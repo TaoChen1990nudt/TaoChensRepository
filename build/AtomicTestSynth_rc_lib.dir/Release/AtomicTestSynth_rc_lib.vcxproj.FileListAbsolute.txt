@@ -1,0 +1,1 @@
+F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth_rc_lib.dir\Release\AtomicTestSynth_rc_lib.lib

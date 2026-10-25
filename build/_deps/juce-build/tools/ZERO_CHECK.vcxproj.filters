@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-build\tools\CMakeFiles\938a10b041c9978cc258fb974465fe96\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{081F493D-08C2-3616-8E03-1CEF06EF88D2}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

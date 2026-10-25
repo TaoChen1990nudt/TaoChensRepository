@@ -1,0 +1,21 @@
+# CMake generation dependency list for this directory.
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.27/Modules/BasicConfigVersion-ExactVersion.cmake.in
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.27/Modules/CMakeCInformation.cmake
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.27/Modules/CMakeCommonLanguageInclude.cmake
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.27/Modules/CMakeDependentOption.cmake
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.27/Modules/CMakeLanguageInformation.cmake
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.27/Modules/CMakePackageConfigHelpers.cmake
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.27/Modules/Compiler/CMakeCommonCompilerMacros.cmake
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.27/Modules/Compiler/MSVC-C.cmake
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.27/Modules/Compiler/MSVC.cmake
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.27/Modules/Platform/Windows-MSVC-C.cmake
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.27/Modules/Platform/Windows-MSVC.cmake
+C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.27/Modules/WriteBasicConfigVersionFile.cmake
+F:/PLSMStudio/Atomic DAW/build/CMakeFiles/3.27.2-msvc1/CMakeCCompiler.cmake
+F:/PLSMStudio/Atomic DAW/build/CMakeFiles/cmake.verify_globs
+F:/PLSMStudio/Atomic DAW/build/_deps/juce-src/CMakeLists.txt
+F:/PLSMStudio/Atomic DAW/build/_deps/juce-src/extras/Build/CMake/JUCECheckAtomic.cmake
+F:/PLSMStudio/Atomic DAW/build/_deps/juce-src/extras/Build/CMake/JUCEConfig.cmake.in
+F:/PLSMStudio/Atomic DAW/build/_deps/juce-src/extras/Build/CMake/JUCEHelperTargets.cmake
+F:/PLSMStudio/Atomic DAW/build/_deps/juce-src/extras/Build/CMake/JUCEModuleSupport.cmake
+F:/PLSMStudio/Atomic DAW/build/_deps/juce-src/extras/Build/CMake/JUCEUtils.cmake

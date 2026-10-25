@@ -1,0 +1,7 @@
+F:/PLSMStudio/Atomic DAW/build/_deps/juce-build/tools/CMakeFiles/INSTALL.dir
+F:/PLSMStudio/Atomic DAW/build/_deps/juce-build/tools/CMakeFiles/ALL_BUILD.dir
+F:/PLSMStudio/Atomic DAW/build/_deps/juce-build/tools/CMakeFiles/ZERO_CHECK.dir
+F:/PLSMStudio/Atomic DAW/build/_deps/juce-build/tools/modules/CMakeFiles/INSTALL.dir
+F:/PLSMStudio/Atomic DAW/build/_deps/juce-build/tools/extras/Build/CMakeFiles/INSTALL.dir
+F:/PLSMStudio/Atomic DAW/build/_deps/juce-build/tools/extras/Build/juceaide/CMakeFiles/juceaide.dir
+F:/PLSMStudio/Atomic DAW/build/_deps/juce-build/tools/extras/Build/juceaide/CMakeFiles/INSTALL.dir

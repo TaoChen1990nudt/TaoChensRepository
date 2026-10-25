@@ -1,0 +1,874 @@
+#include "ProjectIO.h"
+
+#include "Media/SampleLibrary.h"
+
+namespace atomic
+{
+
+namespace project
+{
+
+namespace
+{
+    /** JUCE writes a PluginDescription with the tag "PLUGIN"; a reader that
+        only looks for "Plugin" finds nothing and every VST slot silently comes
+        back empty — which looks exactly like "my plugins were uninstalled".
+        Accept both spellings, since the exact case is not ours to pick. */
+    juce::XmlElement* findPluginElement (juce::XmlElement& parent)
+    {
+        for (auto* child : parent.getChildIterator())
+            if (child->hasTagName ("PLUGIN") || child->hasTagName ("Plugin"))
+                return child;
+
+        return nullptr;
+    }
+
+    //-- Small conversions -----------------------------------------------------
+    juce::String colourToHex (juce::Colour colour)
+    {
+        return juce::String::toHexString ((juce::int64) (juce::uint32) colour.getARGB());
+    }
+
+    juce::Colour colourFromHex (const juce::String& text, juce::Colour fallback)
+    {
+        if (text.isEmpty())
+            return fallback;
+
+        const auto argb = (juce::uint32) text.getHexValue64();
+
+        // A zero alpha would make the layer invisible in the roll, which looks
+        // exactly like "my notes disappeared". Treat it as a bad value.
+        if ((argb >> 24) == 0)
+            return fallback;
+
+        return juce::Colour (argb);
+    }
+
+    juce::String waveformToText (Waveform waveform)
+    {
+        switch (waveform)
+        {
+            case Waveform::sine:     return "sine";
+            case Waveform::saw:      return "saw";
+            case Waveform::square:   return "square";
+            case Waveform::triangle: return "triangle";
+        }
+
+        return "saw";
+    }
+
+    Waveform waveformFromText (const juce::String& text)
+    {
+        if (text == "sine")     return Waveform::sine;
+        if (text == "square")   return Waveform::square;
+        if (text == "triangle") return Waveform::triangle;
+
+        return Waveform::saw;
+    }
+
+    juce::String layerTargetToText (LayerAutomationTarget target)
+    {
+        return target == LayerAutomationTarget::pan ? "pan" : "volume";
+    }
+
+    LayerAutomationTarget layerTargetFromText (const juce::String& text)
+    {
+        return text == "pan" ? LayerAutomationTarget::pan : LayerAutomationTarget::volume;
+    }
+
+    juce::String slotTargetToText (SlotAutomationTarget target)
+    {
+        return target == SlotAutomationTarget::level ? "level" : "filter";
+    }
+
+    SlotAutomationTarget slotTargetFromText (const juce::String& text)
+    {
+        return text == "level" ? SlotAutomationTarget::level : SlotAutomationTarget::filter;
+    }
+
+    /** Floats are written with enough digits to survive a round trip through
+        the text file, and with a dot regardless of the machine's locale. */
+    juce::String number (double value, int decimals = 6)
+    {
+        return juce::String (value, decimals);
+    }
+
+    //-- Writing ---------------------------------------------------------------
+    void writeLane (juce::XmlElement& parent, const AutomationLane& lane,
+                    const juce::String& targetText, bool expanded)
+    {
+        auto* xml = parent.createNewChildElement ("Automation");
+        xml->setAttribute ("enabled", (int) lane.isEnabled());
+        xml->setAttribute ("target", targetText);
+        xml->setAttribute ("expanded", (int) expanded);
+
+        for (const auto& point : lane.getPoints())
+        {
+            auto* p = xml->createNewChildElement ("Point");
+            p->setAttribute ("beat", number (point.beat, 8));
+            p->setAttribute ("value", number (point.value));
+        }
+    }
+
+    void writeEnvelope (juce::XmlElement& noteXml, const NoteEnvelope& envelope)
+    {
+        auto* xml = noteXml.createNewChildElement ("Envelope");
+        xml->setAttribute ("enabled", (int) envelope.isEnabled());
+
+        for (const auto& point : envelope.getPoints())
+        {
+            auto* p = xml->createNewChildElement ("Point");
+            p->setAttribute ("time", number (point.time));
+            p->setAttribute ("value", number (point.value));
+        }
+    }
+
+    /** Empty slots are not written at all: a file with 64 empty <Insert> tags
+        is noise, and "missing" already means "empty". */
+    void writeInserts (juce::XmlElement& parent, const std::array<fx::Settings, fx::ChainState::maxSlots>& inserts)
+    {
+        for (int slot = 0; slot < (int) inserts.size(); ++slot)
+        {
+            const auto& insert = inserts[(size_t) slot];
+
+            if (insert.type == fx::Type::none)
+                continue;
+
+            auto* xml = parent.createNewChildElement ("Insert");
+            xml->setAttribute ("slot", slot);
+            xml->setAttribute ("type", (int) insert.type);
+            xml->setAttribute ("p1", number (insert.p1));
+            xml->setAttribute ("p2", number (insert.p2));
+            xml->setAttribute ("enabled", (int) insert.enabled);
+
+            if (insert.plugin != nullptr)
+                if (auto descriptionXml = insert.plugin->createXml())
+                    xml->addChildElement (descriptionXml.release());
+        }
+    }
+
+    void readInserts (const juce::XmlElement& parent,
+                      std::array<fx::Settings, fx::ChainState::maxSlots>& inserts,
+                      PluginHost* plugins)
+    {
+        for (auto* child = parent.getFirstChildElement(); child != nullptr; child = child->getNextElement())
+        {
+            if (! child->hasTagName ("Insert"))
+                continue;
+
+            const int slot = juce::jlimit (0, (int) inserts.size() - 1,
+                                           child->getIntAttribute ("slot", 0));
+
+            auto& insert = inserts[(size_t) slot];
+            insert.type    = fx::typeFromInt (child->getIntAttribute ("type", 0));
+            insert.p1      = juce::jlimit (0.0f, 1.0f, (float) child->getDoubleAttribute ("p1", 0.5));
+            insert.p2      = juce::jlimit (0.0f, 1.0f, (float) child->getDoubleAttribute ("p2", 0.45));
+            insert.enabled = child->getBoolAttribute ("enabled", true);
+
+            if (auto* pluginXml = findPluginElement (*child))
+            {
+                juce::PluginDescription description;
+
+                if (description.loadFromXml (*pluginXml))
+                {
+                    insert.type       = fx::Type::vst;
+                    insert.pluginName = description.name;
+                    insert.plugin     = std::make_shared<const juce::PluginDescription> (description);
+
+                    // A missing plugin leaves pluginId at 0: the insert keeps
+                    // its name, prints "未载入", and passes audio untouched.
+                    if (plugins != nullptr)
+                        insert.pluginId = plugins->load (description);
+                }
+            }
+        }
+    }
+
+    //-- Reading ---------------------------------------------------------------
+    void readLane (const juce::XmlElement& xml, AutomationLane& lane,
+                   bool& enabled, juce::String& targetText, bool& expanded)
+    {
+        std::vector<AutomationPoint> points;
+
+        for (auto* child = xml.getFirstChildElement(); child != nullptr; child = child->getNextElement())
+        {
+            if (! child->hasTagName ("Point"))
+                continue;
+
+            points.push_back ({ child->getDoubleAttribute ("beat", 0.0),
+                                (float) child->getDoubleAttribute ("value", 1.0) });
+        }
+
+        lane.loadPoints (std::move (points));
+        enabled  = xml.getBoolAttribute ("enabled", false);
+        targetText = xml.getStringAttribute ("target");
+        expanded = xml.getBoolAttribute ("expanded", false);
+    }
+
+    void readEnvelope (const juce::XmlElement& xml, NoteEnvelope& envelope)
+    {
+        std::vector<EnvelopePoint> points;
+
+        for (auto* child = xml.getFirstChildElement(); child != nullptr; child = child->getNextElement())
+        {
+            if (! child->hasTagName ("Point"))
+                continue;
+
+            points.push_back ({ (float) child->getDoubleAttribute ("time", 0.0),
+                                (float) child->getDoubleAttribute ("value", 1.0) });
+        }
+
+        envelope.loadPoints (std::move (points));
+        envelope.setEnabled (xml.getBoolAttribute ("enabled", true));
+    }
+}
+
+//==============================================================================
+juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double bpm,
+                        const MixerModel* mixer, const AutomationModel* automation)
+{
+    juce::XmlElement root ("AtomicDAW");
+    root.setAttribute ("version", formatVersion);
+    root.setAttribute ("tempo", number (bpm, 4));
+    root.setAttribute ("timelineBeats", number (timeline::defaultLengthBeats, 2));
+
+    //-- Rack ----------------------------------------------------------------
+    {
+        auto* rackXml = root.createNewChildElement ("Rack");
+
+        for (int i = 0; i < rack.getNumSlots(); ++i)
+        {
+            const auto* slot = rack.getSlot (i);
+
+            if (slot == nullptr)
+                continue;
+
+            auto* xml = rackXml->createNewChildElement ("Synth");
+            xml->setAttribute ("id", slot->id);
+            xml->setAttribute ("name", slot->name);
+            xml->setAttribute ("colour", colourToHex (slot->colour));
+            xml->setAttribute ("waveform", waveformToText (slot->waveform));
+            xml->setAttribute ("levelDb", number (slot->levelDb));
+            xml->setAttribute ("pan", number (slot->pan));
+            xml->setAttribute ("muted", (int) slot->muted);
+            xml->setAttribute ("soloed", (int) slot->soloed);
+
+            // Phase 17: only the folded state is written when it is set, so a
+            // v6 file (which has no such attribute) reads back unfolded.
+            if (slot->collapsed)
+                xml->setAttribute ("collapsed", 1);
+
+            // Phase 11. Only written when the synth actually feeds a console
+            // channel; a missing attribute reads back as -1, which is "direct to
+            // master" — so a v4 file keeps sounding exactly as it did.
+            if (slot->sendsToMixer())
+                xml->setAttribute ("mixer", slot->mixerChannel);
+
+            if (slot->plugin != nullptr)
+                if (auto descriptionXml = slot->plugin->createXml())
+                    xml->addChildElement (descriptionXml.release());
+
+            for (auto target : { SlotAutomationTarget::filter, SlotAutomationTarget::level })
+                writeLane (*xml, slot->automationFor (target),
+                           slotTargetToText (target),
+                           target == slot->automationTarget && slot->automationExpanded);
+        }
+    }
+
+    //-- Mixer ---------------------------------------------------------------
+    if (mixer != nullptr)
+    {
+        auto* mixXml = root.createNewChildElement ("Mixer");
+        mixXml->setAttribute ("masterLevelDb", number (mixer->getMasterLevelDb()));
+        mixXml->setAttribute ("masterPan", number (mixer->getMasterPan()));
+        mixXml->setAttribute ("masterMuted", (int) mixer->isMasterMuted());
+        mixXml->setAttribute ("channels", mixer->getChannelCount());
+
+        for (int channel = 0; channel < MixerModel::numChannels; ++channel)
+        {
+            auto* channelXml = mixXml->createNewChildElement ("Channel");
+            channelXml->setAttribute ("index", channel);
+            writeInserts (*channelXml, mixer->getInserts (channel));
+        }
+
+        auto* masterXml = mixXml->createNewChildElement ("MasterInserts");
+        writeInserts (*masterXml, mixer->getInserts (MixerModel::masterChannel));
+
+        // Phase 18: the master bus's two curves. They live in the mixer model,
+        // so they are written here rather than with the layer / slot lanes.
+        auto* masterAutoXml = mixXml->createNewChildElement ("MasterAutomation");
+        writeLane (*masterAutoXml, mixer->automationFor (0), "level", false);
+        writeLane (*masterAutoXml, mixer->automationFor (1), "pan", false);
+    }
+
+    //-- Automation window ---------------------------------------------------
+    if (automation != nullptr)
+    {
+        auto* autoXml = root.createNewChildElement ("AutomationWindow");
+
+        for (const auto& track : automation->getTracks())
+        {
+            auto* trackXml = autoXml->createNewChildElement ("Track");
+            trackXml->setAttribute ("id", track.id);
+            trackXml->setAttribute ("owner", track.owner == AutomationOwner::layer ? "layer"
+                                             : track.owner == AutomationOwner::group ? "group"
+                                             : track.owner == AutomationOwner::master ? "master"
+                                                                                      : "slot");
+            trackXml->setAttribute ("ownerId", track.ownerId);
+            trackXml->setAttribute ("target", track.target);
+        }
+    }
+
+    //-- Layers --------------------------------------------------------------
+    {
+        auto* layersXml = root.createNewChildElement ("Layers");
+        layersXml->setAttribute ("active", stack.getActiveLayerIndex());
+
+        for (int i = 0; i < stack.getNumLayers(); ++i)
+        {
+            const auto* layer = stack.getLayer (i);
+
+            if (layer == nullptr)
+                continue;
+
+            auto* xml = layersXml->createNewChildElement ("Layer");
+            xml->setAttribute ("id", layer->getId());
+            xml->setAttribute ("name", layer->getName());
+            xml->setAttribute ("colour", colourToHex (layer->getColour()));
+            xml->setAttribute ("visible", (int) layer->isVisible());
+            xml->setAttribute ("output", layer->getOutputSlotId());
+            xml->setAttribute ("levelDb", number (layer->getLevelDb()));
+            xml->setAttribute ("pan", number (layer->getPan()));
+            xml->setAttribute ("muted", (int) layer->isMuted());
+            xml->setAttribute ("soloed", (int) layer->isSoloed());
+
+            if (layer->isCollapsed())
+                xml->setAttribute ("collapsed", 1);
+
+            for (auto target : { LayerAutomationTarget::volume, LayerAutomationTarget::pan })
+                writeLane (*xml, layer->automationFor (target),
+                           layerTargetToText (target),
+                           target == layer->getAutomationTarget() && layer->isAutomationExpanded());
+
+            //-- Phase 16: groups, written BEFORE the notes ---------------
+            // A group owns its mount and its curve; the notes only carry the
+            // id. Reading a note whose group is missing repairs to "ungrouped",
+            // so the order in the file is a convenience, not a requirement.
+            if (! layer->getGroups().empty())
+            {
+                auto* groupsXml = xml->createNewChildElement ("Groups");
+
+                for (const auto& group : layer->getGroups())
+                {
+                    auto* groupXml = groupsXml->createNewChildElement ("Group");
+                    groupXml->setAttribute ("id", group.getId());
+                    groupXml->setAttribute ("name", group.getName());
+                    groupXml->setAttribute ("colour", colourToHex (group.getColour()));
+
+                    // Absent means "follow the layer" — that is what an old file
+                    // (which has no groups at all) and a plain group both mean.
+                    if (! group.followsLayerOutput())
+                        groupXml->setAttribute ("output", group.getOutputSlotId());
+
+                    // Phase 17: the group's own trim. Absent = unity / centre,
+                    // which is exactly what a v6 group meant.
+                    if (group.getLevelDb() != 0.0f)
+                        groupXml->setAttribute ("levelDb", number (group.getLevelDb()));
+
+                    if (group.getPan() != 0.0f)
+                        groupXml->setAttribute ("pan", number (group.getPan()));
+
+                    if (group.isCollapsed())
+                        groupXml->setAttribute ("collapsed", 1);
+
+                    writeLane (*groupXml, group.getLevelAutomation(), "level", false);
+
+                    // Phase 20: the pan lane, only when it carries something.
+                    // A disabled-but-drawn curve is still worth saving (it is
+                    // what "automation off, curve kept" means), so enabled is
+                    // not the test — having points with a non-flat shape is.
+                    if (group.getPanAutomation().isEnabled()
+                          || group.getPanAutomation().getPoints().size() > 2)
+                        writeLane (*groupXml, group.getPanAutomation(), "pan", false);
+                }
+            }
+
+            //-- Phase 17: audio clips ------------------------------------
+            // Written before the notes so a reader meets the blocks that own
+            // the low lanes first; neither depends on the other's order.
+            if (! layer->getSamples().empty())
+            {
+                auto* samplesXml = xml->createNewChildElement ("Samples");
+
+                for (const auto& sample : layer->getSamples())
+                {
+                    auto* sampleXml = samplesXml->createNewChildElement ("Sample");
+                    sampleXml->setAttribute ("id", sample.id);
+                    sampleXml->setAttribute ("name", sample.name);
+                    sampleXml->setAttribute ("path", sample.path);
+                    sampleXml->setAttribute ("start", number (sample.startBeat, 8));
+                    sampleXml->setAttribute ("length", number (sample.lengthBeats, 8));
+                    sampleXml->setAttribute ("pitch", sample.pitch);
+                    sampleXml->setAttribute ("span", sample.laneSpan);
+
+                    if (sample.gainDb != 0.0f)
+                        sampleXml->setAttribute ("gainDb", number (sample.gainDb));
+                }
+            }
+
+            auto* notesXml = xml->createNewChildElement ("Notes");
+
+            for (const auto& note : layer->getNotes())
+            {
+                auto* noteXml = notesXml->createNewChildElement ("Note");
+                noteXml->setAttribute ("id", note.id);
+                noteXml->setAttribute ("pitch", note.pitch);
+                noteXml->setAttribute ("start", number (note.startBeat, 8));
+                noteXml->setAttribute ("length", number (note.lengthBeats, 8));
+                noteXml->setAttribute ("velocity", number (note.velocity));
+
+                // Only written when it is actually set: a missing attribute
+                // reads back as -1 ("follow the layer"), so old files and new
+                // ones agree on what "no override" looks like.
+                if (note.outputSlotOverride >= 0)
+                    noteXml->setAttribute ("output", note.outputSlotOverride);
+
+                // Phase 8. Only written when it is not the default, so a v3
+                // file whose notes are all plain level curves stays readable as
+                // if it were v2.
+                if (note.modTarget != NoteModTarget::level)
+                    noteXml->setAttribute ("mod", noteModTargetKey (note.modTarget));
+
+                if (note.groupId >= 0)
+                    noteXml->setAttribute ("group", note.groupId);
+
+                writeEnvelope (*noteXml, note.envelope);
+            }
+        }
+    }
+
+    juce::XmlElement::TextFormat format;
+    format.lineWrapLength = 200;
+
+    return root.toString (format);
+}
+
+//==============================================================================
+bool fromXmlText (const juce::String& xmlText,
+                  LayerStack& stack, RackModel& rack,
+                  double& bpm, juce::String& error,
+                  MixerModel* mixer, AutomationModel* automation, PluginHost* plugins)
+{
+    error.clear();
+
+    auto root = juce::parseXML (xmlText);
+
+    if (root == nullptr || ! root->hasTagName ("AtomicDAW"))
+    {
+        error = juce::String::fromUTF8 (u8"不是 AtomicDAW 工程文件");
+        return false;
+    }
+
+    const int version = root->getIntAttribute ("version", 0);
+
+    if (version > formatVersion)
+    {
+        error = juce::String::fromUTF8 (u8"工程由更新版本的 AtomicDAW 创建（格式 ")
+                  + juce::String (version) + juce::String::fromUTF8 (u8"），无法读取");
+        return false;
+    }
+
+    //-- Parse everything into temporaries ------------------------------------
+    std::vector<SynthSlot>        parsedSlots;
+    std::vector<std::unique_ptr<Layer>> parsedLayers;
+    int    activeIndex = 0;
+    double parsedBpm   = 120.0;
+
+    // Mixer and automation list are collected here and applied only after the
+    // whole document has parsed, same rule as the layers.
+    std::array<std::array<fx::Settings, MixerModel::numInserts>, MixerModel::numChannels + 1> parsedInserts {};
+    float  parsedMasterDb    = 0.0f;
+    float  parsedMasterPan   = 0.0f;
+    bool   parsedMasterMuted = false;
+    int    parsedChannelCount = MixerModel::numChannels;
+    std::array<std::vector<AutomationPoint>, MixerModel::numMasterParameters> parsedMasterCurves;
+    std::array<bool, MixerModel::numMasterParameters> parsedMasterCurveOn { false, false };
+    // readLane() writes into a lane; for the master curves we only want the
+    // points, which are staged and applied at commit time like everything else.
+    AutomationLane scratchLane;
+    std::vector<AutomationTrack> parsedTracks;
+
+    if (auto* rackXml = root->getChildByName ("Rack"))
+    {
+        for (auto* child = rackXml->getFirstChildElement(); child != nullptr; child = child->getNextElement())
+        {
+            if (! child->hasTagName ("Synth"))
+                continue;
+
+            SynthSlot slot;
+            slot.id       = child->getIntAttribute ("id", (int) parsedSlots.size() + 1);
+            slot.name     = child->getStringAttribute ("name", "Synth");
+            slot.colour   = colourFromHex (child->getStringAttribute ("colour"),
+                                           juce::Colour (0xff7c96f5));
+            slot.waveform = waveformFromText (child->getStringAttribute ("waveform"));
+            slot.levelDb  = juce::jlimit (-48.0f, 6.0f, (float) child->getDoubleAttribute ("levelDb", -6.0));
+            slot.pan      = juce::jlimit (-1.0f, 1.0f, (float) child->getDoubleAttribute ("pan", 0.0));
+            slot.muted    = child->getBoolAttribute ("muted", false);
+            slot.soloed   = child->getBoolAttribute ("soloed", false);
+            slot.collapsed = child->getBoolAttribute ("collapsed", false);
+            slot.mixerChannel = juce::isPositiveAndBelow (child->getIntAttribute ("mixer", -1),
+                                                          SynthSlot::maxMixerChannels)
+                                  ? child->getIntAttribute ("mixer", -1)
+                                  : -1;
+
+            if (auto* pluginXml = findPluginElement (*child))
+            {
+                juce::PluginDescription description;
+
+                if (description.loadFromXml (*pluginXml))
+                {
+                    slot.pluginName = description.name;
+                    slot.plugin     = std::make_shared<const juce::PluginDescription> (description);
+
+                    if (plugins != nullptr)
+                        slot.pluginId = plugins->load (description);
+                }
+            }
+
+            bool         enabled = false, expanded = false;
+            juce::String targetText;
+
+            for (auto* autoXml = child->getFirstChildElement(); autoXml != nullptr; autoXml = autoXml->getNextElement())
+            {
+                if (! autoXml->hasTagName ("Automation"))
+                    continue;
+
+                const auto target = slotTargetFromText (autoXml->getStringAttribute ("target", "filter"));
+
+                readLane (*autoXml, slot.automationFor (target), enabled, targetText, expanded);
+                slot.automationFor (target).setEnabled (enabled);
+                slot.automationExpanded = slot.automationExpanded || expanded;
+
+                if (targetText.isNotEmpty())
+                    slot.automationTarget = target;
+            }
+
+            parsedSlots.push_back (std::move (slot));
+        }
+    }
+
+    if (auto* layersXml = root->getChildByName ("Layers"))
+    {
+        activeIndex = layersXml->getIntAttribute ("active", 0);
+
+        for (auto* child = layersXml->getFirstChildElement(); child != nullptr; child = child->getNextElement())
+        {
+            if (! child->hasTagName ("Layer"))
+                continue;
+
+            auto layer = std::make_unique<Layer> (
+                            child->getStringAttribute ("name", "Layer"),
+                            colourFromHex (child->getStringAttribute ("colour"), palette::layer1),
+                            child->getIntAttribute ("output", 0));
+
+            if (const int restoredId = child->getIntAttribute ("id", 0); restoredId > 0)
+                layer->setId (restoredId);
+
+            layer->setVisible (child->getBoolAttribute ("visible", true));
+            layer->setLevelDb ((float) child->getDoubleAttribute ("levelDb", -3.0));
+            layer->setPan ((float) child->getDoubleAttribute ("pan", 0.0));
+            layer->setMuted (child->getBoolAttribute ("muted", false));
+            layer->setSoloed (child->getBoolAttribute ("soloed", false));
+            layer->setCollapsed (child->getBoolAttribute ("collapsed", false));
+
+            bool         laneEnabled = false, laneExpanded = false;
+            juce::String targetText;
+
+            for (auto* autoXml = child->getFirstChildElement(); autoXml != nullptr; autoXml = autoXml->getNextElement())
+            {
+                if (! autoXml->hasTagName ("Automation"))
+                    continue;
+
+                const auto target = layerTargetFromText (autoXml->getStringAttribute ("target", "volume"));
+
+                readLane (*autoXml, layer->automationFor (target), laneEnabled, targetText, laneExpanded);
+                layer->automationFor (target).setEnabled (laneEnabled);
+                layer->setAutomationExpanded (layer->isAutomationExpanded() || laneExpanded);
+
+                if (targetText.isNotEmpty())
+                    layer->setAutomationTarget (target);
+            }
+
+            std::vector<NoteEvent> notes;
+            std::vector<NoteGroup> groups;
+
+            if (auto* groupsXml = child->getChildByName ("Groups"))
+            {
+                for (auto* g = groupsXml->getFirstChildElement(); g != nullptr; g = g->getNextElement())
+                {
+                    if (! g->hasTagName ("Group"))
+                        continue;
+
+                    const int groupId = g->getIntAttribute ("id", 0);
+
+                    if (groupId < 0)
+                        continue;
+
+                    NoteGroup group (groupId,
+                                     g->getStringAttribute ("name",
+                                                            groupPalette::defaultName ((int) groups.size())),
+                                     colourFromHex (g->getStringAttribute ("colour"),
+                                                    groupPalette::nextGroupColour ((int) groups.size())));
+
+                    group.setOutputSlotId (g->getIntAttribute ("output", -1));
+                    group.setLevelDb ((float) g->getDoubleAttribute ("levelDb", 0.0));
+                    group.setPan ((float) g->getDoubleAttribute ("pan", 0.0));
+                    group.setCollapsed (g->getBoolAttribute ("collapsed", false));
+
+                    bool enabled = false, expanded = false;
+                    juce::String groupTargetText;
+
+                    for (auto* autoXml = g->getFirstChildElement(); autoXml != nullptr;
+                         autoXml = autoXml->getNextElement())
+                    {
+                        if (! autoXml->hasTagName ("Automation"))
+                            continue;
+
+                        // Phase 20: a group can carry two lanes now, so the
+                        // target attribute decides which one this element is.
+                        // v6 files have exactly one, and it never said its
+                        // name — "level" is the only thing v6 could have meant.
+                        const bool isPan = autoXml->getStringAttribute ("target") == "pan";
+                        auto& lane = group.automationFor (isPan ? GroupAutomationTarget::pan
+                                                                : GroupAutomationTarget::level);
+
+                        readLane (*autoXml, lane, enabled, groupTargetText, expanded);
+                        lane.setEnabled (enabled);
+                    }
+
+                    groups.push_back (std::move (group));
+                }
+            }
+
+            //-- Phase 17: audio clips ------------------------------------
+            // Decoded here, on the message thread, once. A clip whose file has
+            // moved keeps its rectangle and loads with `audio == nullptr`, which
+            // the roll draws as "missing" — the alternative (refusing the whole
+            // project) would punish the user for a renamed folder.
+            std::vector<SampleEvent> samples;
+
+            if (auto* samplesXml = child->getChildByName ("Samples"))
+            {
+                for (auto* sm = samplesXml->getFirstChildElement(); sm != nullptr; sm = sm->getNextElement())
+                {
+                    if (! sm->hasTagName ("Sample"))
+                        continue;
+
+                    SampleEvent sample;
+                    sample.id          = sm->getIntAttribute ("id", (int) samples.size() + 1);
+                    sample.name        = sm->getStringAttribute ("name", "Sample");
+                    sample.path        = sm->getStringAttribute ("path");
+                    sample.startBeat   = sm->getDoubleAttribute ("start", 0.0);
+                    sample.lengthBeats = sm->getDoubleAttribute ("length", 4.0);
+                    sample.pitch       = sm->getIntAttribute ("pitch", 60);
+                    sample.laneSpan    = sm->getIntAttribute ("span", 4);
+                    sample.gainDb      = (float) sm->getDoubleAttribute ("gainDb", 0.0);
+
+                    if (sample.path.isNotEmpty())
+                    {
+                        const juce::File audioFile (sample.path);
+
+                        if (auto loaded = loadSampleFile (audioFile); loaded.ok())
+                        {
+                            sample.audio = loaded.buffer;
+
+                            if (sample.name.isEmpty())
+                                sample.name = audioFile.getFileName();
+                        }
+                    }
+
+                    samples.push_back (std::move (sample));
+                }
+            }
+
+            if (auto* notesXml = child->getChildByName ("Notes"))
+            {
+                for (auto* n = notesXml->getFirstChildElement(); n != nullptr; n = n->getNextElement())
+                {
+                    if (! n->hasTagName ("Note"))
+                        continue;
+
+                    NoteEvent note;
+                    note.id          = n->getIntAttribute ("id", (int) notes.size() + 1);
+                    note.pitch       = n->getIntAttribute ("pitch", 60);
+                    note.startBeat   = n->getDoubleAttribute ("start", 0.0);
+                    note.lengthBeats = n->getDoubleAttribute ("length", 1.0);
+                    note.velocity    = (float) n->getDoubleAttribute ("velocity", 0.8);
+                    note.outputSlotOverride = n->getIntAttribute ("output", -1);
+                    note.groupId  = n->getIntAttribute ("group", -1);
+                    note.modTarget = noteModTargetFromKey (n->getStringAttribute ("mod", "level"));
+
+                    if (auto* envXml = n->getChildByName ("Envelope"))
+                        readEnvelope (*envXml, note.envelope);
+
+                    notes.push_back (std::move (note));
+                }
+            }
+
+            layer->restoreNotes (std::move (notes));
+            layer->restoreSamples (std::move (samples));
+            layer->restoreGroups (std::move (groups));   // also repairs stale ids
+            parsedLayers.push_back (std::move (layer));
+        }
+    }
+
+    if (parsedLayers.empty())
+    {
+        error = juce::String::fromUTF8 (u8"工程里没有任何图层");
+        return false;
+    }
+
+    if (auto* mixXml = root->getChildByName ("Mixer"))
+    {
+        parsedMasterDb    = juce::jlimit (-48.0f, 6.0f, (float) mixXml->getDoubleAttribute ("masterLevelDb", 0.0));
+        parsedMasterPan   = juce::jlimit (-1.0f, 1.0f, (float) mixXml->getDoubleAttribute ("masterPan", 0.0));
+        parsedMasterMuted = mixXml->getBoolAttribute ("masterMuted", false);
+
+        for (auto* child = mixXml->getFirstChildElement(); child != nullptr; child = child->getNextElement())
+        {
+            if (child->hasTagName ("Channel"))
+            {
+                const int channel = juce::jlimit (0, MixerModel::numChannels - 1,
+                                                  child->getIntAttribute ("index", 0));
+                readInserts (*child, parsedInserts[(size_t) channel], plugins);
+            }
+            else if (child->hasTagName ("MasterInserts"))
+            {
+                readInserts (*child, parsedInserts[(size_t) MixerModel::masterChannel], plugins);
+            }
+        }
+
+        parsedChannelCount = juce::jlimit (MixerModel::minChannels, MixerModel::maxChannels,
+                                           mixXml->getIntAttribute ("channels",
+                                                                    MixerModel::numChannels));
+
+        if (auto* masterAutoXml = mixXml->getChildByName ("MasterAutomation"))
+        {
+            bool enabled = false;
+            juce::String targetText;
+            bool expanded = false;
+
+            for (auto* child = masterAutoXml->getFirstChildElement(); child != nullptr;
+                 child = child->getNextElement())
+            {
+                if (! child->hasTagName ("Automation"))
+                    continue;
+
+                const int index = child->getStringAttribute ("target") == "pan" ? 1 : 0;
+
+                readLane (*child, scratchLane, enabled, targetText, expanded);
+                parsedMasterCurves[(size_t) index]   = scratchLane.getPoints();
+                parsedMasterCurveOn[(size_t) index]  = enabled;
+            }
+        }
+    }
+
+    if (auto* autoXml = root->getChildByName ("AutomationWindow"))
+    {
+        for (auto* child = autoXml->getFirstChildElement(); child != nullptr; child = child->getNextElement())
+        {
+            if (! child->hasTagName ("Track"))
+                continue;
+
+            AutomationTrack track;
+            track.id      = child->getIntAttribute ("id", 0);
+
+            const juce::String ownerText = child->getStringAttribute ("owner", "layer");
+            track.owner   = ownerText == "slot"  ? AutomationOwner::slot
+                          : ownerText == "group" ? AutomationOwner::group
+                          : ownerText == "master" ? AutomationOwner::master
+                                                 : AutomationOwner::layer;
+
+            track.ownerId = child->getIntAttribute ("ownerId", 0);
+            track.target  = child->getIntAttribute ("target", 0);
+
+            // Every owner has a positive id except the master bus, which is
+            // singular and therefore always id 0.
+            if (track.owner == AutomationOwner::master || track.ownerId > 0)
+                parsedTracks.push_back (track);
+        }
+    }
+
+    parsedBpm = juce::jlimit (30.0, 300.0, root->getDoubleAttribute ("tempo", 120.0));
+
+    //-- Commit --------------------------------------------------------------
+    rack.restoreSlots (std::move (parsedSlots));
+    stack.restoreLayers (std::move (parsedLayers), activeIndex);
+    bpm = parsedBpm;
+
+    if (mixer != nullptr)
+    {
+        for (int channel = 0; channel <= MixerModel::masterChannel; ++channel)
+            mixer->getInserts (channel) = parsedInserts[(size_t) channel];
+
+        mixer->setMasterLevelDb (parsedMasterDb);
+        mixer->setMasterPan (parsedMasterPan);
+        mixer->setMasterMuted (parsedMasterMuted);
+
+        for (int i = 0; i < MixerModel::numMasterParameters; ++i)
+        {
+            auto& lane = mixer->automationFor (i);
+
+            lane.loadPoints (std::move (parsedMasterCurves[(size_t) i]));
+            lane.setEnabled (parsedMasterCurveOn[(size_t) i]);
+        }
+
+        mixer->setChannelCount (parsedChannelCount);
+        mixer->notify();
+    }
+
+    if (automation != nullptr)
+        automation->restoreTracks (std::move (parsedTracks));
+
+    return true;
+}
+
+//==============================================================================
+bool save (const juce::File& file,
+           const LayerStack& stack, const RackModel& rack, double bpm,
+           juce::String& error, const MixerModel* mixer, const AutomationModel* automation)
+{
+    error.clear();
+
+    file.getParentDirectory().createDirectory();
+
+    // replaceWithText with asUnicode = false writes UTF-8 without a BOM, which
+    // is exactly what the XML header in the document declares.
+    if (! file.replaceWithText (toXmlText (stack, rack, bpm, mixer, automation)))
+    {
+        error = juce::String::fromUTF8 (u8"无法写入 ") + file.getFullPathName();
+        return false;
+    }
+
+    return true;
+}
+
+bool load (const juce::File& file,
+           LayerStack& stack, RackModel& rack,
+           double& bpm, juce::String& error,
+           MixerModel* mixer, AutomationModel* automation, PluginHost* plugins)
+{
+    error.clear();
+
+    if (! file.existsAsFile())
+    {
+        error = juce::String::fromUTF8 (u8"文件不存在：") + file.getFullPathName();
+        return false;
+    }
+
+    return fromXmlText (file.loadFileAsString(), stack, rack, bpm, error,
+                        mixer, automation, plugins);
+}
+
+} // namespace project
+} // namespace atomic

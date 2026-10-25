@@ -1,0 +1,17 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <ProjectOutputs>
+    <ProjectOutput>
+      <FullPath>F:\PLSMStudio\Atomic DAW\build\x64\Release\ZERO_CHECK</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>F:\PLSMStudio\Atomic DAW\build\Release\juce_vst3_helper.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth_artefacts\Release\VST3\Atomic Test Synth.vst3\Contents\x86_64-win\Atomic Test Synth.vst3</FullPath>
+    </ProjectOutput>
+  </ProjectOutputs>
+  <ContentFiles />
+  <SatelliteDlls />
+  <NonRecipeFileRefs />
+</Project>

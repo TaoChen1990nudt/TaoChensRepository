@@ -1,0 +1,22 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="F:\PLSMStudio\Atomic DAW\build\CMakeFiles\b729af564933ed09f7e086fc6d0b430d\AtomicDAW_resources.rc.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="F:\PLSMStudio\Atomic DAW\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="F:\PLSMStudio\Atomic DAW\build\AtomicDAW_artefacts\JuceLibraryCode\AtomicDAW_resources.rc">
+      <Filter>Source Files</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{3C1056E7-9CA6-371F-B99B-52A3F59605F2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{FF0BB5BB-529B-3E46-993E-4D621BF64A57}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

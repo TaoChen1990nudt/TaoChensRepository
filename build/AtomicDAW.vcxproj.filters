@@ -1,0 +1,164 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\MainComponent.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Audio\AudioEngine.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Audio\PlaybackEngine.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Audio\PluginHost.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Audio\WavExport.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Media\SampleLibrary.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Model\AutomationLane.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Model\AutomationModel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Model\HardwareRack.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Model\LayerModel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Model\MixerModel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Model\NoteEnvelope.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Model\ProjectIO.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\UI\AutomationLaneComponent.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\UI\AutomationWindow.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\UI\BpmField.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\UI\EffectWindows.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\UI\FileBrowserPanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\UI\GroupPanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\UI\LayerPanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\UI\MixerPanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\UI\MixerWindow.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\UI\NoteEnvelopePanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\UI\PianoRollComponent.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\UI\RackPanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\UI\SettingsWindow.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_devices\juce_audio_devices.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_basics\juce_audio_basics.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_core\juce_core.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_core\juce_core_CompilationTime.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_events\juce_events.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_processors\juce_audio_processors.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_processors\juce_audio_processors_ara.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_processors\juce_audio_processors_lv2_libs.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_gui_extra\juce_gui_extra.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_gui_basics\juce_gui_basics.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_graphics\juce_graphics.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_graphics\juce_graphics_Harfbuzz.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_graphics\juce_graphics_Sheenbidi.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_data_structures\juce_data_structures.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_utils\juce_audio_utils.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_formats\juce_audio_formats.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="F:\PLSMStudio\Atomic DAW\build\AtomicDAW_artefacts\JuceLibraryCode\JuceHeader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="F:\PLSMStudio\Atomic DAW\build\CMakeFiles\b729af564933ed09f7e086fc6d0b430d\JuceHeader.h.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="F:\PLSMStudio\Atomic DAW\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Object Include="F:\PLSMStudio\Atomic DAW\build\AtomicDAW_rc_lib.dir\$(Configuration)\AtomicDAW_resources.res">
+      <Filter>Object Libraries</Filter>
+    </Object>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{3C1056E7-9CA6-371F-B99B-52A3F59605F2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{3FB942DB-B9FE-3E13-AA3E-2FD03934062B}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Object Libraries">
+      <UniqueIdentifier>{33DD0EDA-19A8-3F19-9E20-0EAD4BBFD667}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{FF0BB5BB-529B-3E46-993E-4D621BF64A57}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

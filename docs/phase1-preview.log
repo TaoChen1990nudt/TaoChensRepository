@@ -1,0 +1,8 @@
+AtomicDAW Phase 1 — headless rule check
+  [PASS] Found a testable ghost note   (layer 1)
+  [PASS] Ghost note is click-through (30% layer)   (raw id 1)
+  [PASS] Active layer note IS editable   (expected id 1)
+  [PASS] After switching sheets, former ghost becomes editable   (layer 1 now active)
+  [PASS] Hidden active layer is not editable   (eye toggled off)
+
+  ALL CHECKS PASSED

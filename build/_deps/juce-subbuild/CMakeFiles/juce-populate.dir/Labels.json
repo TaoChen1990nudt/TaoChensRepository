@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/CMakeFiles/juce-populate"
+		},
+		{
+			"file" : "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/CMakeFiles/75df7dc8657200fbf05fe69bfeaccd85/juce-populate.rule"
+		},
+		{
+			"file" : "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/CMakeFiles/4668181835aabfbdd185310576bfe54e/juce-populate-complete.rule"
+		},
+		{
+			"file" : "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/CMakeFiles/e2496e9a19b416f929205532e82fa81a/juce-populate-build.rule"
+		},
+		{
+			"file" : "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/CMakeFiles/e2496e9a19b416f929205532e82fa81a/juce-populate-configure.rule"
+		},
+		{
+			"file" : "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/CMakeFiles/e2496e9a19b416f929205532e82fa81a/juce-populate-download.rule"
+		},
+		{
+			"file" : "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/CMakeFiles/e2496e9a19b416f929205532e82fa81a/juce-populate-install.rule"
+		},
+		{
+			"file" : "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/CMakeFiles/e2496e9a19b416f929205532e82fa81a/juce-populate-mkdir.rule"
+		},
+		{
+			"file" : "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/CMakeFiles/e2496e9a19b416f929205532e82fa81a/juce-populate-patch.rule"
+		},
+		{
+			"file" : "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/CMakeFiles/e2496e9a19b416f929205532e82fa81a/juce-populate-test.rule"
+		},
+		{
+			"file" : "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/CMakeFiles/e2496e9a19b416f929205532e82fa81a/juce-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"juce-populate"
+		],
+		"name" : "juce-populate"
+	}
+}

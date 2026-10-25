@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="F:\PLSMStudio\Atomic DAW\build\CMakeFiles\c229807f8670dcf0745283e9f1a4c5c7\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{3C1056E7-9CA6-371F-B99B-52A3F59605F2}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

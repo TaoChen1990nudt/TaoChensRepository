@@ -1,0 +1,17 @@
+F:\PLSMStudio\Atomic DAW\Tools\TestPlugins\TestSynth.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\TestSynth.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_processors\juce_audio_processors.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_audio_processors.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_processors\juce_audio_processors_ara.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_audio_processors_ara.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_processors\juce_audio_processors_lv2_libs.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_audio_processors_lv2_libs.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_gui_extra\juce_gui_extra.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_gui_extra.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_gui_basics\juce_gui_basics.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_gui_basics.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_graphics\juce_graphics.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_graphics.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_graphics\juce_graphics_Harfbuzz.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_graphics_Harfbuzz.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_graphics\juce_graphics_Sheenbidi.c;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_graphics_Sheenbidi.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_events\juce_events.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_events.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_core\juce_core.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_core.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_core\juce_core_CompilationTime.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_core_CompilationTime.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_data_structures\juce_data_structures.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_data_structures.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_basics\juce_audio_basics.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_audio_basics.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_utils\juce_audio_utils.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_audio_utils.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_formats\juce_audio_formats.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_audio_formats.obj
+F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_devices\juce_audio_devices.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestSynth.dir\Release\juce_audio_devices.obj

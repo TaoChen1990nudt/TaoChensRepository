@@ -1,0 +1,708 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<AtomicDAW version="9" tempo="120.0000" timelineBeats="64.00">
+  <Rack>
+    <Synth id="1" name="Synth A" colour="ff7c96f5" waveform="sine" levelDb="-4.000000" pan="-0.080000" muted="0" soloed="0" mixer="0">
+      <Automation enabled="1" target="filter" expanded="0">
+        <Point beat="0.00000000" value="0.550000"/>
+        <Point beat="12.00000000" value="0.900000"/>
+        <Point beat="24.00000000" value="0.180000"/>
+        <Point beat="36.00000000" value="0.750000"/>
+        <Point beat="48.00000000" value="0.300000"/>
+        <Point beat="64.00000000" value="0.550000"/>
+      </Automation>
+      <Automation enabled="0" target="level" expanded="0">
+        <Point beat="0.00000000" value="1.000000"/>
+        <Point beat="64.00000000" value="1.000000"/>
+      </Automation>
+    </Synth>
+    <Synth id="2" name="Synth B" colour="ffe879a6" waveform="sine" levelDb="-8.000000" pan="0.180000" muted="0" soloed="0" mixer="1">
+      <Automation enabled="0" target="filter" expanded="0">
+        <Point beat="0.00000000" value="1.000000"/>
+        <Point beat="64.00000000" value="1.000000"/>
+      </Automation>
+      <Automation enabled="0" target="level" expanded="0">
+        <Point beat="0.00000000" value="1.000000"/>
+        <Point beat="64.00000000" value="1.000000"/>
+      </Automation>
+    </Synth>
+  </Rack>
+  <Mixer masterLevelDb="0.000000" masterPan="0.000000" masterMuted="0" channels="8">
+    <Channel index="0">
+      <Insert slot="0" type="2" p1="0.280000" p2="0.400000" enabled="1"/>
+    </Channel>
+    <Channel index="1">
+      <Insert slot="0" type="1" p1="0.720000" p2="0.400000" enabled="1"/>
+      <Insert slot="1" type="3" p1="0.340000" p2="0.300000" enabled="1"/>
+    </Channel>
+    <Channel index="2"/>
+    <Channel index="3"/>
+    <Channel index="4"/>
+    <Channel index="5"/>
+    <Channel index="6"/>
+    <Channel index="7"/>
+    <MasterInserts/>
+    <MasterAutomation>
+      <Automation enabled="1" target="level" expanded="0">
+        <Point beat="0.00000000" value="0.860000"/>
+        <Point beat="12.00000000" value="1.000000"/>
+        <Point beat="28.00000000" value="0.900000"/>
+        <Point beat="64.00000000" value="0.960000"/>
+      </Automation>
+      <Automation enabled="0" target="pan" expanded="0">
+        <Point beat="0.00000000" value="1.000000"/>
+        <Point beat="64.00000000" value="1.000000"/>
+      </Automation>
+    </MasterAutomation>
+  </Mixer>
+  <AutomationWindow>
+    <Track id="17" owner="layer" ownerId="65" target="0"/>
+    <Track id="18" owner="layer" ownerId="66" target="1"/>
+    <Track id="19" owner="layer" ownerId="67" target="0"/>
+    <Track id="20" owner="slot" ownerId="1" target="0"/>
+    <Track id="21" owner="group" ownerId="10" target="0"/>
+    <Track id="22" owner="master" ownerId="0" target="0"/>
+  </AutomationWindow>
+  <Layers active="2">
+    <Layer id="65" name="Layer 1" colour="ff4fd1c5" visible="0" output="1" levelDb="-4.000000" pan="-0.120000" muted="0" soloed="0">
+      <Automation enabled="1" target="volume" expanded="0">
+        <Point beat="0.00000000" value="0.620000"/>
+        <Point beat="8.00000000" value="0.950000"/>
+        <Point beat="16.00000000" value="0.550000"/>
+        <Point beat="24.00000000" value="1.000000"/>
+        <Point beat="36.00000000" value="0.420000"/>
+        <Point beat="48.00000000" value="0.880000"/>
+        <Point beat="64.00000000" value="0.620000"/>
+      </Automation>
+      <Automation enabled="0" target="pan" expanded="0">
+        <Point beat="0.00000000" value="1.000000"/>
+        <Point beat="64.00000000" value="1.000000"/>
+      </Automation>
+      <Groups>
+        <Group id="10" name="&#32452; B" colour="ff8ce99a" levelDb="-3.500000">
+          <Automation enabled="0" target="level" expanded="0">
+            <Point beat="0.00000000" value="1.000000"/>
+            <Point beat="64.00000000" value="1.000000"/>
+          </Automation>
+        </Group>
+      </Groups>
+      <Notes>
+        <Note id="1" pitch="36" start="0.00000000" length="3.50000000" velocity="0.850000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="2" pitch="36" start="4.00000000" length="3.50000000" velocity="0.850000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="3" pitch="43" start="8.00000000" length="3.50000000" velocity="0.850000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="4" pitch="41" start="12.00000000" length="3.50000000" velocity="0.850000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="5" pitch="36" start="16.00000000" length="3.50000000" velocity="0.850000" group="10">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="6" pitch="34" start="20.00000000" length="3.50000000" velocity="0.850000" group="10">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="7" pitch="41" start="24.00000000" length="3.50000000" velocity="0.850000" group="10">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="8" pitch="39" start="28.00000000" length="3.50000000" velocity="0.850000" group="10">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+      </Notes>
+    </Layer>
+    <Layer id="66" name="Layer 2" colour="fff6ad55" visible="0" output="2" levelDb="-6.000000" pan="0.000000" muted="0" soloed="0">
+      <Automation enabled="0" target="volume" expanded="0">
+        <Point beat="0.00000000" value="1.000000"/>
+        <Point beat="64.00000000" value="1.000000"/>
+      </Automation>
+      <Automation enabled="1" target="pan" expanded="0">
+        <Point beat="0.00000000" value="0.180000"/>
+        <Point beat="16.00000000" value="0.840000"/>
+        <Point beat="32.00000000" value="0.160000"/>
+        <Point beat="48.00000000" value="0.780000"/>
+        <Point beat="64.00000000" value="0.180000"/>
+      </Automation>
+      <Notes>
+        <Note id="1" pitch="60" start="0.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="2" pitch="64" start="0.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="3" pitch="67" start="0.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="4" pitch="62" start="4.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="5" pitch="65" start="4.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="6" pitch="69" start="4.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="7" pitch="59" start="8.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="8" pitch="62" start="8.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="9" pitch="67" start="8.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="10" pitch="57" start="12.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="11" pitch="60" start="12.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="12" pitch="64" start="12.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="13" pitch="60" start="16.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="14" pitch="64" start="16.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="15" pitch="67" start="16.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="16" pitch="62" start="20.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="17" pitch="65" start="20.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="18" pitch="69" start="20.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="19" pitch="59" start="24.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="20" pitch="62" start="24.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="21" pitch="67" start="24.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="22" pitch="57" start="28.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="23" pitch="60" start="28.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="24" pitch="64" start="28.50000000" length="3.00000000" velocity="0.700000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+      </Notes>
+    </Layer>
+    <Layer id="67" name="Layer 3" colour="ff9f7aea" visible="0" output="1" levelDb="-2.500000" pan="0.120000" muted="0" soloed="0">
+      <Automation enabled="0" target="volume" expanded="0">
+        <Point beat="0.00000000" value="1.000000"/>
+        <Point beat="64.00000000" value="1.000000"/>
+      </Automation>
+      <Automation enabled="0" target="pan" expanded="0">
+        <Point beat="0.00000000" value="1.000000"/>
+        <Point beat="64.00000000" value="1.000000"/>
+      </Automation>
+      <Groups>
+        <Group id="9" name="&#32452; A" colour="ffffd166" output="2">
+          <Automation enabled="1" target="level" expanded="0">
+            <Point beat="8.00000000" value="1.000000"/>
+            <Point beat="15.00000000" value="0.350000"/>
+            <Point beat="23.00000000" value="1.000000"/>
+          </Automation>
+        </Group>
+      </Groups>
+      <Samples>
+        <Sample id="1" name="demo-clip.wav" path="C:\Users\&#38472;&#20426;&#40857;\AppData\Roaming\AtomicDAW\Samples\demo-clip.wav" start="12.00000000" length="5.00000000" pitch="81" span="4" gainDb="-1.500000"/>
+      </Samples>
+      <Notes>
+        <Note id="1" pitch="72" start="0.00000000" length="0.50000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="2" pitch="74" start="2.00000000" length="0.50000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="3" pitch="76" start="4.00000000" length="0.75000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="4" pitch="79" start="6.00000000" length="1.00000000" velocity="0.900000" output="2">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="5" pitch="76" start="8.00000000" length="0.50000000" velocity="0.900000" group="9">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="6" pitch="74" start="10.00000000" length="0.50000000" velocity="0.900000" group="9">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="7" pitch="72" start="12.00000000" length="0.75000000" velocity="0.900000" group="9">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="8" pitch="71" start="14.00000000" length="1.00000000" velocity="0.900000" group="9">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="9" pitch="72" start="16.00000000" length="0.50000000" velocity="0.900000" group="9">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="10" pitch="76" start="18.00000000" length="0.50000000" velocity="0.900000" group="9">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="11" pitch="79" start="20.00000000" length="0.75000000" velocity="0.900000" group="9">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="12" pitch="81" start="22.00000000" length="1.00000000" velocity="0.900000" group="9">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="13" pitch="79" start="24.00000000" length="0.50000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="14" pitch="76" start="26.00000000" length="0.50000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="15" pitch="74" start="28.00000000" length="0.75000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="16" pitch="72" start="30.00000000" length="1.00000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="17" pitch="72" start="32.00000000" length="0.50000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="18" pitch="74" start="34.00000000" length="0.50000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="19" pitch="76" start="36.00000000" length="0.75000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="20" pitch="79" start="38.00000000" length="1.00000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="21" pitch="76" start="40.00000000" length="0.50000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="22" pitch="74" start="42.00000000" length="0.50000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="23" pitch="72" start="44.00000000" length="0.75000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="24" pitch="71" start="46.00000000" length="1.00000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="25" pitch="72" start="48.00000000" length="0.50000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="26" pitch="76" start="50.00000000" length="0.50000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="27" pitch="79" start="52.00000000" length="0.75000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="28" pitch="81" start="54.00000000" length="1.00000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="29" pitch="79" start="56.00000000" length="0.50000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="30" pitch="76" start="58.00000000" length="0.50000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="31" pitch="74" start="60.00000000" length="0.75000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+        <Note id="32" pitch="72" start="62.00000000" length="1.00000000" velocity="0.900000">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.080000" value="1.000000"/>
+            <Point time="0.340000" value="0.620000"/>
+            <Point time="0.820000" value="0.580000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Note>
+      </Notes>
+    </Layer>
+  </Layers>
+</AtomicDAW>

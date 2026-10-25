@@ -1,0 +1,13 @@
+AtomicDAW — headless rule check (Phase 1 + 2)
+  [PASS] Found a testable ghost note   (layer 1)
+  [PASS] Ghost note is click-through (30% layer)   (raw id 1)
+  [PASS] Active layer note IS editable   (expected id 1)
+  [PASS] After switching sheets, former ghost becomes editable   (layer 1 now active)
+  [PASS] Hidden active layer is not editable   (eye toggled off)
+  [PASS] Duplicate creates a distinct note id   (src 33 -> copy 34)
+  [PASS] Duplicated note carries an identical envelope   (2-point fade-out curve)
+  [PASS] Editing the copy leaves the original untouched   (independent value copies)
+  [PASS] Inspector opens for the double-clicked note   (id 33)
+  [PASS] Inspector closes when its note is deleted   (no dangling pointer)
+
+  ALL CHECKS PASSED

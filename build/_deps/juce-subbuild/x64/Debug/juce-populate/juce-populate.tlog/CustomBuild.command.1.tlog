@@ -1,0 +1,150 @@
+^F:\PLSMSTUDIO\ATOMIC DAW\BUILD\_DEPS\JUCE-SUBBUILD\CMAKEFILES\E2496E9A19B416F929205532E82FA81A\JUCE-POPULATE-MKDIR.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -Dcfgdir=/Debug -P "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/juce-populate-prefix/tmp/juce-populate-mkdirs.cmake"
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/Debug/juce-populate-mkdir"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^F:\PLSMSTUDIO\ATOMIC DAW\BUILD\_DEPS\JUCE-SUBBUILD\CMAKEFILES\E2496E9A19B416F929205532E82FA81A\JUCE-POPULATE-DOWNLOAD.RULE
+setlocal
+cd "F:\PLSMStudio\Atomic DAW\build\_deps"
+if %errorlevel% neq 0 goto :cmEnd
+F:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -P "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/juce-populate-prefix/tmp/juce-populate-gitclone.cmake"
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/Debug/juce-populate-download"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^F:\PLSMSTUDIO\ATOMIC DAW\BUILD\_DEPS\JUCE-SUBBUILD\CMAKEFILES\E2496E9A19B416F929205532E82FA81A\JUCE-POPULATE-UPDATE.RULE
+setlocal
+cd "F:\PLSMStudio\Atomic DAW\build\_deps\juce-src"
+if %errorlevel% neq 0 goto :cmEnd
+F:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -Dcan_fetch=YES -P "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/juce-populate-prefix/tmp/juce-populate-gitupdate.cmake"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^F:\PLSMSTUDIO\ATOMIC DAW\BUILD\_DEPS\JUCE-SUBBUILD\CMAKEFILES\E2496E9A19B416F929205532E82FA81A\JUCE-POPULATE-PATCH.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/Debug/juce-populate-patch"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^F:\PLSMSTUDIO\ATOMIC DAW\BUILD\_DEPS\JUCE-SUBBUILD\CMAKEFILES\E2496E9A19B416F929205532E82FA81A\JUCE-POPULATE-CONFIGURE.RULE
+setlocal
+cd "F:\PLSMStudio\Atomic DAW\build\_deps\juce-build"
+if %errorlevel% neq 0 goto :cmEnd
+F:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/Debug/juce-populate-configure"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^F:\PLSMSTUDIO\ATOMIC DAW\BUILD\_DEPS\JUCE-SUBBUILD\CMAKEFILES\E2496E9A19B416F929205532E82FA81A\JUCE-POPULATE-BUILD.RULE
+setlocal
+cd "F:\PLSMStudio\Atomic DAW\build\_deps\juce-build"
+if %errorlevel% neq 0 goto :cmEnd
+F:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/Debug/juce-populate-build"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^F:\PLSMSTUDIO\ATOMIC DAW\BUILD\_DEPS\JUCE-SUBBUILD\CMAKEFILES\E2496E9A19B416F929205532E82FA81A\JUCE-POPULATE-INSTALL.RULE
+setlocal
+cd "F:\PLSMStudio\Atomic DAW\build\_deps\juce-build"
+if %errorlevel% neq 0 goto :cmEnd
+F:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/Debug/juce-populate-install"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^F:\PLSMSTUDIO\ATOMIC DAW\BUILD\_DEPS\JUCE-SUBBUILD\CMAKEFILES\E2496E9A19B416F929205532E82FA81A\JUCE-POPULATE-TEST.RULE
+setlocal
+cd "F:\PLSMStudio\Atomic DAW\build\_deps\juce-build"
+if %errorlevel% neq 0 goto :cmEnd
+F:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/Debug/juce-populate-test"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^F:\PLSMSTUDIO\ATOMIC DAW\BUILD\_DEPS\JUCE-SUBBUILD\CMAKEFILES\4668181835AABFBDD185310576BFE54E\JUCE-POPULATE-COMPLETE.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E make_directory "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/CMakeFiles/Debug"
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/CMakeFiles/Debug/juce-populate-complete"
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/juce-populate-prefix/src/juce-populate-stamp/Debug/juce-populate-done"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^F:\PLSMSTUDIO\ATOMIC DAW\BUILD\_DEPS\JUCE-SUBBUILD\CMAKEFILES\75DF7DC8657200FBF05FE69BFEACCD85\JUCE-POPULATE.RULE
+setlocal
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^F:\PLSMSTUDIO\ATOMIC DAW\BUILD\_DEPS\JUCE-SUBBUILD\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" "-SF:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild" "-BF:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild" --check-stamp-file "F:/PLSMStudio/Atomic DAW/build/_deps/juce-subbuild/CMakeFiles/generate.stamp"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

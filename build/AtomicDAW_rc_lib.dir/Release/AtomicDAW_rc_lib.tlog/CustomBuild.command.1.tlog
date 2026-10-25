@@ -1,0 +1,20 @@
+^F:\PLSMSTUDIO\ATOMIC DAW\BUILD\CMAKEFILES\B729AF564933ED09F7E086FC6D0B430D\ATOMICDAW_RESOURCES.RC.RULE
+setlocal
+_deps\juce-build\tools\extras\Build\juceaide\juceaide_artefacts\Debug\juceaide.exe rcfile "F:/PLSMStudio/Atomic DAW/build/AtomicDAW_artefacts/JuceLibraryCode/Info.txt" "F:/PLSMStudio/Atomic DAW/build/AtomicDAW_artefacts/JuceLibraryCode/AtomicDAW_resources.rc"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^F:\PLSMSTUDIO\ATOMIC DAW\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" "-SF:/PLSMStudio/Atomic DAW" "-BF:/PLSMStudio/Atomic DAW/build" --check-stamp-file "F:/PLSMStudio/Atomic DAW/build/CMakeFiles/generate.stamp"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

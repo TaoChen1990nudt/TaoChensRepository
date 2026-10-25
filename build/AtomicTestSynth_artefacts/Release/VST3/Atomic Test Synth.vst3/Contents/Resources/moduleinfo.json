@@ -1,0 +1,60 @@
+{
+  "Name": "Atomic Test Synth",
+  "Version": "0.1.0",
+  "Factory Info": {
+    "Vendor": "PLSM Studio",
+    "URL": "",
+    "E-Mail": "",
+    "Flags": {
+      "Unicode": true,
+      "Classes Discardable": false,
+      "Component Non Discardable": false,
+    },
+  },
+  "Classes": [
+    {
+      "CID": "5653544174736E61746F6D6963207465",
+      "Category": "Audio Module Class",
+      "Name": "Atomic Test Synth",
+      "Vendor": "PLSM Studio",
+      "Version": "0.1.0",
+      "SDKVersion": "VST 3.7.12",
+      "Sub Categories": [
+        "Instrument",
+        "Synth",
+      ],
+      "Class Flags": 2,
+      "Cardinality": 2147483647,
+      "Snapshots": [
+      ],
+    },
+    {
+      "CID": "5653454174736E61746F6D6963207465",
+      "Category": "Component Controller Class",
+      "Name": "Atomic Test Synth",
+      "Vendor": "PLSM Studio",
+      "Version": "0.1.0",
+      "SDKVersion": "VST 3.7.12",
+      "Sub Categories": [
+        "Instrument",
+        "Synth",
+      ],
+      "Class Flags": 2,
+      "Cardinality": 2147483647,
+      "Snapshots": [
+      ],
+    },
+    {
+      "CID": "ABCDEF01C0DEF00D506C736D4174736E",
+      "Category": "Plugin Compatibility Class",
+      "Name": "Atomic Test Synth",
+      "Vendor": "PLSM Studio",
+      "Version": "0.1.0",
+      "SDKVersion": "VST 3.7.12",
+      "Class Flags": 0,
+      "Cardinality": 2147483647,
+      "Snapshots": [
+      ],
+    },
+  ],
+}
