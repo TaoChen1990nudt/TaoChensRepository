@@ -99,13 +99,20 @@ AutomationWindow::Resolved AutomationWindow::resolve (const AutomationTrack& tra
             {
                 // Phase 20: two lanes per group now, addressed by target the
                 // same way a layer's two are.
-                const bool isPan = track.target == (int) GroupAutomationTarget::pan;
+                // Phase 24: and a third, which drives a parameter of the synth
+                // the group is mounted on. The window cannot name the plugin
+                // parameter (it has no plugin host and must not grow one), so
+                // the row says what KIND of curve it is and the inline box —
+                // which does have the list — says which parameter.
+                const auto target = (GroupAutomationTarget) juce::jlimit (0, numGroupAutomationTargets - 1,
+                                                                         track.target);
 
-                resolved.lane      = &group->automationFor (isPan ? GroupAutomationTarget::pan
-                                                                  : GroupAutomationTarget::level);
+                resolved.lane      = &group->automationFor (target);
                 resolved.name      = group->getName();
                 resolved.colour    = group->getColour();
-                resolved.parameter = isPan ? utf8 ("组声相") : utf8 ("组音量");
+                resolved.parameter = target == GroupAutomationTarget::pan    ? utf8 ("组声相")
+                                   : target == GroupAutomationTarget::plugin ? utf8 ("音源参数")
+                                                                             : utf8 ("组音量");
                 break;
             }
         }
@@ -117,12 +124,24 @@ AutomationWindow::Resolved AutomationWindow::resolve (const AutomationTrack& tra
         if (slot == nullptr)
             return resolved;
 
-        const auto target = (SlotAutomationTarget) juce::jlimit (0, 1, track.target);
+        const auto target = (SlotAutomationTarget) juce::jlimit (0, numSlotAutomationTargets - 1,
+                                                                 track.target);
 
         resolved.lane      = &slot->automationFor (target);
-        resolved.name      = slot->name;
+        resolved.name      = slot->getDisplayName();
         resolved.colour    = slot->colour;
-        resolved.parameter = target == SlotAutomationTarget::filter ? utf8 ("滤波") : utf8 ("音量");
+        // Phase 42: the window still cannot name the plugin's parameter — it has
+        // no plugin host and must not grow one — so the third row says what KIND
+        // of curve it is and the rack card's submenu says which parameter.
+        //
+        // Phase 43: the strip grew three rows: 声相 / 静音 / 独奏, named the way
+        // the console names them.
+        resolved.parameter = target == SlotAutomationTarget::filter ? utf8 ("滤波")
+                           : target == SlotAutomationTarget::plugin ? utf8 ("音源参数")
+                           : target == SlotAutomationTarget::pan    ? utf8 ("声相")
+                           : target == SlotAutomationTarget::mute   ? utf8 ("静音")
+                           : target == SlotAutomationTarget::solo   ? utf8 ("独奏")
+                                                                    : utf8 ("音量");
     }
 
     return resolved;

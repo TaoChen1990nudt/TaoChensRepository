@@ -45,6 +45,21 @@ struct NoteEvent
         happened to be open when it was set. */
     NoteModTarget modTarget = NoteModTarget::level;
 
+    /** Phase 24: when >= 0, `envelope` drives parameter `modPluginParam` of the
+        HOSTED instrument this note resolves to, and `modTarget` is dormant.
+
+        A separate field instead of extra enum values because a plugin's
+        parameters are not a fixed set: they are a list the vendor defines, and
+        an enum cannot name them. Keeping `modTarget` untouched means switching
+        to a plugin parameter and back is lossless — the built-in choice you had
+        before is still there.
+
+        -1 means "drive the built-in target". A note mounted on an internal
+        synth always has -1 in practice; routing can change afterwards, so this
+        is a request, not a guarantee — the schedule publisher is what checks
+        that the resolved synth actually has a plugin. */
+    int modPluginParam = -1;
+
     /** Phase 3: the note's own output, bypassing its layer.
 
         -1 means "follow the layer's default output". Any other value is a
@@ -70,6 +85,7 @@ struct NoteEvent
 
     bool followsLayerOutput() const noexcept { return outputSlotOverride < 0; }
     bool belongsToGroup() const noexcept     { return groupId >= 0; }
+    bool drivesPluginParam() const noexcept  { return modPluginParam >= 0; }
     void clearOutputOverride() noexcept      { outputSlotOverride = -1; }
 
     double endBeat() const noexcept { return startBeat + lengthBeats; }
@@ -89,6 +105,26 @@ struct NoteEvent
 
         return (u < 0.0 || u > 1.0) ? -1.0 : juce::jlimit (0.0, 1.0, u);
     }
+};
+
+//==============================================================================
+/** Phase 31: what dragging a clip's edge does to the AUDIO inside it.
+
+    Phase 30 settled that a block is a window onto a file — trimming cuts the
+    sound instead of squeezing it. That left "make the block twice as long"
+    meaning "show some more silence", which is right for a window and wrong for
+    a sampler. These are the four answers a sampler user actually wants, and the
+    choice belongs to the CLIP, not the app: one project may want a tape-style
+    squeeze next to a pitch-preserved stretch.
+
+    Stored as an int in the project file, so a reader that does not know
+    `pitch` yet still gets a valid value for every older project (0 = none). */
+enum class StretchMode
+{
+    none     = 0,   // 原速窗口: nothing but where the audio stops (Phase 30)
+    resample = 1,   // 变速变调: tape — twice as fast is also an octave up
+    tempo    = 2,   // 只变速不变调: the whole file squeezed in, pitch kept
+    pitch    = 3    // 不变速只变调: same speed, transposed by the length ratio
 };
 
 //==============================================================================
@@ -127,12 +163,62 @@ struct SampleEvent
     int          laneSpan    = 4;      // how many pitch lanes tall, >= 1
     float        gainDb      = 0.0f;
 
+    //-- Phase 27: what plays it, and who it belongs to ----------------------
+    /** Sampler slot this clip is mounted on, or -1 for "the layer's output".
+
+        A clip names a SAMPLER, not an instrument: the sampler holds the file,
+        so re-pointing this number changes the sound of the block while leaving
+        its rectangle where it was. -1 means the clip plays its own `audio`
+        through the layer's default bus, which is what every pre-Phase-27
+        project does. */
+    int          outputSlotId = -1;
+
+    /** Group this clip belongs to, or -1. A clip can sit in a group with notes
+        (Phase 27) so that moving the group moves it too — but membership says
+        nothing about routing. See routing::resolveSample: a group's mount is a
+        statement about notes, and a clip keeps its own sampler regardless. */
+    int          groupId      = -1;
+
+    //-- Phase 29: the window onto the file, and its fades --------------------
+    /** Seconds into the source where this block starts.
+
+        The block is a WINDOW onto the file, not a copy of it: trimming the head
+        advances this by exactly the time the block lost, so the audio that is
+        left stays where it was on the timeline. Without it a "trim" would be
+        indistinguishable from "cut the tail and restart the file here", which
+        is the one thing a trim must not sound like. */
+    double sourceOffsetSeconds = 0.0;
+
+    /** Fade lengths, measured in BEATS inwards from each end (0 = no fade).
+
+        Beats, not seconds or a normalised 0..1: a fade is a shape drawn inside
+        the rectangle the user sees, so stretching the block has to stretch the
+        fade with it. A normalised fade would survive a tempo change but would
+        move the diagonal out from under the handle that set it. */
+    double fadeInBeats  = 0.0;
+    double fadeOutBeats = 0.0;
+
+    //-- Phase 31: what a length change does to the audio --------------------
+    /** How this block answers "make me longer". `none` keeps Phase 30's window
+        behaviour; the other three rescale the sound. A block's own property,
+        because two blocks of the same file may want different answers. */
+    StretchMode stretchMode = StretchMode::none;
+
     std::shared_ptr<const SampleBuffer> audio;
 
     /** The roll is 128 lanes tall, so no block can be taller than that. */
     static constexpr int numPitchLanes = 128;
 
     double endBeat() const noexcept { return startBeat + lengthBeats; }
+
+    /** Phase 29: how much of the file is left after the start offset. Zero when
+        the buffer is missing — callers treat that as "no limit", because a block
+        whose file could not be found must still be editable. */
+    double remainingSourceSeconds() const noexcept
+    {
+        return audio != nullptr ? juce::jmax (0.0, audio->lengthSeconds() - sourceOffsetSeconds)
+                                : 0.0;
+    }
 
     /** Highest lane covered, inclusive. */
     int topPitch() const noexcept { return pitch + juce::jmax (1, laneSpan) - 1; }
@@ -145,6 +231,22 @@ struct SampleEvent
     {
         return bpm > 0.0 ? seconds * bpm / 60.0 : seconds;
     }
+
+    /** Phase 31: natural length / drawn length — the ONE number the three
+        stretch modes are derived from. 1.0 means this block is exactly as long
+        as the audio it holds, so:
+          * a head trim cannot change it (offset and length move together),
+          * a tail trim changes it, which is the whole point,
+          * "恢复原始长度" puts it back to exactly 1.0.
+        Measured against what is LEFT of the file after `sourceOffsetSeconds`,
+        because that is what the block is a window onto. Zero when the buffer is
+        missing; callers treat that as 1.0. */
+    double stretchRatio (double bpm) const noexcept
+    {
+        const double naturalBeats = beatsForSeconds (remainingSourceSeconds(), bpm);
+
+        return (naturalBeats > 0.0 && lengthBeats > 0.0) ? naturalBeats / lengthBeats : 1.0;
+    }
 };
 
 //==============================================================================
@@ -156,9 +258,11 @@ struct SampleEvent
       * **挂载音源** — one output for every member, sitting between the note's
         own override and the layer default. `outputSlotId` is -1 ("follow the
         layer"), otherwise a SynthSlot id, never an index.
-      * **宏观自动化** — one `AutomationLane` in ABSOLUTE beats that multiplies
-        the level of every member. Same time base as a layer curve, because a
-        group curve is a property of the project, not of one note.
+      * **宏观自动化** — `AutomationLane`s in ABSOLUTE beats: one multiplies
+        the level of every member, one adds to their pan, and (Phase 24) one
+        writes a parameter of the hosted instrument the group is mounted on.
+        Same time base as a layer curve, because a group curve is a property of
+        the project, not of one note.
 
     Membership is NOT stored here. It lives on the note (`NoteEvent::groupId`),
     so there is exactly one place that can be wrong, and deleting a note cannot
@@ -181,6 +285,17 @@ public:
     void setOutputSlotId (int slotId) noexcept    { outputSlotId = slotId; }
     bool followsLayerOutput() const noexcept      { return outputSlotId < 0; }
 
+    /** Phase 24: which parameter of the mounted HOSTED instrument the `plugin`
+        lane drives. -1 = none chosen yet, in which case that lane is inert.
+
+        Index into `AudioProcessor::getParameters()` of whatever plugin the
+        group's resolved synth holds. Stored as an int for the same reason a
+        note's override is: a plugin may be uninstalled between sessions, and an
+        index that no longer resolves has to be survivable, not fatal. */
+    int  getPluginParam() const noexcept          { return pluginParam; }
+    void setPluginParam (int index) noexcept      { pluginParam = index; }
+    bool drivesPluginParam() const noexcept       { return pluginParam >= 0; }
+
     //-- Phase 17: the group's own trim --------------------------------------
     /** Volume and pan, the same pair every other mixer strip has.
 
@@ -195,6 +310,22 @@ public:
     void  setPan (float p) noexcept                { pan = juce::jlimit (-1.0f, 1.0f, p); }
 
     float getGainLinear() const noexcept           { return gain::fromDb (levelDb); }
+
+    //-- Phase 35: the group's mute ------------------------------------------
+    /** Silent, without touching the fader.
+
+        The distinction is the whole reason this exists rather than "drag the
+        level to -48": a mute has to be reversible with one click and has to
+        leave the trim where the user put it. It lives on the group — not on
+        the members — for the same reason the level does: muting a group is one
+        decision, and copying it to sixty notes is sixty places to get wrong.
+
+        Unlike the layer's mute there is no solo counterpart. A group's mute is
+        a property of its notes AND its sample blocks (Phase 35 folded both into
+        GroupMix::gainAt), and a solo over a subset of the members would only
+        describe one of the two. */
+    bool isMuted() const noexcept                  { return muted; }
+    void setMuted (bool shouldBeMuted) noexcept    { muted = shouldBeMuted; }
 
     /** View state: the group list draws a one-line title bar when this is set.
         It lives on the model so every row-layout calculation stays a pure
@@ -222,19 +353,27 @@ public:
     AutomationLane&       getPanAutomation() noexcept       { return automationFor (GroupAutomationTarget::pan); }
     const AutomationLane& getPanAutomation() const noexcept { return automationFor (GroupAutomationTarget::pan); }
 
+    /** Phase 24: the lane that drives NoteGroup::getPluginParam(). Same value
+        range and same absolute-beat time base as the other two. */
+    AutomationLane&       getPluginAutomation() noexcept       { return automationFor (GroupAutomationTarget::plugin); }
+    const AutomationLane& getPluginAutomation() const noexcept { return automationFor (GroupAutomationTarget::plugin); }
+
 private:
     int          id = 0;
     juce::String name;
     juce::Colour colour;
     int          outputSlotId = -1;
+    int          pluginParam  = -1;
 
     float levelDb   = 0.0f;       // a group is a trim: unity unless moved
     float pan       = 0.0f;
     bool  collapsed = false;
+    bool  muted     = false;      // Phase 35: silences notes AND sample blocks
 
     /** 0..1 multiplier over project time, indexed by GroupAutomationTarget.
-        Disabled means "identity": 1.0 for level, 0.0 for pan. */
-    std::array<AutomationLane, 2> automationLanes;
+        Disabled means "identity": 1.0 for level, 0.0 for pan, and for the
+        plugin lane the parameter simply is not written at all. */
+    std::array<AutomationLane, numGroupAutomationTargets> automationLanes;
 
     JUCE_LEAK_DETECTOR (NoteGroup)
 };
@@ -371,6 +510,16 @@ public:
     /** Members, in note order (the order the roll draws them in). */
     std::vector<int> getGroupNoteIds (int groupId) const;
     int countNotesInGroup (int groupId) const noexcept;
+
+    //-- Phase 27: clips as group members -------------------------------------
+    /** A clip can be grouped with notes. It stays a clip: membership means
+        "move and select with the rest", never "play what the group plays" —
+        the routing question is answered by routing::resolveSample and nowhere
+        else. */
+    void assignSamplesToGroup (const std::vector<int>& sampleIds, int groupId);
+    int  getGroupIdOfSample (int sampleId) const noexcept;
+    std::vector<int> getGroupSampleIds (int groupId) const;
+    int  countSamplesInGroup (int groupId) const noexcept;
 
     /** Replaces the group list (project load). Ids are preserved and the id
         counter is raised past them, exactly like restoreNotes(). */

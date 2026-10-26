@@ -28,6 +28,22 @@ namespace
     {
         return juce::Font (juce::FontOptions{}.withHeight (atomic::ui::sp (height)).withStyle ("Bold"));
     }
+
+    /** Phase 42: what the lane header calls the curve it is pointed at. One
+        place, because the badge row, the AUTO readout and the lane's own title
+        would otherwise be three chances to disagree. */
+    juce::String automationName (const SynthSlot& slot)
+    {
+        switch (slot.automationTarget)
+        {
+            case SlotAutomationTarget::level:  return utf8 ("音量");
+            case SlotAutomationTarget::plugin: return utf8 ("音源参数");
+            case SlotAutomationTarget::pan:    return utf8 ("声相");
+            case SlotAutomationTarget::mute:   return utf8 ("静音");
+            case SlotAutomationTarget::solo:   return utf8 ("独奏");
+            default:                           return utf8 ("滤波器");
+        }
+    }
 }
 
 //==============================================================================
@@ -343,7 +359,7 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
         g.setColour (juce::Colours::white.withAlpha (slot->muted ? 0.40f : 0.92f));
         g.setFont (juce::Font (juce::FontOptions{}.withHeight (atomic::ui::sp (12.5f))
                                  .withStyle ("Bold")));
-        g.drawText (slot->name,
+        g.drawText (slot->getDisplayName(),
                     juce::Rectangle<int> (cardX + ui::px (36), cardY,
                                           cardW - ui::px (130), (int) card.getHeight()),
                     juce::Justification::centredLeft, true);
@@ -363,7 +379,7 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
 
     g.setColour (juce::Colours::white.withAlpha (slot->muted ? 0.45f : 0.95f));
     g.setFont (boldFont (13.0f));
-    g.drawText (slot->name,
+    g.drawText (slot->getDisplayName(),
                 juce::Rectangle<int> (cardX + ui::px (26), cardY + ui::px (6),
                                       cardW - ui::px (134), ui::px (18)),
                 juce::Justification::centredLeft, false);
@@ -426,14 +442,26 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
     {
         auto pill = getWaveformBounds (index).toFloat();
 
-        const bool hot = hovered && hoveredPart == Part::waveform && ! slot->isPlugin();
+        const bool hot = hovered && hoveredPart == Part::waveform
+                           && ! slot->isPlugin() && ! slot->isSampler();
 
         g.setColour (juce::Colours::white.withAlpha (hot ? 0.11f : 0.055f));
         g.fillRoundedRectangle (pill, ui::pf (5));
         g.setColour (accent.withAlpha (hot ? 0.60f : 0.35f));
         g.drawRoundedRectangle (pill, ui::pf (5), 1.0f);
 
-        if (slot->isPlugin())
+        if (slot->isSampler())
+        {
+            // Phase 27: a sampler is neither an oscillator nor a plugin — it is
+            // a container for one file. Saying "SAMPLE" here is the whole
+            // explanation for why clicking it does not cycle a waveform and why
+            // its notes readout is a duration instead of a note count.
+            g.setColour (accent.withAlpha (slot->sampleBuffer != nullptr ? 0.95f : 0.4f));
+            g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
+            g.drawText ("SAMPLE", pill.reduced (ui::pf (7), 0.0f),
+                        juce::Justification::centredLeft, false);
+        }
+        else if (slot->isPlugin())
         {
             g.setColour (accent.withAlpha (slot->pluginId > 0 ? 0.95f : 0.4f));
             g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
@@ -457,12 +485,31 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
 
         g.setColour (kMutedText.withAlpha (0.85f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
-        g.drawText (juce::String (notes) + " notes",
-                    juce::Rectangle<int> (cardX + ui::px (102), cardY + ui::px (40),
-                                          cardW - ui::px (116), ui::px (18)),
-                    juce::Justification::centredLeft, false);
 
-        if (overrides > 0)
+        // A sampler is fed by clips, not by notes, so a note count would be a
+        // permanently honest-looking zero. The file's length is the number a
+        // user actually wants next to a sampler.
+        if (slot->isSampler())
+        {
+            const double seconds = slot->sampleBuffer != nullptr ? slot->sampleBuffer->lengthSeconds()
+                                                                 : 0.0;
+
+            g.drawText (slot->sampleBuffer != nullptr
+                          ? juce::String (seconds, 2) + " s" + utf8 (" · 采样")
+                          : utf8 ("采样缺失"),
+                        juce::Rectangle<int> (cardX + ui::px (102), cardY + ui::px (40),
+                                              cardW - ui::px (116), ui::px (18)),
+                        juce::Justification::centredLeft, true);
+        }
+        else
+        {
+            g.drawText (juce::String (notes) + " notes",
+                        juce::Rectangle<int> (cardX + ui::px (102), cardY + ui::px (40),
+                                              cardW - ui::px (116), ui::px (18)),
+                        juce::Justification::centredLeft, false);
+        }
+
+        if (overrides > 0 && ! slot->isSampler())
         {
             g.setColour (accent);
             g.setFont (juce::Font (juce::FontOptions{}.withHeight (atomic::ui::sp (9.0f)).withStyle ("Bold")));
@@ -511,9 +558,7 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
 
         g.setColour (kMutedText.withAlpha (hasCurve ? 0.85f : 0.7f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
-        g.drawText (hasCurve ? juce::String ("AUTO") + separatorDot()
-                                 + (slot->automationTarget == SlotAutomationTarget::filter
-                                      ? utf8 ("滤波器") : utf8 ("音量"))
+        g.drawText (hasCurve ? juce::String ("AUTO") + separatorDot() + automationName (*slot)
                              : utf8 ("右键：创建自动化"),
                     line.withTrimmedLeft (ui::px (9)),
                     juce::Justification::centredLeft, false);
@@ -578,10 +623,12 @@ void RackPanel::drawLaneHeader (juce::Graphics& g, int index)
         const double probeBeat = playheadBeat >= 0.0 ? playheadBeat : 0.0;
         const float  value     = slot->getAutomation().valueAtBeat (probeBeat);
 
-        const juce::String readout = slot->automationTarget == SlotAutomationTarget::filter
-                                       ? juce::String (juce::roundToInt (value * 100.0f)) + "%"
-                                       : mixerlook::dbText (mixerlook::faderBottomDb
-                                                              + value * mixerlook::faderRangeDb);
+        // Phase 42: a plugin parameter is a normalised 0..1 amount, not decibels,
+        // so the third lane reads as a percentage like the filter does.
+        const juce::String readout = slot->automationTarget == SlotAutomationTarget::level
+                                       ? mixerlook::dbText (mixerlook::faderBottomDb
+                                                              + value * mixerlook::faderRangeDb)
+                                       : juce::String (juce::roundToInt (value * 100.0f)) + "%";
 
         g.setColour (juce::Colours::white.withAlpha (enabled ? 0.48f : 0.26f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
@@ -697,18 +744,44 @@ void RackPanel::setRoutingFocus (int slotId, bool hasSelection)
     repaint();
 }
 
+void RackPanel::setSelectionActive (bool active)
+{
+    if (selectionActive == active)
+        return;
+
+    selectionActive = active;
+    repaint();
+}
+
 void RackPanel::rackChanged()
 {
     // A deleted card can leave the hover index pointing at nothing.
     hoveredCard = -1;
     hoveredPart = Part::none;
 
+    // Phase 27: a card is usually grown by dropping a file into the ROLL, which
+    // means the user is not looking at the rack when it happens. Scrolling to
+    // the new card is the difference between "my sample is in the rack" and
+    // "nothing happened". Only on GROWTH: renaming a synth must not move the
+    // view out from under the field being typed into.
+    const int slotCount = rack.getNumSlots();
+
+    if (slotCount > lastSlotCount)
+    {
+        clampScroll();
+        scrollY = (float) juce::jmax (0, getContentHeight() - getViewHeight());
+    }
+
+    lastSlotCount = slotCount;
+
     syncLaneEditors();
+    updateLayout();
     repaint();
 }
 
 void RackPanel::resized()
 {
+    lastSlotCount = rack.getNumSlots();
     updateLayout();
 }
 
@@ -765,7 +838,7 @@ void RackPanel::mouseDown (const juce::MouseEvent& e)
                 const int  slotId    = slot->id;
 
                 ui::showValueMenu (this, screenPos,
-                                   slot->name + (onVolume ? utf8 (" · 音量") : utf8 (" · 声相")),
+                                   slot->getDisplayName() + (onVolume ? utf8 (" · 音量") : utf8 (" · 声相")),
                                    onVolume ? mixerlook::dbText (slot->levelDb) + " dB"
                                             : mixerlook::panText (slot->pan),
                                    [this, slotId, onVolume]
@@ -775,14 +848,19 @@ void RackPanel::mouseDown (const juce::MouseEvent& e)
                                        else
                                            rack.setPan (slotId, 0.0f);       // centre
                                    },
-                                   [] (juce::PopupMenu& m)
+                                   [this, slotId] (juce::PopupMenu& m)
                                    {
-                                       m.addItem (10, utf8 ("音源菜单…"));
+                                       juce::PopupMenu sub;
+
+                                       if (buildCardSubmenu != nullptr)
+                                           buildCardSubmenu (sub, slotId);
+
+                                       m.addSubMenu (utf8 ("音源"), sub, true);
                                    },
-                                   [this, slotId, screenPos] (int result)
+                                   [this, slotId] (int result)
                                    {
-                                       if (result == 10 && onCardMenuRequested != nullptr)
-                                           onCardMenuRequested (slotId, screenPos);
+                                       if (onCardSubmenuChosen != nullptr)
+                                           onCardSubmenuChosen (slotId, result);
                                    });
 
                 return;
@@ -820,8 +898,16 @@ void RackPanel::mouseDown (const juce::MouseEvent& e)
             // came before every control and swallowed those clicks.)
             if (getCloseBounds (i).contains (pos))
             {
+                // Phase 32: the host removes a sampler together with the clips
+                // that were playing through it — one promise, one owner. The
+                // fallback keeps the panel usable on its own.
                 if (rack.getNumSlots() > 1)
-                    rack.removeSlot (slot->id);
+                {
+                    if (onSlotRemoveRequested != nullptr)
+                        onSlotRemoveRequested (slot->id);
+                    else
+                        rack.removeSlot (slot->id);
+                }
 
                 return;
             }
@@ -840,8 +926,9 @@ void RackPanel::mouseDown (const juce::MouseEvent& e)
 
             if (getWaveformBounds (i).contains (pos))
             {
-                // Hosted instruments have no oscillator to cycle through.
-                if (! slot->isPlugin())
+                // Hosted instruments have no oscillator to cycle through, and
+                // neither has a sampler: its pill names the file it holds.
+                if (! slot->isPlugin() && ! slot->isSampler())
                     rack.setWaveform (slot->id, nextWaveform (slot->waveform));
 
                 return;
@@ -877,10 +964,16 @@ void RackPanel::mouseDown (const juce::MouseEvent& e)
             // that a group can be mounted on a synth, a stray click that moved
             // twenty notes would be a very expensive accident.
             //
-            // Alt-click keeps the old meaning (mount the selected notes here),
-            // and the card's context menu offers it in words for anyone who
-            // does not know the modifier.
-            if (e.mods.isAltDown())
+            // Phase 23: the exception is a click made WHILE something is
+            // selected. Then the click means what it looks like it means —
+            // "play this on that one" — and it is not a stray click, because
+            // the user got here by selecting notes first. With nothing selected
+            // the old, harmless reading stands.
+            //
+            // Alt-click keeps the old meaning unconditionally, and the card's
+            // context menu offers it in words for anyone who does not know the
+            // modifier.
+            if (e.mods.isAltDown() || (selectionActive && onSlotChosen != nullptr))
             {
                 if (onSlotChosen != nullptr)
                     onSlotChosen (slot->id);
@@ -980,7 +1073,9 @@ void RackPanel::mouseMove (const juce::MouseEvent& e)
         else if (getSoloBounds (i).contains (pos))        newPart = Part::solo;
         else if (getMuteBounds (i).contains (pos))   newPart = Part::mute;
         else if (getCloseBounds (i).contains (pos))  newPart = Part::close;
-        else if (getWaveformBounds (i).contains (pos)) newPart = Part::waveform;
+        else if (getWaveformBounds (i).contains (pos)
+                   && rack.getSlot (i) != nullptr && ! rack.getSlot (i)->isSampler())
+            newPart = Part::waveform;
         else if (getSendBounds (i).contains (pos))   newPart = Part::send;
         else if (getVolumeBounds (i).expanded (0, 6).contains (pos)) newPart = Part::volume;
         else if (getPanBounds (i).expanded (0, 6).contains (pos))    newPart = Part::pan;

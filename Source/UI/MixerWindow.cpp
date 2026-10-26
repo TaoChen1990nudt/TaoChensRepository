@@ -43,4 +43,31 @@ void MixerWindow::closeButtonPressed()
         onCloseRequest();
 }
 
+void MixerWindow::setKeyForwarder (juce::KeyListener* listener)
+{
+    if (keyForwarder == listener)
+        return;
+
+    if (keyForwarder != nullptr)
+    {
+        removeKeyListener (keyForwarder);
+
+        if (auto* content = getContentComponent())
+            content->removeKeyListener (keyForwarder);
+    }
+
+    keyForwarder = listener;
+
+    if (keyForwarder != nullptr)
+    {
+        // Both layers, for the reason spelled out in PluginEditorWindow: the
+        // focus can sit on any child of the panel, and a listener that only
+        // reaches the window is a listener the faders never call.
+        addKeyListener (keyForwarder);
+
+        if (auto* content = getContentComponent())
+            content->addKeyListener (keyForwarder);
+    }
+}
+
 } // namespace atomic

@@ -2,6 +2,7 @@
 
 #include "PluginHost.h"
 
+#include "Model/AutomationStack.h"
 #include "Model/Routing.h"
 
 #include <algorithm>
@@ -63,6 +64,13 @@ namespace
     constexpr double kAuditionHold   = 0.28;   // seconds at full level
     constexpr double kAuditionDecay  = 0.16;   // then exponential, this tau
     constexpr double kAuditionLength = 1.10;   // hard cap, seconds
+
+    /** Phase 39: how long a hosted instrument keeps being rendered after the
+        last live note-off. A plugin that stops receiving processBlock calls
+        freezes mid-tail, and a pad's four-second release is the normal case,
+        not the exception. Long enough for any reasonable release, short enough
+        that a stray tail does not keep the device callback awake forever. */
+    constexpr double kLivePluginTailSeconds = 6.0;
 
     double pitchToFrequency (int pitch) noexcept
     {
@@ -177,25 +185,35 @@ float RenderStats::peakForLayer (int layerIndex) const
     return 0.0f;
 }
 
-void RenderStats::addChannelPeak (int channel, float newPeak)
+void RenderStats::addChannelPeak (int channel, float leftPeak, float rightPeak)
 {
     for (auto& entry : channelPeaks)
     {
-        if (entry.first == channel)
+        if (entry.channel == channel)
         {
-            entry.second = juce::jmax (entry.second, newPeak);
+            entry.left  = juce::jmax (entry.left,  leftPeak);
+            entry.right = juce::jmax (entry.right, rightPeak);
             return;
         }
     }
 
-    channelPeaks.emplace_back (channel, newPeak);
+    channelPeaks.push_back ({ channel, leftPeak, rightPeak });
 }
 
 float RenderStats::peakForChannel (int channel) const
 {
     for (const auto& entry : channelPeaks)
-        if (entry.first == channel)
-            return entry.second;
+        if (entry.channel == channel)
+            return entry.loudest();
+
+    return 0.0f;
+}
+
+float RenderStats::peakForChannelSide (int channel, int side) const
+{
+    for (const auto& entry : channelPeaks)
+        if (entry.channel == channel)
+            return side == 0 ? entry.left : entry.right;
 
     return 0.0f;
 }
@@ -209,7 +227,10 @@ PlaybackEngine::PlaybackEngine()
     for (auto& meter : layerMeters)
         meter.store (0.0f);
 
-    for (auto& meter : channelMeters)
+    for (auto& meter : channelMetersL)
+        meter.store (0.0f);
+
+    for (auto& meter : channelMetersR)
         meter.store (0.0f);
 
     for (auto& meter : masterMeters)
@@ -219,8 +240,26 @@ PlaybackEngine::PlaybackEngine()
 
     // Delay lines must exist before the first render, even if nobody ever calls
     // setSampleRate (the headless tests render straight from a fresh engine).
-    for (auto& chain : channelChains)
-        chain.prepare (sampleRate);
+    // Phase 25: only the strips a schedule actually references get memory —
+    // publish() tops this up as the console grows.
+    prepareChannelChains (MixerModel::defaultChannels);
+}
+
+void PlaybackEngine::prepareChannelChains (int count)
+{
+    const int wanted = juce::jlimit (0, (int) MixerModel::numChannels, count);
+
+    for (int i = chainsReady.load (std::memory_order_relaxed); i < wanted; ++i)
+        channelChains[(size_t) i].prepare (sampleRate);
+
+    if (wanted > chainsReady.load (std::memory_order_relaxed))
+        chainsReady.store (wanted, std::memory_order_release);
+
+    if (! masterChainReady.load (std::memory_order_relaxed))
+    {
+        channelChains[(size_t) MixerModel::masterChannel].prepare (sampleRate);
+        masterChainReady.store (true, std::memory_order_release);
+    }
 }
 
 void PlaybackEngine::setSampleRate (double newSampleRate)
@@ -231,9 +270,16 @@ void PlaybackEngine::setSampleRate (double newSampleRate)
     sampleRate = newSampleRate;
 
     // Insert memory is sized by sample rate (delay buffers), so it is rebuilt
-    // here — on the message thread — never in the callback.
-    for (auto& chain : channelChains)
-        chain.prepare (sampleRate);
+    // here — on the message thread — never in the callback. Phase 25: only the
+    // chains that were ever prepared, which keeps the cost proportional to the
+    // strips in use instead of the 127-strip ceiling.
+    const int ready = chainsReady.load (std::memory_order_relaxed);
+
+    for (int i = 0; i < ready; ++i)
+        channelChains[(size_t) i].prepare (sampleRate);
+
+    if (masterChainReady.load (std::memory_order_relaxed))
+        channelChains[(size_t) MixerModel::masterChannel].prepare (sampleRate);
 }
 
 void PlaybackEngine::prepareToPlay (double newSampleRate, int expectedBlockSize)
@@ -254,6 +300,17 @@ void PlaybackEngine::prepareToPlay (double newSampleRate, int expectedBlockSize)
         pluginBuffer.setSize (2, pluginBlock, false, false, false);
 
     pluginMidi.ensureSize (8192);
+
+    // Phase 39: the live plugin path renders in chunks of at most this, so the
+    // scratch only ever has to hold one chunk — and it is sized HERE, on the
+    // message thread, because a buffer that resizes itself inside the audio
+    // callback is an allocation with a real-time deadline.
+    const int liveBlock = juce::jmax (PluginHost::maxBlockSize, required);
+
+    if (livePluginBuffer.getNumSamples() < liveBlock || livePluginBuffer.getNumChannels() < 2)
+        livePluginBuffer.setSize (2, liveBlock, false, false, false);
+
+    liveMidi.ensureSize (2048);
 
     for (auto& bus : channelBuses)
         if (bus.getNumSamples() < required || bus.getNumChannels() < 2)
@@ -345,14 +402,81 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
     // Phase 11: a channel belongs to the mixer, not to a layer. Its inserts are
     // frozen whether or not anything is routed here; whether it is *processed*
     // is decided at render time by "did any voice arrive".
-    if (mixer != nullptr)
+    //
+    // Phase 23: the bus slots exist in the engine whether or not a mixer was
+    // handed in, so they are published unconditionally. A schedule without a
+    // mixer then renders exactly the pre-Phase-23 way: eight strips, all going
+    // to the master, in index order.
+    //
+    // Phase 25: the live count, not the 127-strip ceiling. Publishing 127
+    // channels would make the render loop and the topology sort pay for strips
+    // nobody created, and `channels` is indexed BY CHANNEL NUMBER, so the array
+    // has to be exactly as long as the console anyway.
+    const int liveChannels = mixer != nullptr ? mixer->getChannelCount()
+                                              : MixerModel::defaultChannels;
+
+    // The chains these channels will run in the callback have to exist first.
+    prepareChannelChains (liveChannels);
+
+    for (int channel = 0; channel < liveChannels; ++channel)
     {
-        for (int channel = 0; channel < MixerModel::numChannels; ++channel)
+        ChannelMix mix;
+        mix.channel = channel;
+
+        if (mixer != nullptr)
         {
-            ChannelMix mix;
-            mix.channel = channel;
             mix.inserts = mixer->getInserts (channel);
-            fresh->channels.push_back (std::move (mix));
+            mix.output  = mixer->getChannelOutput (channel);
+            mix.mono    = mixer->isChannelMono (channel);
+        }
+
+        fresh->channels.push_back (std::move (mix));
+    }
+
+    //-- Phase 23: the summing order ----------------------------------------
+    // A strip that feeds another strip has to be summed BEFORE its destination
+    // runs its own inserts, otherwise the signal would land in a bus that has
+    // already been read. Sorting here (message thread, once per edit) keeps the
+    // audio thread to a flat loop over a list it does not have to understand.
+    {
+        std::array<bool, MixerModel::numChannels> placed {};
+
+        const auto feeds = [&fresh] (int source, int destination)
+        {
+            return source != destination
+                     && juce::isPositiveAndBelow (source, (int) fresh->channels.size())
+                     && fresh->channels[(size_t) source].output == destination;
+        };
+
+        for (int step = 0; step < liveChannels; ++step)
+        {
+            int pick = -1;
+
+            for (int candidate = 0; candidate < liveChannels && pick < 0; ++candidate)
+            {
+                if (placed[(size_t) candidate])
+                    continue;
+
+                bool ready = true;
+
+                for (int other = 0; other < liveChannels && ready; ++other)
+                    if (! placed[(size_t) other] && feeds (other, candidate))
+                        ready = false;
+
+                if (ready)
+                    pick = candidate;
+            }
+
+            // A loop cannot be rendered, so nothing in it is ever "ready". The
+            // model refuses to build one; this is what keeps a hand-edited file
+            // from stalling the publish instead of merely sounding odd.
+            if (pick < 0)
+                for (int candidate = 0; candidate < liveChannels && pick < 0; ++candidate)
+                    if (! placed[(size_t) candidate])
+                        pick = candidate;
+
+            placed[(size_t) pick] = true;
+            fresh->channelOrder.push_back (pick);
         }
     }
 
@@ -367,6 +491,9 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
         SlotMix mix;
         mix.slotId   = slot->id;
         mix.pluginId = slot->pluginId;
+        mix.sampler  = slot->isSampler();
+        mix.muted    = slot->muted;
+        mix.soloed   = slot->soloed;
         mix.audible  = ! slot->muted && (! anySlotSolo || slot->soloed);
         mix.gain    = slot->getGainLinear();
         mix.pan     = slot->pan;
@@ -387,6 +514,22 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
         mix.filterPoints    = mix.filterAutomated ? filterLane.getPoints() : std::vector<AutomationPoint> {};
         mix.levelPoints     = mix.levelAutomated  ? levelLane.getPoints()  : std::vector<AutomationPoint> {};
 
+        // Phase 43: pan / mute / solo. Three more frozen curves, the same shape
+        // as the two above — the audio thread never looks at the model.
+        const auto& panLane  = slot->automationFor (SlotAutomationTarget::pan);
+        const auto& muteLane = slot->automationFor (SlotAutomationTarget::mute);
+        const auto& soloLane = slot->automationFor (SlotAutomationTarget::solo);
+
+        mix.panAutomated  = panLane.isEnabled();
+        mix.muteAutomated = muteLane.isEnabled();
+        mix.soloAutomated = soloLane.isEnabled();
+        mix.panPoints     = mix.panAutomated  ? panLane.getPoints()  : std::vector<AutomationPoint> {};
+        mix.mutePoints    = mix.muteAutomated ? muteLane.getPoints() : std::vector<AutomationPoint> {};
+        mix.soloPoints    = mix.soloAutomated ? soloLane.getPoints() : std::vector<AutomationPoint> {};
+
+        // A solo curve makes "who is soloed" move with the playhead, so the
+        // renderer cannot use the constant it used to cache. The publish step
+        // still freezes the curves; the renderer asks `isSoloedAt` per block.
         fresh->slots.push_back (std::move (mix));
     }
 
@@ -408,6 +551,7 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             mix.groupId = group.getId();
             mix.gain    = group.getGainLinear();
             mix.pan     = group.getPan();
+            mix.muted   = group.isMuted();      // Phase 35: folded into gainAt()
 
             const auto& lane = group.getLevelAutomation();
             mix.levelAutomated = lane.isEnabled();
@@ -425,6 +569,52 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
                 mix.panPoints = panLane.getPoints();
 
             fresh->groups.push_back (std::move (mix));
+
+            //-- Phase 24: the group's plugin lane ---------------------------
+            // A group still has no signal path of its own, so this lane cannot
+            // be "the group's parameter". It writes a parameter of the synth
+            // the group is MOUNTED on, over the beats the group covers — which
+            // is what "自动化编组挂载的音源" has to mean. The target synth is
+            // resolved exactly like its notes' output is, so the group cannot
+            // drive a plugin that none of its members play through.
+            if (group.drivesPluginParam() && group.getPluginAutomation().isEnabled())
+            {
+                const int groupSlot = group.followsLayerOutput()
+                                        ? routing::layerSlotId (*layer, rack)
+                                        : (rack.findSlot (group.getOutputSlotId()) != nullptr
+                                             ? group.getOutputSlotId()
+                                             : routing::layerSlotId (*layer, rack));
+
+                const auto* mount = rack.findSlot (groupSlot);
+
+                if (mount != nullptr && mount->pluginId > 0)
+                {
+                    double first = 0.0, last = 0.0;
+                    bool   any  = false;
+
+                    for (const auto& member : layer->getNotes())
+                    {
+                        if (member.groupId != group.getId())
+                            continue;
+
+                        first = any ? juce::jmin (first, member.startBeat) : member.startBeat;
+                        last  = any ? juce::jmax (last,  member.endBeat())  : member.endBeat();
+                        any   = true;
+                    }
+
+                    if (any && last > first)
+                    {
+                        PluginParamCurve curve;
+                        curve.pluginId   = mount->pluginId;
+                        curve.paramIndex = group.getPluginParam();
+                        curve.startBeat  = first;
+                        curve.endBeat    = last;
+                        curve.priority   = 1;                  // the coarser curve
+                        curve.points     = group.getPluginAutomation().getPoints();
+                        fresh->pluginParams.push_back (std::move (curve));
+                    }
+                }
+            }
         }
 
         for (const auto& note : layer->getNotes())
@@ -485,35 +675,89 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
 
             contentBeats = juce::jmax (contentBeats, note.endBeat());
             fresh->notes.push_back (scheduled);
+
+            //-- Phase 24: the note's envelope driving a plugin parameter ----
+            // The note's curve is normalised; the schedule speaks absolute
+            // beats. Converting here (once) instead of on the audio thread is
+            // the same trade the pitch integral makes: pay it at publish time.
+            if (note.drivesPluginParam() && note.envelope.isEnabled()
+                  && slot->pluginId > 0)
+            {
+                PluginParamCurve curve;
+                curve.pluginId   = slot->pluginId;
+                curve.paramIndex = note.modPluginParam;
+                curve.startBeat  = note.startBeat;
+                curve.endBeat    = note.endBeat();
+                curve.priority   = 2;                  // the finer curve; multiplies #1
+
+                for (const auto& p : note.envelope.getPoints())
+                    curve.points.push_back ({ note.startBeat
+                                                + (double) p.time * juce::jmax (1.0e-6, note.lengthBeats),
+                                              p.value });
+
+                fresh->pluginParams.push_back (std::move (curve));
+            }
         }
 
         //-- Phase 17: audio clips ------------------------------------------
-        // A clip follows its LAYER's output. It has no note to carry an
-        // override and no group to be mounted through, so routing::layerSlotId
-        // is the whole rule here — and it is still the same resolver, so a
-        // deleted synth falls back exactly like a note would.
-        const int clipSlot = routing::layerSlotId (*layer, rack);
-
-        if (clipSlot >= 0)
+        // Phase 27: a clip resolves through routing::resolveSample, which is
+        // the only place "which sampler plays this, and through which bus" is
+        // decided. It deliberately does NOT consult the clip's group: a group's
+        // mount is a statement about its NOTES, and a clip that changed its
+        // audio because somebody re-mounted the group would be exactly the
+        // surprise this phase set out to avoid.
+        for (const auto& clip : layer->getSamples())
         {
-            for (const auto& clip : layer->getSamples())
-            {
-                if (clip.audio == nullptr)
-                    continue;               // missing file: a hole in the audio, not a crash
+            const auto res = routing::resolveSample (*layer, clip, rack);
 
-                ScheduledClip scheduled;
-                scheduled.slotId       = clipSlot;
-                scheduled.layerIndex   = layerIndex;
-                scheduled.clipId       = clip.id;
-                scheduled.startSeconds = clip.startBeat * secondsPerBeat;
-                scheduled.endSeconds   = juce::jmax (scheduled.startSeconds + 0.01,
-                                                     clip.endBeat() * secondsPerBeat);
-                scheduled.gain         = gain::fromDb (clip.gainDb);
-                scheduled.audio        = clip.audio;
+            if (res.missingAudio)
+                continue;               // missing file: a hole in the audio, not a crash
 
-                contentBeats = juce::jmax (contentBeats, clip.endBeat());
-                fresh->clips.push_back (std::move (scheduled));
-            }
+            if (res.slotId < 0)
+                continue;               // nowhere to come out of
+
+            ScheduledClip scheduled;
+            scheduled.slotId       = res.slotId;
+            scheduled.layerIndex   = layerIndex;
+            scheduled.clipId       = clip.id;
+            scheduled.startSeconds = clip.startBeat * secondsPerBeat;
+            scheduled.endSeconds   = juce::jmax (scheduled.startSeconds + 0.01,
+                                                 clip.endBeat() * secondsPerBeat);
+            scheduled.gain         = gain::fromDb (clip.gainDb);
+            scheduled.audio        = res.audio;
+
+            // Phase 29: the window and the fades, in seconds. A clip whose
+            // offset points past the end of its file is left alone — the render
+            // loop stops at the last frame anyway, and clamping here would
+            // silently move the audio the user is about to trim.
+            scheduled.sourceOffsetSeconds = juce::jmax (0.0, clip.sourceOffsetSeconds);
+            scheduled.fadeInSeconds       = juce::jmax (0.0, clip.fadeInBeats)  * secondsPerBeat;
+            scheduled.fadeOutSeconds      = juce::jmax (0.0, clip.fadeOutBeats) * secondsPerBeat;
+
+            // Phase 31: the stretch ratio is "what the file would take" over
+            // "what the block gives it". Computed from the SAME resolver the
+            // block's drawing uses (routing::resolveSample), so a clip mounted
+            // on a sampler stretches against the file that actually plays.
+            //
+            // Measured after the start offset, not against the whole file: a
+            // head trim moves the window without changing how much audio is
+            // squeezed into it, and a ratio that moved with it would detune the
+            // block every time its left edge was nudged.
+            const double windowSeconds = juce::jmax (1.0e-4, clip.lengthBeats * secondsPerBeat);
+            const double naturalSeconds = juce::jmax (0.0, res.audio->lengthSeconds()
+                                                            - scheduled.sourceOffsetSeconds);
+
+            scheduled.stretch = clipstretch::Playback::make (clip.stretchMode,
+                                                             naturalSeconds / windowSeconds);
+
+            // Phase 35: membership, for the group's trim only. Nothing above
+            // this line consulted it — `res` was resolved from the mount and the
+            // layer, never from the group — so adding this field cannot change
+            // what plays, only how loud.
+            scheduled.groupId = clip.groupId;
+
+            contentBeats = juce::jmax (contentBeats, clip.endBeat());
+            fresh->clips.push_back (std::move (scheduled));
         }
     }
 
@@ -525,20 +769,72 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
                [] (const ScheduledClip& a, const ScheduledClip& b)
                { return a.startSeconds < b.startSeconds; });
 
+    // Phase 24: ascending priority, so the audio thread applies the whole list
+    // in order. Phase 36: the order no longer decides a winner — curves on the
+    // same parameter are multiplied — but a stable order still means two runs
+    // over the same song produce the same schedule, which is what makes an
+    // offline export comparable to a live render.
+    // Phase 42: the SLOT's own plugin lane.
+    //
+    // It is the coarsest curve there is — the whole project, at the level of
+    // "the synth" — where a group's curve covers its members and a note's
+    // envelope covers the note. All three multiply on the way out
+    // (automation::stackPluginParam), so a slot at 0.5 under a group at 0.5 is a
+    // quarter of the parameter's range: the same arithmetic the level stack has
+    // used since Phase 36.
+    //
+    // Published here, after the loops above, because the window it covers is the
+    // project's length — and that is not known until every note and clip has
+    // been seen.
+    {
+        const double curveLength = juce::jmax (1.0, contentBeats);
+
+        for (int i = 0; i < rack.getNumSlots(); ++i)
+        {
+            const auto* slot = rack.getSlot (i);
+
+            if (slot == nullptr || slot->pluginId <= 0 || ! slot->drivesPluginParam())
+                continue;
+
+            const auto& lane = slot->getPluginAutomation();
+
+            if (! lane.isEnabled() || lane.getPoints().empty())
+                continue;
+
+            PluginParamCurve curve;
+            curve.pluginId   = slot->pluginId;
+            curve.paramIndex = slot->getPluginParam();
+            curve.startBeat  = 0.0;
+            curve.endBeat    = curveLength;
+            curve.priority   = 0;
+            curve.points     = lane.getPoints();
+
+            fresh->pluginParams.push_back (std::move (curve));
+        }
+    }
+
+    std::stable_sort (fresh->pluginParams.begin(), fresh->pluginParams.end(),
+                      [] (const PluginParamCurve& a, const PluginParamCurve& b)
+                      { return a.priority < b.priority; });
+
     //-- Master strip ---------------------------------------------------------
     if (mixer != nullptr)
     {
         fresh->masterInserts = mixer->getInserts (MixerModel::masterChannel);
         fresh->masterGain    = mixer->getMasterGainLinear();
         fresh->masterPan     = mixer->getMasterPan();
+        fresh->masterMono    = mixer->isMasterMono();
 
         const auto& levelLane = mixer->automationFor (0);
         const auto& panLane   = mixer->automationFor (1);
+        const auto& muteLane  = mixer->automationFor (2);
 
         fresh->masterLevelAutomated = levelLane.isEnabled();
         fresh->masterPanAutomated   = panLane.isEnabled();
+        fresh->masterMuteAutomated  = muteLane.isEnabled();
         fresh->masterLevelPoints    = levelLane.getPoints();
         fresh->masterPanPoints      = panLane.getPoints();
+        fresh->masterMutePoints     = muteLane.getPoints();
     }
 
     // Never shorter than the project grid, never shorter than the content, and
@@ -679,6 +975,24 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
                  : MixerModel::numChannels;
     };
 
+    //-- Phase 43: who is soloed, for THIS block ------------------------------
+    // Solo is the only control whose answer is not local: it decides whether a
+    // slot that is soloing nothing is heard at all. While solo was a boolean
+    // that question had one answer and publish time could freeze it; a solo
+    // CURVE makes it a function of the playhead, so it is asked once per block.
+    //
+    // One loop, not two: when no solo lane exists `isSoloedAt` is the same
+    // boolean the publish step read, so the branch would buy nothing but a
+    // second path to disagree with this one.
+    bool anySoloNow = false;
+
+    for (const auto& s : current.slots)
+        if (s.isSoloedAt (startBeat))
+        {
+            anySoloNow = true;
+            break;
+        }
+
     //-- Stage 1: voices -> per-channel stereo bus ---------------------------
     // A note contributes to exactly one channel (its layer) and one synth (its
     // resolved output). The channel bus has to exist independently of the synth
@@ -691,11 +1005,16 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
         if (slot.pluginId > 0)
             continue;
 
-        if (! slot.audible)
+        if (! slot.isAudibleAt (startBeat, anySoloNow))
             continue;
 
         const float slotGain0 = slot.gainAt (startBeat);
         const float slotGain1 = slot.gainAt (endBeat);
+
+        // Phase 43: the strip's pan, sampled at both ends of the block so a pan
+        // curve sweeps the way the level curve already ramps.
+        const float slotPan0 = slot.panAt (startBeat);
+        const float slotPan1 = slot.panAt (endBeat);
 
         if (slotGain0 <= 0.0f && slotGain1 <= 0.0f)
             continue;                           // muted synth
@@ -721,6 +1040,13 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
 
         for (const auto& note : current.notes)
         {
+            // Phase 27: a sampler slot has no oscillator. Its job is the clip
+            // loop further down; running voices through it would mean a note
+            // routed there by accident makes a saw wave out of a slot the user
+            // believes only holds a file.
+            if (slot.sampler)
+                break;
+
             if (note.slotId != slot.slotId)
                 continue;
 
@@ -766,16 +1092,27 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
             const double increment = frequency / sampleRate;
             const double length    = note.endSeconds - note.startSeconds;
 
-            // Pan is the layer's pan PLUS the synth's pan PLUS the group's,
-            // constant-power. The stages are summed rather than multiplied
-            // because a pan is an angle: adding two half-lefts should not
-            // cancel out. Phase 20 makes the group's term a ramp (pan0..pan1)
-            // so a group pan curve sweeps instead of stepping per block.
+            // Pan is the layer's pan PLUS the synth's pan PLUS the group's PLUS
+            // whatever the note's own curve adds — constant-power. The stages are
+            // summed rather than multiplied because a pan is an angle: adding two
+            // half-lefts should not cancel out. Phase 20 makes the group's term a
+            // ramp (pan0..pan1) so a group pan curve sweeps instead of stepping
+            // per block.
+            //
+            // Phase 36: the sum is `automation::stackPan`, the same function the
+            // overlay painter calls. The macro term is the layer and synth pans
+            // added together because those two are one layer of the stack — "how
+            // far off centre is the mix" — and the arithmetic is associative
+            // either way, so merging them costs nothing and keeps the stack at
+            // three terms everywhere.
             const float groupPan0 = gb != nullptr ? gb->pan0 : 0.0f;
             const float groupPan1 = gb != nullptr ? gb->pan1 : 0.0f;
 
-            const float p0 = juce::jlimit (-1.0f, 1.0f, lb.pan0 + slot.pan + groupPan0);
-            const float p1 = juce::jlimit (-1.0f, 1.0f, lb.pan1 + slot.pan + groupPan1);
+            const float macroPan0 = lb.pan0 + slotPan0;
+            const float macroPan1 = lb.pan1 + slotPan1;
+
+            const float p0 = automation::stackPan (macroPan0, groupPan0, 0.0f);
+            const float p1 = automation::stackPan (macroPan1, groupPan1, 0.0f);
 
             const float panL0 = std::cos ((p0 + 1.0f) * kPiOver4);
             const float panR0 = std::sin ((p0 + 1.0f) * kPiOver4);
@@ -827,8 +1164,12 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
                 {
                     // Same rule as the macro pan: angles add, they do not
                     // multiply. 0.5 in the curve means "no offset".
+                    //
+                    // Phase 36: and the addition is `stackPan`'s, with the note
+                    // as its own term. A curve sitting at 0.5 contributes 0, so
+                    // an armed-but-flat note pan cannot move a panned group.
                     const float spread = juce::jlimit (0.0f, 1.0f, env) * 2.0f - 1.0f;
-                    const float pp     = juce::jlimit (-1.0f, 1.0f, p0 + spread);
+                    const float pp     = automation::stackPan (macroPan0, groupPan0, spread);
 
                     panL = std::cos ((pp + 1.0f) * kPiOver4);
                     panR = std::sin ((pp + 1.0f) * kPiOver4);
@@ -840,8 +1181,17 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
                     phase += frequency * length * (double) note.pitchIntegralAt (u);
                 }
 
+                // Phase 36: the three layers, through the one law. The macro
+                // term is layer × synth because those two are the same layer of
+                // the stack; the group and the note are the other two. Before
+                // this line existed the multiplication was spelled out here and
+                // again in the clip loop, which is exactly how two renderers
+                // drift apart.
+                const float stackGain = automation::stackLevel (layerGain * slotGain,
+                                                                groupGain, amp);
+
                 float mono = oscillator (note.waveform, phase, increment)
-                               * amp * fade * note.gain * layerGain * slotGain * groupGain;
+                               * stackGain * fade * note.gain;
 
                 if (filterOn)
                 {
@@ -876,6 +1226,12 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
         //     the pan is applied as a balance: hard left keeps the left channel
         //     and fades the right, instead of collapsing the image and
         //     re-spreading it.
+        //
+        // Phase 35: what it DOES get, and did not before, is the group trim.
+        // A fader, a pan curve and a mute are statements about "my members", and
+        // a block can be a member. The pan joins the balance above rather than
+        // becoming a second law, so "pan the group" sounds like "pan the layer"
+        // on the same material.
         for (const auto& clip : current.clips)
         {
             if (clip.slotId != slot.slotId)
@@ -903,6 +1259,24 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
             if (lb.gain0 <= 0.0f && lb.gain1 <= 0.0f)
                 continue;
 
+            // Phase 35: the group trim, looked up exactly the way a note does it
+            // — same array, same lambda, same frozen values. A clip that is not
+            // in a group gets 1.0, so the arithmetic below is unchanged for the
+            // fifty-percent case where nobody ever groups a block.
+            //
+            // The mute is already inside these numbers (GroupMix::gainAt), which
+            // is deliberate: this loop must not be able to disagree with the
+            // voice loop about what a muted group means.
+            const auto* gb = groupBlockFor (clip.groupId);
+            const float groupGain0 = gb != nullptr ? gb->gain0 : 1.0f;
+            const float groupGain1 = gb != nullptr ? gb->gain1 : 1.0f;
+
+            if (groupGain0 <= 0.0f && groupGain1 <= 0.0f)
+                continue;                       // muted, or the curve faded it out
+
+            const float groupPan0 = gb != nullptr ? gb->pan0 : 0.0f;
+            const float groupPan1 = gb != nullptr ? gb->pan1 : 0.0f;
+
             const int first = juce::jmax (0, (int) std::ceil ((clip.startSeconds - startSeconds) * sampleRate - 1.0e-9));
             const int last  = juce::jmin (numSamples, (int) std::ceil ((clip.endSeconds - startSeconds) * sampleRate));
 
@@ -918,8 +1292,12 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
 
             const double length = clip.endSeconds - clip.startSeconds;
 
-            const float p0 = juce::jlimit (-1.0f, 1.0f, lb.pan0 + slot.pan);
-            const float p1 = juce::jlimit (-1.0f, 1.0f, lb.pan1 + slot.pan);
+            // Phase 36: and the macro term is the same sum the voice loop uses
+            // — layer pan plus synth pan, added to the group's — because a block
+            // and a note must not disagree about where "the layer is panned"
+            // puts them.
+            const float p0 = automation::stackPan (lb.pan0 + slotPan0, groupPan0, 0.0f);
+            const float p1 = automation::stackPan (lb.pan1 + slotPan1, groupPan1, 0.0f);
 
             const float balL0 = juce::jmin (1.0f, 1.0f - p0);
             const float balR0 = juce::jmin (1.0f, 1.0f + p0);
@@ -930,8 +1308,6 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
             float* busL = bus.getWritePointer (0);
             float* busR = bus.getWritePointer (1);
 
-            const float* src = buffer.frames.data();
-
             float clipPeak = 0.0f;
 
             for (int i = first; i < last; ++i)
@@ -939,31 +1315,53 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
                 const double elapsed   = (startSeconds + (double) i / sampleRate) - clip.startSeconds;
                 const double remaining = length - elapsed;
 
-                // Linear interpolation. The clip is placed on a beat grid, not a
-                // sample grid, so its read position is almost never an integer;
-                // at unity rate this is a bit-exact copy, and at other rates a
-                // first-order resample is the honest 1:1 trade for staying
-                // stateless.
-                const double srcPos = elapsed * buffer.sampleRate;
+                // Phase 31: one call, and it is still a pure function of the
+                // clock. `clipstretch::read` decides between a single read head
+                // (原速 / 变速变调, where speed == pitch) and the two-head grain
+                // crossfade (只变速 / 只变调), from numbers frozen at publish
+                // time. Nothing here remembers a read position, so a seek or an
+                // offline export cannot drift away from playback.
+                //
+                // Notice what is GONE: the old `break` when the read position
+                // ran past the file. A stretched clip legitimately reaches the
+                // end at a different moment than the block does, and the read
+                // returns silence past it either way.
+                const auto frame = clipstretch::read (buffer, clip.stretch,
+                                                      clip.sourceOffsetSeconds,
+                                                      juce::jmax (0.0, elapsed),
+                                                      clipstretch::defaultGrainSeconds);
 
-                if (srcPos >= (double) (srcFrames - 1))
-                    break;
-
-                const int   i0   = (int) srcPos;
-                const float frac = (float) (srcPos - (double) i0);
-
-                const float* a = src + (size_t) i0 * (size_t) srcChannels;
-                // One frame of look-ahead, clamped at the tail so the last
-                // frame repeats instead of reading past the buffer.
-                const float* b = (i0 + 1 < srcFrames) ? a + (size_t) srcChannels : a;
-
-                const float left  = a[0] + (b[0] - a[0]) * frac;
-                const float right = srcChannels > 1 ? (a[1] + (b[1] - a[1]) * frac) : left;
+                const float left  = frame.left;
+                const float right = frame.right;
 
                 const float t = (float) i * invNumSamples;
-                const float gain = clip.gain
-                                     * (lb.gain0 + (lb.gain1 - lb.gain0) * t)
-                                     * (slotGain0 + (slotGain1 - slotGain0) * t)
+
+                // Phase 29: the block's own fades, multiplied on top of the
+                // de-click ramp below rather than replacing it. Two ramps that
+                // both start at zero are the smaller of the two, and picking one
+                // would mean a deliberately short fade quietly loses its
+                // anti-click edge.
+                float fadeGain = 1.0f;
+
+                if (clip.fadeInSeconds > 0.0)
+                    fadeGain = (float) juce::jmin (1.0, elapsed / clip.fadeInSeconds);
+
+                if (clip.fadeOutSeconds > 0.0)
+                    fadeGain = juce::jmin (fadeGain,
+                                           (float) juce::jmin (1.0, remaining / clip.fadeOutSeconds));
+
+                // Phase 36: the three layers through the one law. A block has no
+                // note envelope, so its note term is the identity — which is not
+                // a special case here but the definition of an absent layer. The
+                // macro term still carries both faders, so a clip keeps obeying
+                // the layer and the synth exactly as it did.
+                const float stackGain = automation::stackLevel ((lb.gain0 + (lb.gain1 - lb.gain0) * t)
+                                                                  * (slotGain0 + (slotGain1 - slotGain0) * t),
+                                                                groupGain0 + (groupGain1 - groupGain0) * t,
+                                                                1.0f);
+
+                const float gain = clip.gain * fadeGain
+                                     * stackGain
                                      * (float) juce::jlimit (0.0, 1.0,
                                                             juce::jmin (elapsed, remaining) / kClickFadeSecond);
 
@@ -1009,8 +1407,22 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
     // has memory that must see the whole channel, not one note at a time. A
     // channel nobody feeds is skipped — an insert sitting on an unrouted channel
     // must not colour the mix (and must not advance its delay line either).
-    for (int channel = 0; channel < MixerModel::numChannels; ++channel)
+    //
+    // Phase 23: the strips are walked in `channelOrder`, not 0..7. A strip that
+    // feeds another strip is summed into its destination's bus BEFORE that
+    // destination reaches this loop, so a group channel hears its children. The
+    // order was decided at publish time; this loop never looks at the graph.
+    const int orderSize = current.channelOrder.empty() ? (int) current.channels.size()
+                                                       : (int) current.channelOrder.size();
+
+    for (int step = 0; step < orderSize; ++step)
     {
+        const int channel = current.channelOrder.empty() ? step
+                                                        : current.channelOrder[(size_t) step];
+
+        if (! juce::isPositiveAndBelow (channel, MixerModel::numChannels))
+            continue;
+
         if (! busUsed[(size_t) channel])
             continue;
 
@@ -1026,11 +1438,49 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
         else
             chain.process (inserts, bus, numSamples, sampleRate);
 
-        for (int ch = 0; ch < numChannels; ++ch)
-            output.addFrom (ch, 0, bus, juce::jmin (ch, 1), 0, numSamples);
+        // Phase 25: mono monitoring, straight after the inserts. Here and not
+        // before them because the chain is set up for a stereo signal — summing
+        // first would feed every reverb and delay a mono source, which is a
+        // different sound, not a different way of listening to this one.
+        if (juce::isPositiveAndBelow (channel, (int) current.channels.size())
+              && current.channels[(size_t) channel].mono)
+        {
+            auto* left  = bus.getWritePointer (0);
+            auto* right = bus.getNumChannels() > 1 ? bus.getWritePointer (1) : left;
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float sum = (left[i] + right[i]) * 0.5f;
+                left[i]  = sum;
+                right[i] = sum;
+            }
+        }
+
+        const int destination = juce::isPositiveAndBelow (channel, (int) current.channels.size())
+                                  ? current.channels[(size_t) channel].output
+                                  : MixerModel::masterChannel;
+
+        if (juce::isPositiveAndBelow (destination, MixerModel::numChannels))
+        {
+            // Feeds another strip: sum into its bus and mark it as fed, so a
+            // destination whose only source is a child still runs its inserts.
+            auto& target = channelBuses[(size_t) destination];
+
+            for (int ch = 0; ch < 2; ++ch)
+                target.addFrom (ch, 0, bus, ch, 0, numSamples);
+
+            busUsed[(size_t) destination] = true;
+        }
+        else
+        {
+            for (int ch = 0; ch < numChannels; ++ch)
+                output.addFrom (ch, 0, bus, juce::jmin (ch, 1), 0, numSamples);
+        }
 
         if (stats != nullptr)
-            stats->addChannelPeak (channel, bus.getMagnitude (0, 0, numSamples));
+            stats->addChannelPeak (channel, bus.getMagnitude (0, 0, numSamples),
+                                   bus.getMagnitude (juce::jmin (1, bus.getNumChannels() - 1),
+                                                     0, numSamples));
     }
 
     // Everything that bypasses the console lands here: no inserts, no channel
@@ -1059,10 +1509,23 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
     // step on a moving master fader is audible as zipper noise on a fade.
     const double masterEndBeat = startBeat + (double) numSamples / sampleRate / spb;
 
+    // Phase 43: the master's mute lane is a GATE on the same fade, read at both
+    // ends of the block like the level curve above — so switching it off mid
+    // fade lands where the fade was, not at full level.
+    const auto masterMuteGate = [&] (double beat)
+    {
+        if (! current.masterMuteAutomated)
+            return 1.0f;
+
+        return automationValueAt (current.masterMutePoints, beat) < 0.5f ? 0.0f : 1.0f;
+    };
+
     const float level0 = current.masterGain
+                           * masterMuteGate (startBeat)
                            * (current.masterLevelAutomated
                                 ? automationValueAt (current.masterLevelPoints, startBeat) : 1.0f);
     const float level1 = current.masterGain
+                           * masterMuteGate (masterEndBeat)
                            * (current.masterLevelAutomated
                                 ? automationValueAt (current.masterLevelPoints, masterEndBeat) : 1.0f);
 
@@ -1102,6 +1565,25 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
             output.applyGain (1, 0, numSamples, masterR0);
     }
 
+    //-- Phase 26: master mono monitoring --------------------------------------
+    // Last, not next to the inserts. A channel applies mono at the point its
+    // signal leaves the strip; the master's exit is here, after the inserts and
+    // after the fader/pan ramp. Summing earlier would leave the pan law working
+    // on a signal that no longer has a side, and the meter would then disagree
+    // with what the device is actually being fed.
+    if (current.masterMono && numChannels > 1)
+    {
+        auto* left  = output.getWritePointer (0, 0);
+        auto* right = output.getWritePointer (1, 0);
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float sum = (left[i] + right[i]) * 0.5f;
+            left[i]  = sum;
+            right[i] = sum;
+        }
+    }
+
     if (stats != nullptr)
         stats->peak = juce::jmax (stats->peak, output.getMagnitude (0, 0, numSamples));
 }
@@ -1126,9 +1608,20 @@ void PlaybackEngine::renderHostedInstruments (const PublishedSchedule& current, 
     if (pluginBuffer.getNumChannels() < 2)
         return;
 
+    // Phase 43: the same per-block solo question the oscillator stage asks, for
+    // the same reason — a solo curve moves with the playhead.
+    bool anySoloNow = false;
+
+    for (const auto& s : current.slots)
+        if (s.isSoloedAt (startBeat))
+        {
+            anySoloNow = true;
+            break;
+        }
+
     for (const auto& slot : current.slots)
     {
-        if (slot.pluginId <= 0 || ! slot.audible)
+        if (slot.pluginId <= 0 || ! slot.isAudibleAt (startBeat, anySoloNow))
             continue;
 
         auto* plugin = pluginHost->getInstanceWhileLocked (slot.pluginId);
@@ -1159,9 +1652,12 @@ void PlaybackEngine::renderHostedInstruments (const PublishedSchedule& current, 
         const int outChannels = juce::jmin (2, destination.getNumChannels());
 
         // Balance, not constant power: the plugin already produced a stereo
-        // image, and squaring it away would break it.
-        const float balanceL = juce::jmin (1.0f, 1.0f - slot.pan);
-        const float balanceR = juce::jmin (1.0f, 1.0f + slot.pan);
+        // image, and squaring it away would break it. Phase 43: the pan comes
+        // from `panAt`, so a pan curve is heard here too — sampled once per
+        // block, because a plugin's output is gained as a whole and a per-sample
+        // ramp would mean touching its buffer twice.
+        const float balanceL = juce::jmin (1.0f, 1.0f - slot.panAt (startBeat));
+        const float balanceR = juce::jmin (1.0f, 1.0f + slot.panAt (startBeat));
 
         float slotPeak = 0.0f;
 
@@ -1220,10 +1716,38 @@ void PlaybackEngine::renderHostedInstruments (const PublishedSchedule& current, 
                     pluginMidi.addEvent (juce::MidiMessage::noteOff (1, note.pitch), off);
             }
 
+            // Phase 39: keys held on this instrument go into the SAME MIDI
+            // buffer as the timeline's notes. The alternative — a second
+            // processBlock just for the live voice — would run the plugin's own
+            // DSP twice per block, and "the LFO is twice as fast while the
+            // transport rolls" is a bug nobody would ever track down.
+            if (chunkStart == 0)
+                for (int e = 0; e < pendingLiveCount; ++e)
+                {
+                    const auto& event = pendingLive[(size_t) e];
+
+                    if (event.slotId != slot.slotId)
+                        continue;
+
+                    if (event.on)
+                        pluginMidi.addEvent (juce::MidiMessage::noteOn (1, event.pitch,
+                                                                        event.velocity), 0);
+                    else
+                        pluginMidi.addEvent (juce::MidiMessage::noteOff (1, event.pitch), 0);
+                }
+
             // Plugins are not required to clear their output, and a leftover
             // from the last chunk is exactly the kind of noise nobody can
             // explain later.
             pluginBuffer.clear (0, chunkLen);
+
+            // Phase 24: any curve that writes one of this instrument's
+            // parameters lands here — after the MIDI for this chunk is built,
+            // before it is processed, so the parameter and the notes it shapes
+            // belong to the same chunk.
+            applyHostedParamAutomation (*plugin, current, slot.pluginId,
+                                        (startSeconds + (double) chunkStart / sampleRate) / spb,
+                                        (startSeconds + (double) (chunkStart + chunkLen) / sampleRate) / spb);
 
             juce::AudioBuffer<float> view (pluginBuffer.getArrayOfWritePointers(),
                                            pluginChannels, 0, chunkLen);
@@ -1248,8 +1772,117 @@ void PlaybackEngine::renderHostedInstruments (const PublishedSchedule& current, 
 
         busUsed[(size_t) busIndex] = true;
 
+        // Phase 39: this plugin has already been processed in this callback, so
+        // renderLive must not process it again — see the live MIDI merge above.
+        if (numTransportPluginSlots < maxTransportPluginSlots)
+            transportPluginSlots[(size_t) numTransportPluginSlots++] = slot.slotId;
+
         if (stats != nullptr)
             stats->addPeak (slot.slotId, slotPeak);
+    }
+}
+
+//==============================================================================
+void PlaybackEngine::applyHostedParamAutomation (juce::AudioProcessor& plugin,
+                                                 const PublishedSchedule& current,
+                                                 int pluginInstanceId,
+                                                 double chunkStartBeat,
+                                                 double chunkEndBeat) const
+{
+    const auto& parameters = plugin.getParameters();
+
+    if (parameters.isEmpty())
+        return;
+
+    //-- Phase 36: collect this chunk's live curves, then merge per parameter --
+    //
+    // Before this phase the loop wrote each curve's value straight into the
+    // parameter, so two curves aimed at the same parameter overwrote each other
+    // and `priority` decided which one the user heard. That is not a fader, it
+    // is a coin toss with a documented winner: a group dragging a cutoff while a
+    // note shapes the same cutoff should produce the product of both, not one of
+    // them.
+    //
+    // So: gather first (a fixed array, because the audio thread does not
+    // allocate), then for each distinct parameter multiply together everything
+    // that points at it and write the result ONCE. One `setValueNotifyingHost`
+    // per parameter per chunk also means a plugin's editor repaints once, not
+    // once per note.
+    //
+    // 64 is a ceiling, not an expectation: overlapping curves in one chunk means
+    // notes that start within a few milliseconds of each other, and a song with
+    // more than 64 of those in one buffer has already stopped being legible.
+    // Anything past the ceiling is dropped rather than written unmerged, because
+    // an unmerged write is the old overwrite bug wearing a different hat.
+    static constexpr int maxLiveCurves = 64;
+    const PluginParamCurve* live[maxLiveCurves] {};
+    int liveCount = 0;
+
+    for (const auto& curve : current.pluginParams)
+    {
+        if (curve.pluginId != pluginInstanceId || curve.points.empty())
+            continue;
+
+        // Overlap, not containment: a note shorter than a chunk still gets its
+        // curve written, because the chunk it lives inside is a chunk it
+        // intersects. Evaluating at the chunk's start would otherwise write the
+        // value from before the note began.
+        if (curve.endBeat < chunkStartBeat || curve.startBeat > chunkEndBeat)
+            continue;
+
+        if (! juce::isPositiveAndBelow (curve.paramIndex, parameters.size()))
+            continue;
+
+        if (liveCount < maxLiveCurves)
+            live[liveCount++] = &curve;
+    }
+
+    for (int i = 0; i < liveCount; ++i)
+    {
+        const int index = live[i]->paramIndex;
+
+        // Only the first curve naming this parameter does the work; the rest are
+        // folded into its product below. Without this, N curves on one parameter
+        // would write it N times.
+        bool handled = false;
+
+        for (int j = 0; j < i && ! handled; ++j)
+            handled = live[j]->paramIndex == index;
+
+        if (handled)
+            continue;
+
+        auto* parameter = parameters.getUnchecked (index);
+
+        if (parameter == nullptr)
+            continue;
+
+        // The product, through the one law. A layer with no live curve is the
+        // identity, which is why a single curve passes through unchanged and
+        // "group 0.5 × note 0.5" is 0.25 rather than 1.0.
+        float want = 1.0f;
+
+        for (int k = 0; k < liveCount; ++k)
+        {
+            if (live[k]->paramIndex != index)
+                continue;
+
+            const double at = juce::jlimit (live[k]->startBeat, live[k]->endBeat, chunkStartBeat);
+
+            want = automation::stackPluginParam (want,
+                                                 automationValueAt (live[k]->points, at));
+        }
+
+        want = juce::jlimit (0.0f, 1.0f, want);
+
+        // A notification per parameter per block would make a plugin repaint its
+        // editor at block rate for values that did not move. Only write real
+        // changes; a step smaller than the parameter's own resolution is not a
+        // change.
+        if (std::abs (parameter->getValue() - want) < 1.0e-4f)
+            continue;
+
+        parameter->setValueNotifyingHost (want);
     }
 }
 
@@ -1395,7 +2028,10 @@ void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numS
     for (auto& meter : layerMeters)
         meter.store (meter.load (std::memory_order_relaxed) * 0.80f);
 
-    for (auto& meter : channelMeters)
+    for (auto& meter : channelMetersL)
+        meter.store (meter.load (std::memory_order_relaxed) * 0.80f);
+
+    for (auto& meter : channelMetersR)
         meter.store (meter.load (std::memory_order_relaxed) * 0.80f);
 
     for (const auto& entry : stats.slotPeaks)
@@ -1418,12 +2054,16 @@ void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numS
 
     for (const auto& entry : stats.channelPeaks)
     {
-        if (! juce::isPositiveAndBelow (entry.first, MixerModel::numChannels))
+        if (! juce::isPositiveAndBelow (entry.channel, MixerModel::numChannels))
             continue;
 
-        auto& meter = channelMeters[(size_t) entry.first];
-        meter.store (juce::jmax (meter.load (std::memory_order_relaxed), entry.second),
-                     std::memory_order_relaxed);
+        auto& meterL = channelMetersL[(size_t) entry.channel];
+        auto& meterR = channelMetersR[(size_t) entry.channel];
+
+        meterL.store (juce::jmax (meterL.load (std::memory_order_relaxed), entry.left),
+                      std::memory_order_relaxed);
+        meterR.store (juce::jmax (meterR.load (std::memory_order_relaxed), entry.right),
+                      std::memory_order_relaxed);
     }
 
     for (int ch = 0; ch < 2; ++ch)
@@ -1571,6 +2211,569 @@ void PlaybackEngine::renderAudition (juce::AudioBuffer<float>& output, int numSa
         auditionVoice.amplitude = 0.0f;
         auditionEngaged.store (false, std::memory_order_relaxed);
     }
+}
+
+//==============================================================================
+//  Phase 39: live performance — a key held down, not a note on the timeline
+//==============================================================================
+void PlaybackEngine::pushLiveEvent (const LiveEvent& event)
+{
+    // Producers only. Two of them exist (the MIDI thread and the message
+    // thread) and AbstractFifo is single-producer, so they take turns. The
+    // audio thread's reader takes no lock at all.
+    const juce::SpinLock::ScopedLockType guard (liveProducerLock);
+
+    int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+    liveFifo.prepareToWrite (1, start1, size1, start2, size2);
+
+    if (size1 + size2 <= 0)
+        return;                       // queue full: a blocked producer, not a crash
+
+    liveQueue[(size_t) (size1 > 0 ? start1 : start2)] = event;
+    liveFifo.finishedWrite (1);
+    liveQueued.fetch_add (1, std::memory_order_relaxed);
+}
+
+void PlaybackEngine::noteOnLive (int slotId, int pitch, float velocity)
+{
+    LiveEvent event;
+    event.slotId   = slotId;
+    event.pitch    = juce::jlimit (0, 127, pitch);
+    event.velocity = juce::jlimit (0.0f, 1.0f, velocity);
+    event.on       = true;
+
+    pushLiveEvent (event);
+}
+
+void PlaybackEngine::noteOffLive (int pitch)
+{
+    LiveEvent event;
+    event.pitch = juce::jlimit (0, 127, pitch);
+    event.on    = false;
+
+    // slotId stays -1: the note-off is matched by pitch, and by the time it is
+    // applied the queue's reader looks the held voice up itself.
+    pushLiveEvent (event);
+}
+
+void PlaybackEngine::allLiveNotesOff()
+{
+    // ONE event, not a read of the voice pool. The callers are a settings click
+    // and a source switch — message thread — and the pool belongs to the audio
+    // thread. The block that applies this expands it into the note-offs that
+    // the plugins need and the releases the oscillators need.
+    LiveEvent event;
+    event.allOff = true;
+
+    pushLiveEvent (event);
+}
+
+//==============================================================================
+void PlaybackEngine::beginLiveBlock()
+{
+    pendingLiveCount = 0;
+    numTransportPluginSlots = 0;
+
+    int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+    liveFifo.prepareToRead (liveFifo.getNumReady(), start1, size1, start2, size2);
+
+    for (int i = 0; i < size1; ++i)
+        if (pendingLiveCount < maxLivePerBlock)
+            pendingLive[(size_t) pendingLiveCount++] = liveQueue[(size_t) (start1 + i)];
+
+    for (int i = 0; i < size2; ++i)
+        if (pendingLiveCount < maxLivePerBlock)
+            pendingLive[(size_t) pendingLiveCount++] = liveQueue[(size_t) (start2 + i)];
+
+    const int taken = size1 + size2;
+    liveFifo.finishedRead (taken);
+    liveQueued.fetch_sub (juce::jmin (taken, liveQueued.load (std::memory_order_relaxed)),
+                          std::memory_order_relaxed);
+
+    for (int i = 0; i < pendingLiveCount; ++i)
+        applyLiveEvent (pendingLive[(size_t) i]);
+}
+
+//==============================================================================
+PlaybackEngine::LiveVoice* PlaybackEngine::findLiveVoice (int pitch, bool includeReleased)
+{
+    for (auto& voice : liveVoices)
+        if (voice.active && voice.pitch == pitch && (includeReleased || ! voice.released))
+            return &voice;
+
+    return nullptr;
+}
+
+int PlaybackEngine::freeLiveVoiceSlot() const
+{
+    // Prefer a silent one, then the quietest released one, and only then take
+    // a sounding voice away. Stealing the oldest note is what every synth does
+    // when the pool is full; stealing a loud one while a silent one exists is
+    // what makes a keyboard feel broken.
+    int   bestIndex = -1;
+    float quietest  = 2.0f;
+
+    for (int i = 0; i < maxLiveVoices; ++i)
+    {
+        const auto& voice = liveVoices[(size_t) i];
+
+        if (! voice.active)
+            return i;
+
+        if (voice.released && voice.amp < quietest)
+        {
+            quietest  = voice.amp;
+            bestIndex = i;
+        }
+    }
+
+    return bestIndex >= 0 ? bestIndex : 0;
+}
+
+PlaybackEngine::LivePluginSlot* PlaybackEngine::findLivePluginSlot (int slotId)
+{
+    for (auto& live : livePluginSlots)
+        if (live.slotId == slotId)
+            return &live;
+
+    return nullptr;
+}
+
+//==============================================================================
+void PlaybackEngine::applyLiveEvent (LiveEvent& event)
+{
+    //-- "Let go of everything" ----------------------------------------------
+    if (event.allOff)
+    {
+        for (auto& voice : liveVoices)
+            if (voice.active)
+                voice.released = true;
+
+        int active = 0;
+
+        for (const auto& voice : liveVoices)
+            if (voice.active)
+                ++active;
+
+        liveVoicesActive.store (active, std::memory_order_relaxed);
+
+        // A hosted instrument needs a real note-off per key, so the held list is
+        // expanded into ordinary note-off events — the same ones a released key
+        // would have produced, appended to this block's list so they are applied
+        // (and sent) by the normal path a moment later.
+        for (auto& live : livePluginSlots)
+        {
+            if (live.slotId < 0)
+                continue;
+
+            for (int i = 0; i < live.numHeld; ++i)
+                if (pendingLiveCount < maxLivePerBlock)
+                {
+                    LiveEvent off;
+                    off.slotId = live.slotId;
+                    off.pitch  = live.held[(size_t) i];
+                    off.on     = false;
+
+                    pendingLive[(size_t) pendingLiveCount++] = off;
+                }
+
+            live.numHeld = 0;
+        }
+
+        // Nothing is held any more, so nothing may still claim a synth: the
+        // table is the map a note-off reads, and a map that keeps pointing at
+        // synths nobody is holding is a map a later key can be matched against
+        // by accident.
+        for (auto& held : liveHeldNotes)
+        {
+            held.pitch  = -1;
+            held.slotId = -1;
+        }
+
+        return;
+    }
+
+    // A note-off never knew which synth started it — the key only knows its
+    // pitch, and by the time it is released the spotlight may have moved. The
+    // table the note-on wrote is what puts the release back on the right synth;
+    // without it, a hosted instrument would keep the note down for ever while
+    // the oscillator voice politely stopped.
+    if (! event.on)
+        for (auto& held : liveHeldNotes)
+            if (held.pitch == event.pitch)
+            {
+                event.slotId = held.slotId;
+                held.pitch   = -1;
+                held.slotId  = -1;
+                break;
+            }
+
+    // Where a note-on goes is written down HERE, before the two kinds of synth
+    // split apart.
+    //
+    // Phase 41: this line used to sit at the bottom of the oscillator branch,
+    // which meant a hosted instrument — the one that returns before reaching it
+    // — never recorded where its note went. Its note-off then arrived with no
+    // slot id, matched nothing, and was dropped: every key left the VST holding
+    // its note, and the synth droned until the session ended. The rule is
+    // "every note-on remembers its synth", so it belongs where every note-on
+    // passes, not inside one of the two branches that should be remembering it.
+    if (event.on)
+        for (auto& held : liveHeldNotes)
+            if (held.pitch == event.pitch || held.pitch < 0)
+            {
+                held.pitch  = event.pitch;
+                held.slotId = event.slotId;
+                break;
+            }
+
+    //-- The release always happens, whatever the schedule says now ----------
+    // A synth that was deleted mid-note must still let go of the note.
+    if (! event.on)
+    {
+        for (auto& voice : liveVoices)
+            if (voice.active && ! voice.released && voice.pitch == event.pitch)
+                voice.released = true;
+
+        int active = 0;
+
+        for (const auto& voice : liveVoices)
+            if (voice.active)
+                ++active;
+
+        liveVoicesActive.store (active, std::memory_order_relaxed);
+    }
+
+    auto current = getSchedule();
+
+    const SlotMix* slot = nullptr;
+
+    if (current != nullptr)
+        for (const auto& candidate : current->slots)
+            if (candidate.slotId == event.slotId)
+            {
+                slot = &candidate;
+                break;
+            }
+
+    //-- A hosted instrument: this is MIDI, not a voice ------------------------
+    if (slot != nullptr && slot->pluginId > 0)
+    {
+        auto* live = findLivePluginSlot (event.slotId);
+
+        if (live == nullptr && event.on)
+            for (auto& candidate : livePluginSlots)
+                if (candidate.slotId < 0)
+                {
+                    candidate.slotId     = event.slotId;
+                    candidate.numHeld    = 0;
+                    candidate.tailFrames = 0;
+                    live = &candidate;
+                    break;
+                }
+
+        if (live == nullptr)
+            return;
+
+        if (event.on)
+        {
+            if (live->numHeld < (int) live->held.size())
+                live->held[(size_t) live->numHeld++] = event.pitch;
+
+            live->tailFrames = (int) (sampleRate * kLivePluginTailSeconds);
+        }
+        else
+        {
+            for (int i = 0; i < live->numHeld; ++i)
+                if (live->held[(size_t) i] == event.pitch)
+                {
+                    for (int j = i; j < live->numHeld - 1; ++j)
+                        live->held[(size_t) j] = live->held[(size_t) j + 1];
+
+                    --live->numHeld;
+                    break;
+                }
+        }
+
+        int engaged = 0;
+
+        for (const auto& candidate : livePluginSlots)
+            if (candidate.slotId >= 0)
+                ++engaged;
+
+        livePluginEngaged.store (engaged, std::memory_order_relaxed);
+        return;
+    }
+
+    if (! event.on)
+        return;
+
+    // A slot that holds one file (a sampler) or does not exist has nothing to
+    // play. Inventing a sine for it would make "no target synth" a lie, and the
+    // settings page says exactly that when there is none.
+    if (slot == nullptr || slot->sampler)
+        return;
+
+    //-- An oscillator: a real voice with a beginning and an end --------------
+    // Same pitch pressed again: retrigger in place. A second voice at the same
+    // pitch would just be the first one, 20 % louder.
+    auto* voice = findLiveVoice (event.pitch, true);
+
+    if (voice == nullptr)
+        voice = &liveVoices[(size_t) freeLiveVoiceSlot()];
+
+    const bool continuing = voice->active && ! voice->released && voice->pitch == event.pitch;
+
+    voice->slotId   = event.slotId;
+    voice->pitch    = event.pitch;
+    voice->velocity = event.velocity;
+    voice->waveform = slot->waveform;
+
+    const double liveBeat = positionBeats.load (std::memory_order_relaxed);
+
+    // Phase 43: `gainAt` is the fader × the mute gate × the level curve, and it
+    // no longer knows about solo. A key struck on a synth that is silent because
+    // another one is soloed still has to be silent, so `audible` is applied here
+    // — it is the publish-time answer to exactly that question.
+    voice->gain     = slot->audible ? slot->gainAt (liveBeat) : 0.0f;
+    voice->pan      = slot->panAt (liveBeat);
+
+    if (! continuing)
+    {
+        voice->phase = 0.0;
+        voice->amp   = 0.0f;              // ramps up: a key is never a step
+    }
+
+    voice->released = false;
+    voice->active   = true;
+
+    // The pitch → synth memory was written above, for both kinds of synth.
+
+    int active = 0;
+
+    for (const auto& counting : liveVoices)
+        if (counting.active)
+            ++active;
+
+    liveVoicesActive.store (active, std::memory_order_relaxed);
+}
+
+//==============================================================================
+void PlaybackEngine::renderLive (juce::AudioBuffer<float>& output, int numSamples)
+{
+    if (numSamples <= 0 || output.getNumChannels() <= 0 || sampleRate <= 0.0)
+        return;
+
+    auto current = getSchedule();
+
+    const float masterGain = current != nullptr ? current->masterGain : kMasterGain;
+    const float masterPan  = current != nullptr ? current->masterPan  : 0.0f;
+
+    if (liveVoicesActive.load (std::memory_order_relaxed) > 0)
+        renderLiveOscillators (current.get(), masterGain, masterPan, output, numSamples);
+
+    if (livePluginEngaged.load (std::memory_order_relaxed) > 0)
+        renderLivePlugins (current.get(), masterGain, output, numSamples);
+}
+
+void PlaybackEngine::renderLiveOscillators (const PublishedSchedule* current, float masterGain,
+                                            float masterPan, juce::AudioBuffer<float>& output,
+                                            int numSamples)
+{
+    const float masterAngle = juce::jlimit (-1.0f, 1.0f, masterPan);
+    const float masterL     = masterGain * juce::jmin (1.0f, 1.0f - masterAngle);
+    const float masterR     = masterGain * juce::jmin (1.0f, 1.0f + masterAngle);
+
+    // 3 ms in, 60 ms out. Short enough that a key feels immediate, long enough
+    // that neither edge is a click — the same job the audition voice's 4 ms
+    // one-pole does, split into the two directions a held key actually has.
+    const float attack  = (float) (1.0 - std::exp (-1.0 / (0.003 * sampleRate)));
+    const float release = (float) (1.0 - std::exp (-1.0 / (0.060 * sampleRate)));
+
+    float* left  = output.getWritePointer (0);
+    float* right = output.getNumChannels() > 1 ? output.getWritePointer (1) : nullptr;
+
+    const double beat = positionBeats.load (std::memory_order_relaxed);
+    int   active = 0;
+    float peak   = 0.0f;
+
+    for (auto& voice : liveVoices)
+    {
+        if (! voice.active)
+            continue;
+
+        // Re-read the synth's own strip every block: moving that fader with a
+        // chord held down has to be heard, exactly like it is on the timeline.
+        if (current != nullptr)
+            for (const auto& slot : current->slots)
+                if (slot.slotId == voice.slotId)
+                {
+                    voice.gain     = slot.audible ? slot.gainAt (beat) : 0.0f;
+                    voice.pan      = slot.panAt (beat);
+                    voice.waveform = slot.waveform;
+                    break;
+                }
+
+        const float angle = juce::jlimit (-1.0f, 1.0f, voice.pan);
+        const float levelL = voice.gain * juce::jmin (1.0f, 1.0f - angle) * masterL;
+        const float levelR = voice.gain * juce::jmin (1.0f, 1.0f + angle) * masterR;
+
+        const double increment = pitchToFrequency (voice.pitch) / sampleRate;
+        const float  target    = voice.released ? 0.0f : 1.0f;
+        const float  coef      = voice.released ? release : attack;
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            voice.amp += (target - voice.amp) * coef;
+
+            const float mono = oscillator (voice.waveform, voice.phase, increment)
+                                 * voice.amp * voice.velocity;
+
+            left[i] += mono * levelL;
+
+            if (right != nullptr)
+                right[i] += mono * levelR;
+
+            peak = juce::jmax (peak, std::abs (mono));
+
+            voice.phase += increment;
+        }
+
+        if (voice.released && voice.amp < 1.0e-4f)
+        {
+            voice.active   = false;
+            voice.released = false;
+            voice.amp      = 0.0f;
+            voice.phase    = 0.0;
+            continue;
+        }
+
+        ++active;
+    }
+
+    liveVoicesActive.store (active, std::memory_order_relaxed);
+
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        auto& meter = masterMeters[(size_t) ch];
+        meter.store (juce::jmax (meter.load (std::memory_order_relaxed), peak * masterGain),
+                     std::memory_order_relaxed);
+    }
+}
+
+void PlaybackEngine::renderLivePlugins (const PublishedSchedule* current, float masterGain,
+                                        juce::AudioBuffer<float>& output, int numSamples)
+{
+    if (pluginHost == nullptr || current == nullptr)
+        return;
+
+    const int chunkMax = juce::jmax (1, juce::jmin (pluginHost->getRenderBlockSize(),
+                                                    livePluginBuffer.getNumSamples()));
+
+    if (livePluginBuffer.getNumChannels() < 2)
+        return;
+
+    const double beat = positionBeats.load (std::memory_order_relaxed);
+    int engaged = 0;
+
+    for (auto& live : livePluginSlots)
+    {
+        if (live.slotId < 0)
+            continue;
+
+        if (live.numHeld == 0 && live.tailFrames <= 0)
+        {
+            live.slotId = -1;             // finished: the slot is reusable
+            continue;
+        }
+
+        ++engaged;
+
+        bool alreadyRendered = false;
+
+        for (int i = 0; i < numTransportPluginSlots; ++i)
+            if (transportPluginSlots[(size_t) i] == live.slotId)
+                alreadyRendered = true;
+
+        // The transport rendered this plugin in this same callback. Sending it
+        // a second processBlock would not double its output — it would double
+        // the rate its own DSP runs at, and that is a bug nobody would guess.
+        if (alreadyRendered)
+            continue;
+
+        const SlotMix* slot = nullptr;
+
+        for (const auto& candidate : current->slots)
+            if (candidate.slotId == live.slotId)
+            {
+                slot = &candidate;
+                break;
+            }
+
+        if (slot == nullptr || slot->pluginId <= 0)
+            continue;
+
+        auto* plugin = pluginHost->getInstanceWhileLocked (slot->pluginId);
+
+        if (plugin == nullptr)
+            continue;
+
+        const int channels = juce::jlimit (1, 2, plugin->getTotalNumOutputChannels());
+        const float gain   = (slot->audible ? slot->gainAt (beat) : 0.0f) * masterGain;
+        const float balanceL = juce::jmin (1.0f, 1.0f - slot->panAt (beat));
+        const float balanceR = juce::jmin (1.0f, 1.0f + slot->panAt (beat));
+
+        float peak = 0.0f;
+
+        for (int offset = 0; offset < numSamples; )
+        {
+            const int len = juce::jmin (chunkMax, numSamples - offset);
+
+            juce::AudioBuffer<float> view (livePluginBuffer.getArrayOfWritePointers(),
+                                           channels, 0, len);
+            view.clear();
+
+            liveMidi.clear();
+
+            // Only on the first chunk: the block's events belong at its start,
+            // and sending them once per chunk would play the note several times.
+            if (offset == 0)
+                for (int e = 0; e < pendingLiveCount; ++e)
+                {
+                    if (pendingLive[(size_t) e].slotId != live.slotId)
+                        continue;
+
+                    const auto& event = pendingLive[(size_t) e];
+
+                    if (event.on)
+                        liveMidi.addEvent (juce::MidiMessage::noteOn (1, event.pitch, event.velocity), 0);
+                    else
+                        liveMidi.addEvent (juce::MidiMessage::noteOff (1, event.pitch), 0);
+                }
+
+            plugin->processBlock (view, liveMidi);
+
+            for (int ch = 0; ch < channels && ch < output.getNumChannels(); ++ch)
+            {
+                const float level = gain * (ch == 0 ? balanceL : balanceR);
+                output.addFrom (ch, offset, view, ch, 0, len, level);
+                peak = juce::jmax (peak, view.getMagnitude (ch, 0, len) * std::abs (level));
+            }
+
+            offset += len;
+        }
+
+        live.tailFrames = juce::jmax (0, live.tailFrames - numSamples);
+
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            auto& meter = masterMeters[(size_t) ch];
+            meter.store (juce::jmax (meter.load (std::memory_order_relaxed), peak),
+                         std::memory_order_relaxed);
+        }
+    }
+
+    livePluginEngaged.store (engaged, std::memory_order_relaxed);
 }
 
 //==============================================================================
@@ -1802,7 +3005,17 @@ float PlaybackEngine::getChannelPeak (int channel) const
     if (! juce::isPositiveAndBelow (channel, MixerModel::numChannels))
         return 0.0f;
 
-    return channelMeters[(size_t) channel].load (std::memory_order_relaxed);
+    return juce::jmax (channelMetersL[(size_t) channel].load (std::memory_order_relaxed),
+                       channelMetersR[(size_t) channel].load (std::memory_order_relaxed));
+}
+
+float PlaybackEngine::getChannelPeakSide (int channel, int side) const
+{
+    if (! juce::isPositiveAndBelow (channel, MixerModel::numChannels))
+        return 0.0f;
+
+    return (side == 0 ? channelMetersL : channelMetersR)[(size_t) channel]
+             .load (std::memory_order_relaxed);
 }
 
 float PlaybackEngine::getMasterPeak (int channel) const
@@ -1810,19 +3023,50 @@ float PlaybackEngine::getMasterPeak (int channel) const
     return masterMeters[(size_t) juce::jlimit (0, 1, channel)].load (std::memory_order_relaxed);
 }
 
-void PlaybackEngine::decayMeters (float factor)
+void PlaybackEngine::decayMeters (int numSamples)
 {
+    // 50 dB per second, over exactly this block. The number is a feel decision
+    // (fast enough that a stopped song reads as "off", slow enough to see a
+    // transient), the FORM is the part that matters: a fall expressed in the
+    // block's own duration is the same fall at any sample rate or buffer size.
+    const double dt = sampleRate > 0.0
+                        ? (double) juce::jmax (0, numSamples) / sampleRate
+                        : 0.0;
+
+    const float factor = (float) std::pow (10.0, -2.5 * dt);   // -50 dB/s
+
     for (auto& meter : meters)
         meter.store (meter.load (std::memory_order_relaxed) * factor, std::memory_order_relaxed);
 
     for (auto& meter : layerMeters)
         meter.store (meter.load (std::memory_order_relaxed) * factor, std::memory_order_relaxed);
 
-    for (auto& meter : channelMeters)
+    for (auto& meter : channelMetersL)
+        meter.store (meter.load (std::memory_order_relaxed) * factor, std::memory_order_relaxed);
+
+    for (auto& meter : channelMetersR)
         meter.store (meter.load (std::memory_order_relaxed) * factor, std::memory_order_relaxed);
 
     for (auto& meter : masterMeters)
         meter.store (meter.load (std::memory_order_relaxed) * factor, std::memory_order_relaxed);
+}
+
+bool PlaybackEngine::hasMeters() const noexcept
+{
+    // The floor is the same one the window treats as "empty", so "the bars have
+    // settled" and "nobody needs to repaint them" are the same answer.
+    auto anyAbove = [] (const auto& set) -> bool
+    {
+        for (const auto& meter : set)
+            if (meter.load (std::memory_order_relaxed) > 1.0e-4f)
+                return true;
+
+        return false;
+    };
+
+    return anyAbove (meters) || anyAbove (layerMeters)
+             || anyAbove (channelMetersL) || anyAbove (channelMetersR)
+             || anyAbove (masterMeters);
 }
 
 void PlaybackEngine::resetMeters()
@@ -1833,7 +3077,10 @@ void PlaybackEngine::resetMeters()
     for (auto& meter : layerMeters)
         meter.store (0.0f, std::memory_order_relaxed);
 
-    for (auto& meter : channelMeters)
+    for (auto& meter : channelMetersL)
+        meter.store (0.0f, std::memory_order_relaxed);
+
+    for (auto& meter : channelMetersR)
         meter.store (0.0f, std::memory_order_relaxed);
 
     for (auto& meter : masterMeters)

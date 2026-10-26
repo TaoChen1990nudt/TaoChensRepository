@@ -32,8 +32,38 @@ enum class LayerAutomationTarget
 enum class SlotAutomationTarget
 {
     filter,
-    level
+    level,
+    /** Phase 42: a parameter of the hosted instrument this slot carries.
+
+        The lane holds the VALUE and the slot holds the ADDRESS
+        (`SynthSlot::getPluginParam()`), exactly like a group's third lane: a
+        parameter index means nothing on its own — it is only an index into one
+        particular plugin's list — so the two have to travel together. */
+    plugin,
+
+    //-- Phase 43: the rest of the strip -------------------------------------
+    /** The channel strip's pan. Same arithmetic as a layer's or a group's: the
+        curve is an OFFSET in -1..+1 added to the strip's own pan, so a curve at
+        the middle changes nothing and the pan control keeps working alone. */
+    pan,
+    /** The strip's mute, as a GATE: curve >= 0.5 is open, below is silent.
+
+        Not a second volume lane — that is what `level` is. Mute is the switch
+        the user draws on and off, and a switch read as a gain would be a ramp,
+        which is the one thing a mute must never be. */
+    mute,
+    /** The strip's solo, same gate, same threshold. It is here because the four
+        controls on a strip are the four things a user points at and asks "can I
+        automate this?" — and "yes except solo" is an answer nobody accepts. */
+    solo
 };
+
+/** How many lanes every slot keeps resident, indexed by the enum above.
+
+    Phase 43 appended three lanes, so old files keep working without a mapping
+    table: filter/level/plugin stayed at 0/1/2 and the new ones took the numbers
+    nothing had used. Appending is the only safe way to grow this enum. */
+inline constexpr int numSlotAutomationTargets = 6;
 
 /** What a note group's lane drives.
 
@@ -43,12 +73,22 @@ enum class SlotAutomationTarget
     its loudness — and a group that could be faded but not swept was a gap the
     user hits as soon as they build a busy stack. Both lanes are absolute beats,
     both are multiplied/added at the voice stage next to the group's own trim.
-    Pitch stays per-note: that is what the micro envelope is for. */
+    Pitch stays per-note: that is what the micro envelope is for.
+
+    Phase 24 adds `plugin`: the third lane drives a parameter of the HOSTED
+    instrument the group is mounted on (NoteGroup::getPluginParam()). It is the
+    same 0..1 value automation has always been — a plugin parameter is
+    normalised too — so the curve needs no new representation, only a different
+    destination. */
 enum class GroupAutomationTarget
 {
     level,
-    pan
+    pan,
+    plugin
 };
+
+/** How many lanes every group keeps resident, indexed by the enum above. */
+inline constexpr int numGroupAutomationTargets = 3;
 
 //==============================================================================
 /**

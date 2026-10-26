@@ -39,10 +39,25 @@ public:
 
     int getInstanceId() const noexcept { return instanceId; }
 
+    /** Phase 42: the host's key forwarder.
+
+        A plugin window is a different top-level component, so a key pressed here
+        never walks up to the main window: 空格 stopped starting the transport
+        and the computer keyboard stopped playing notes the moment the user
+        clicked the synth's own UI. The listener goes on the window AND on the
+        content — the content is the plugin's editor, and a key listener there
+        runs before the editor's own handler. */
+    void setKeyForwarder (juce::KeyListener* listener);
+
+    /** True when a forwarder was installed. The self-test asks, because "the
+        keys work" is otherwise only observable with a real keyboard. */
+    bool hasKeyForwarder() const noexcept { return keyForwarder != nullptr; }
+
     void closeButtonPressed() override;
 
 private:
     juce::AudioProcessorEditor* editor = nullptr;
+    juce::KeyListener*          keyForwarder = nullptr;
     int instanceId = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginEditorWindow)

@@ -19,6 +19,8 @@ namespace
     /** Phase 20: the audition line. Green, because it is "playing", and green
         is the one colour in this palette nothing else uses. */
     const juce::Colour kPreviewAccent   { 0xff7bd88f };
+    /** Phase 28: the scan line. Amber — it is "working", not "playing". */
+    const juce::Colour kScanAccent      { 0xffe0b268 };
 
     juce::Font boldFont (float height)
     {
@@ -26,9 +28,26 @@ namespace
     }
 
     /** A folder is scanned at most this deep, so adding "C:\\" by accident
-        cannot freeze the message thread for a minute. */
+        cannot freeze the scanner for a minute. */
     constexpr int maxScanDepth = 6;
-    constexpr int maxFilesPerFolder = 800;
+    constexpr int maxFilesPerFolder = 2000;
+
+    /** The prefix that marks a directory the user has opened in the store file.
+
+        Phase 33 inverted this list. It used to record the branches that were
+        FOLDED, which made "everything is open" the default — and a real sample
+        library then arrived as a thousand-row wall the moment the scan finished.
+        Folding is the state worth remembering, so the store now names the
+        branches that are OPEN and anything unlisted starts folded. An older
+        store's `!collapse` lines are simply ignored: every branch it left open
+        opens folded once, which is the behaviour this change is for. */
+    const juce::String expandPrefix ("!expand ");
+
+    bool isHiddenDirectory (const juce::File& dir)
+    {
+        const auto name = dir.getFileName();
+        return name.startsWithChar ('.') || name.startsWithIgnoreCase ("__");
+    }
 }
 
 //==============================================================================
@@ -38,16 +57,259 @@ FileBrowserPanel::FileBrowserPanel()
     loadFromDisk();
 }
 
-FileBrowserPanel::~FileBrowserPanel()
-{
-    stopTimer();
-}
-
 juce::File FileBrowserPanel::getStoreFile()
 {
     return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
              .getChildFile ("AtomicDAW")
              .getChildFile ("sample-folders.txt");
+}
+
+//==============================================================================
+//  Phase 28: the background scan
+//==============================================================================
+struct FileBrowserPanel::ScanThread final : public juce::Thread
+{
+    ScanThread (FileBrowserPanel& o, juce::File r)
+        : juce::Thread ("AtomicDAW sample scan"),
+          owner (o), root (std::move (r))
+    {
+    }
+
+    void run() override;
+
+    std::unique_ptr<ScanResult> takeResult() { return std::move (result); }
+
+    FileBrowserPanel& owner;
+    juce::File        root;
+    std::unique_ptr<ScanResult> result;
+};
+
+void FileBrowserPanel::ScanThread::run()
+{
+    auto out = std::make_unique<ScanResult>();
+    out->root = root;
+
+    auto rootNode = std::make_unique<DirNode>();
+    rootNode->dir        = root;
+    rootNode->name       = root.getFileName();
+    rootNode->scanDepth  = 0;
+
+    // Level by level, so "how far along is this" is a real ratio: every
+    // iteration finishes one directory and leaves a known number in the queue.
+    // A single recursive findChildFiles() would be one indivisible call, and a
+    // progress bar over one indivisible call can only lie.
+    std::deque<DirNode*> queue { rootNode.get() };
+    int processed = 0;
+    int found     = 0;
+
+    while (! queue.empty() && ! threadShouldExit())
+    {
+        auto* node = queue.front();
+        queue.pop_front();
+
+        if (node->dir.isDirectory())
+        {
+            juce::Array<juce::File> dirs, files;
+
+            node->dir.findChildFiles (dirs,  juce::File::findDirectories, false, "*");
+            node->dir.findChildFiles (files, juce::File::findFiles,      false, "*.wav;*.wave");
+
+            for (const auto& dir : dirs)
+            {
+                if (threadShouldExit())
+                    break;
+
+                if (node->scanDepth + 1 > maxScanDepth || isHiddenDirectory (dir))
+                    continue;
+
+                auto child = std::make_unique<DirNode>();
+                child->dir       = dir;
+                child->name      = dir.getFileName();
+                child->scanDepth = node->scanDepth + 1;
+                queue.push_back (child.get());
+                node->children.push_back (std::move (child));
+            }
+
+            for (const auto& file : files)
+            {
+                if (found >= maxFilesPerFolder)
+                    break;
+
+                if (! isSampleFile (file))
+                    continue;
+
+                node->files.push_back (file);
+                ++found;
+            }
+
+            // Alphabetical inside one directory; the tree provides the order
+            // BETWEEN directories, so sorting by full path here would just
+            // scramble the branch you are looking at.
+            std::sort (node->files.begin(), node->files.end(),
+                       [] (const juce::File& a, const juce::File& b)
+                       { return a.getFileName().compareIgnoreCase (b.getFileName()) < 0; });
+
+            std::sort (node->children.begin(), node->children.end(),
+                       [] (const std::unique_ptr<DirNode>& a, const std::unique_ptr<DirNode>& b)
+                       { return a->name.compareIgnoreCase (b->name) < 0; });
+        }
+
+        ++processed;
+
+        const int remaining = (int) queue.size();
+        const float progress = (float) processed / (float) juce::jmax (1, processed + remaining);
+
+        owner.scanProgress.store (juce::jlimit (0.0f, 1.0f, progress));
+        owner.scanFileCount.store (found);
+    }
+
+    rootNode->recount();
+
+    out->tree      = std::move (rootNode);
+    out->files     = found;
+    out->cancelled = threadShouldExit();
+
+    result = std::move (out);
+
+    owner.triggerAsyncUpdate();
+}
+
+//==============================================================================
+//  Defined here, after ScanThread, because the destructor has to be able to
+//  stop the thread it holds by unique_ptr — a destructor written above the
+//  definition of an incomplete type cannot call members on it.
+FileBrowserPanel::~FileBrowserPanel()
+{
+    stopTimer();
+    cancelPendingUpdate();
+
+    if (scanner != nullptr)
+    {
+        scanner->signalThreadShouldExit();
+
+        // A Thread object must never be destroyed while its thread is still
+        // running — JUCE asserts on it and, in a release build, the thread
+        // would touch a half-destroyed panel. findChildFiles() cannot be
+        // interrupted, so this waits for the current directory to finish and
+        // then quits at the next level.
+        if (! scanner->waitForThreadToExit (5000))
+            scanner->stopThread (-1);
+    }
+}
+
+int FileBrowserPanel::DirNode::recount(){
+    fileCount = (int) files.size();
+
+    for (const auto& child : children)
+        fileCount += child->recount();
+
+    return fileCount;
+}
+
+//==============================================================================
+void FileBrowserPanel::startNextQueuedScan()
+{
+    if (scanQueue.empty())
+    {
+        scanRunning.store (false);
+        // 100 %, not 0 %: the last scan did finish, and a finished job that
+        // reports zero reads as "it failed" in anything that inspects it after
+        // the fact (including the self-test).
+        scanProgress.store (1.0f);
+        return;
+    }
+
+    scanningRoot = scanQueue.front();
+    scanQueue.pop_front();
+
+    scanRunning.store (true);
+    scanProgress.store (0.0f);
+    scanFileCount.store (0);
+
+    scanner = std::make_unique<ScanThread> (*this, scanningRoot);
+    scanner->startThread (juce::Thread::Priority::normal);
+}
+
+void FileBrowserPanel::applyScanResult (ScanResult& result)
+{
+    for (auto& entry : folders)
+    {
+        if (entry.folder.getFullPathName() != result.root.getFullPathName())
+            continue;
+
+        entry.tree    = std::move (result.tree);
+        entry.scanned = true;
+        break;
+    }
+
+    invalidateRows();
+    clampScroll();
+
+    if (onFoldersChanged)
+        onFoldersChanged();
+
+    repaint();
+}
+
+void FileBrowserPanel::handleAsyncUpdate()
+{
+    if (scanner == nullptr)
+        return;
+
+    // The thread posts this on its last line, so it is normally already gone;
+    // the wait only covers the scheduler finishing the unwind. Without it the
+    // result could be read while run() is still placing it.
+    if (scanner->isThreadRunning())
+        scanner->waitForThreadToExit (3000);
+
+    auto result = scanner->takeResult();
+    scanner.reset();
+    scanRunning.store (false);
+
+    if (result != nullptr && ! result->cancelled)
+        applyScanResult (*result);
+
+    startNextQueuedScan();
+    updateTimerState();
+    repaint();
+}
+
+bool FileBrowserPanel::waitForPendingScans (int timeoutMs){
+    const auto deadline = juce::Time::getMillisecondCounter()
+                            + (juce::uint32) juce::jmax (1, timeoutMs);
+
+    for (;;)
+    {
+        if (scanner != nullptr)
+        {
+            scanner->waitForThreadToExit (250);
+
+            if (! scanner->isThreadRunning())
+            {
+                cancelPendingUpdate();
+                handleAsyncUpdate();      // idempotent: it resets the thread
+            }
+        }
+
+        if (! scanRunning.load() && scanQueue.empty())
+            return true;
+
+        if (juce::Time::getMillisecondCounter() > deadline)
+            return false;
+    }
+}
+
+void FileBrowserPanel::clearFoldersForSnapshot()
+{
+    // No saveToDisk() on purpose: this is a view-only reset for the screenshot
+    // harness, and writing here would erase the user's real folder list. The
+    // folders added afterwards use persist = false for the same reason.
+    folders.clear();
+    expandedPaths.clear();
+    scanQueue.clear();
+    invalidateRows();
+    clampScroll();
+    repaint();
 }
 
 //==============================================================================
@@ -60,25 +322,59 @@ void FileBrowserPanel::loadFromDisk()
 
     const auto lines = juce::StringArray::fromLines (store.loadFileAsString());
 
+    // Two passes: the folded branches have to be known BEFORE the folders are
+    // added, because adding a folder writes the store file back out — and a
+    // write in the middle of reading would drop every line after it.
+    std::vector<juce::File> paths;
+
     for (const auto& line : lines)
     {
-        const auto path = line.trim();
+        const auto text = line.trim();
 
-        if (path.isEmpty() || path.startsWith ("#"))
+        if (text.isEmpty() || text.startsWith ("#"))
             continue;
 
-        addFolder (juce::File (path));
+        if (text.startsWith (expandPrefix))
+        {
+            const auto path = text.fromFirstOccurrenceOf (expandPrefix, false, false).trim();
+
+            if (path.isNotEmpty())
+                expandedPaths.insert (juce::File (path).getFullPathName());
+
+            continue;
+        }
+
+        // Any other "!" line is a marker this build does not know: `!collapse`
+        // from Phase 28's store is the one that actually exists in the wild.
+        // Skipping it (rather than treating it as a folder path) is what makes
+        // an old store readable instead of a list of folders called "!collapse".
+        if (text.startsWithChar ('!'))
+            continue;
+
+        paths.push_back (juce::File (text));
     }
+
+    for (const auto& path : paths)
+        addFolder (path, false);
+
+    // Written once, after every path is in: addFolder() used to write the store
+    // on each call, which on a load means rewriting the file that is still being
+    // read — every path after the one being added fell off the end.
+    saveToDisk();
 }
 
 void FileBrowserPanel::saveToDisk() const
 {
     juce::StringArray lines;
     lines.add ("# AtomicDAW sample folders — one path per line, safe to edit");
-    lines.add ("# 采样文件夹列表，一行一个路径");
+    lines.add (utf8 ("# 采样文件夹列表，一行一个路径；") + expandPrefix
+               + utf8 ("<路径> 表示该子目录已展开，未列出的默认折叠"));
 
     for (const auto& entry : folders)
         lines.add (entry.folder.getFullPathName());
+
+    for (const auto& path : expandedPaths)
+        lines.add (expandPrefix + path);
 
     const auto store = getStoreFile();
     store.getParentDirectory().createDirectory();
@@ -86,7 +382,7 @@ void FileBrowserPanel::saveToDisk() const
 }
 
 //==============================================================================
-void FileBrowserPanel::addFolder (const juce::File& folder)
+void FileBrowserPanel::addFolder (const juce::File& folder, bool persist)
 {
     if (! folder.isDirectory())
         return;
@@ -99,11 +395,23 @@ void FileBrowserPanel::addFolder (const juce::File& folder)
 
     FolderEntry entry;
     entry.folder = folder;
-    scanFolder (entry);
+
+    // The row appears NOW, empty, with the header showing a spinner. Filling it
+    // in immediately is what used to freeze the click that added the folder.
     folders.push_back (std::move (entry));
 
-    saveToDisk();
+    if (persist)
+        saveToDisk();
+
+    invalidateRows();
     clampScroll();
+
+    scanQueue.push_back (folder);
+
+    if (! scanRunning.load())
+        startNextQueuedScan();
+
+    updateTimerState();
 
     if (onFoldersChanged)
         onFoldersChanged();
@@ -117,7 +425,9 @@ void FileBrowserPanel::removeFolder (int index)
         return;
 
     folders.erase (folders.begin() + index);
+
     saveToDisk();
+    invalidateRows();
     clampScroll();
 
     if (onFoldersChanged)
@@ -128,46 +438,14 @@ void FileBrowserPanel::removeFolder (int index)
 
 void FileBrowserPanel::rescanFolders()
 {
-    for (auto& entry : folders)
-        scanFolder (entry);
+    for (const auto& entry : folders)
+        scanQueue.push_back (entry.folder);
 
-    clampScroll();
+    if (! scanRunning.load())
+        startNextQueuedScan();
+
+    updateTimerState();
     repaint();
-}
-
-void FileBrowserPanel::scanFolder (FolderEntry& entry)
-{
-    entry.files.clear();
-
-    if (! entry.folder.isDirectory())
-        return;
-
-    // Recursive but bounded: samples usually live one or two levels down, and a
-    // folder with eight hundred hits is already more than the panel can show.
-    juce::Array<juce::File> found;
-    entry.folder.findChildFiles (found, juce::File::findFiles, true, "*.wav;*.wave");
-
-    for (const auto& file : found)
-    {
-        if ((int) entry.files.size() >= maxFilesPerFolder)
-            break;
-
-        if (! isSampleFile (file))
-            continue;
-
-        // Depth guard: count separators below the folder itself.
-        const auto relative = file.getRelativePathFrom (entry.folder);
-        const int  depth    = juce::StringArray::fromTokens (relative, "/\\", "").size() - 1;
-
-        if (depth > maxScanDepth)
-            continue;
-
-        entry.files.push_back (file);
-    }
-
-    std::sort (entry.files.begin(), entry.files.end(),
-               [] (const juce::File& a, const juce::File& b)
-               { return a.getFileName().compareIgnoreCase (b.getFileName()) < 0; });
 }
 
 juce::File FileBrowserPanel::getFolder (int index) const
@@ -186,7 +464,49 @@ bool FileBrowserPanel::isFolderExpanded (int index) const
     return folders[(size_t) index].expanded;
 }
 
+bool FileBrowserPanel::isSubFolderExpanded (const juce::File& directory) const
+{
+    // Phase 33: unlisted means FOLDED. A folder the user has never touched
+    // starts closed, which is the whole point of the change.
+    return expandedPaths.find (directory.getFullPathName()) != expandedPaths.end();
+}
+
+void FileBrowserPanel::setSubFolderExpanded (const juce::File& directory, bool expanded,
+                                             bool persist)
+{
+    const auto key = directory.getFullPathName();
+
+    if (expanded)
+        expandedPaths.insert (key);
+    else
+        expandedPaths.erase (key);
+
+    // Phase 33: the screenshot harness unfolds a branch with persist = false —
+    // it must not leave a temp folder's path in the user's real store file.
+    if (persist)
+        saveToDisk();
+    invalidateRows();
+    clampScroll();
+    repaint();
+}
+
 //==============================================================================
+void FileBrowserPanel::invalidateRows()
+{
+    rowsDirty = true;
+}
+
+const std::vector<FileBrowserPanel::Row>& FileBrowserPanel::ensureRows() const
+{
+    if (rowsDirty)
+    {
+        cachedRows = buildRows();
+        rowsDirty  = false;
+    }
+
+    return cachedRows;
+}
+
 std::vector<FileBrowserPanel::Row> FileBrowserPanel::buildRows() const
 {
     std::vector<Row> rows;
@@ -196,33 +516,64 @@ std::vector<FileBrowserPanel::Row> FileBrowserPanel::buildRows() const
         const auto& entry = folders[(size_t) i];
 
         Row header;
-        header.isFolder    = true;
+        header.kind        = Row::Kind::rootFolder;
         header.folderIndex = i;
         header.file        = entry.folder;
+        header.label       = entry.folder.getFileName().isEmpty()
+                               ? entry.folder.getFullPathName()
+                               : entry.folder.getFileName();
+        header.fileCount   = entry.tree != nullptr ? entry.tree->fileCount : 0;
         rows.push_back (std::move (header));
 
-        if (! entry.expanded)
+        if (! entry.expanded || entry.tree == nullptr)
             continue;
 
-        for (const auto& file : entry.files)
-        {
-            Row row;
-            row.folderIndex = i;
-            row.file        = file;
-            row.indent      = 1;
-            rows.push_back (std::move (row));
-        }
+        appendNodeRows (rows, i, *entry.tree, 1);
     }
 
     return rows;
+}
+
+void FileBrowserPanel::appendNodeRows (std::vector<Row>& rows, int folderIndex,
+                                       const DirNode& node, int indent) const
+{
+    // Directories first, then files — the order every file manager uses, and
+    // the order that answers "where am I" without reading a path.
+    for (const auto& child : node.children)
+    {
+        if (child->fileCount == 0)
+            continue;                      // nothing to show underneath it
+
+        Row dirRow;
+        dirRow.kind        = Row::Kind::subFolder;
+        dirRow.folderIndex = folderIndex;
+        dirRow.file        = child->dir;
+        dirRow.indent      = indent;
+        dirRow.label       = child->name;
+        dirRow.fileCount   = child->fileCount;
+        rows.push_back (std::move (dirRow));
+
+        if (isSubFolderExpanded (child->dir))
+            appendNodeRows (rows, folderIndex, *child, indent + 1);
+    }
+
+    for (const auto& file : node.files)
+    {
+        Row row;
+        row.kind        = Row::Kind::file;
+        row.folderIndex = folderIndex;
+        row.file        = file;
+        row.indent      = indent;
+        rows.push_back (std::move (row));
+    }
 }
 
 int FileBrowserPanel::getContentHeight() const
 {
     int total = 0;
 
-    for (const auto& row : buildRows())
-        total += row.isFolder ? folderHeight : fileHeight;
+    for (const auto& row : ensureRows())
+        total += row.height();
 
     return total;
 }
@@ -251,15 +602,15 @@ juce::Rectangle<int> FileBrowserPanel::getViewArea() const
 
 juce::Rectangle<int> FileBrowserPanel::getRowBounds (int rowIndex) const
 {
-    const auto rows = buildRows();
+    const auto& rows = ensureRows();
 
     int y = headerHeight - (int) scrollY;
 
     for (int i = 0; i < rowIndex && i < (int) rows.size(); ++i)
-        y += rows[(size_t) i].isFolder ? folderHeight : fileHeight;
+        y += rows[(size_t) i].height();
 
     const int height = juce::isPositiveAndBelow (rowIndex, (int) rows.size())
-                         ? (rows[(size_t) rowIndex].isFolder ? folderHeight : fileHeight)
+                         ? rows[(size_t) rowIndex].height()
                          : 0;
 
     return { 0, y, getWidth(), height };
@@ -270,7 +621,7 @@ int FileBrowserPanel::rowAt (juce::Point<int> position) const
     if (! getViewArea().contains (position))
         return -1;
 
-    const auto rows = buildRows();
+    const auto& rows = ensureRows();
 
     for (int i = 0; i < (int) rows.size(); ++i)
         if (getRowBounds (i).contains (position))
@@ -304,16 +655,49 @@ void FileBrowserPanel::paint (juce::Graphics& g)
     g.drawText (utf8 ("文件"), ui::px (14), ui::px (8), ui::px (100), ui::px (18),
                 juce::Justification::centredLeft, false);
 
-    int fileCount = 0;
+    const bool scanning = scanRunning.load();
 
-    for (const auto& entry : folders)
-        fileCount += (int) entry.files.size();
+    if (scanning)
+    {
+        //-- Phase 28: the scan line ------------------------------------------
+        // It replaces the "SAMPLES · N · WAV" caption instead of sitting next to
+        // it: during a scan the count is a moving target, and printing a number
+        // that changes four times a second reads as a glitch.
+        const auto  name     = scanningRoot.getFileName();
+        const float progress = juce::jlimit (0.0f, 1.0f, scanProgress.load());
+        const int   files    = scanFileCount.load();
 
-    g.setColour (juce::Colours::white.withAlpha (0.26f));
-    g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
-    g.drawText ("SAMPLES" + separatorDot() + juce::String (fileCount) + utf8 (" · WAV"),
-                ui::px (14), ui::px (25), ui::px (150), ui::px (14),
-                juce::Justification::centredLeft, false);
+        g.setColour (kScanAccent.withAlpha (0.92f));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
+        g.drawText (utf8 ("正在加载 ") + (name.isEmpty() ? utf8 ("文件夹") : name)
+                      + utf8 (" · ") + juce::String ((int) (progress * 100.0f)) + "%"
+                      + utf8 (" · ") + juce::String (files) + utf8 (" 个文件"),
+                    ui::px (14), ui::px (25), getWidth() - ui::px (110), ui::px (14),
+                    juce::Justification::centredLeft, false);
+
+        // The track is the full width under the header, so the bar is readable
+        // from across the room even when the number is not.
+        const auto track = juce::Rectangle<float> (0.0f, (float) headerHeight - ui::pf (2.5f),
+                                                   (float) getWidth(), ui::pf (2.5f));
+        g.setColour (juce::Colours::white.withAlpha (0.07f));
+        g.fillRect (track);
+        g.setColour (kScanAccent.withAlpha (0.85f));
+        g.fillRect (track.withWidth (track.getWidth() * progress));
+    }
+    else
+    {
+        int fileCount = 0;
+
+        for (const auto& entry : folders)
+            if (entry.tree != nullptr)
+                fileCount += entry.tree->fileCount;
+
+        g.setColour (juce::Colours::white.withAlpha (0.26f));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
+        g.drawText ("SAMPLES" + separatorDot() + juce::String (fileCount) + utf8 (" · WAV"),
+                    ui::px (14), ui::px (25), ui::px (150), ui::px (14),
+                    juce::Justification::centredLeft, false);
+    }
 
     {
         const auto button = getAddButtonBounds().toFloat();
@@ -331,7 +715,7 @@ void FileBrowserPanel::paint (juce::Graphics& g)
     g.drawHorizontalLine (headerHeight - 1, 0.0f, (float) getWidth());
 
     //-- Rows -----------------------------------------------------------------
-    const auto rows = buildRows();
+    const auto& rows = ensureRows();
 
     {
         juce::Graphics::ScopedSaveState clip (g);
@@ -352,13 +736,17 @@ void FileBrowserPanel::paint (juce::Graphics& g)
                 g.fillRect (bounds);
             }
 
-            if (row.isFolder)
+            const int  left = ui::px (10) + row.indent * indentWidth;
+            const bool isRoot = (row.kind == Row::Kind::rootFolder);
+
+            if (row.isFolder())
             {
-                const bool expanded = folders[(size_t) row.folderIndex].expanded;
+                const bool expanded = isRoot ? folders[(size_t) row.folderIndex].expanded
+                                             : isSubFolderExpanded (row.file);
 
                 // Disclosure triangle.
                 juce::Path caret;
-                const float cx = ui::pf (18);
+                const float cx = (float) left + ui::pf (8);
                 const float cy = (float) bounds.getCentreY();
 
                 if (expanded)
@@ -370,23 +758,33 @@ void FileBrowserPanel::paint (juce::Graphics& g)
                                        cx - ui::pf (2), cy + ui::pf (3.5f),
                                        cx + ui::pf (3), cy);
 
-                g.setColour (juce::Colours::white.withAlpha (0.42f));
+                g.setColour (juce::Colours::white.withAlpha (isRoot ? 0.42f : 0.30f));
                 g.fillPath (caret);
 
-                g.setColour (kFolderText.withAlpha (0.92f));
-                g.setFont (boldFont (11.0f));
-                g.drawText (row.file.getFileName(),
-                            bounds.withTrimmedLeft (ui::px (30)).withTrimmedRight (ui::px (34)),
+                const auto name = row.label.isNotEmpty() ? row.label
+                                                         : row.file.getFileName();
+
+                g.setColour (kFolderText.withAlpha (isRoot ? 0.92f : 0.72f));
+                g.setFont (isRoot ? boldFont (11.0f)
+                                  : juce::Font (juce::FontOptions (atomic::ui::sp (10.5f))));
+
+                const int textLeft = left + ui::px (20);
+
+                g.drawText (name,
+                            bounds.withTrimmedLeft (textLeft)
+                                  .withTrimmedRight (ui::px (isRoot ? 34 : 26)),
                             juce::Justification::centredLeft, true);
 
                 // File count, right aligned, quiet.
-                g.setColour (juce::Colours::white.withAlpha (0.26f));
+                g.setColour (juce::Colours::white.withAlpha (isRoot ? 0.26f : 0.20f));
                 g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
-                g.drawText (juce::String ((int) folders[(size_t) row.folderIndex].files.size()),
-                            bounds.withTrimmedRight (ui::px (8)),
+
+                const auto count = row.fileCount > 0 ? juce::String (row.fileCount)
+                                                     : juce::String (utf8 ("…"));
+                g.drawText (count, bounds.withTrimmedRight (ui::px (isRoot ? 8 : 4)),
                             juce::Justification::centredRight, false);
 
-                if (i == hoveredRow)
+                if (isRoot && i == hoveredRow)
                 {
                     const auto remove = getRemoveButtonBounds (i).toFloat();
                     g.setColour (juce::Colours::white.withAlpha (0.10f));
@@ -399,18 +797,19 @@ void FileBrowserPanel::paint (juce::Graphics& g)
             else
             {
                 const bool exists = row.file.existsAsFile();
+                const int  textLeft = left + ui::px (18);
 
                 g.setColour (kFileText.withAlpha (exists ? 0.86f : 0.34f));
                 g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.0f))));
                 g.drawText (row.file.getFileName(),
-                            bounds.withTrimmedLeft (ui::px (38)).withTrimmedRight (ui::px (26)),
+                            bounds.withTrimmedLeft (textLeft).withTrimmedRight (ui::px (26)),
                             juce::Justification::centredLeft, true);
 
                 // A five-bar waveform instead of a generic file icon: the row is
                 // audio, and the shape is the one thing that distinguishes it
                 // from a text file at a glance.
                 {
-                    const float cx = ui::pf (20);
+                    const float cx = (float) left + ui::pf (9);
                     const float cy = (float) bounds.getCentreY();
                     const float heights[] { 0.35f, 0.75f, 1.0f, 0.55f, 0.30f };
 
@@ -453,10 +852,10 @@ void FileBrowserPanel::paint (juce::Graphics& g)
                     g.fillRect (bounds.reduced (0, 1));
 
                     g.setColour (kPreviewAccent.withAlpha (0.9f));
-                    g.fillRect (juce::Rectangle<int> (bounds.getX() + ui::px (34),
+                    g.fillRect (juce::Rectangle<int> (bounds.getX() + textLeft - ui::px (2),
                                                       bounds.getBottom() - ui::px (2),
-                                                      (int) ((float) (bounds.getWidth() - ui::px (74))
-                                                               * (float) p),
+                                                      (int) ((float) (bounds.getWidth() - textLeft
+                                                                       - ui::px (40)) * (float) p),
                                                       ui::px (2)));
 
                     g.setColour (kPreviewAccent);
@@ -534,24 +933,26 @@ void FileBrowserPanel::mouseDown (const juce::MouseEvent& e)
     if (row < 0)
         return;
 
-    const auto rows = buildRows();
-    const auto& info = rows[(size_t) row];
+    const auto& info = ensureRows()[(size_t) row];
 
-    if (info.isFolder)
+    if (info.kind == Row::Kind::rootFolder)
     {
         if (e.mods.isPopupMenu())
         {
             juce::PopupMenu menu;
             menu.addItem (1, utf8 ("重新扫描"));
-            menu.addItem (2, utf8 ("移除这个文件夹"));
+            menu.addItem (2, utf8 ("在资源管理器中显示"));
+            menu.addItem (3, utf8 ("移除这个文件夹"));
 
             menu.showMenuAsync (juce::PopupMenu::Options()
                                   .withTargetScreenArea (localAreaToGlobal (getRowBounds (row))),
-                                [this, index = info.folderIndex] (int choice)
+                                [this, index = info.folderIndex, dir = info.file] (int choice)
                                 {
                                     if (choice == 1)
                                         rescanFolders();
                                     else if (choice == 2)
+                                        dir.revealToUser();
+                                    else if (choice == 3)
                                         removeFolder (index);
                                 });
             return;
@@ -565,8 +966,30 @@ void FileBrowserPanel::mouseDown (const juce::MouseEvent& e)
 
         auto& entry = folders[(size_t) info.folderIndex];
         entry.expanded = ! entry.expanded;
+        invalidateRows();
         clampScroll();
         repaint();
+        return;
+    }
+
+    if (info.kind == Row::Kind::subFolder)
+    {
+        if (e.mods.isPopupMenu())
+        {
+            juce::PopupMenu menu;
+            menu.addItem (1, utf8 ("在资源管理器中显示"));
+
+            menu.showMenuAsync (juce::PopupMenu::Options()
+                                  .withTargetScreenArea (localAreaToGlobal (getRowBounds (row))),
+                                [dir = info.file] (int choice)
+                                {
+                                    if (choice == 1)
+                                        dir.revealToUser();
+                                });
+            return;
+        }
+
+        setSubFolderExpanded (info.file, ! isSubFolderExpanded (info.file));
     }
 }
 
@@ -578,14 +1001,14 @@ void FileBrowserPanel::mouseDrag (const juce::MouseEvent& e)
     if (e.getDistanceFromDragStart() < 6)
         return;
 
-    const auto rows = buildRows();
+    const auto& rows = ensureRows();
 
     if (! juce::isPositiveAndBelow (pressedRow, (int) rows.size()))
         return;
 
     const auto& info = rows[(size_t) pressedRow];
 
-    if (info.isFolder || ! info.file.existsAsFile())
+    if (info.isFolder() || ! info.file.existsAsFile())
         return;
 
     auto* container = juce::DragAndDropContainer::findParentDragContainerFor (this);
@@ -620,14 +1043,14 @@ void FileBrowserPanel::mouseUp (const juce::MouseEvent& e)
     if (wasDragging || row < 0 || rowAt (e.getPosition()) != row)
         return;
 
-    const auto rows = buildRows();
+    const auto& rows = ensureRows();
 
     if (! juce::isPositiveAndBelow (row, (int) rows.size()))
         return;
 
     const auto& info = rows[(size_t) row];
 
-    if (info.isFolder || ! info.file.existsAsFile() || onPreviewRequested == nullptr)
+    if (info.isFolder() || ! info.file.existsAsFile() || onPreviewRequested == nullptr)
         return;
 
     // Phase 20: one click, three seconds. The host decodes and starts the
@@ -649,7 +1072,7 @@ void FileBrowserPanel::beginPreviewFeedback (const juce::File& file, double seco
 
     // 30 Hz is enough for a 3-second line and cheap enough to leave running for
     // the whole of it; the timer stops itself the moment the window is over.
-    startTimerHz (30);
+    updateTimerState();
     repaint();
 }
 
@@ -659,8 +1082,19 @@ void FileBrowserPanel::endPreviewFeedback()
         return;
 
     previewing = false;
-    stopTimer();
+    updateTimerState();
     repaint();
+}
+
+void FileBrowserPanel::updateTimerState()
+{
+    // One timer, two jobs: the audition line expires, the scan percentage
+    // ticks. Starting it at 30 Hz for either is fine — the repaint is the same
+    // header strip.
+    if (previewing || scanRunning.load())
+        startTimerHz (30);
+    else
+        stopTimer();
 }
 
 double FileBrowserPanel::getPreviewProgress() const
@@ -675,17 +1109,23 @@ double FileBrowserPanel::getPreviewProgress() const
 
 void FileBrowserPanel::timerCallback()
 {
+    if (scanRunning.load())
+    {
+        // Only the header moves while a scan runs: repainting the whole list at
+        // 30 Hz to update a percentage would make adding a folder the slowest
+        // thing this panel ever does.
+        repaint (0, 0, getWidth(), headerHeight);
+    }
+
     // 120 ms of slack: the engine's own tail fade can outlast the nominal
     // length by a few milliseconds, and a line that snaps back to zero while the
     // sound is still ringing looks like a bug.
-    if (! previewing
-          || juce::Time::getMillisecondCounterHiRes() - previewStartMs > previewDurationMs + 120.0)
-    {
+    if (previewing
+          && juce::Time::getMillisecondCounterHiRes() - previewStartMs > previewDurationMs + 120.0)
         endPreviewFeedback();
-        return;
-    }
 
-    repaint();
+    if (! previewing && ! scanRunning.load())
+        stopTimer();
 }
 
 void FileBrowserPanel::mouseMove (const juce::MouseEvent& e)

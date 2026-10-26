@@ -136,8 +136,11 @@ int RackModel::getFirstSlotId() const
 
 juce::String RackModel::getSlotName (int slotId) const
 {
+    // Phase 38: the display name, not the stored identity — see
+    // SynthSlot::getDisplayName. Every menu and readout in the app comes
+    // through here, so a replaced instrument is named the same everywhere.
     if (auto* slot = findSlot (slotId))
-        return slot->name;
+        return slot->getDisplayName();
 
     return juce::String::fromUTF8 ("\xe2\x80\x94");   // em dash
 }
@@ -164,6 +167,55 @@ int RackModel::addSynth()
     slots.push_back (slot);
     notify();
     return slot.id;
+}
+
+int RackModel::addSampler (std::shared_ptr<const SampleBuffer> buffer,
+                           const juce::String& path,
+                           const juce::String& displayName)
+{
+    // One file, one sampler. Dropping the same sample twice should not grow a
+    // second slot holding the identical buffer: the rack is a list of things
+    // that make sound, and "the same clip again" is not another one of those.
+    if (path.isNotEmpty())
+        for (auto& existing : slots)
+            if (existing.sampler && existing.samplePath == path)
+                return existing.id;
+
+    SynthSlot slot;
+    slot.id       = nextSlotId++;
+    slot.name     = displayName.isNotEmpty() ? displayName : utf8 ("采样");
+    slot.colour   = kSlotColours[nextOrdinal % numSlotColours];
+    slot.sampler  = true;
+    slot.sampleBuffer = std::move (buffer);
+    slot.samplePath   = path;
+    slot.levelDb      = -3.0f;
+    slot.mixerChannel = -1;
+
+    ++nextOrdinal;
+
+    slots.push_back (slot);
+    notify();
+    return slot.id;
+}
+
+std::vector<int> RackModel::getSamplerSlotIds() const
+{
+    std::vector<int> ids;
+
+    for (const auto& slot : slots)
+        if (slot.sampler)
+            ids.push_back (slot.id);
+
+    return ids;
+}
+
+int RackModel::getFirstInstrumentSlotId() const
+{
+    for (const auto& slot : slots)
+        if (! slot.sampler)
+            return slot.id;
+
+    return -1;
 }
 
 int RackModel::addPluginSynth (const juce::PluginDescription& description, int instanceId)
@@ -343,6 +395,18 @@ void RackModel::setAutomationExpanded (int slotId, bool expanded)
             return;
 
         slot->automationExpanded = expanded;
+        notify();
+    }
+}
+
+void RackModel::setPluginParam (int slotId, int paramIndex)
+{
+    if (auto* slot = findSlot (slotId))
+    {
+        if (slot->getPluginParam() == paramIndex)
+            return;
+
+        slot->setPluginParam (paramIndex);
         notify();
     }
 }

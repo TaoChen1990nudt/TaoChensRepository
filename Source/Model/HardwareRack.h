@@ -8,6 +8,7 @@
 
 #include "AutomationLane.h"
 #include "Gain.h"
+#include "Media/SampleLibrary.h"
 
 namespace atomic
 {
@@ -40,8 +41,11 @@ Waveform nextWaveform (Waveform);
 struct SynthSlot
 {
     /** Mirrors MixerModel::numChannels. Kept here so the rack does not have to
-        include the mixer just to clamp a number. */
-    static constexpr int maxMixerChannels = 8;
+        include the mixer just to clamp a number — ProjectIO static_asserts the
+        two agree, so this cannot quietly fall behind the console again (it did:
+        Phase 25 raised the console to 127 strips and this stayed at 8, which
+        silently refused every send above channel 8). */
+    static constexpr int maxMixerChannels = 127;
 
     int          id       = 0;
     juce::String name;
@@ -82,6 +86,49 @@ struct SynthSlot
 
     bool isPlugin() const noexcept { return pluginId > 0; }
 
+    /** Phase 38: what the card, the menus and every "→ Synth A" readout CALL
+        this synth.
+
+        A hosted plugin's name IS its identity: "Serum" tells you what will
+        happen when you play a note on it, and "Synth A" does not. Leaving the
+        card on the old slot name is why replacing a built-in synth with a VST3
+        looked like the click had done nothing — the pill changed from SAW to
+        "VST3 · 插件" and nothing else did.
+
+        A built-in synth keeps its slot name on purpose: the pill already says
+        SAW, and "SAW" as a card title is not a name. A sampler keeps whatever
+        it was called, because its file name is on the pill.
+
+        Derived, not written: replacing back to an oscillator must give the old
+        name back, and a stored `name` cannot do that once it has been
+        overwritten. */
+    juce::String getDisplayName() const
+    {
+        if (isPlugin() && pluginName.isNotEmpty())
+            return pluginName;
+
+        return name;
+    }
+
+    //-- Phase 27: a slot that holds a sample instead of an instrument --------
+    /** A sampler slot is a CONTAINER, not a player.
+
+        Dropping a file into the roll grows one of these, holding exactly that
+        one clip. The point is the indirection: a clip in the roll names a
+        sampler slot to play, so re-pointing the clip at another sampler changes
+        what it sounds like without touching its position, length or gain — the
+        same way mounting a note on another synth changes its timbre.
+
+        It deliberately has no oscillator. A slot whose job is "hold this file"
+        must not also make a saw wave when a note happens to be routed to it,
+        because then "which slot am I on" would silently become a change of
+        instrument as well as a change of sample. */
+    bool sampler = false;
+    std::shared_ptr<const SampleBuffer> sampleBuffer;
+    juce::String samplePath;             // absolute, so a reload can find it
+
+    bool isSampler() const noexcept { return sampler; }
+
     /** Macro automation for this synth. Both parameters keep their own lane, so
         a filter sweep and a level ride can be drawn and heard at the same time. */
     AutomationLane& automationFor (SlotAutomationTarget t) noexcept
@@ -100,9 +147,35 @@ struct SynthSlot
         return automationFor (automationTarget);
     }
 
-    std::array<AutomationLane, 2> automationLanes;
+    const AutomationLane& getAutomation() const noexcept
+    {
+        return automationFor (automationTarget);
+    }
+
+    /** Phase 42: which parameter of the hosted instrument `plugin` drives.
+
+        -1 means "no parameter chosen", and that is the default: an index only
+        means something relative to one plugin's list, so a slot that has never
+        had one picked must not claim parameter 0 of whatever gets mounted next.
+        Same field, same meaning as NoteGroup::getPluginParam(). */
+    int  getPluginParam() const noexcept  { return pluginParam; }
+    void setPluginParam (int index) noexcept { pluginParam = index; }
+    bool drivesPluginParam() const noexcept  { return pluginParam >= 0; }
+
+    AutomationLane&       getPluginAutomation() noexcept
+    {
+        return automationFor (SlotAutomationTarget::plugin);
+    }
+
+    const AutomationLane& getPluginAutomation() const noexcept
+    {
+        return automationFor (SlotAutomationTarget::plugin);
+    }
+
+    std::array<AutomationLane, numSlotAutomationTargets> automationLanes;
     SlotAutomationTarget automationTarget = SlotAutomationTarget::filter;
     bool                 automationExpanded = false;
+    int                  pluginParam = -1;
 
     /** Phase 17: the whole card shrinks to a one-line title bar. View state on
         the model for the same reason as above: the rack's row geometry is a
@@ -156,6 +229,24 @@ public:
     /** Adds a synth, auto-named (Synth C, D, ...). Returns its id. */
     int  addSynth();
 
+    //-- Phase 27: sampler slots ---------------------------------------------
+    /** Grows a slot that holds one decoded sample, named after the file, and
+        returns its id. Reuses an existing slot that already holds the SAME file
+        so dragging one file twice does not litter the rack with twins — the
+        second drop points at the sampler the first one created. */
+    int  addSampler (std::shared_ptr<const SampleBuffer> buffer,
+                     const juce::String& path,
+                     const juce::String& displayName);
+
+    /** Every sampler slot id, in rack order. What the clip's "mount" menu lists. */
+    std::vector<int> getSamplerSlotIds() const;
+
+    /** First slot that can actually PLAY A NOTE, skipping samplers (which have
+        no oscillator) and empty plugin slots. The fallback for a layer whose
+        configured output is gone: answering "the sampler I happen to have first"
+        would mute every note on that sheet for no visible reason. */
+    int getFirstInstrumentSlotId() const;
+
     /** Adds a rack slot driven by a hosted VST3. `instanceId` must already be
         loaded in PluginHost; 0 adds the slot anyway, silent, so a project that
         lost its plugin still shows what used to be there. Returns the slot id. */
@@ -194,6 +285,12 @@ public:
     void setSoloed (int slotId, bool shouldBeSoloed);
     void setAutomationTarget (int slotId, SlotAutomationTarget target);
     void setAutomationExpanded (int slotId, bool expanded);
+
+    /** Phase 42: which parameter of the hosted instrument the slot's `plugin`
+        lane writes. Notifies, because the published schedule carries the index
+        and a curve pointing at the wrong one would be audible immediately. */
+    void setPluginParam (int slotId, int paramIndex);
+
     void setCollapsed (int slotId, bool shouldCollapse);
     void touch();
 

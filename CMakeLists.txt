@@ -31,6 +31,7 @@ target_sources(AtomicDAW PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
     Source/Audio/AudioEngine.cpp
+    Source/Audio/MidiInputHub.cpp
     Source/Audio/PlaybackEngine.cpp
     Source/Audio/PluginHost.cpp
     Source/Audio/WavExport.cpp
@@ -62,6 +63,24 @@ target_include_directories(AtomicDAW PRIVATE Source)
 # system code page (936 here) and every Chinese UI string turns into mojibake.
 if (MSVC)
     target_compile_options(AtomicDAW PRIVATE /utf-8)
+
+    # Phase 24: 8 MB of stack instead of the 1 MB default.
+    #
+    # The headless self-test is one very large function and every local in it
+    # lives in the same frame; by Phase 24 that frame was within a few kilobytes
+    # of the limit, and the failure mode was spectacular — a stack overflow
+    # reported inside the NVIDIA driver, several checks before the end, with
+    # nothing written. The new blocks are lambdas so their locals are released,
+    # but the reserve is the real fix: "add a check" must not be able to crash
+    # the harness in a module nobody recognises.
+    #
+    # Phase 25 raised it again: the optimiser inlines an immediately-invoked
+    # [&] lambda, so its locals land in the SAME frame, and the console checks
+    # add a MixerModel (128 x 8 insert settings) and a PlaybackEngine (128 insert
+    # chains) each. 8 MB overflowed at function ENTRY, before the first check
+    # could even print. 64 MB is a reserve, not a commit: Windows only backs the
+    # pages that are actually touched, so this costs nothing at run time.
+    target_link_options(AtomicDAW PRIVATE /STACK:67108864)
 endif()
 
 target_compile_definitions(AtomicDAW PRIVATE

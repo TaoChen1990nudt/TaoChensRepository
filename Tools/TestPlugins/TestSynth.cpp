@@ -24,6 +24,13 @@ public:
     AtomicTestSynth()
         : juce::AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true))
     {
+        // Phase 24: one real parameter. "A curve drives a hosted instrument's
+        // parameter" has to be checkable on a machine with no third-party
+        // plugins, which means the fixture needs something to drive — and the
+        // only way to prove it end to end is to make the parameter audible.
+        addParameter (levelParameter = new juce::AudioParameterFloat (
+                          juce::ParameterID { "level", 1 }, "Level",
+                          juce::NormalisableRange<float> (0.0f, 1.0f), 1.0f));
     }
 
     //-- Metadata -------------------------------------------------------------
@@ -84,12 +91,17 @@ public:
         if (! gateOpen || increment <= 0.0)
             return;
 
+        // Read per block, not at note-on: a parameter that only took effect on
+        // the next note could not demonstrate automation at all.
+        const float level = levelParameter != nullptr ? levelParameter->get() : 1.0f;
+
         auto* left  = buffer.getWritePointer (0);
         auto* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
 
         for (int i = 0; i < buffer.getNumSamples(); ++i)
         {
-            const auto sample = (float) std::sin (phase * juce::MathConstants<double>::twoPi) * amplitude;
+            const auto sample = (float) std::sin (phase * juce::MathConstants<double>::twoPi)
+                                  * amplitude * level;
 
             left[i] = sample;
 
@@ -108,6 +120,8 @@ public:
     void setStateInformation (const void*, int) override {}
 
 private:
+    juce::AudioParameterFloat* levelParameter = nullptr;
+
     double sampleRate = 44100.0;
     double phase      = 0.0;
     double increment  = 0.0;

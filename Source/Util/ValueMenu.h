@@ -22,9 +22,17 @@ namespace atomic::ui
     `addExtra`/`onExtra` exist because three of these controls share their pixel
     with an owner that has more to say (a layer's automation, a group's mount).
     Rather than invent a second right-click meaning for those rows, the shared
-    menu grows extra items that open the owner's own menu. Item ids handed to
-    `onExtra` are >= 10; 1 is reserved for 复位.
+    menu grows extra items that open the owner's own menu.
+
+    Phase 21: the extras are REAL sub-menus now, so they appear on hover
+    (`addSubMenu`) instead of answering a click with a second menu somewhere
+    else on screen. That changed one thing here: 复位 can no longer own id 1,
+    because the sub-menus are built by the owner and freely use 1, 2, 3 — the
+    ids that come back through `onExtra` are the owner's, unchanged. 复位
+    therefore sits far outside any range an owner would pick.
 */
+inline constexpr int valueMenuResetId = 9001;
+
 inline void showValueMenu (juce::Component* owner,
                            juce::Point<int> screenPos,
                            const juce::String& title,
@@ -35,7 +43,7 @@ inline void showValueMenu (juce::Component* owner,
 {
     juce::PopupMenu menu;
     menu.addSectionHeader (title + utf8 (" · ") + valueText);
-    menu.addItem (1, utf8 ("复位"));
+    menu.addItem (valueMenuResetId, utf8 ("复位"));
 
     if (addExtra != nullptr)
     {
@@ -53,7 +61,7 @@ inline void showValueMenu (juce::Component* owner,
                             if (safe == nullptr || result <= 0)
                                 return;
 
-                            if (result == 1)
+                            if (result == valueMenuResetId)
                             {
                                 if (onReset != nullptr)
                                     onReset();

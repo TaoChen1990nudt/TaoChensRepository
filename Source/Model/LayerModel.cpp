@@ -82,6 +82,13 @@ void Layer::removeGroup (int groupId)
         if (n.groupId == groupId)
             n.groupId = -1;
 
+    // Phase 27: clips are members too, and they are detached the same way. A
+    // clip left pointing at a dissolved group would be a member of nothing that
+    // still draws inside somebody's bracket.
+    for (auto& s : samples)
+        if (s.groupId == groupId)
+            s.groupId = -1;
+
     groups.erase (std::remove_if (groups.begin(), groups.end(),
                                   [groupId] (const NoteGroup& g) { return g.getId() == groupId; }),
                   groups.end());
@@ -105,6 +112,52 @@ int Layer::getGroupIdOfNote (int noteId) const noexcept
             return n.groupId;
 
     return -1;
+}
+
+//==============================================================================
+void Layer::assignSamplesToGroup (const std::vector<int>& sampleIds, int groupId)
+{
+    const int target = findGroup (groupId) != nullptr ? groupId : -1;
+
+    for (int sampleId : sampleIds)
+        if (auto* sample = findSample (sampleId))
+            sample->groupId = target;
+}
+
+int Layer::getGroupIdOfSample (int sampleId) const noexcept
+{
+    if (const auto* sample = findSample (sampleId))
+        return sample->groupId;
+
+    return -1;
+}
+
+std::vector<int> Layer::getGroupSampleIds (int groupId) const
+{
+    std::vector<int> ids;
+
+    if (groupId < 0)
+        return ids;
+
+    for (const auto& s : samples)
+        if (s.groupId == groupId)
+            ids.push_back (s.id);
+
+    return ids;
+}
+
+int Layer::countSamplesInGroup (int groupId) const noexcept
+{
+    if (groupId < 0)
+        return 0;
+
+    int count = 0;
+
+    for (const auto& s : samples)
+        if (s.groupId == groupId)
+            ++count;
+
+    return count;
 }
 
 std::vector<int> Layer::getGroupNoteIds (int groupId) const

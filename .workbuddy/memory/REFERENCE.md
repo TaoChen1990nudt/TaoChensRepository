@@ -1,0 +1,462 @@
+# AtomicDAW — 详细约定（MEMORY.md 的展开版）
+
+按主题分节。MEMORY.md 只留六条跨主题硬规则，具体规则都在这里。
+
+## 构建与验证
+- VS2022 + MSVC 14.38 + Win SDK 10.0.22621；PATH 无 cmake，用 VS 自带
+  `.../Common7/IDE/.../CMake/bin/cmake.exe`；JUCE 8.0.4 走 FetchContent。
+- **构建前 `unset https_proxy http_proxy all_proxy no_proxy`**（大小写两份）：
+  否则 MSB6001，报的却是 "No CMAKE_CXX_COMPILER could be found"。
+- 日志别走管道 grep：`> /tmp/buildNN.log 2>&1` 再带 `-a` 过滤，并核对 exe mtime。
+- **中文一律 `atomic::utf8("...")`**（CMake 加 `/utf-8`）；裸中文走 CharPointer_ASCII
+  直接乱码——**自检的失败信息也算**。
+- **`/STACK:67108864`**：`runSelfTest()` 是单个巨帧，优化器把 `[&]{}()` 内联回同一帧。
+- 真退出码只有 `cmd /v:on /c "exe ... & echo !ERRORLEVEL!"` 拿得到（bash 给 127）；
+  `0xC00000FD` = 栈溢出。出图用 PowerShell `Start-Process -Wait`（前台 Bash 会截断）。
+- `--export` 与直接导出 MD5 相同；`--save` 存的是**空白会话**。
+- 自检新建音符用中音区 pitch（78/80）：pitch 60 在 520 高画布上已出屏。写死的像素断言是
+  **真实像素**、与 scale 无关；数字变了说明有常量没走 px()。
+
+## 数据规则
+- **挂在音符上的东西都是值成员**（`NoteEnvelope` / `outputSlotOverride` / `groupId` /
+  `modTarget` / `modPluginParam`）：复制、拖动时物理上不可能脱钩。采样块同理。
+- 音符包络**归一化 0..1**（跟随音符长度），宏曲线**绝对拍**（钉在时间线）。不许统一。
+- UI 寻址一律 `(layerIndex, noteId)` 或稳定 id，禁止缓存 `NoteEvent*` / `Layer*`。
+- 图层共用一套 content 空间（128 pitch × N beat）；只有激活图层的音符可命中。
+
+## 路由（唯一实现 `Model/Routing.h`）
+- `routing::resolve()`：**note.outputSlotOverride > group.outputSlotId > layer.outputSlotId >
+  第一个乐器槽**。UI 高亮、聚光灯、引擎全调它；另写三段判断，显示和听到就是两套话。
+- `routing::resolveSample()`：**sample.outputSlotId（须是 sampler 槽）> 图层默认**。
+  它**不看 group** —— 组挂载陈述的是"这些音符由哪个乐器演奏"，采样不由乐器演奏。
+- `layerSlotId()` 兜底 `getFirstInstrumentSlotId()`，**跳过 sampler**：落到采样音源会让整层
+  音符无声，而且屏幕上找不到原因。
+
+## 音频
+- 音频线程**绝不**读 Layer / NoteEvent / RackModel：消息线程 `publishSchedule()` 构建不可变
+  `PublishedSchedule`，锁只覆盖 shared_ptr 赋值。声部无状态：相位 = freq × 音符内秒数。
+- 链路：**声部 → 通道总线（通道插入）→ 主插入 → 主推子**。图层推子/组增益在声部阶段（乘），
+  音源推子+滤波在总线阶段；`busIndexFor(mixerChannel)`，-1/越界 → 直通。汇总顺序 =
+  发布时的 `channelOrder`。
+- **主输出也有第三条曲线（mute）**：`MixerModel::numMasterParameters = 3`，
+  渲染在 master ramp 上按块首尾各取一次闸值，所以关静音不会跳回满电平。
+- 通道条推子**仍是音源推子**："通道 1 → 3"只经通道 3 的**插入**，不经它的推子。
+- 自动化算术只写在 `LayerMix::gainAt()/panAt()` 一类函数：音量**乘**推子、声相**加**推子。
+  solo/mute 发布时解算成 `audible`。复用缓冲**必须无条件 clear**。
+- 只引 `juce_audio_devices`；WAV 头手写 44 字节；dB 走 `Model/Gain.h`。
+- **sampler 槽只渲染 clip，不跑声部**（`SlotMix::sampler` 在声部循环入口 break）。
+- **clip 的窗口与淡变在 publish 期换成秒**，音频线程只做 `min(elapsed/in, (len-elapsed)/out)`
+  的乘法；淡变乘在 de-click 斜坡**之上**。
+- **clip 的读取只有 `clipstretch::read()`**（`Audio/ClipStretch.h`）：`(buffer, Playback,
+  offset, elapsed, grain)` → 一帧，**纯函数**，没有读头状态。speed == pitch 走单读头
+  （原速/变速变调），否则双读头颗粒交叉淡化（只变速/只变调）。
+
+## 电平表（P42：读数是读数，不是最大值）
+- 渲染路径一律用 `jmax` 存块峰值（块内峰值不能被平均掉）。**衰减只有一个地方**：
+  `audioDeviceIOCallbackWithContext` 里 `beginLiveBlock()` 之后立刻 `playback.decayMeters(numSamples)`，
+  **无条件**，在 `isPlaying` 判断之前。原先挂在"完全空转"早退分支里，于是走带在跑但没声音时表永远钉着。
+- 衰减速率用 **dB/秒**：`factor = pow(10, -2.5 * dt)`（−50 dB/s），`dt = numSamples / sampleRate`。
+  绝不能用"每块乘 0.9"——那与缓冲大小、采样率都绑死，512 帧和 256 帧必须落得一样快才叫时间曲线。
+- `hasMeters()`（遍历 `meters / layerMeters / channelMetersL/R / masterMeters`，任一 > 1e-4）
+  是"还需要重绘"的唯一判据；落零就停，否则 60 Hz 定时器把静止窗口永远判成还在响。
+- 窗口门写作 `if (audio.isPlaying() || audio.getPlayback().hasMeters())`，**放在
+  `if (! audio.isPlaying()) return;` 之前**——放后面就漏掉"停止后还在落"那一段，而那正是用户会看的。
+
+## 工程文件（`.atomic`，`formatVersion` = 19）
+- **先解析到临时对象、末尾一次性提交**，坏文件绝不破坏当前会话。载入后重置
+  `nextNoteId`/`nextSlotId`/组 id（max+1）。
+- 老文件必须仍能开：v3 `mod=`、v4 插件（标签 **"PLUGIN"** 全大写）、v5 `mixer=`、
+  v6 `<Groups>`（在 `<Notes>` **之前**）、v7 `<Samples>`、v8 `<Mixer channels>`、
+  v10 `<Channel out>`、v11 `pluginparam=`、v12 `mono="1"`、v13 `masterMono`、
+  v14 `kind="sampler"`、v15 `<Sample offset fadein fadeout>`（不写=0）、
+  v16 `<Sample stretch="0..3">`（不写=0=原速窗口）、v17 `<Group mute="1">`（不写=false）、
+  v18 `<Slot pluginparam="N">` + `<Slot autotarget="filter|level|plugin">` +
+  `<Automation target="plugin">`（三条 lane 全写，`autotarget` 缺失=旧文件）、
+  v19 `<Automation target="pan|mute|solo">`（槽位六条 lane 全写）+ `<MasterAutomation>`
+  多一条 `target="mute"`。**新 lane 一律追加在枚举末尾**，老文件不需要映射表。
+- **选中哪条 lane 显式写 `autotarget`，不靠元素顺序推断**：三条 lane 都写出来之后，
+  "最后读到的那条算选中"恒把 target 变成 `plugin`。回退规则只在 `autotarget` **缺失**时启用。
+- **组静音存在组上，不存成员上**：一个属性熬过粘贴、复制、合并；写到六十个音符上就是六十个
+  可能出错的地方。
+- **`out` 的 master 哨兵随上限走**：v11 及更早 = 8，v12 起 = 127。读旧文件必须翻成 master。
+- 提交顺序：**先 `setChannelCount` 再 `setChannelOutput`**（后者拒绝非活通道）。
+- 导出：发布快照 → 后台按块渲染，长度用 `contentBeats`，不归一化（峰值 >0.999 才拉回）。
+
+## 会话与撤销
+- **会话重置唯一入口 `buildSession(withEmptyLayer)`**：清 automation/mixer → restoreLayers →
+  restoreSlots → BPM 120 → 清 currentProject → reconcilePlugins。空白 = 1 空图层 + 1 原装音源。
+  `loadDemoProject()` = `buildSession(false)` + demo，**不要**复用 `buildBlankProject()`。
+- 脏标记 = `savedStateText` + `dirtyCache`；关窗/新建/载入统一走 `confirmDiscardChanges`，
+  `handleCloseRequest()` 返回 false = 对话框接管退出。
+- 撤销 = 整工程 XML 快照 + AsyncUpdater 合并同一轮次；`restoringHistory` 期间 Listener 返回。
+- 混音台在 `MixerWindow`，面板归 MainComponent：关窗不销毁状态。
+
+## 自动化
+- 每个 owner 常驻 `std::array<AutomationLane, N>` + `automationFor(target)`；
+  `AutomationModel` 只存 `{id, owner, ownerId, target}`，**从不存 `AutomationLane*`**。
+- 建轨只有一条路 `MainComponent::ensureAutomationTrack(...)`；第三项"展开/收起曲线"是内联
+  曲线唯一开关，别删。
+- 行高是 UI 偏好、**按 trackId 存**；`index * rowHeight` 即 bug；行底 6px resize 带命中优先。
+- 通道 owner 是**音源**；主输出 owner = `master`、ownerId = 0。
+- **槽位有六个 target**（`SlotAutomationTarget`：`filter` / `level` / `plugin` / `pan` /
+  `mute` / `solo`，`numSlotAutomationTargets = 6`）。P43 追加后三个**只能加在末尾**：
+  枚举顺序就是 `automationLanes` 的下标，中间插一个会让所有老工程读错 lane。
+  解析一律 `jlimit (0, numSlotAutomationTargets - 1, target)`。
+- **静音/独奏是闸不是量**：`SlotMix::isMutedAt/isSoloedAt` 以 0.5 为界读曲线，
+  不参与乘法链；**声相是加法**（`panAt` = 推子 + 曲线×2-1，夹 ±1）。
+- **音源参数 lane 是"值 + 地址"两件套**：`AutomationLane` 存曲线，`SynthSlot::pluginParam`
+  存参数下标（-1 = 没选）。发布条件 = `pluginId > 0 && drivesPluginParam() && lane.isEnabled()`
+  且有点，窗口 `0 .. jmax(1, contentBeats)`、`priority = 0`。
+- 建音源参数轨只有 `MainComponent::ensureSlotPluginParamTrack(slotId, paramIndex)`：
+  先 `rack.setPluginParam`，曲线为空/仅两点才 `resetFlat(current, length)`（别抹掉用户画过的），
+  再 `setAutomationTarget(plugin)` + `setAutomationExpanded(true)` + `addTrack` + `revealTrack`。
+- 参数清单只有 `pluginParamsForSlot(slotId)`（**非 const**，要开插件才拿得到参数）。
+  `pianoRoll.setPluginParamLister` 只是转发，不能有第二份实现。
+- **「创建自动化」是动词**：`addSlotAutomationItems(menu, slotId, idBase)` +
+  `applySlotAutomationChoice(result, slotId, idBase)` 成对提供，卡片 / 通道条 / 编组 /
+  钢琴窗 / 自动化窗全都调它，菜单名只出现一次。参数项 id = `idBase + kSlotAutoParamBase + index`
+  （`kSlotAutoParamBase = 10000`，必须避开卡片菜单已有的 10..13 / 20 / 30..41 / 200+n / 1000+ch），
+  最多列 64 个，超出追加一条禁止项的「还有 N 个参数没有列出」。
+- 时间线长度变化经 `PianoRollComponent::onTimelineChanged` 灌给自动化窗。
+
+## 三层叠加（P36：`Model/AutomationStack.h`）
+**法则只有一份**，纯函数，引擎与界面都调它，禁止在别处再写一遍乘法链。
+- 三层：**宏**（图层 volume lane × 合成器 level lane，两个 fader 也在这里）、**组**（trim ×
+  level lane × mute）、**音符**（envelope，按 u 归一化）。
+- `stackLevel(macro, group, note)` = **相乘**；`stackPan(macro, group, note)` = **相加后夹 ±1**；
+  `stackPluginParam(group, note)` = **相乘**。缺层 = identity（电平/参数 1、声相 0）。
+- 入参里的"组"那一层，P42 起也承载**音源自己的参数 lane**（`SynthSlot::pluginParam` 指定的那条）：
+  它跟编组 lane、音符包络走同一个 `stackPluginParam`，没有第四条法则。
+- 音符曲线只在 `modTarget == level` 时算电平层；pan/pitch 曲线不参与乘积（否则画面会说谎）。
+- 宿主插件参数**不再是"高优先级覆盖"**：`applyHostedParamAutomation` 先收集本 chunk 的曲线
+  （定长数组，音频线程不分配），按 `paramIndex` 去重后**累乘写一次**。`priority` 只剩排序意义。
+- UI：`NoteEnvelopePanel::rebuildOverlay()` 把宏/组采样到音符的 u 坐标（`sampleLaneInto`），
+  `EnvelopeEditor` 画青（宏）橙（组）虚线 + 琥珀合计线 + 一行图例
+  「宏 a × 组 b × 音符 c → 乘积」。**图例的乘积必须由 `stackLevel` 算**，不能自己乘。
+- 面板在 `layersChanged/notesChanged/rackChanged/openFor` 四处重建 overlay；路由会换合成器，
+  所以 rackChanged 也算。
+
+## UI 制度
+- 唯一密度旋钮 `ui::scale = 1.3f`。几何 `ui::px()/pf()`、字号 `ui::sp()`，**禁止裸像素**。
+  **不缩放**：`numPitches`、内联自动化框最小宽度、gutter。
+- 时间线左侧只有 `ui::gutterWidth` 一个宽度：钢琴键与自动化窗列表都指向它。
+- 菜单/对话框字体走 `Util/UiLookAndFeel.h` + `setDefaultLookAndFeel`（popup 归 desktop），
+  `shutdown()` 置 nullptr。
+- 自绘图标由控件尺寸派生，禁止固定 inset。`▾` 一律 `mixerlook::drawCaret()`。
+- `g.drawText(t, {...}, ...)` 会 C2668 歧义，必须写 `juce::Rectangle<int>(...)`；量中文用
+  `GlyphArrangement` + `getBoundingBox`。塞不下**先让邻控件让位**，别压字号（≈9.5sp 下限）。
+- `withHeight()` 保中心、`withY()` 定顶边；**`withX()` 保留宽度**（要改宽得配 `.withWidth`）。
+- 窗口最大化 = `setBounds(userArea)` **减 `peer->getFrameSize()`**。
+- **顶栏顺序**：新建 → 保存/载入/导出 → 撤销/重做（图标）→ 混音台 → 设置。
+- **数值控件右键 = 复位**：`Util/ValueMenu.h` 的 `ui::showValueMenu()`，复位 id = **9001**。
+  **二级层级一律 `addSubMenu`**；宿主菜单拆 `fill…` + `apply…`。
+- **同一个"动词"只许有一个菜单出处**（P42）：卡片 / 通道条 / 编组 / 钢琴窗 / 自动化窗的
+  「创建自动化 ▸」全部由 `addSlotAutomationItems` + `applySlotAutomationChoice` 生成，
+  名字出现一次，参数（slotId、idBase）由调用方给。平铺回去就是把"加一种目标"变成"改五处"。
+- **`PopupMenu` 的 id 空间是扁平的**，子菜单不占 id。新加一组 id 前先数一遍已用的区间
+  （`10..13 / 20 / 30..41 / 200+n / 1000+ch / 9001 / 10000+`）。空白子菜单要给一条禁用项。
+
+## 分栏（P25：绝对位移）
+- `VerticalSplitter` **不传增量**：`onDragBegin` 记起始高度，`onDragTravel(totalTravel)` 用
+  `e.getScreenY() - 锚点`；增量会把被 clamp 掉的越界量永久丢掉。组件自己会动，必须屏幕坐标。
+- 回调一律 `height = 起始高度 - travel` + `resized()`，clamp 留在 `resized()`；自检走
+  `simulateDrag(travel, continueGesture)`。三个实例：自动化窗 / 文件栏 / 编组栏。
+
+## 混音台（P23 / P25 扩 127 / P27 推子让宽）
+- **主输出在显示槽位 0**，`displaySlotFor/channelForDisplaySlot` 是唯一映射。
+- **容量 ≠ 默认**：`numChannels = 127`（= `masterChannel` 哨兵），`defaultChannels = 8`。
+  发布与排序只跑 live 通道；插入链按需准备（`chainsReady` 只增不减）。
+- **通道条固定宽** `stripWidth = ui::px(92)`，溢出时底部手绘滚动条。
+- **主输出不是通道**：无删除项、无输出下拉；有 MONO（`masterMono`），引擎在**主推子斜坡之后**
+  折叠——那是信号离开声卡的唯一位置。
+- 通道路由只写在 `getChannelOutput/setChannelOutput/wouldLoop`：默认全 `masterChannel`，
+  环路在模型层**拒绝**，`sanitiseOutputs()` 在缩通道时回落。
+- **单声道监听**：`channelMono` → `ChannelMix::mono`，引擎在**插入之后、求和之前** (L+R)/2。
+- **删除通道**：地板 `deletionFloor = 8`（`canRemoveChannel()` 唯一判据，`－` 标灰不隐藏）。
+  `removeChannelAt(i)` 的 `inserts`/`channelMono`/`channelOutputs` **三个数组都要下移**；
+  机架发送重编号在 `MixerPanel::deleteStrip`（先拔 `==i → -1`、再 `>i → --`）。
+- **立体声电平表**：`channelMetersL/R` + `getChannelPeakSide(ch,side)`；`stereoMeterHasOwnPixels()`。
+- **推子/表共用一行**：`getFaderRowBounds()` 切左半给推子（下限 16 px）、右边全给表（约 37 px）。
+  两者必须同源派生；`faderYieldedHalfTheRow()` 一个断言钉两件事。
+- `SynthSlot::maxMixerChannels` 必须等于 `MixerModel::numChannels`（`static_assert`）。
+- 机架卡片发送子菜单 id 基址 `kSendToChannelBase = 1000`（`21 + ch` 会撞 30–40）。
+- **效果器机架可换位置**（P43）：`MixerModel::moveInsert(channel, from, to)` **轮转不是交换**
+  （交换会把目标槽的插件甩到出发点，用户无法靠再拖一次还原）。
+  UI 两条路：拖插槽名上下移动（`pressedInsertSlot` + `mouseUp` 才决定是"拖动"还是"点菜单"）、
+  菜单里的「上移一格 / 下移一格」（id 103 / 104）。
+- **通道条四个控件各一个菜单**（P43）：`MixerPanel::StripControl{fader,pan,mute,solo}`，
+  `fillControlMenu` 只放"复位（或开关动词）+ 那一行自动化"，**不再挂通道菜单**。
+  宿主侧 `fillStripAutomationItems` / `applyStripAutomationChoice` 决定"推子=level lane"。
+
+## 编辑手势（P22 起）
+- **多选拖动是刚体**：唯一实现 `clampMove()`，夹的是 **delta** 不是每个音符；吸附只作用在块上，
+  锚 = 最左成员。成员含采样（`clips` 参数）。
+- **应用只有 `applyMove()`**：音符 + 已武装的采样一起走。
+- **拉伸只作用于被抓住的那一个**：`dragResizeNoteId` + `resizeTargetId()`，数学只有一份
+  `applyNoteResize()`。循环改整个选中会把尾巴拉成一条线。
+- **音符两端都能拉伸**：`kResizeHandleWidth` 是设计值、处处 `ui::pf()`。
+- **选中 ≠ 悬停**：选中 = 主体变亮 + 2 px 白环 + 四角括号；悬停只有 1.2 px 淡环。
+  聚光灯的实芯环会盖住选中环 → `drawFocusHighlights` 对**已选中**音符只画光晕和左耳。
+- **琴键可弹**：键盘区分支排在标尺/网格之前，用 `routing::layerSlotId()`。
+- **菜单栏自绘**：`shortcutKeyDescription` 画快捷键，`kCommandKey` 分平台；新增命令要同时改
+  `fill*Menu` 和 `keyPressed`。
+
+## 编组
+- **内联曲线框**：框的左右 = **组的起止拍**，`getGroupCurveBounds()` 水平零内边距；X 轴是组自身
+  跨度、Y 轴 0..1。打开即 `setEnabled(true)`；**与音符内联框互斥**。
+- **组要能拖起来**：唯一入口 `armGroupMove(groupId, pos)`。两条路：点标签 `getGroupLabelAt`、
+  点框内空地 `getGroupFrameAt`（只认激活图层，排在音符命中之后、marquee 之前）。
+- **采样是组成员**：成员计数/`getGroupContentBounds`/组拖动/`pruneEmptyGroups` 都要同时看
+  notes 和 samples。组复制粘贴暂不带采样（已知边界）。
+- **P35：组是一个 trim，成员可以是两种东西**。`NoteGroup` 只存 levelDb / pan / muted，
+  **成员列表不存**——`groupId` 在音符和采样块自己身上，所有"组里有几个""组里是谁"都是扫出来的。
+  这仍是唯一模型：删除成员不会留下悬挂 id。
+- **建组 / 选组 / 解组都认两类成员**（P35）：
+  - `groupSelection()` = `assignNotesToGroup(selection)` + `assignSamplesToGroup(sampleSelection)`，
+    G 键条件与右键菜单项都放宽到"选中任一即可"；菜单文案「编组选中内容」。
+  - **P38：工具条按钮的门是 `hasAnySelection()`**（`!selection.empty() || !sampleSelection.empty()`）。
+    P35 只改了 `groupSelection()` 和 G 键，按钮的点击门与绘制门还是 `!selection.empty()`，
+    于是"只选采样 → 编组按钮灰着、点了没反应，但按 G 能建组"。现在四处（两次点击、两次绘制）
+    加 Ctrl+D、G 键共用这一个谓词，自检直接断言谓词。
+  - `selectGroup()` = `setMixedSelection(notes, clips)`。**这是唯一能同时写两个选区的入口**；
+    `setSelection` / `setSampleSelection` 互相清空（点击语义：一次点击只抓一种）。
+  - `ungroupSelection()` 两类都清，清完 `pruneEmptyGroups()` 才真的把组删掉。
+  - `getSelectedGroupId()` 混合选区要求两半同组，否则 -1。
+- **组的音量/声相/静音作用于采样块的音频**（P35）：`GroupMix` 冻结 level / pan / **muted**
+  （`gainAt()` 里静音直接返 0，音符和块共用一份，不可能各说一套）。引擎里块的循环用
+  `groupBlockFor(clip.groupId)`，与音符同一份数据；块的 pan 是 **balance**（立体声文件自带
+  声像），音符是 constant-power，两者不混。
+- **组永远不决定采样块的路由**：`routing::resolveSample` 不看 `groupId`。重新挂载组不会换掉
+  某块脚底下的音频文件——那是 P27 定下的，P35 没动。
+
+## 音源卡片（P9 VST3 / P38 命名与界面）
+- 一个槽三种身份：`isSampler()` / `isPlugin()`（`pluginId > 0`）/ 其余是内置振荡器。
+  pill 依次写 `SAMPLE` / `VST3 · 插件` / `waveformName()`。
+- **卡片标题 = `SynthSlot::getDisplayName()`**：插件时返回 `pluginName`，否则 `name`（"Synth A"）。
+  **派生，不写回**——只有派生才可能让 `replaceWithNative` 把原名还回来。读名字一律走
+  `RackModel::getSlotName()` 或 `getDisplayName()`，**不要再直接读 `slot->name`**。
+  "替换成 VST3 看起来没成功"的根因就在这里：pill 变了，标题还是 Synth A。
+- **打开插件界面**：卡片右键第 41 项 → `openPluginEditor(pluginId, getDisplayName())`，
+  与混音台 insert 共用 `PluginEditorWindow`（一实例一窗口，实例卸载时窗口自毁）。
+  enabled 条件 = `plugins.isLoaded(pluginId)`；没载入时文案写「· 未载入」而不是把项藏掉。
+  P42 起窗口尾部 `setKeyForwarder(&pluginForwarder)` —— 前台时的空格与电脑键盘音符靠它。
+- **卡片右键的「创建自动化 ▸」**（P42）列出该槽三样东西：`滤波器` / `音量` / `音源参数 ▸`；
+  「音源参数」展开后是该插件自己的参数表（下标直通 `pluginParam`），内置振荡器没有这一段。
+- 替换 = `replaceWithPlugin` / `replaceWithNative`，**槽 id 不变**，路由 / override / 自动化全保留。
+  两者都返回被换下来的旧实例 id，调用方接 `reconcilePlugins()` 收尸。
+- 替换后不用手动 republish：`AudioEngine` 自己是 rack 的 listener，`rackChanged()` → `republish()`。
+  这条不成立时"换音源没声音变化"就会回来。
+
+## 采样音源（P27）
+- 拖入采样 → `RackModel::addSampler(...)` 长出 sampler 槽，块 `outputSlotId` 指向它；
+  **同一 path 复用已有槽**。
+- 块的音频来自**挂载槽**：引擎与绘制（`clipAudio()`）都只调 `routing::resolveSample()`。
+- sampler 卡片：pill 写 `SAMPLE`，读数行写时长；点 pill 不换波形，点卡片只高亮不挂载。
+- 图层输出菜单、组挂载菜单、音符 override 都**不列 sampler**。
+
+## 采样与音源是双向引用（P32 / P33 改为派生不变量）
+- **块没了 → 槽没了**：`MainComponent::pruneOrphanSamplerSlots()` 扫所有图层所有块的
+  `outputSlotId`，把没人引用的 sampler 槽删掉。
+  **P33 起它挂在模型通知上**（`layersChanged()` / `notesChanged()` 各调一次），不再是
+  `onSampleReferencesChanged` 的回调——那条路只有"滚轮删块"会走，剪切、撤销、粘贴顶掉、
+  代码直接改模型全都漏，规则只在一条路上成立。**块消失必发这两个通知之一**，所以规则
+  现在成立。"谁记得去调回调"不是规则。
+- **护栏**：`pruningSamplers`（自身重入）、`restoringHistory`（撤销分两步恢复）、
+  `suspendSamplerPrune`（`buildSession` / `project::load` 期间层与机架短暂不同步）。
+  三者缺一，就会在换工程的窗口里删掉"下一行正要引用"的槽。
+- **快速通道**：机架上没有 sampler 就直接返回——这条路径在拖音符时每帧都跑。
+- **剪切→粘贴必须是"移动"**：切走会立刻触发清扫，剪贴板里的 `outputSlotId` 因此可能指向
+  已删除的槽；`pasteSamplesFromClipboard()` 会 `rack.addSampler(clip.audio, path, name)` 重新登记。
+  否则粘回来的块指着空气，`resolveSample` 回落到图层默认乐器，听感换了却找不到原因。
+- **槽没了 → 块没了**：`MainComponent::removeSlotAndItsClips()` 是删槽的**唯一入口**（卡片 ×、
+  菜单项 40）。**先删块再删槽**：反过来会短暂留下 dangling mount，音频/面板/撤销都会看到。
+  `PianoRollComponent::deleteSamplesMountedOn()` 跑**所有图层**，且**不再回调**
+  `onSampleReferencesChanged`（宿主正在删槽，回调会重入 rack 的通知）。
+- **换采样音源 = 换文件**：`mountSelectedSamplesToSlot(slotId)`（选中集）把块的 `audio/name/path`
+  换成槽的、`offset` 归零、长度回到新文件全长、fade 夹住；**`startBeat` 不动**（换采样不是搬音乐）。
+  `slotId < 0` = 跟随图层：先把当前听到的 buffer 抄进块，再解挂。
+- **已经挂在该槽 + 已经持有同一 buffer → 直接跳过**。否则"点一下自己那张卡片"会把用户的裁剪
+  悄悄还原成全长。
+- 高亮槽用 `selectedSamplerSlotId()`，只认 `resolveSample().viaSampler`——块跟随图层时它响的是
+  乐器，点亮乐器卡会谎称卡里装着那段音频。
+
+## 删除音乐前先问（P34）
+- **两个方向都要问**：块没了 → 删槽（清扫），槽没了 → 删块（删卡片）。P32/P33 是自动的，
+  P34 加了闸门：**自动发现，人工确认**。
+- **询问只有一处** `askSamplerCascade`（`std::function<void(title, body, onAnswer)>`），
+  执行只有一处（`removeSlotAndItsClips` / `removeSamplerSlots`）。别把对话框塞进执行器——
+  程序化调用会跟着弹框。
+- `installSamplerCascadePrompt()` 装真对话框（`AlertWindow` + `enterModalState`，
+  删除/取消）；自检把它换成**同步返回**的脚本答案，并清掉延迟——自检没有消息循环可泵。
+  跑完 `runSelfTest` 必须装回去，否则整个 app 从此不问。
+- **清扫走消息队列**（`deferSamplerPrompt = true`）：清扫是从 `notesChanged` 进的，拖音符时
+  每帧都跑，在拖拽中途开模态框会吞掉 mouse-up。`prunePromptQueued` 保证一次只问一个问题。
+- **问之前先重算**：`orphanSamplerIds()` 在真正发问时再跑一遍，不搬运队列里的旧名单。
+- **"保留"要记住**（`pruneDeclinedSlots`）：清扫每帧都跑，不记住就不是提问是骚扰。
+  某块重新挂上这个槽时**自动解除**；槽被删也清掉（否则复用的 id 会继承豁免）。
+- **不承诺做不到的事**：最后一个槽删不掉（`getNumSlots() <= 1`），所以**不问**；
+  候选数也夹到 `numSlots - 1`。问完却拒绝执行比不问更糟。
+- **没有成本就不问**：卡片上没挂块 → 直接删；非 sampler 槽 → 直接删。
+- **删块会通知**，所以 `removeSlotAndItsClips` 也持有 `pruningSamplers` 守卫，否则那一瞬
+  卡片被当成孤儿，用户会收到第二个问题（问的是"屏幕上的这张卡"）。
+
+## 走带（P33：空格是播放/停止开关）
+- **暂停键已删除**，界面上只有播放 + 停止两个按钮（`play` 188 / `stop` 226，4 px 间距）。
+- `stopDecision(engaged)` 是停止语义的**唯一算术**，只有两支：
+  **在跑 → 停 + 播放头回 0**；**已经停着 → 什么都不做**。
+  P32 的"回到本次播放起点"和 `playStartBeat` 已删除——它让停止键变成第二个"从这里播"，
+  同时让键盘没有播放键。
+- **播放头也是"从这播"的控件**：点了第 20 小节再顺手按停止，不能被打回开头。要回开头有
+  `rewindTransport()`（回车）和标尺。
+- `playTransport()` 从当前播放头播，不记任何锚点。
+- 落点写盘只有一处 `parkTransportAt(beat)`：`audio.stopTransport()`（引擎语义 = 归零 + 淡出）
+  **之后**再 `setPositionBeats`，中间不重绘，看不到归零那一瞬。
+- **空格 / 回车**：空格 = 在跑就停、停着就播（`spaceStartsPlayback(engaged)`）；回车 = 永远回零。
+
+## 文件树与扫描（P28 / P33 默认折叠）
+- **层级唯一来源是扫描出来的 `DirNode` 树**：`buildRows()` 摊平成行。空目录不出行。
+- **默认全部折叠**（P33）：store 里记的是**已展开**的分支 `!expand <path>`，未列出的就是折的。
+  P28 记的是 `!collapse`（默认全开），扫完一个大库当场变成千行墙。读旧 store 时任何
+  `!` 开头且不认识的标记**跳过**，不能当路径。
+- **根行仍默认展开**：只展开它自己，子目录一律折——否则块面板里只剩一行，用户以为扫崩了。
+- `setSubFolderExpanded(dir, expanded, persist = true)`：`persist = false` 给快照夹具用，
+  否则临时路径会写进用户真实 store。
+- **行列表缓存 `cachedRows` + `rowsDirty`**：改树/折叠都要 `invalidateRows()`。
+- **`addFolder(folder, persist)`**：`persist = false` 是快照夹具和 `loadFromDisk` 用的。
+- **扫描在后台线程**，只写三个 atomic，结果经 `AsyncUpdater` 回消息线程。**模型只在消息线程改**。
+- 进度用**逐层 BFS**；收尾设 **1.0**（不是 0）。`waitForPendingScans()` 自己泵 AsyncUpdater，
+  所以 `handleAsyncUpdate()` 必须幂等。**析构必须 `stopThread(-1)` 兜底**。
+
+## 采样块：选择 / 窗口 / 淡变（P28–P29）
+- **单击替换整个选择，框选可以同时选中两类**。`setSelection`/`setSampleSelection` 清对方
+  （单击语义）；`setMixedSelection(notes, clips)` 一次性替换两者（marquee 与粘贴用）。
+  Delete / Ctrl+C / Ctrl+D 一律"两类一起"，不留"你指哪个"的暗选择。
+- **拖动只有一份实现**：`captureEditOriginals()`（音符+采样）→ `clampMove()` + `applyMove()`。
+  `DragMode::moveSample` 已删除；块拖动走 `moveNote` 分支。
+- **块是窗口不是拷贝**：`sourceOffsetSeconds` 是文件内起点；左端拉伸同时改 `startBeat` 与
+  offset（同样的秒数），音频留在原时间位置；右端拉伸只改 `lengthBeats`。
+- **两端上界都来自文件**：右 ≤ 文件剩余长度，左 ≥ offset 允许的距离（offset 不会 < 0）。
+  这就是"满长拖不长、但拖得短"；`maxSampleLengthBeats()` 是唯一判据，音频缺失时返回 0 = 不设限。
+- **三个命中区**：顶部条 = 两个淡变手柄，整高的左右边 = 拉伸，其余 = 拖动。淡变为 0 时手柄
+  落在角上，所以淡变优先。
+- 淡变长度是**拍**、从各自那条边往里量，`applySampleFade()` 夹到 `lengthBeats`；拉伸后两条
+  fade 要一起夹。波形只画窗口内的 peaks：裁过前后的块**画面必须不同**。
+- 复制/粘贴（Ctrl+C/X/V、Ctrl+D）：粘贴的块 **`groupId = -1`**，锚点与音符一致
+  （playhead > 剪贴板起点 > 右移一个块长）。`copySelectionToClipboards()` **清空另一类**。
+- **P37 贴落点三条规则**（只对采样，音符仍是老行为）：① 连按 Ctrl+V 要接着排——
+  `samplePasteNextBeat` / `samplePastePlayheadSeen`，playhead 没动就接上次终点，动了就按新位置；
+  ② 吸附开着时**落点 beat** 必须是网格线，所以让位/前进一律 `snapUp`（ceil 到网格），
+  不能先 `snapBeat` 再 `+= length`（长度非网格整数倍时那个加法把落点顶出网格）；
+  ③ 落到源位上要往前让，让完再吸附。`copySamplesToClipboard()` 重新起 streak。
+- 绘制：块被选中 = body 提亮 ×1.6 + 白环 + 四角括号（与音符同一套语言），只在激活图层画。
+
+## 高亮（P30 起：没有遮罩）
+- **不再压暗网格**。P16–P29 那层 46% 黑遮罩已删除；高亮 = 被聚焦音源那些音符上的
+  彩色描边 + 左侧小竖标 + 一层同色薄染（同色太淡就看不出来，太浓就毁掉"不改亮度"）。
+- **选中音符不再点亮高亮**：`updateRackRoutingFocus()` 只喂 `rackPanel.setSelectionActive`，
+  不再写 `focusedSlotId`。"点一下音符整张网格变灰"就是这么来的。
+- **出口必须永远在**：`PianoRollComponent::dismissSpotlight()` 是唯一出口（网格空白处单击 /
+  Esc / 机架菜单项 34 / chip）。chip 挪到**右下角**——右上角是采样块和高音区，压的是要看的东西。
+- **P32：选中采样会自动点亮它的采样音源**，这是唯一自动点亮的情况（音符仍然不点亮）。
+  `focusFromSampleSelection` 记住"这次高亮是选择带来的"：选择没了只撤销**这一种**高亮，
+  用户手动点亮的那张卡不会被下一次点空地带走。
+
+## 采样波形（P30–P31）
+- 两种画法，由 `sampleWaveFillsBlock()` **一个函数**决定，`sampleWaveColumns()` 与绘制都调它：
+  * **填满**（变速变调 / 只变速不变调）：整段文件被压进块里，`secPerPixel = 剩余秒 / 块宽`。
+  * **截断**（原速 / 不变速只变调）：`secPerPixel = (60/bpm)/beatWidth`，一个像素永远是
+    同一段源，块变短只是画面被切断——**长度变了波形不能变**。
+- 块比文件长时尾部留空（P31 起拖入不再向上取整，正常情况不会再出现）。
+- 右键「恢复原始长度」= `restoreSampleLength()`：offset 归零、长度回到文件全长、
+  `startBeat` 左移 offset 那么多（音频回到时间线原位）。**整个过程不吸附**。
+
+## 采样伸缩（P31）
+- `SampleEvent::stretchMode`（`none/resample/tempo/pitch`）是**块**的属性，不是一个全局开关。
+- **唯一比例是 `stretchRatio(bpm) = 剩余源拍数 / lengthBeats`**：起点裁剪同时改 offset 与
+  长度，比例不变；只有拖尾会改它。"恢复原长"= 比例 1.0。
+- publish 期折算成 `speed`（源秒/输出秒）与 `pitch`（颗粒内读取倍率），夹到 0.125..8：
+  原速 1/1；变速变调 r/r；只变速 r/1；只变调 1/r。音频线程只做乘加，不算 log。
+- **拖入的块长度 = 文件精确长度**（不再 ceil 到网格）。这就是"恢复原长恢复不回去"的根：
+  投放 4.25、恢复 4.04。长度不在网格上是正确的——块就是那段音频。
+- 块上的黄色徽标是模式的唯一可见痕迹：`变速变调 ×2.50` / `变速 ×2.50` / `变调 +12.0`
+  （半音 = `12*log2(pitch)`）。宽度 < 82% 块宽才画，"块上什么都不写"就是默认模式。
+
+## 标尺缩放（P31）
+- 右键拖标尺 = 以**按下那一点**为锚缩放：`setBeatWidthAround(px, anchorBeat, anchorX)`，
+  锚点由 mouseDown 捕获（`rulerZoomAnchorBeat/X`），不是每帧重算。
+- 滚轮缩放仍锚定**视图中心**（`setBeatWidth()` 只是它的特例）。两者共用同一份数学。
+- 唯一的例外是 `clampScroll()` 在时间线两端生效——左边没有负拍，锚点只能让位。
+
+## 按键发声（P39 通道 / P40 双开关）
+
+- **两个独立开关**（`MidiSources{ typingKeyboard, externalController }`，P40 默认
+  `{true,false}`）：不是三选一。"什么都不开" = 两个都关。**不跨启动记忆**（默认值是代码里的）。
+- **关掉一个来源才释放它自己的音符**：键盘 → `releaseAllTypingNotes()`；控制器 → 一条
+  `allLiveNotesOff()`（端口说不出自己按着什么）。**打开一个来源不打扰另一个**——这是双开关
+  存在的全部理由，自检里断的就是这条（按着 Z/X 再开控制器，`typingHeld` 不能变）。
+- **设备归 `MidiInputHub` 所有**（`Source/Audio/MidiInputHub.*`）：一个 MIDI 端口只能开一次，
+  所以"打开设备的东西"和"发声的东西"必须是同一个对象；设置页只是它的视图。
+  `setSources` 在控制器关掉时关所有端口，`setDeviceOpen` 在控制器关着时**拒绝**打开。
+- **设置页布局要算，不能假设**（P40）：两块会同时出现，`MidiSettingsPage::plan()` 返回
+  `{keyboard, devices, monitor, deviceRowsTop, maxDeviceRows}`，**绘制和命中测试读同一份**；
+  装不下的设备行会被裁掉并在标题行写「显示 N / M 个」。
+- **线程边界**：MIDI 回调在 MIDI 线程；它只碰原子变量（`liveTargetSlot`）和引擎的
+  无锁队列。模型（`RackModel` / `LayerStack`）只在消息线程读。
+- **目标音源**：`focusedSlotId`（且不是 sampler）→ 否则 `routing::layerSlotId(activeLayer)`。
+  与 FL 的"选中通道"同义；`applyFocus()` 与 60 Hz 定时器把这个答案写进原子。
+- **发声走 `PlaybackEngine` 的 live 通道**，不是试听通道：
+  `noteOnLive(slotId, pitch, vel)` / `noteOffLive(pitch)` / `allLiveNotesOff()` +
+  `beginLiveBlock()`（每个回调一次，唯一排空点）+ `renderLive()`（`AudioEngine` 在 masterFade
+  之后调用，和试听一样不吃走带淡出）。
+  队列是 `AbstractFifo`；**生产者侧上 `SpinLock`**（生产者有两个：MIDI 线程和消息线程），
+  音频线程**不加锁**。16 个 voice，attack 3 ms / release 60 ms。
+- **插件乐器**：走带在跑时，`renderHostedInstruments` 把本块的 `pendingLive` 合进它自己的
+  `pluginMidi`，并把 slot 记进 `transportPluginSlots`；`renderLivePlugins` 跳过这些 slot。
+  一个 block 处理两次不是"双倍输出"，是**双倍 DSP 速率**。
+- **note-off 只有音高**（键不知道自己是哪个音源开始的）→ `liveHeldNotes` 记 `pitch → slotId`，
+  note-off 靠它找回原音源；否则插件会一直按着那个音。这条表也是 all-off 展开的依据。
+  **写入点必须在"振荡器 / 插件"分叉之前**（P41）：写在某一个分支末尾，另一个分支就永远
+  不记事，它的 note-off 带 `slotId = -1` 进来、匹配不到、被丢掉——症状是"选中 VST 卡片后
+  键盘弹一个音就一直响"。all-off 之后整张表清空（没人按着，就不该还指着音源）。
+- **all-off 是一条事件**（`LiveEvent::allOff`），不是消息线程遍历 voice 池；展开成每个
+  (slot, pitch) 的 note-off 追加进 `pendingLive`，由正常路径送出。
+- **裸按键打向谁只有 `routing::auditionSlotId(focusedSlotId, layer, rack)`**（P43）：
+  选中且不是 sampler 的槽优先，否则 `layerSlotId`。电脑键盘、钢琴窗琴键列、试听全调它。
+  这条原来是两份实现，只在"选中 VST"这一种情况下说法不同——也就是用户唯一会点的那下。
+- **键位唯一出处 `Source/UI/TypingPiano.h`**：FL Studio 默认布局，24 键两八度，
+  `Z = C4 = MIDI 60`；低八度白键 `Z X C V B N M`、黑键 `S D G H J`；高八度白键 `Q W E R T Y U`、
+  黑键 `2 3 5 6 7`。设置页的映射表和自检都读这张表。
+  小键盘 `+` / `-` 换八度（音圈没有别的空键可放；数字键是黑键）。
+  八度范围夹在 -4..+4，越界返回 -1 而不是发明音符。
+- **按键优先级**：`TypingKeyForwarder`（`juce::KeyListener`）挂在 `pianoRoll` 与
+  `envelopePanel` 上——**KeyListener 先于组件自己的 `keyPressed`**，所以 `G` 是音符而不是"编组"。
+  `Ctrl` / `Alt` 组合仍归快捷键（`Ctrl+S` 还要保存）。
+- **插件编辑器窗口是独立顶层组件，按键不走父链**（P42）：`PluginEditorWindow::setKeyForwarder`
+  把 `MainComponent::pluginForwarder` 装到**窗口 + `getContentComponent()` 两层**；
+  转发器唯一动作是调 `handleGlobalKeyPress()` → `keyPressed()`，**键表只有一份**。
+  有 `juce::TextEditor` 拿着焦点时返回 false（放行），否则在插件界面里输预设名会弹出音符。
+- **窗口开着也要能用空格**：同一套转发器把空格交给走带（播放/停止），
+  所以插件前台时"点一下空格能停"不需要用户先点回主窗口。
+- **释放**：JUCE 没有 key-up 事件。`keyStateChanged` 里按 `isKeyCurrentlyDown` 逐个查；
+  60 Hz 定时器再兜一次底（焦点跑到别的窗口时也能松手），**卡音是键盘最不能有的故障**。
+- **不过音源滤波器**：live 声音只做 slot 增益 + 声相 + master，和走带里的音色略有差别（已知边界）。
+
+## 主窗口（P40：默认最大化，保留标题栏）
+
+- `MainWindow`（`Source/Main.cpp`）的顺序是 **`centreWithSize(px(1440),px(820))` →
+  `setVisible(true)` → `setFullScreen(true)`**，没有手算 `userArea` 减边框。
+- **"最大化"就是窗口管理器自己的状态**：Windows 上 `setFullScreen(true)` =
+  `ShowWindow(SW_SHOWMAXIMIZED)`，标题栏照旧（`DocumentWindow::maximiseButtonPressed`
+  走的也是它），**不是**无边框全屏、**也不是** kiosk（那是 `Desktop::setKioskModeComponent`）。
+- `centreWithSize` 那一步是"还原尺寸"：`ResizableWindow::setFullScreen` 在显示状态下会存
+  `lastNonFullScreenPos`，点还原就回到 1440×820（实测 1872×1066 px）。
+- **自证入口 `--windowtest`**：建真窗口，打印 `maximised` / `titleBar` / 边框 / 内容区 /
+  `userArea` / 显示器 scale，再还原一次并打印尺寸。改窗口代码后跑它，不要靠肉眼看。
+  本机实测：`maximised=1 titleBar=30 border=7/7/7 content=0 23 2048 1081
+  userArea=0 0 2048 1104 scale=1.25x → OK`，`restored to 88 17 1872 1066`。
+
+## 踩坑档案
+平台陷阱、自检夹具摆位、出图尺寸见同目录 **`PITFALLS.md`**。动以下任一处前先读它：
+VST3 扫描 / 采样解码 / 试听声部 / 标尺 / ghost / `--snapshot` / 折叠行高 / 插件参数自动化 /
+剪贴板 / 组双曲线 / 删除通道与电平表 / sampler 与 clip / 文件树扫描 / 拉伸与淡变手柄 /
+采样波形比例与聚光灯出口 / 采样槽引用与删除 / 走带落点。

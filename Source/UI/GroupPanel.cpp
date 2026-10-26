@@ -15,6 +15,11 @@ namespace
     const juce::Colour kRowPlate        { 0x08ffffff };
     const juce::Colour kRowHover        { 0x0effffff };
 
+    /** Phase 35: the mixer's mute amber, repeated rather than shared. The two
+        panels have no common header to put it in, and inventing one for a
+        single colour would be a worse dependency than a line of duplication. */
+    const juce::Colour kMuteColour      { 0xffffb020 };
+
     juce::Font boldFont (float height)
     {
         return juce::Font (juce::FontOptions{}.withHeight (atomic::ui::sp (height)).withStyle ("Bold"));
@@ -176,6 +181,16 @@ juce::Rectangle<int> GroupPanel::getSendBounds (int rowIndex) const
     return { ui::px (12), row.getY() + ui::px (68), getWidth() - ui::px (24), ui::px (18) };
 }
 
+juce::Rectangle<int> GroupPanel::getMuteBounds (int rowIndex) const
+{
+    // On the title line, at the far right: the one place a row has spare width,
+    // and the same corner the mixer's strips put it in. The layer name that used
+    // to live there is trimmed to make room rather than moved — see drawRow.
+    const auto row = getRowBounds (rowIndex);
+
+    return { getWidth() - ui::px (30), row.getY() + ui::px (4), ui::px (22), ui::px (16) };
+}
+
 int GroupPanel::rowAt (juce::Point<int> position, Part* partOut) const
 {
     if (partOut != nullptr)
@@ -200,6 +215,8 @@ int GroupPanel::rowAt (juce::Point<int> position, Part* partOut) const
 
             if (getCollapseBounds (i).contains (position))
                 *partOut = Part::collapse;
+            else if (getMuteBounds (i).contains (position))
+                *partOut = Part::mute;          // Phase 35, before the body
             else if (collapsed)
                 *partOut = Part::body;
             else if (getVolumeBounds (i).expanded (0, ui::px (6)).contains (position))
@@ -291,8 +308,29 @@ void GroupPanel::drawRow (juce::Graphics& g, int rowIndex)
     g.setColour (juce::Colours::white.withAlpha (0.26f));
     g.setFont (plainFont (9.0f));
     g.drawText (layer != nullptr ? layer->getName() : juce::String(),
-                juce::Rectangle<int> (0, bounds.getY() + ui::px (5), getWidth() - ui::px (10), ui::px (16)),
+                juce::Rectangle<int> (0, bounds.getY() + ui::px (5),
+                                      getWidth() - ui::px (34), ui::px (16)),
                 juce::Justification::centredRight, true);
+
+    //-- Phase 35: mute -------------------------------------------------------
+    // The same chip the mixer's strips have (M, amber when on), because a mute
+    // is a mute wherever it appears. It stays on the title line in both the
+    // expanded and the folded state — a folded group is exactly the row you
+    // cannot otherwise tell is silent.
+    {
+        const auto chip = getMuteBounds (rowIndex).toFloat();
+        const bool on   = group->isMuted();
+        const bool chipHot = hot && hoveredPart == Part::mute;
+
+        g.setColour (on ? kMuteColour
+                        : juce::Colours::white.withAlpha (chipHot ? 0.18f : 0.07f));
+        g.fillRoundedRectangle (chip, ui::pf (2.5f));
+
+        g.setColour (on ? juce::Colours::black.withAlpha (0.8f)
+                        : juce::Colours::white.withAlpha (chipHot ? 0.72f : 0.42f));
+        g.setFont (boldFont (9.0f));
+        g.drawText ("M", chip, juce::Justification::centred, false);
+    }
 
     if (collapsed)
     {
@@ -408,7 +446,7 @@ void GroupPanel::paint (juce::Graphics& g)
     {
         g.setColour (juce::Colours::white.withAlpha (0.26f));
         g.setFont (plainFont (10.0f));
-        g.drawFittedText (utf8 ("还没有编组。\n在钢琴窗选中音符按 G，\n编组就会出现在这里。"),
+        g.drawFittedText (utf8 ("还没有编组。\n在钢琴窗选中音符或采样按 G，\n编组就会出现在这里。"),
                           getViewArea().reduced (ui::px (16), ui::px (12)),
                           juce::Justification::centredTop, 4);
     }
@@ -452,6 +490,27 @@ void GroupPanel::setPanFromMouse (NoteGroup& group, juce::Rectangle<int> track, 
                                      (x - (float) track.getX()) / juce::jmax (1.0f, (float) track.getWidth()));
     group.setPan (norm * 2.0f - 1.0f);
     stack.touchLayers();
+}
+
+void GroupPanel::toggleMute (int rowIndex)
+{
+    const auto rows = getRows();
+
+    if (! juce::isPositiveAndBelow (rowIndex, (int) rows.size()))
+        return;
+
+    auto* group = groupFor (rows[(size_t) rowIndex]);
+
+    if (group == nullptr)
+        return;
+
+    group->setMuted (! group->isMuted());
+
+    // Same notification the fader uses, for the same reason: mute is frozen into
+    // the schedule, so the engine has to republish or the mix keeps playing a
+    // group the model already calls silent.
+    stack.touchLayers();
+    repaint();
 }
 
 void GroupPanel::mouseDown (const juce::MouseEvent& e)
@@ -560,6 +619,10 @@ void GroupPanel::mouseDown (const juce::MouseEvent& e)
                 onMountRequested (ref.layerIndex, ref.groupId, e.getScreenPosition());
             break;
 
+        case Part::mute:
+            toggleMute (row);
+            break;
+
         case Part::none:
         default:
             break;
@@ -634,6 +697,16 @@ void GroupPanel::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheel
 //==============================================================================
 void GroupPanel::layersChanged()
 {
+    clampScroll();
+    repaint();
+}
+
+void GroupPanel::notesChanged()
+{
+    // Rows are derived from the model on every paint (see getRows), so the only
+    // thing standing between "a group was just made" and "the row is on screen"
+    // is this notification. Clamp first: grouping can also PRUNE an emptied
+    // group, which makes the list shorter under a scrolled viewport.
     clampScroll();
     repaint();
 }

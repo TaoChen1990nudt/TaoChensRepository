@@ -123,6 +123,19 @@ PluginEditorWindow::~PluginEditorWindow()
     clearContentComponent();
 }
 
+void PluginEditorWindow::setKeyForwarder (juce::KeyListener* listener)
+{
+    keyForwarder = listener;
+
+    if (listener == nullptr)
+        return;
+
+    addKeyListener (listener);
+
+    if (auto* content = getContentComponent())
+        content->addKeyListener (listener);
+}
+
 void PluginEditorWindow::closeButtonPressed()
 {
     if (onCloseRequest != nullptr)

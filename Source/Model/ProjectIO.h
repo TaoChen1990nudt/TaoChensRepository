@@ -77,8 +77,82 @@ namespace project
     v9 (Phase 20): a note group can carry a pan curve as well as a level one,
     so `<Group>` may hold two `<Automation>` children whose `target` says which
     is which. A v8 group had exactly one, unnamed, and level is the only thing
-    it could have been — so older files read with pan untouched. */
-inline constexpr int formatVersion = 9;
+    it could have been — so older files read with pan untouched.
+
+    v10 (Phase 23): a console strip remembers which strip it feeds
+    (`<Channel out="N">`, 8 = the master, also the default). Older files have
+    no `out` and read back as a flat console, which is exactly what they were.
+
+    v11 (Phase 24): a curve can drive a HOSTED instrument's parameter. A note
+    names it with `pluginparam="N"` (absent = the built-in `mod` target still
+    wins), and a group may carry a third `<Automation target="plugin">` lane
+    plus `pluginparam="N"`. `N` is an index into the plugin's parameter list;
+    a file naming a parameter of a plugin that is no longer installed loads
+    fine and simply has nothing to drive. Older files read with no plugin
+    targets at all.
+
+    v12 (Phase 25): 127 addressable strips (the master sentinel moved from 8 to
+    127, so `out="8"` in a v11-and-earlier file is translated to the master),
+    and per-strip mono monitoring (`<Channel mono="1">`).
+
+    v13 (Phase 26): the master strip's own mono button (`<Mixer masterMono="1">`).
+    Absent means off, which is what an older project was doing anyway.
+
+    v14 (Phase 27): sampler slots and clip mounts.
+
+      * `<Synth kind="sampler" sample="C:\\...\\clip.wav">` — a rack slot that
+        holds one file instead of an oscillator. The file is re-decoded on load;
+        a missing one leaves the slot in place with no buffer, and the card says
+        so rather than the project refusing to open.
+      * `<Sample slot="7">` — the sampler this clip plays through. Absent = the
+        layer's output, which is what every v13 clip did.
+      * `<Sample group="3">` — clips can be group members now. Membership says
+        "move with the group"; it never says what to play, so re-mounting a
+        group leaves its clips pointing at the samplers they were on.
+
+    v15 (Phase 29): a clip is a WINDOW onto its file.
+
+      * `<Sample offset="1.25">` — seconds into the source where the block
+        starts. Trimming the head writes it, so the rest of the audio stays on
+        the timeline instead of restarting at the new head. Absent = 0, which is
+        what every v14 clip did.
+      * `<Sample fadein="0.5" fadeout="1">` — fade lengths in BEATS from each
+        end. Absent = no fade, i.e. the hard edge a v14 clip had.
+
+    v16 (Phase 31): a clip says what a length change does to its audio.
+
+      * `<Sample stretch="0|1|2|3">` — 原速窗口 / 变速变调 / 只变速不变调 /
+        不变速只变调. Absent = 0, which is the window behaviour every v15 clip
+        already had, so an old project opens sounding exactly as it did. A
+        reader that does not know a mode number must keep it as an int rather
+        than guess a flag — the number IS the contract.
+
+    v17 (Phase 35): a group can be muted, and it means its clips too.
+
+      * `<Group mute="1">` — absent = not muted, which is what every v16 group
+        meant. The field is on the GROUP, not on each member, so one attribute
+        survives a paste, a duplicate and a merge; a v16 reader ignores it and
+        opens the group at its fader value, which is the closest thing it can
+        honestly do.
+
+    v18 (Phase 42): a slot can automate a parameter of its own hosted instrument.
+
+      * `<Slot pluginparam="N">` — which parameter of the plugin the third lane
+        writes. Absent = none chosen, which is what every v17 slot meant.
+      * `<Automation target="plugin">` — the third lane, same element as the
+        other two, so a v17 reader that only knows "filter" and "level" simply
+        skips it and opens the project with its existing two curves intact.
+
+    v19 (Phase 43): the rest of the strip became automatable.
+
+      * `<Automation target="pan|mute|solo">` — three more lanes on a slot,
+        appended AFTER the existing three so the numbers in the file's `target`
+        text and the model's enum keep agreeing. A v18 reader skips them and
+        opens the project with its two/three curves intact and the strip at its
+        fader value, which is what those files meant.
+
+      Nothing else changed: no attribute was renamed, no meaning was redefined. */
+inline constexpr int formatVersion = 19;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";

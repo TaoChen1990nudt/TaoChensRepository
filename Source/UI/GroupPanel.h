@@ -68,6 +68,15 @@ public:
         reads it to prove the panel and the roll agree. */
     bool isGroupFocused (int layerIndex, int groupId) const;
 
+    /** Phase 35: mute a row, by row index. The chip and the keyboard/menu path
+        both land here, so "the panel muted it" and "a test muted it" cannot be
+        two different operations. Out-of-range is ignored. */
+    void toggleMute (int rowIndex);
+
+    /** Phase 35: where the mute chip sits, so a test can click the real target
+        rather than a coordinate that drifts when the row is restyled. */
+    juce::Rectangle<int> getMuteBounds (int rowIndex) const;
+
     //-- Scrolling ------------------------------------------------------------
     int  getContentHeight() const;
     int  getViewHeight() const;
@@ -85,11 +94,19 @@ public:
 
     //-- Listeners -----------------------------------------------------------
     void layersChanged() override;
+
+    /** Phase 21: grouping does not change the LAYER count, it changes the
+        notes — so it arrives here, not in layersChanged(). Without this
+        override a freshly made group did not paint until something else asked
+        for a repaint (a mouse hover was the first thing that did), which read
+        as "the group list is one gesture behind". */
+    void notesChanged() override;
+
     void rackChanged() override { repaint(); }
 
 private:
     /** Which control of which row the mouse is over (or dragging). */
-    enum class Part { none, body, collapse, volume, pan, send };
+    enum class Part { none, body, collapse, volume, pan, send, mute };
 
     juce::Rectangle<int> getViewArea() const;
     juce::Rectangle<int> getRowBounds (int rowIndex) const;

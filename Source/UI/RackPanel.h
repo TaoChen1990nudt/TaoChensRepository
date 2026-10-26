@@ -60,10 +60,29 @@ public:
         replace-the-instrument, send-to-channel, automation, remove. */
     std::function<void (int slotId, juce::Point<int> screenPos)> onCardMenuRequested;
 
+    /** Phase 21: the card menu as a hover sub-menu of the fader's value menu.
+        Same split as the layer panel's pair. */
+    std::function<void (juce::PopupMenu&, int slotId)> buildCardSubmenu;
+    std::function<void (int slotId, int result)> onCardSubmenuChosen;
+
     /** A card was clicked while notes are selected: re-route them to it. Now
         bound to Alt-click (and the card menu), because a plain click means
         "inspect this synth" — see onCardFocused. */
     std::function<void (int slotId)> onSlotChosen;
+
+    /** Phase 32: the × on a card. A sampler holds the only copy of the link
+        between itself and the clips that play it, so the host has to delete
+        both in one step — the panel cannot know about the roll. When unset the
+        panel falls back to removing the slot on its own. */
+    std::function<void (int slotId)> onSlotRemoveRequested;
+
+    /** Phase 23: "there is a note/group selection right now". With a selection
+        on screen, a plain card click mounts it on that synth — the gesture the
+        user is already making when they look at a selection and then reach for
+        an instrument. With nothing selected the plain click stays harmless
+        (inspect only), so a stray click can never rewire a sheet. */
+    void setSelectionActive (bool active);
+    bool isSelectionActive() const noexcept { return selectionActive; }
 
     /** Phase 16: a card body was clicked. The host spotlights this synth in the
         piano roll and the layer list. -1 means "the empty rack was clicked". */
@@ -144,10 +163,15 @@ private:
     /** Phase 17: pixels the card list is pushed up. */
     float  scrollY = 0.0f;
 
+    /** Phase 27: how many slots the last change reported, so a GROWTH can be
+        told apart from a rename. Only growth scrolls the new card into view. */
+    int    lastSlotCount = 0;
+
     int  hoveredCard = -1;
     Part hoveredPart = Part::none;
     int  focusSlotId = -1;          // synth the selection plays on
     bool focusActive = false;
+    bool selectionActive = false;   // Phase 23: a plain click may mount the selection
     bool hoveringAdd = false;
 
     Part dragPart = Part::none;

@@ -32,10 +32,21 @@ public:
         faders are exactly where they were the next time it opens. */
     std::function<void()> onCloseRequest;
 
+    /** Phase 43: 空格 and the computer keyboard have to keep working while the
+        console has focus.
+
+        Same hole Phase 42 plugged for a plugin's editor: this is a top-level
+        window, so its keys never reach the main component's parent chain. The
+        shell owns the key map, so it owns the listener — the window only carries
+        it, on itself AND on the panel it hosts. */
+    void setKeyForwarder (juce::KeyListener* listener);
+    bool hasKeyForwarder() const noexcept { return keyForwarder != nullptr; }
+
     void closeButtonPressed() override;
 
 private:
     MixerPanel& panel;
+    juce::KeyListener* keyForwarder = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MixerWindow)
 };

@@ -248,6 +248,20 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     if (numOutputChannels <= 0 || numSamples <= 0)
         return;
 
+    // Phase 39: the live queue is drained exactly once per callback, before
+    // anything reads it — the transport's hosted-instrument path and the live
+    // renderer both need the same note-ons, and a second drain would send each
+    // one twice.
+    playback.beginLiveBlock();
+
+    // Phase 42: the meters fall on EVERY callback, not only the idle one. The
+    // render paths store peaks with `jmax`, so a block with nothing in it used
+    // to leave the bar exactly where the last loud block put it — the transport
+    // rolling over silence looked identical to a mastered wall of sound. Doing
+    // it here, before any render, is also what makes it reach zero: nothing
+    // below writes a peak when there is no peak.
+    playback.decayMeters (numSamples);
+
     const bool running = isPlaying();
 
     // Phase 19: a preview (drawing or dragging a note) has to be audible with
@@ -257,15 +271,17 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     const bool audition = playback.hasAudition();
     const bool preview  = playback.hasSamplePreview();
 
+    // Phase 39: nor is a key held down on a MIDI controller or the typing
+    // keyboard — playing an instrument with the transport stopped is the whole
+    // point of it.
+    const bool live = playback.hasLiveNotes();
+
     masterFade.setTargetValue (running ? 1.0f : 0.0f);
 
     // Once the release ramp has reached zero there is nothing left to render.
-    if (! running && ! audition && ! preview
+    if (! running && ! audition && ! preview && ! live
           && ! masterFade.isSmoothing() && masterFade.getCurrentValue() < 1.0e-4f)
-    {
-        playback.decayMeters (0.90f);
         return;
-    }
 
     juce::AudioBuffer<float> output (outputChannelData, numOutputChannels, numSamples);
 
@@ -296,6 +312,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // 8 ms fade-out that silences a stopped transport must not swallow it.
     if (audition)
         playback.renderAudition (output, numSamples);
+
+    // Same rule as the preview: a held key is not transport audio, so the
+    // fade-out that silences a stopped transport must not swallow it.
+    if (live)
+        playback.renderLive (output, numSamples);
 
     if (preview)
         playback.renderSamplePreview (output, numSamples);

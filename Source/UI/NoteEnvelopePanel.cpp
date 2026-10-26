@@ -15,6 +15,15 @@ namespace
     const juce::Colour kEditorBg    { 0xff101116 };
     const juce::Colour kMuted       { 0xff8b91a0 };
 
+    //-- Phase 36: the three layers, three colours ---------------------------
+    // Chosen to be tellable apart at 1 px against a near-black box AND from the
+    // note's own curve, which wears the layer's accent — a sheet's colour can be
+    // violet, so the references must not be. Teal for the mix (layer + synth),
+    // orange for the group, amber for the result.
+    const juce::Colour kMacroColour { 0xff4fd1c5 };
+    const juce::Colour kGroupColour { 0xffffa06b };
+    const juce::Colour kStackColour { 0xffffd479 };
+
     constexpr int kEditorX  = atomic::ui::px (16);
     constexpr int kOutputY  = atomic::ui::px (58);
     constexpr int kOutputH  = atomic::ui::px (28);
@@ -53,6 +62,99 @@ void EnvelopeEditor::setAccentColour (juce::Colour colour)
 {
     accent = colour;
     repaint();
+}
+
+void EnvelopeEditor::setOverlay (AutomationOverlay newOverlay)
+{
+    overlay = std::move (newOverlay);
+    repaint();
+}
+
+//==============================================================================
+void EnvelopeEditor::drawReferenceCurve (juce::Graphics& g, juce::Rectangle<float> area,
+                                         const std::vector<float>& curve, juce::Colour colour) const
+{
+    if (curve.size() < 2 || area.getWidth() <= 1.0f)
+        return;
+
+    juce::Path path;
+
+    for (int i = 0; i <= AutomationOverlay::steps; ++i)
+    {
+        const float u = (float) i / (float) AutomationOverlay::steps;
+        const float v = juce::jlimit (0.0f, 1.0f, automation::sampleAt (curve, u));
+        const float x = area.getX() + u * area.getWidth();
+        const float y = area.getBottom() - v * area.getHeight();
+
+        if (i == 0)
+            path.startNewSubPath (x, y);
+        else
+            path.lineTo (x, y);
+    }
+
+    // Dashed, so a reference line can never be mistaken for something you can
+    // grab. The handles in this box all sit on the solid curve.
+    const float dashes[] { 3.0f, 3.0f };
+    juce::Path dashed;
+
+    juce::PathStrokeType (1.2f).createDashedStroke (dashed, path, dashes, 2);
+    g.setColour (colour.withAlpha (0.62f));
+    g.fillPath (dashed);
+}
+
+float EnvelopeEditor::drawStackCurve (juce::Graphics& g, juce::Rectangle<float> area,
+                                      const NoteEnvelope* envelope) const
+{
+    if (area.getWidth() <= 1.0f || area.getHeight() <= 1.0f)
+        return 1.0f;
+
+    juce::Path line, fill;
+    float levelAtMiddle = 1.0f;
+
+    for (int i = 0; i <= AutomationOverlay::steps; ++i)
+    {
+        const float u = (float) i / (float) AutomationOverlay::steps;
+
+        // The note's own term: its curve, but only when that curve is a LEVEL
+        // curve. `overlay.noteLive` was decided by the panel, which is the only
+        // place that can see the note's target as well as its shape.
+        const float noteTerm = (overlay.noteLive && envelope != nullptr && envelope->isEnabled())
+                                 ? envelope->valueAt (u) : 1.0f;
+
+        // The law, not a look-alike of it.
+        const float level = juce::jlimit (0.0f, 1.0f,
+                                          automation::stackLevel (overlay.macroAt (u),
+                                                                  overlay.groupAt (u),
+                                                                  noteTerm));
+
+        const float x = area.getX() + u * area.getWidth();
+        const float y = area.getBottom() - level * area.getHeight();
+
+        if (i == 0)
+        {
+            line.startNewSubPath (x, y);
+            fill.startNewSubPath (area.getX(), area.getBottom());
+            fill.lineTo (x, y);
+        }
+        else
+        {
+            line.lineTo (x, y);
+            fill.lineTo (x, y);
+        }
+
+        if (i == AutomationOverlay::steps / 2)
+            levelAtMiddle = level;
+    }
+
+    fill.lineTo (area.getRight(), area.getBottom());
+    fill.closeSubPath();
+
+    g.setColour (kStackColour.withAlpha (0.12f));
+    g.fillPath (fill);
+    g.setColour (kStackColour.withAlpha (0.78f));
+    g.strokePath (line, juce::PathStrokeType (2.4f));
+
+    return levelAtMiddle;
 }
 
 void EnvelopeEditor::setPlayheadProgress (double progress)
@@ -148,6 +250,61 @@ void EnvelopeEditor::paint (juce::Graphics& g)
     }
 
     const auto& points = envelope->getPoints();
+
+    //-- Phase 36: the other two layers, and the product -----------------------
+    // Drawn BEFORE the note's own curve so the handles stay on top of everything
+    // — the overlay is context, not a second thing to grab. The order inside is
+    // the stack's own order: the mix, then the group, then the result.
+    if (overlay.anyLive())
+    {
+        if (overlay.macroLive)
+            drawReferenceCurve (g, curve, overlay.macro, kMacroColour);
+
+        if (overlay.groupLive)
+            drawReferenceCurve (g, curve, overlay.group, kGroupColour);
+
+        const float stacked = drawStackCurve (g, curve, envelope);
+
+        //-- Legend ----------------------------------------------------------
+        // One line, quoted at the middle of the note. It names the three factors
+        // rather than only the product, because "why is this note so quiet" is
+        // answered by the factor that is small, not by their product. The
+        // multiplication sign is literal: these three numbers ARE multiplied.
+        juce::String legend;
+
+        if (overlay.macroLive)
+            legend << utf8 ("宏 ") << juce::String (overlay.macroAt (0.5f), 2);
+
+        if (overlay.groupMuted)
+            legend << (legend.isNotEmpty() ? utf8 ("  ×  ") : "") << utf8 ("组 静音");
+        else if (overlay.groupLive)
+            legend << (legend.isNotEmpty() ? utf8 ("  ×  ") : "") << utf8 ("组 ")
+                   << juce::String (overlay.groupAt (0.5f), 2);
+
+        if (overlay.noteLive)
+            legend << (legend.isNotEmpty() ? utf8 ("  ×  ") : "") << utf8 ("音符 ")
+                   << juce::String (envelope->isEnabled() ? envelope->valueAt (0.5f) : 1.0f, 2);
+
+        if (legend.isNotEmpty())
+            legend << utf8 ("  →  ") << juce::String (stacked, 2);
+
+        const juce::Font legendFont (juce::FontOptions (atomic::ui::sp (9.0f)));
+        juce::GlyphArrangement measure;
+        measure.addLineOfText (legendFont, legend, 0.0f, 0.0f);
+        const float legendWidth = measure.getBoundingBox (0, -1, true).getWidth();
+
+        const juce::Rectangle<float> pill (curve.getRight() - legendWidth - atomic::ui::pf (12),
+                                           curve.getY() + atomic::ui::pf (2),
+                                           legendWidth + atomic::ui::pf (10),
+                                           atomic::ui::pf (14));
+
+        g.setColour (juce::Colours::black.withAlpha (0.55f));
+        g.fillRoundedRectangle (pill, atomic::ui::pf (3));
+
+        g.setColour (kStackColour.withAlpha (0.92f));
+        g.setFont (legendFont);
+        g.drawText (legend, pill, juce::Justification::centred, false);
+    }
 
     if (points.size() < 2)
         return;
@@ -350,6 +507,86 @@ NoteEvent* NoteEnvelopePanel::getNote() const
     return nullptr;
 }
 
+//==============================================================================
+void NoteEnvelopePanel::rebuildOverlay()
+{
+    overlay = AutomationOverlay {};
+
+    auto* note  = getNote();
+    auto* layer = stack.getLayer (layerIndex);
+
+    if (note != nullptr && layer != nullptr)
+    {
+        const double startBeat = note->startBeat;
+        const double endBeat   = note->startBeat + juce::jmax (1.0e-6, note->lengthBeats);
+
+        //-- The MACRO layer: the sheet's volume lane, times the synth's --------
+        // Two curves, one layer of the stack: a note passes through both before
+        // anyone grouped it, and they multiply in the engine for exactly the
+        // reason they multiply here.
+        std::vector<float> layerCurve, slotCurve;
+
+        const auto& volumeLane = layer->automationFor (LayerAutomationTarget::volume);
+
+        const bool layerLive = automation::sampleLaneInto (volumeLane.getPoints(),
+                                                            volumeLane.isEnabled(),
+                                                            startBeat, endBeat, layerCurve,
+                                                            AutomationOverlay::steps);
+
+        bool slotLive = false;
+
+        // Which synth this note resolves to, through the same resolver the
+        // engine uses. A note that overrides its layer's output has to show the
+        // curve of the synth it actually plays on; asking the layer for its
+        // default would draw a different instrument's automation.
+        const auto route = routing::resolve (*layer, *note, rack);
+
+        if (const auto* slot = rack.findSlot (route.slotId))
+        {
+            const auto& levelLane = slot->automationFor (SlotAutomationTarget::level);
+
+            slotLive = automation::sampleLaneInto (levelLane.getPoints(),
+                                                    levelLane.isEnabled(),
+                                                    startBeat, endBeat, slotCurve,
+                                                    AutomationOverlay::steps);
+        }
+
+        if (layerLive || slotLive)
+        {
+            overlay.macro.assign ((size_t) AutomationOverlay::steps + 1, 1.0f);
+
+            for (size_t i = 0; i < overlay.macro.size(); ++i)
+                overlay.macro[i] = (layerLive ? layerCurve[i] : 1.0f)
+                                   * (slotLive ? slotCurve[i] : 1.0f);
+
+            overlay.macroLive = true;
+        }
+
+        //-- The GROUP layer ---------------------------------------------------
+        // A note that was never grouped has no entry here at all, and the
+        // identity is what `macroAt`/`groupAt` return in that case — the same
+        // "absent means unity" the audio thread relies on.
+        if (const auto* group = layer->findGroup (note->groupId))
+        {
+            const auto& lane = group->getLevelAutomation();
+
+            overlay.groupLive = automation::sampleLaneInto (lane.getPoints(), lane.isEnabled(),
+                                                           startBeat, endBeat, overlay.group,
+                                                           AutomationOverlay::steps);
+
+            overlay.groupMuted = group->isMuted();
+        }
+
+        //-- The NOTE layer ----------------------------------------------------
+        // Only a level curve multiplies the level. A note bending pitch or
+        // sweeping pan through the same box is doing real work, but folding it
+        // into this product would draw a level change that nobody hears.
+        overlay.noteLive = note->envelope.isEnabled() && note->modTarget == NoteModTarget::level;
+    }
+
+    editor.setOverlay (overlay);
+}
+
 void NoteEnvelopePanel::openFor (int newLayerIndex, int newNoteId)
 {
     auto* layer = stack.getLayer (newLayerIndex);
@@ -361,6 +598,7 @@ void NoteEnvelopePanel::openFor (int newLayerIndex, int newNoteId)
     noteId = newNoteId;
 
     editor.setAccentColour (layer->getColour());
+    rebuildOverlay();
     editor.repaint();
 
     setVisible (true);
@@ -409,13 +647,22 @@ void NoteEnvelopePanel::layersChanged()
         return;
     }
 
+    // Phase 36: a group fader, a macro lane or a layer's own volume curve may
+    // have just moved — all of them arrive as layersChanged, and all of them
+    // change the overlay.
+    rebuildOverlay();
     repaint();
 }
 
 void NoteEnvelopePanel::rackChanged()
 {
-    if (isOpen())
-        repaint();
+    if (! isOpen())
+        return;
+
+    // Phase 36: a routing change can point this note at a different synth, and
+    // that synth brings its own level curve.
+    rebuildOverlay();
+    repaint();
 }
 
 void NoteEnvelopePanel::notesChanged()
@@ -429,6 +676,10 @@ void NoteEnvelopePanel::notesChanged()
         return;
     }
 
+    // Phase 36: the note's own curve moving changes the product as well, and so
+    // does its length — the macro and group curves are sampled across the note,
+    // so stretching a note resamples them.
+    rebuildOverlay();
     editor.repaint();
     repaint();
 }

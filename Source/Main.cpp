@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 
+#include <cstdlib>
 #include <iostream>
 
 #include "MainComponent.h"
@@ -72,6 +73,12 @@ namespace
         component.openDemoNoteAutomation();
         component.showDemoRoutingOverride();
 
+        // Phase 29: the hero shot shows a MIXED selection — a block and notes at
+        // once — because that is the state the marquee can now produce, and it
+        // is the one thing a still image can prove about it.
+        component.prepareSnapshotBrowser();
+        component.showDemoMixedSelection();
+
         pngFile.getParentDirectory().createDirectory();
 
         if (auto stream = pngFile.createOutputStream())
@@ -100,7 +107,68 @@ namespace
             }
         };
 
+        // Phase 32: the clip and its sampler, in one frame. Selecting the block
+        // is the gesture that lights the card in the rack, and the pair is the
+        // only way to photograph the rule that ties them together.
+        writePng ("-sampler", component.createSamplerLinkSnapshot());
+
+        // Phase 34: the question, not the answer. Both cascade deletions stop
+        // here first, and a dialog is the one thing a screenshot of the shell
+        // can never contain — it lives in its own window.
+        writePng ("-prompt", component.createSamplerPromptSnapshot());
+
+        // Phase 23: 通道 1 → 2 → 3 → 主输出, so the console image documents the
+        // strip-to-strip routing instead of eight strips that all say the same.
+        component.showDemoConsoleRouting();
+
         writePng ("-mixer", component.createMixerSnapshot());
+
+        // Phase 23: the same console in a window too narrow to hold it. The
+        // strip widths do not change — a scrollbar appears instead — and that
+        // is a claim only a second image can make.
+        writePng ("-mixer-narrow", component.createMixerSnapshot (atomic::ui::px (700),
+                                                                 atomic::ui::px (300)));
+
+        // Phase 28: the browser tree, taller than the shell's split can give it.
+        writePng ("-browser", component.createFileBrowserSnapshot());
+
+        // Phase 29: the demo block zoomed in — the fade ramps and their handles
+        // are the point, and at the opening scale a half-beat fade is twelve
+        // pixels. Restores the view itself, so the frames below are unaffected.
+        writePng ("-clip", component.createClipCloseupSnapshot());
+
+        // Phase 30: "highlight a synth" with no veil. The grid keeps its normal
+        // brightness and the notes that reach the synth are marked in its
+        // colour, which is a claim only a picture can make — every other frame
+        // here looks identical either way.
+        writePng ("-spotlight", component.createSpotlightSnapshot());
+
+        // Phase 31: one file, three stretch modes side by side. The modes are
+        // audible and the blocks are not, so this frame exists to show the
+        // badges — the only place the mode is written down on screen.
+        writePng ("-stretch", component.createStretchSnapshot());
+
+        // Phase 35: a group whose members are two kinds of thing. The pill says
+        // 静音 and the block under it is lit by the same selection that lights
+        // the notes — a muted group is still an editable group.
+        writePng ("-groups", component.createGroupMuteSnapshot());
+
+        // Phase 21: the group's inline curve box. Its own frame, because only
+        // one floating editor can be open at a time and the main image above
+        // already documents the note box.
+        component.openDemoGroupAutomation();
+        writePng ("-groupauto", component.createComponentSnapshot (component.getLocalBounds(), true));
+
+        // Phase 36: the three automation layers in one editor — macro, group and
+        // the note's own curve — with the product drawn through them. A number
+        // in a legend can be quoted in prose; only the picture shows that the
+        // three lines were read separately and multiplied.
+        writePng ("-stack", component.createAutomationStackSnapshot());
+
+        // Phase 42: a synth's OWN parameter as an automation row. The submenu
+        // that creates it cannot be photographed headlessly, so this frame shows
+        // what it produced: a row whose parameter column says 音源参数.
+        writePng ("-slotparam", component.createSlotParamAutomationSnapshot());
 
         // The audio page lists device, sample rate and buffer size — none of
         // which exist until something is open. Opening a device here only fills
@@ -109,6 +177,15 @@ namespace
 
         writePng ("-settings-audio", component.createSettingsSnapshot (0));
         writePng ("-settings-midi", component.createSettingsSnapshot (1));
+
+        // Phase 39/40: the same tab with the keyboard source chosen — the FL
+        // Studio map, built from the table the key handler reads.
+        writePng ("-midi-keyboard", component.createMidiKeyboardSnapshot());
+
+        // Phase 40: both sources on at once. With two blocks sharing one page
+        // the layout is the thing that can go wrong, and only a picture of the
+        // pair shows whether the device list still fits above the monitor.
+        writePng ("-midi-both", component.createMidiBothSnapshot());
         writePng ("-settings-plugins", component.createSettingsSnapshot (2));
 
         // Phase 10: what a real double-click launch shows — one empty layer and
@@ -393,11 +470,77 @@ public:
             juce::Thread::sleep (1000);
 
             const double end = component.getTransportBeats();
-            component.pauseTransport();
+            component.stopTransport();
 
             std::cout << "transport moved " << juce::String (end - start, 3)
                       << " beats in 1 s at 120 BPM  (expected about 2)"
                       << "  -  " << component.getAudioStatus() << std::endl;
+            quit();
+            return;
+        }
+
+        // Window contract: "opens maximised, keeps the title bar". A screenshot
+        // cannot answer that — it shows the content, not the state the window
+        // manager thinks the window is in — so the window is asked directly.
+        // Run by hand after touching MainWindow.
+        if (args.contains ("--windowtest"))
+        {
+            mainWindow = std::make_unique<MainWindow> (getApplicationName());
+
+            auto* window = mainWindow.get();
+            auto* peer   = window->getPeer();
+
+            const auto content = window->getScreenBounds();
+            const auto frame   = peer != nullptr ? peer->getFrameSize()
+                                                 : juce::BorderSize<int>();
+
+            auto userArea = juce::Rectangle<int> {};
+            juce::String displayName;
+
+            if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+            {
+                userArea    = display->userArea;
+                displayName = juce::String (display->scale) + "x";
+            }
+
+            const auto near = [] (int a, int b, int tolerance)
+            {
+                return std::abs (a - b) <= tolerance;
+            };
+
+            // A maximised Windows window sticks its (invisible) resize border a
+            // few pixels past the work area, and the border itself comes back in
+            // physical pixels while the bounds are logical. Both make an exact
+            // comparison lie; 16 px of slack does not hide a real failure — a
+            // window that is not maximised is off by hundreds.
+            const auto expected = userArea.withTrimmedTop (frame.getTop());
+
+            const bool maximised   = window->isFullScreen();
+            const bool hasTitleBar = frame.getTop() >= 20;
+            const bool fillsWorkArea = near (content.getWidth(),  expected.getWidth(),  16)
+                                        && near (content.getHeight(), expected.getHeight(), 16)
+                                        && near (content.getX(),      expected.getX(),      16)
+                                        && near (content.getY(),      expected.getY(),      16);
+
+            std::cout << "maximised=" << (int) maximised
+                      << "  titleBar=" << frame.getTop()
+                      << "  border=" << frame.getLeft() << "/" << frame.getRight()
+                                      << "/" << frame.getBottom()
+                      << "  content=" << content.toString()
+                      << "  userArea=" << userArea.toString()
+                      << "  scale=" << displayName
+                      << "  ->  " << ((maximised && hasTitleBar && fillsWorkArea) ? "OK" : "MISMATCH")
+                      << std::endl;
+
+            // And un-maximising has to come back to a usable window, not to the
+            // corner it was created in: that is what proves the frame is a normal
+            // frame and not a kiosk one.
+            window->setFullScreen (false);
+
+            std::cout << "restored to " << window->getScreenBounds().toString()
+                      << "  (asked for " << atomic::ui::px (1440) << " x " << atomic::ui::px (820) << ")"
+                      << std::endl;
+
             quit();
             return;
         }
@@ -444,38 +587,20 @@ public:
             // now runs into the master meter, so the floor has to move with it.
             setResizeLimits (atomic::ui::px (1024), atomic::ui::px (620), 12000, 12000);
 
-            // Opens maximised: three panes side by side plus the automation
-            // window is what the shell is for, and a 1440 window no longer
-            // holds them at the larger UI scale.
-            //
-            // Phase 18: setBounds() on a top-level Component takes the CONTENT
-            // size and lets the peer grow the frame AROUND it, so
-            // setBounds (userArea) pushed the title bar off the top of the
-            // screen — a borderless fullscreen, which is not what the user
-            // asked for. Subtract the frame first: the window+titlebar then
-            // sits inside the work area, which is exactly "maximised".
+            // Opens maximised, and "maximised" means the state the window
+            // manager itself is in. Phase 40 replaced a hand-rolled attempt:
+            // Phase 18 called setBounds (userArea trimmed by the frame), which
+            // is only right on a 100 % display — userArea is in logical units
+            // while the frame comes back in physical ones, so at 150 % the
+            // window came up a title bar short of the work area and the restore
+            // button did not light. The peer's own maximise has no such
+            // arithmetic in it, keeps the title bar (it is ShowWindow
+            // (SW_SHOWMAXIMIZED), not a borderless fullscreen), and still
+            // restores to the size set below.
+            centreWithSize (atomic::ui::px (1440), atomic::ui::px (820));
+
             setVisible (true);
-
-            if (auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
-            {
-                auto area = display->userArea;
-
-                if (auto* peer = getPeer())
-                {
-                    const auto frame = peer->getFrameSize();
-
-                    area = area.withTrimmedTop (frame.getTop())
-                               .withTrimmedLeft (frame.getLeft())
-                               .withTrimmedRight (frame.getRight())
-                               .withTrimmedBottom (frame.getBottom());
-                }
-
-                setBounds (area);
-            }
-            else
-            {
-                centreWithSize (atomic::ui::px (1440), atomic::ui::px (820));
-            }
+            setFullScreen (true);
         }
 
         void closeButtonPressed() override

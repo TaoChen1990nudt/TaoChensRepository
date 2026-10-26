@@ -675,7 +675,16 @@ void LayerPanel::showOutputMenu (int index)
 
     for (int i = 0; i < rack.getNumSlots(); ++i)
         if (auto* slot = rack.getSlot (i))
+        {
+            // Phase 27: a sheet of notes needs something that plays notes. A
+            // sampler slot holds one audio file and has no oscillator, so it is
+            // not a legal default output — see routing::layerSlotId, which
+            // skips it for exactly the same reason.
+            if (slot->isSampler())
+                continue;
+
             menu.addItem (100 + slot->id, slot->name, true, slot->id == currentId);
+        }
 
     juce::Component::SafePointer<LayerPanel> safeThis (this);
 
@@ -854,14 +863,23 @@ void LayerPanel::mouseDown (const juce::MouseEvent& e)
                                        else
                                            stack.setLayerPan (index, 0.0f);       // centre
                                    },
-                                   [] (juce::PopupMenu& m)
+                                   // Phase 21: a real sub-menu instead of an
+                                   // item that opened a second menu — the
+                                   // curve list appears on hover now, exactly
+                                   // like the rack's VST3 sub-menu.
+                                   [this, index] (juce::PopupMenu& m)
                                    {
-                                       m.addItem (10, utf8 ("自动化…"));
+                                       juce::PopupMenu sub;
+
+                                       if (buildAutomationSubmenu != nullptr)
+                                           buildAutomationSubmenu (sub, index);
+
+                                       m.addSubMenu (utf8 ("自动化"), sub, true);
                                    },
-                                   [this, index, screenPos] (int result)
+                                   [this, index] (int result)
                                    {
-                                       if (result == 10 && onAutomationRequested != nullptr)
-                                           onAutomationRequested (index, screenPos);
+                                       if (onAutomationChosen != nullptr)
+                                           onAutomationChosen (index, result);
                                    });
 
                 return;

@@ -1,6 +1,7 @@
 #include "SettingsWindow.h"
 
 #include "Util/Metrics.h"
+#include "UI/TypingPiano.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
@@ -100,267 +101,493 @@ namespace
     };
 
     //==========================================================================
-    /** MIDI inputs, and an honest monitor.
+    /** What plays the synth, and what is arriving on it.
 
-        The monitor exists because "MIDI 设置" that only lists device names is
-        not a setting, it is a claim. Ticking a device opens it, and the panel
-        shows the last message so a keyboard that is plugged in but silent can
-        be told apart from one that is not there at all. */
+        Phase 40: two independent switches, not one three-way choice. Phase 39
+        asked which single source to use, which meant turning the controller off
+        to play the computer keyboard — and those two are exactly what people
+        have in front of them at the same time.
+
+        The page owns no device. A MIDI port can only be opened once, so the hub
+        that opens it and the synth that hears it have to be the same object —
+        which is why the device list here is a VIEW of MidiInputHub rather than a
+        list of its own.
+    */
     class MidiSettingsPage final : public juce::Component,
-                                   private juce::MidiInputCallback,
                                    private juce::Timer
     {
     public:
-        MidiSettingsPage()
+        explicit MidiSettingsPage (MidiInputHub& hubToUse)
+            : hub (hubToUse)
         {
-            rescanButton.setButtonText (utf8 ("重新扫描"));
-            rescanButton.onClick = [this] { refreshDevices(); };
+            rescanButton.setButtonText (utf8 ("重新扫描设备"));
+            rescanButton.onClick = [this]
+            {
+                hub.refreshDevices();
+                refreshRows();
+            };
+
             addAndMakeVisible (rescanButton);
 
-            refreshDevices();
+            refreshRows();
             startTimerHz (10);
         }
 
-        ~MidiSettingsPage() override
-        {
-            stopTimer();
+        ~MidiSettingsPage() override { stopTimer(); }
 
-            for (auto& row : rows)
-                if (row.input != nullptr)
-                {
-                    row.input->stop();
-                    row.input.reset();
-                }
+        /** The host applies the switches: it is the one that has to release the
+            notes a source was holding when that source is turned off. */
+        std::function<void (MidiSources)> onSourcesChanged;
+
+        /** Asked on every paint, so the caption cannot go stale. */
+        std::function<juce::String()> getTargetName;
+
+        //-- Layout, in design units -----------------------------------------
+        static constexpr int switchRowTop    = 44;
+        static constexpr int switchRowStep   = 28;
+        static constexpr int switchRowHeight = 26;
+        static constexpr int numSwitches     = 2;
+
+        static constexpr int blockGap      = 10;
+        static constexpr int blockTitle    = 16;
+        static constexpr int mapRows       = 4;
+        static constexpr int mapRowHeight  = 20;
+        static constexpr int mapRowStep    = 23;
+        static constexpr int deviceRowStep = 28;
+        static constexpr int monitorHeight = 48;
+
+        static juce::Rectangle<int> switchRowBounds (int index, int width)
+        {
+            return { atomic::ui::px (12), atomic::ui::px (switchRowTop + index * switchRowStep),
+                     width - atomic::ui::px (24), atomic::ui::px (switchRowHeight) };
         }
 
+        /** Where the two blocks go, worked out from the switches.
+
+            With both sources on they share one page, so the space has to be
+            divided rather than assumed — and a short window must clip the device
+            list instead of drawing it over the monitor. Paint AND hit-testing
+            read this one plan: a device row you can see but not click (or the
+            reverse) is what computing the layout twice produces. */
+        struct Plan
+        {
+            juce::Rectangle<int> keyboard;    // empty when the keyboard is off
+            juce::Rectangle<int> devices;     // empty when the controller is off
+            juce::Rectangle<int> monitor;     // inside `devices`, stuck to its bottom
+            int deviceRowsTop = 0;            // design units
+            int maxDeviceRows = 0;            // how many rows fit above the monitor
+        };
+
+        Plan plan() const
+        {
+            Plan p;
+
+            const auto sources = hub.getSources();
+
+            int y = switchRowTop + numSwitches * switchRowStep + 8;
+
+            const int keyboardHeight = blockTitle + mapRows * mapRowStep + 6 + 16;
+
+            if (sources.typingKeyboard)
+            {
+                p.keyboard = { atomic::ui::px (12), atomic::ui::px (y),
+                               getWidth() - atomic::ui::px (24), atomic::ui::px (keyboardHeight) };
+
+                y += keyboardHeight + blockGap;
+            }
+
+            if (sources.externalController)
+            {
+                const int top    = atomic::ui::px (y);
+                const int bottom = getHeight() - atomic::ui::px (6);
+
+                p.devices = { atomic::ui::px (12), top,
+                              getWidth() - atomic::ui::px (24), juce::jmax (0, bottom - top) };
+
+                auto monitorArea = p.devices.reduced (atomic::ui::px (2), 0);
+                p.monitor = monitorArea.removeFromBottom (atomic::ui::px (monitorHeight));
+
+                p.deviceRowsTop = y + blockTitle + 4;
+
+                const int rowsBottom = p.monitor.getY() - atomic::ui::px (6);
+                const int rowsTopPx  = atomic::ui::px (p.deviceRowsTop);
+
+                p.maxDeviceRows = juce::jmax (0, (rowsBottom - rowsTopPx)
+                                                   / atomic::ui::px (deviceRowStep));
+            }
+
+            return p;
+        }
+
+        static juce::Rectangle<int> deviceRowBounds (const Plan& p, int index, int width)
+        {
+            return { atomic::ui::px (14),
+                     atomic::ui::px (p.deviceRowsTop + index * deviceRowStep),
+                     width - atomic::ui::px (30), atomic::ui::px (24) };
+        }
+
+        //-- Painting ---------------------------------------------------------
         void paint (juce::Graphics& g) override
         {
             g.fillAll (kPanel);
 
             g.setColour (juce::Colours::white.withAlpha (0.85f));
             g.setFont (boldFont (12.0f));
-            g.drawText (utf8 ("MIDI 输入设备"), atomic::ui::px (14), atomic::ui::px (10),
-                        atomic::ui::px (200), atomic::ui::px (18),
+            g.drawText (utf8 ("按键发声的来源"),
+                        atomic::ui::px (14), atomic::ui::px (10),
+                        atomic::ui::px (300), atomic::ui::px (18),
                         juce::Justification::centredLeft, false);
 
             g.setColour (kText.withAlpha (0.7f));
             g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
-            g.drawText (utf8 ("勾选即打开设备"), atomic::ui::px (14), atomic::ui::px (28),
-                        atomic::ui::px (200), atomic::ui::px (14),
-                        juce::Justification::centredLeft, false);
-
-            if (rows.empty())
-            {
-                g.setColour (kText.withAlpha (0.6f));
-                g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (11.0f))));
-                g.drawText (utf8 ("没有检测到 MIDI 输入设备。接上键盘后点“重新扫描”。"),
-                            getLocalBounds().withTrimmedTop (atomic::ui::px (56))
-                                            .reduced (atomic::ui::px (14), 0)
-                                            .removeFromTop (atomic::ui::px (40)),
-                            juce::Justification::topLeft, true);
-            }
-
-            for (int i = 0; i < (int) rows.size(); ++i)
-            {
-                const auto bounds = getRowBounds (i);
-                const auto& row   = rows[(size_t) i];
-
-                g.setColour (i % 2 == 0 ? kRow : juce::Colour (0xff15171c));
-                g.fillRoundedRectangle (bounds.toFloat(), 4.0f);
-
-                // Checkbox.
-                const auto box = juce::Rectangle<float> (12.0f, 12.0f)
-                                    .withCentre ({ (float) bounds.getX() + 18.0f,
-                                                   (float) bounds.getCentreY() });
-
-                g.setColour (row.open ? kAccent : juce::Colours::white.withAlpha (0.18f));
-                g.drawRoundedRectangle (box, 3.0f, 1.2f);
-
-                if (row.open)
-                    g.fillRoundedRectangle (box.reduced (atomic::ui::pf (3)), 1.5f);
-
-                g.setColour (juce::Colours::white.withAlpha (row.open ? 0.9f : 0.55f));
-                g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (11.0f))));
-                g.drawText (row.name, bounds.withTrimmedLeft (atomic::ui::px (38)),
-                            juce::Justification::centredLeft, true);
-            }
-
-            //-- Monitor -----------------------------------------------------
-            const auto monitor = getLocalBounds().removeFromBottom (atomic::ui::px (54))
-                                                     .reduced (atomic::ui::px (14), atomic::ui::px (8));
-
-            g.setColour (juce::Colour (0xff0d0e12));
-            g.fillRoundedRectangle (monitor.toFloat(), 4.0f);
-
-            g.setColour (kText.withAlpha (0.85f));
-            g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.0f))));
-            g.drawText (getMonitorText(),
-                        monitor.reduced (atomic::ui::px (8), 0).withHeight (atomic::ui::px (18)),
+            g.drawText (utf8 ("两个开关可以同时打开：控制器和电脑键盘互不排斥。"),
+                        atomic::ui::px (14), atomic::ui::px (27),
+                        getWidth() - atomic::ui::px (140), atomic::ui::px (14),
                         juce::Justification::centredLeft, true);
 
-            g.setColour (kText.withAlpha (0.45f));
-            g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
-            g.drawText (utf8 ("MIDI 仅做监视，尚未录入音符：录音要到走带录制阶段才接。"),
-                        monitor.reduced (atomic::ui::px (8), 0).removeFromBottom (atomic::ui::px (18)),
-                        juce::Justification::centredLeft, true);
+            drawSwitches (g);
+
+            const auto p = plan();
+
+            if (! p.keyboard.isEmpty())
+                drawKeyboardBlock (g, p.keyboard);
+
+            if (! p.devices.isEmpty())
+                drawDeviceBlock (g, p);
+
+            drawTargetLine (g);
         }
 
         void resized() override
         {
-            rescanButton.setBounds (getWidth() - atomic::ui::px (110), atomic::ui::px (10),
-                                    atomic::ui::px (96), atomic::ui::px (22));
+            rescanButton.setBounds (getWidth() - atomic::ui::px (122), atomic::ui::px (8),
+                                    atomic::ui::px (108), atomic::ui::px (22));
         }
 
         void mouseDown (const juce::MouseEvent& e) override
         {
-            for (int i = 0; i < (int) rows.size(); ++i)
-                if (getRowBounds (i).contains (e.getPosition()))
+            const auto position = e.getPosition();
+
+            for (int i = 0; i < numSwitches; ++i)
+                if (switchRowBounds (i, getWidth()).contains (position))
                 {
-                    setRowOpen (i, ! rows[(size_t) i].open);                    return;
+                    flipSwitch (i);
+                    return;
+                }
+
+            // The device rows are drawn from a plan, so they are clicked from the
+            // same plan. The loop bound matters twice over: rows past
+            // maxDeviceRows are not on screen, and clicking where a row is not
+            // drawn would open a port the user cannot see.
+            const auto p = plan();
+
+            if (p.devices.isEmpty())
+                return;
+
+            for (int i = 0; i < (int) rows.size() && i < p.maxDeviceRows; ++i)
+                if (deviceRowBounds (p, i, getWidth()).contains (position))
+                {
+                    // setDeviceOpen reports what actually happened: a port
+                    // another app is holding does not open, and the tick must
+                    // not claim it did.
+                    hub.setDeviceOpen (rows[(size_t) i].identifier,
+                                       ! rows[(size_t) i].open);
+                    refreshRows();
+                    return;
                 }
         }
 
     private:
-        struct Row
+        void flipSwitch (int index)
         {
-            juce::String                        name;
-            juce::String                        identifier;
-            std::unique_ptr<juce::MidiInput>    input;
-            bool                                open = false;
-        };
+            auto next = hub.getSources();
 
-        juce::Rectangle<int> getRowBounds (int index) const
-        {
-            return { 12, 46 + index * 28, getWidth() - 24, 24 };
+            if (index == 0)
+                next.typingKeyboard = ! next.typingKeyboard;
+            else
+                next.externalController = ! next.externalController;
+
+            // The host applies it. Only it knows what has to be released on the
+            // way out, and it also has to tell the panels.
+            if (onSourcesChanged != nullptr)
+                onSourcesChanged (next);
+
+            // The host applied it; this page only reflects the result. Ports may
+            // have been closed on the way out, so the list has to be re-read.
+            refreshRows();
         }
 
-        void refreshDevices()
+        void refreshRows()
         {
-            for (auto& row : rows)
-                if (row.input != nullptr)
-                {
-                    row.input->stop();
-                    row.input.reset();
-                }
+            // Turning the controller on is the moment its list starts to matter,
+            // and a device plugged in since the window opened has to appear then.
+            if (hub.usesExternalController())
+                hub.refreshDevices();
 
-            rows.clear();
+            rows = hub.getDevices();
 
-            for (const auto& device : juce::MidiInput::getAvailableDevices())
-            {
-                Row row;
-                row.name       = device.name;
-                row.identifier = device.identifier;
-                rows.push_back (std::move (row));
-            }
+            // Scanning for controllers is only a thing to do while the controller
+            // switch is on; next to a keyboard-only page the button is a red
+            // herring.
+            rescanButton.setVisible (hub.usesExternalController());
 
             repaint();
-        }
-
-        void setRowOpen (int index, bool shouldOpen)
-        {
-            if (! juce::isPositiveAndBelow (index, (int) rows.size()))
-                return;
-
-            auto& row = rows[(size_t) index];
-
-            if (shouldOpen)
-            {
-                if (row.input == nullptr)
-                {
-                    row.input = juce::MidiInput::openDevice (row.identifier, this);
-
-                    if (row.input != nullptr)
-                        row.input->start();
-                }
-
-                row.open = (row.input != nullptr);
-            }
-            else
-            {
-                if (row.input != nullptr)
-                {
-                    row.input->stop();
-                    row.input.reset();
-                }
-
-                row.open = false;
-            }
-
-            repaint();
-        }
-
-        void handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& message) override
-        {
-            ++messageCount;
-
-            if (message.isNoteOn())
-            {
-                lastType.store (1);
-                lastNote.store (message.getNoteNumber());
-                lastVelocity.store (juce::roundToInt (message.getFloatVelocity() * 127.0f));
-            }
-            else if (message.isNoteOff())
-            {
-                lastType.store (2);
-                lastNote.store (message.getNoteNumber());
-            }
-            else if (message.isController())
-            {
-                lastType.store (3);
-                lastNote.store (message.getControllerNumber());
-                lastVelocity.store (message.getControllerValue());
-            }
-            else
-            {
-                lastType.store (4);
-            }
-
-            lastChannel.store (message.getChannel());
-            dirty = true;
         }
 
         void timerCallback() override
         {
-            if (dirty)
+            // The monitor is the only thing here that changes on its own.
+            const auto monitor = hub.getMonitor();
+
+            if (monitor.count != lastMessageCount)
             {
-                dirty = false;
+                lastMessageCount = monitor.count;
                 repaint();
             }
         }
 
-        juce::String getMonitorText() const
+        void drawSwitches (juce::Graphics& g)
         {
-            const int total = messageCount.load();
+            const auto sources = hub.getSources();
 
-            if (total <= 0)
+            for (int i = 0; i < numSwitches; ++i)
+            {
+                const auto bounds = switchRowBounds (i, getWidth());
+                const bool on = (i == 0) ? sources.typingKeyboard : sources.externalController;
+
+                g.setColour (on ? kAccent.withAlpha (0.14f) : kRow);
+                g.fillRoundedRectangle (bounds.toFloat(), 4.0f);
+
+                // A tick box, not a radio dot: two of these can be on at once.
+                const auto box = juce::Rectangle<float> (13.0f, 13.0f)
+                                    .withCentre ({ (float) bounds.getX() + atomic::ui::pf (18),
+                                                   (float) bounds.getCentreY() });
+
+                g.setColour (on ? kAccent : juce::Colours::white.withAlpha (0.22f));
+                g.drawRoundedRectangle (box, 3.0f, 1.2f);
+
+                if (on)
+                    g.fillRoundedRectangle (box.reduced (atomic::ui::pf (3.5f)), 1.5f);
+
+                g.setColour (juce::Colours::white.withAlpha (on ? 0.92f : 0.6f));
+                g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (11.0f))));
+                g.drawText (switchCaption (i),
+                            bounds.withTrimmedLeft (atomic::ui::px (38)),
+                            juce::Justification::centredLeft, true);
+
+                // How many ports are actually open, on the row that owns them.
+                if (i == 1 && on)
+                {
+                    g.setColour (kAccent.withAlpha (0.75f));
+                    g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
+                    g.drawText (utf8 ("已打开 ") + juce::String (hub.getNumOpenDevices())
+                                  + utf8 (" 个端口"),
+                                bounds.withTrimmedRight (atomic::ui::px (14)),
+                                juce::Justification::centredRight, true);
+                }
+            }
+        }
+
+        static juce::String switchCaption (int index)
+        {
+            return index == 0 ? utf8 ("电脑键盘（FL Studio 键位）")
+                              : utf8 ("外部 MIDI 控制器");
+        }
+
+        void drawKeyboardBlock (juce::Graphics& g, juce::Rectangle<int> area)
+        {
+            const int left = area.getX() + atomic::ui::px (8);
+
+            g.setColour (juce::Colours::white.withAlpha (0.85f));
+            g.setFont (boldFont (11.0f));
+            g.drawText (utf8 ("键位映射 · FL Studio"),
+                        left, area.getY(), atomic::ui::px (300), atomic::ui::px (blockTitle),
+                        juce::Justification::centredLeft, false);
+
+            struct Line { const char* caption; typing::Row row; };
+            const Line lines[] {
+                { "白键 · 低八度", typing::Row::lowerWhite },
+                { "黑键 · 低八度", typing::Row::lowerBlack },
+                { "白键 · 高八度", typing::Row::upperWhite },
+                { "黑键 · 高八度", typing::Row::upperBlack }
+            };
+
+            int y = area.getY() + atomic::ui::px (blockTitle + 4);
+
+            for (const auto& line : lines)
+            {
+                const int rowHeight = atomic::ui::px (mapRowHeight);
+
+                g.setColour (kRow);
+                g.fillRoundedRectangle (juce::Rectangle<int> (area.getX(), y,
+                                                              area.getWidth(), rowHeight).toFloat(),
+                                        3.0f);
+
+                g.setColour (kText.withAlpha (0.8f));
+                g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
+                g.drawText (utf8 (line.caption),
+                            area.getX() + atomic::ui::px (10), y,
+                            atomic::ui::px (92), rowHeight,
+                            juce::Justification::centredLeft, false);
+
+                g.setColour (juce::Colours::white.withAlpha (0.9f));
+                g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.5f))));
+                g.drawText (typing::rowKeys (line.row),
+                            area.getX() + atomic::ui::px (104), y,
+                            atomic::ui::px (150), rowHeight,
+                            juce::Justification::centredLeft, false);
+
+                g.setColour (kAccent.withAlpha (0.85f));
+                g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
+                g.drawText (typing::rowNotes (line.row),
+                            area.getX() + atomic::ui::px (258), y,
+                            area.getWidth() - atomic::ui::px (270), rowHeight,
+                            juce::Justification::centredLeft, false);
+
+                y += atomic::ui::px (mapRowStep);
+            }
+
+            g.setColour (kText.withAlpha (0.6f));
+            g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
+            g.drawText (utf8 ("小键盘 + / − 换八度。字母键此时归音源（G 编组、Ctrl+S 保存仍可用）。"),
+                        left, area.getBottom() - atomic::ui::px (18),
+                        area.getWidth() - atomic::ui::px (16), atomic::ui::px (16),
+                        juce::Justification::centredLeft, true);
+        }
+
+        void drawDeviceBlock (juce::Graphics& g, const Plan& p)
+        {
+            const int left = p.devices.getX() + atomic::ui::px (8);
+
+            g.setColour (juce::Colours::white.withAlpha (0.85f));
+            g.setFont (boldFont (11.0f));
+            g.drawText (utf8 ("MIDI 输入设备"),
+                        left, p.devices.getY(), atomic::ui::px (300), atomic::ui::px (blockTitle),
+                        juce::Justification::centredLeft, false);
+
+            // Sharing the page with the keyboard block clips the list; saying so
+            // beats drawing four devices and pretending the fifth does not exist.
+            if ((int) rows.size() > p.maxDeviceRows)
+            {
+                g.setColour (kText.withAlpha (0.5f));
+                g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
+                g.drawText (utf8 ("显示 ") + juce::String (p.maxDeviceRows) + utf8 (" / ")
+                              + juce::String ((int) rows.size()) + utf8 (" 个"),
+                            p.devices.withTrimmedRight (atomic::ui::px (8))
+                                     .withHeight (atomic::ui::px (blockTitle)),
+                            juce::Justification::centredRight, true);
+            }
+
+            //-- Rows --------------------------------------------------------
+            if (rows.empty())
+            {
+                g.setColour (kText.withAlpha (0.6f));
+                g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.5f))));
+                g.drawFittedText (utf8 ("没有检测到 MIDI 输入设备。接上后点“重新扫描设备”，或只用电脑键盘。"),
+                                  juce::Rectangle<int> (left, atomic::ui::px (p.deviceRowsTop),
+                                                        p.devices.getWidth() - atomic::ui::px (16),
+                                                        atomic::ui::px (44)),
+                                  juce::Justification::topLeft, 2);
+            }
+            else
+            {
+                for (int i = 0; i < (int) rows.size() && i < p.maxDeviceRows; ++i)
+                {
+                    const auto bounds = deviceRowBounds (p, i, getWidth());
+                    const auto& row   = rows[(size_t) i];
+
+                    g.setColour (i % 2 == 0 ? kRow : juce::Colour (0xff15171c));
+                    g.fillRoundedRectangle (bounds.toFloat(), 4.0f);
+
+                    const auto box = juce::Rectangle<float> (12.0f, 12.0f)
+                                        .withCentre ({ (float) bounds.getX() + atomic::ui::pf (18),
+                                                       (float) bounds.getCentreY() });
+
+                    g.setColour (row.open ? kAccent : juce::Colours::white.withAlpha (0.18f));
+                    g.drawRoundedRectangle (box, 3.0f, 1.2f);
+
+                    if (row.open)
+                        g.fillRoundedRectangle (box.reduced (atomic::ui::pf (3)), 1.5f);
+
+                    g.setColour (juce::Colours::white.withAlpha (row.open ? 0.9f : 0.55f));
+                    g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (11.0f))));
+                    g.drawText (row.name, bounds.withTrimmedLeft (atomic::ui::px (38)),
+                                juce::Justification::centredLeft, true);
+                }
+            }
+
+            //-- Monitor -----------------------------------------------------
+            g.setColour (juce::Colour (0xff0d0e12));
+            g.fillRoundedRectangle (p.monitor.toFloat(), 4.0f);
+
+            g.setColour (kText.withAlpha (0.85f));
+            g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.0f))));
+            g.drawText (monitorText (hub.getMonitor()),
+                        p.monitor.reduced (atomic::ui::px (8), 0).withHeight (atomic::ui::px (18)),
+                        juce::Justification::centredLeft, true);
+
+            g.setColour (kText.withAlpha (0.45f));
+            g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
+            g.drawText (utf8 ("端口可以一起用；按键即发声，录音（写进钢琴窗）还没接。"),
+                        p.monitor.reduced (atomic::ui::px (8), 0)
+                                  .removeFromBottom (atomic::ui::px (18)),
+                        juce::Justification::centredLeft, true);
+        }
+
+        /** "目标音源：Synth A" — the other half of "why is nothing sounding".
+            A key that goes to no synth is silent for a reason the user can fix,
+            and this line is the reason. It sits on the title row, right-aligned,
+            because the bottom of the page belongs to the monitor. */
+        void drawTargetLine (juce::Graphics& g)
+        {
+            const auto sources = hub.getSources();
+
+            if (! sources.any() || getTargetName == nullptr)
+                return;
+
+            const int reserved = hub.usesExternalController() ? atomic::ui::px (130)
+                                                              : atomic::ui::px (16);
+
+            g.setColour (kAccent.withAlpha (0.8f));
+            g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
+            g.drawText (utf8 ("目标音源：") + getTargetName(),
+                        juce::Rectangle<int> (atomic::ui::px (14), atomic::ui::px (10),
+                                              getWidth() - reserved - atomic::ui::px (28),
+                                              atomic::ui::px (18)),
+                        juce::Justification::centredRight, true);
+        }
+
+        static juce::String monitorText (const MidiInputHub::Monitor& monitor)
+        {
+            if (monitor.count <= 0)
                 return utf8 ("等待 MIDI 消息…");
 
             juce::String what;
 
-            switch (lastType.load())
+            switch (monitor.lastType)
             {
-                case 1:  what = "Note On  " + juce::MidiMessage::getMidiNoteName (lastNote.load(), true, true, 3)
-                                  + "  vel " + juce::String (lastVelocity.load()); break;
-                case 2:  what = "Note Off " + juce::MidiMessage::getMidiNoteName (lastNote.load(), true, true, 3); break;
-                case 3:  what = "CC " + juce::String (lastNote.load()) + "  =  " + juce::String (lastVelocity.load()); break;
+                case 1:  what = "Note On  " + atomic::noteName (monitor.lastNote)
+                                  + "  vel " + juce::String (monitor.lastVelocity); break;
+                case 2:  what = "Note Off " + atomic::noteName (monitor.lastNote); break;
+                case 3:  what = "CC " + juce::String (monitor.lastNote)
+                                  + "  =  " + juce::String (monitor.lastVelocity); break;
                 default: what = utf8 ("其它消息"); break;
             }
 
-            return what + utf8 ("   ·   通道 ") + juce::String (lastChannel.load())
-                     + utf8 ("   ·   共 ") + juce::String (total) + utf8 (" 条");
+            return what + utf8 ("   ·   通道 ") + juce::String (monitor.lastChannel)
+                     + utf8 ("   ·   共 ") + juce::String (monitor.count) + utf8 (" 条");
         }
 
-        std::vector<Row> rows;
+        MidiInputHub& hub;
 
-        /** The empty state tells the user to press this, so it has to exist. */
+        /** A copy of the hub's device list, refreshed when it can change — not
+            queried inside paint(), which runs far more often than hardware
+            changes and would allocate on every repaint. */
+        std::vector<MidiInputHub::DeviceInfo> rows;
+
         juce::TextButton rescanButton;
 
-        std::atomic<int>   messageCount { 0 };
-        std::atomic<int>   lastType     { 0 };
-        std::atomic<int>   lastNote     { 0 };
-        std::atomic<int>   lastVelocity { 0 };
-        std::atomic<int>   lastChannel  { 1 };
-        std::atomic<bool>  dirty        { false };
+        int lastMessageCount = 0;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MidiSettingsPage)
     };
@@ -568,7 +795,7 @@ namespace
 class SettingsWindow::Panel final : public juce::Component
 {
 public:
-    Panel (PluginHost& host, juce::AudioDeviceManager& devices)
+    Panel (PluginHost& host, juce::AudioDeviceManager& devices, MidiInputHub& midiHub)
     {
         // The app paints itself by hand and never installs a look-and-feel, so
         // JUCE's default (light grey) is what a TabbedComponent would draw in —
@@ -585,7 +812,20 @@ public:
         tabs.setColour (juce::TabbedButtonBar::frontTextColourId, juce::Colours::white);
 
         tabs.addTab (utf8 ("音频设置"), kPanel, new AudioSettingsPage (devices), true);
-        tabs.addTab (utf8 ("MIDI 设置"), kPanel, new MidiSettingsPage(), true);
+
+        auto* midi = new MidiSettingsPage (midiHub);
+        midi->onSourcesChanged = [this] (MidiSources sources)
+        {
+            if (onMidiSourcesChanged != nullptr)
+                onMidiSourcesChanged (sources);
+        };
+        midi->getTargetName = [this]
+        {
+            return getLiveTargetName != nullptr ? getLiveTargetName() : juce::String();
+        };
+
+        midiPage = midi;
+        tabs.addTab (utf8 ("MIDI 设置"), kPanel, midi, true);
 
         auto* pluginPage = new PluginManagerPage (host);
         pluginPage->onAddInstrument = [this] (const juce::PluginDescription& d)
@@ -631,6 +871,8 @@ public:
 
     std::function<void (const juce::PluginDescription&)> onAddInstrument;
     std::function<void (const juce::PluginDescription&)> onAddEffect;
+    std::function<void (MidiSources)> onMidiSourcesChanged;
+    std::function<juce::String()>     getLiveTargetName;
 
     friend class SettingsWindow;
 
@@ -644,16 +886,21 @@ private:
     /** Owned by the TabbedComponent; this is only here to call rebuild(). */
     PluginManagerPage* plugins = nullptr;
 
+    /** Same, for the MIDI page's refresh after the plugin list moved. */
+    MidiSettingsPage* midiPage = nullptr;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Panel)
 };
 
 //==============================================================================
-SettingsWindow::SettingsWindow (PluginHost& pluginHost, juce::AudioDeviceManager& deviceManager)
+SettingsWindow::SettingsWindow (PluginHost& pluginHost,
+                                juce::AudioDeviceManager& deviceManager,
+                                MidiInputHub& midiHub)
     : juce::DocumentWindow (utf8 ("设置"), kBackground, juce::DocumentWindow::closeButton)
 {
     setUsingNativeTitleBar (true);
 
-    auto* content = new Panel (pluginHost, deviceManager);
+    auto* content = new Panel (pluginHost, deviceManager, midiHub);
 
     content->onAddInstrument = [this] (const juce::PluginDescription& description)
     {
@@ -667,12 +914,27 @@ SettingsWindow::SettingsWindow (PluginHost& pluginHost, juce::AudioDeviceManager
             onAddEffect (description);
     };
 
+    content->onMidiSourcesChanged = [this] (MidiSources sources)
+    {
+        if (onMidiSourcesChanged != nullptr)
+            onMidiSourcesChanged (sources);
+    };
+
+    content->getLiveTargetName = [this]
+    {
+        return getLiveTargetName != nullptr ? getLiveTargetName() : juce::String();
+    };
+
     panel = content;
 
     setContentOwned (content, false);
     setResizable (true, false);
+
+    // Phase 40: taller than Phase 39's 480. With both sources on, the keyboard
+    // map and the device list share one page, and 480 left the list three rows
+    // tall — enough to hide the device you were looking for.
     setResizeLimits (700, 400, 1400, 900);
-    centreWithSize (atomic::ui::px (800), atomic::ui::px (480));
+    centreWithSize (atomic::ui::px (800), atomic::ui::px (520));
 }
 
 SettingsWindow::~SettingsWindow()

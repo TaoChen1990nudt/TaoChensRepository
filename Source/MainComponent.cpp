@@ -2,6 +2,7 @@
 
 #include "Util/Metrics.h"
 
+#include "Model/AutomationStack.h"
 #include "Model/Routing.h"
 #include "UI/MixerLook.h"
 #include "Util/Text.h"
@@ -10,6 +11,7 @@
 #include <cmath>
 
 #include <cstring>
+#include <iostream>
 
 namespace atomic
 {
@@ -49,11 +51,65 @@ namespace
         return juce::Rectangle<float> (side, side).withCentre (button.getCentre());
     }
 
-    /** Play / pause / stop share one glyph size so the three read as a set. */
+    /** Play and stop share one glyph size so the two read as a set. */
     constexpr float kTransportGlyph = 0.46f;
+
+    /** Phase 33: what a STOP press means, as a value.
+
+        `stop` says whether the press does anything at all, `beat` where the
+        playhead lands when it does. Two cases, both of them the user's:
+
+          * something is running  -> end it and rewind to zero;
+          * nothing is running    -> do NOTHING. The playhead is also how you
+            choose where playback starts, so a stop press while stopped must not
+            throw away the bar you just clicked.
+
+        It used to be "back to where this run started", which made the stop
+        button a second play-from-here and left the keyboard with no way to
+        start playback — see the space key below. */
+    struct StopDecision
+    {
+        bool   stop = false;
+        double beat = 0.0;
+    };
+
+    inline StopDecision stopDecision (bool engaged) noexcept
+    {
+        return engaged ? StopDecision { true, 0.0 } : StopDecision { false, 0.0 };
+    }
+
+    /** Phase 33: the space bar is a PLAY/STOP toggle again. Pressed while idle
+        it starts playback where the playhead is; pressed while rolling it is a
+        stop. Return is the other verb: it always rewinds, which is the one way
+        left to get back to the top without touching the ruler. */
+    inline bool spaceStartsPlayback (bool engaged) noexcept { return ! engaged; }
+
+    /** Phase 25: id base for the rack card's "发送到混音器通道" submenu. The
+        submenu lists up to 127 strips, and 21 + channel would have walked right
+        through the automation / delete ids of the menu that hosts it. */
+    constexpr int kSendToChannelBase = 1000;
+
+    /** Phase 42: inside a synth's 创建自动化 submenu, the parameters of its
+        hosted instrument start here.
+
+        10000, not 100: the rack card's own menu already spends 10..13, 20, 30..41,
+        200 + n (the VST3 instrument list) and 1000 + channel (the sends). A
+        plugin with 200 parameters would have walked straight through the VST3
+        list at 100, and the click would have replaced the synth. */
+    constexpr int kSlotAutoParamBase = 10000;
+
+    /** Phase 43: 声相 / 静音 / 独奏 live in their OWN band, not at idBase + 3.
+
+        `idBase + 3` was the obvious choice and it was wrong within one build: the
+        rack card passes idBase = 30, and 33/34/35 are already 高亮 and its
+        neighbours — so choosing "创建声相自动化" on a card would have hit the
+        spotlight toggle instead. Every band gets counted before it is used; this
+        one is counted here. */
+    constexpr int kSlotAutoTargetBase = 20000;
 
     /** The three glyphs, defined once so the self-test measures the same
         geometry the paint routine fills. */
+
     juce::Path playGlyph (juce::Rectangle<float> button)
     {
         const auto  icon  = transportIconBox (button, kTransportGlyph);
@@ -69,22 +125,6 @@ namespace
                               left, icon.getBottom(),
                               left + width, icon.getCentreY());
         return triangle;
-    }
-
-    struct PauseGlyph
-    {
-        juce::Rectangle<float> left, right;
-    };
-
-    PauseGlyph pauseGlyph (juce::Rectangle<float> button)
-    {
-        const auto  icon = transportIconBox (button, kTransportGlyph);
-        const float barW = icon.getWidth() * 0.30f;
-        const float gap  = icon.getWidth() * 0.24f;
-        const float x0   = icon.getCentreX() - (barW * 2.0f + gap) * 0.5f;
-
-        return { { x0, icon.getY(), barW, icon.getHeight() },
-                 { x0 + barW + gap, icon.getY(), barW, icon.getHeight() } };
     }
 
     juce::Rectangle<float> stopGlyph (juce::Rectangle<float> button)
@@ -175,7 +215,8 @@ namespace
         `firstId + index` into `entries`, so the caller's switch is unchanged. */
     void addPluginItems (juce::PopupMenu& menu,
                          const std::vector<juce::PluginDescription>& entries,
-                         int firstId)
+                         int firstId,
+                         const juce::String& tickedName = {})
     {
         juce::StringArray vendors;
 
@@ -201,7 +242,15 @@ namespace
 
             for (int i = 0; i < (int) entries.size(); ++i)
                 if (vendorOf (entries[(size_t) i]) == vendor)
-                    sub.addItem (firstId + i, entries[(size_t) i].name);
+                {
+                    const auto& entry = entries[(size_t) i];
+
+                    // Phase 38: the rack's replace menu says which plugin the
+                    // slot is running right now. Without a tick, "did my
+                    // replacement land?" is a question about a 9px pill.
+                    sub.addItem (firstId + i, entry.name, true,
+                                 tickedName.isNotEmpty() && entry.name == tickedName);
+                }
 
             menu.addSubMenu (vendor, sub);
         }
@@ -250,8 +299,16 @@ void VerticalSplitter::paint (juce::Graphics& g)
 void VerticalSplitter::mouseDown (const juce::MouseEvent& e)
 {
     dragging = true;
-    lastY    = e.getPosition().y;
+
+    // Screen coordinates, not local ones: this component MOVES while it is
+    // dragged, so `e.getPosition()` measured against it would keep cancelling
+    // out the very travel it is supposed to report.
+    dragStartScreenY = e.getScreenY();
+    lastTravel       = 0;
     repaint();
+
+    if (onDragBegin != nullptr)
+        onDragBegin();
 }
 
 void VerticalSplitter::mouseDrag (const juce::MouseEvent& e)
@@ -259,15 +316,24 @@ void VerticalSplitter::mouseDrag (const juce::MouseEvent& e)
     if (! dragging)
         return;
 
-    const int dy = e.getPosition().y - lastY;
+    const int travel = e.getScreenY() - dragStartScreenY;
 
-    if (dy == 0)
+    if (travel == lastTravel)
         return;
 
-    lastY += dy;
+    lastTravel = travel;
 
-    if (onDrag != nullptr)
-        onDrag (dy);
+    if (onDragTravel != nullptr)
+        onDragTravel (travel);
+}
+
+void VerticalSplitter::simulateDrag (int totalTravel, bool continueGesture)
+{
+    if (! continueGesture && onDragBegin != nullptr)
+        onDragBegin();
+
+    if (onDragTravel != nullptr)
+        onDragTravel (totalTravel);
 }
 
 void VerticalSplitter::mouseUp (const juce::MouseEvent&)
@@ -295,6 +361,11 @@ MainComponent::MainComponent()
     setSize (ui::px (1440), ui::px (820));
     setWantsKeyboardFocus (true);
 
+    // Phase 34: the question both cascade deletions ask. Installed here rather
+    // than defaulted in the header so the self-test can swap in a scripted
+    // answer and put the real dialog back afterwards.
+    installSamplerCascadePrompt();
+
     addAndMakeVisible (layerPanel);
     addAndMakeVisible (pianoRoll);
     addAndMakeVisible (rackPanel);
@@ -308,10 +379,49 @@ MainComponent::MainComponent()
     addAndMakeVisible (filePanel);
     addAndMakeVisible (groupPanel);
 
-    splitterBar.onDrag = [this] (int deltaY)
+    splitterBar.onDragBegin = [this]
+    {
+        dragBaseAutomationHeight = automationPaneHeight;
+    };
+
+    splitterBar.onDragTravel = [this] (int travel)
     {
         // Dragging DOWN pushes the automation window down, so it gets shorter.
-        setAutomationPaneHeight (automationPaneHeight - deltaY);
+        // Absolute travel from a captured base: the band is where the pointer is
+        // until the pane bottoms out, and it lets go the moment the pointer
+        // comes back — no accumulated deltas to lose.
+        setAutomationPaneHeight (dragBaseAutomationHeight - travel);
+    };
+
+    // Phase 21: the two side columns get the same handle. Adding the panels as
+    // visible before the bands keeps the bands on top, which matters because a
+    // panel that repaints itself must not draw over the thing you are dragging.
+    addAndMakeVisible (leftSplitter);
+    addAndMakeVisible (rightSplitter);
+
+    leftSplitter.onDragBegin = [this]
+    {
+        dragBaseFileHeight = filePaneHeight;
+    };
+
+    leftSplitter.onDragTravel = [this] (int travel)
+    {
+        // Dragging UP makes the file tree taller, so the height is minus the
+        // travel — same sign convention as the automation band, for the same
+        // reason: the handle stays under the pointer.
+        filePaneHeight = dragBaseFileHeight - travel;
+        resized();
+    };
+
+    rightSplitter.onDragBegin = [this]
+    {
+        dragBaseGroupHeight = groupPaneHeight;
+    };
+
+    rightSplitter.onDragTravel = [this] (int travel)
+    {
+        groupPaneHeight = dragBaseGroupHeight - travel;
+        resized();
     };
 
     // The mixer lives in its own window (Phase 8), so it is NOT a child here.
@@ -402,6 +512,21 @@ MainComponent::MainComponent()
             showAutomationMenu (AutomationOwner::layer, layer->getId(), pos);
     };
 
+    // Phase 21: the fader's value menu hangs the same list as a sub-menu, so
+    // the curve you want appears when the pointer reaches 自动化 — no second
+    // click, no second menu in a different place on screen.
+    layerPanel.buildAutomationSubmenu = [this] (juce::PopupMenu& menu, int layerIndex)
+    {
+        if (auto* layer = stack.getLayer (layerIndex))
+            fillAutomationMenu (menu, AutomationOwner::layer, layer->getId());
+    };
+
+    layerPanel.onAutomationChosen = [this] (int layerIndex, int result)
+    {
+        if (auto* layer = stack.getLayer (layerIndex))
+            applyAutomationChoice (result, AutomationOwner::layer, layer->getId());
+    };
+
     // Picking 音量 / 声相 under an open lane has to create the row too: the
     // panel may never show a curve the window does not list.
     layerPanel.onAutomationTargetChosen = [this] (int layerIndex, int target)
@@ -421,14 +546,74 @@ MainComponent::MainComponent()
         showRackCardMenu (slotId, pos);
     };
 
+    rackPanel.buildCardSubmenu = [this] (juce::PopupMenu& menu, int slotId)
+    {
+        fillRackCardMenu (menu, slotId);
+    };
+
+    rackPanel.onCardSubmenuChosen = [this] (int slotId, int result)
+    {
+        applyRackCardChoice (result, slotId);
+    };
+
     rackPanel.onSlotChosen = [this] (int slotId)
     {
-        // "Put the notes I have selected on this synth." A per-note override,
-        // not a change to the layer: one exception should stay one exception.
-        pianoRoll.routeSelectionTo (slotId);
+        //-- Phase 32: a selected BLOCK follows the sampler you click ---------
+        // Selecting a block is how you say "this sample", so the next click on a
+        // sampler is how you say "on that one" — and since a sampler holds the
+        // file, the block takes that file too (name, length, offset). The rail
+        // click this replaces was the note gesture, which means nothing here:
+        // there are no notes in a clip selection.
+        if (! pianoRoll.getSampleSelection().empty())
+        {
+            const auto* target = rack.findSlot (slotId);
+
+            if (target != nullptr && target->isSampler()
+                 && pianoRoll.mountSelectedSamplesToSlot (slotId))
+            {
+                focusSynth (slotId);
+                layerPanel.repaint();
+                groupPanel.repaint();
+                rackPanel.repaint();
+                return;
+            }
+
+            // Anything else is just inspected: an instrument has no file to hand
+            // over, so there is nothing to mount.
+            if (target != nullptr)
+            {
+                focusSynth (slotId);
+                layerPanel.repaint();
+                groupPanel.repaint();
+                rackPanel.repaint();
+            }
+
+            return;
+        }
+
+        // Phase 27: clicking a sampler spotlights it and nothing else. It holds
+        // one file; it cannot play notes, so mounting a selection on it would
+        // be a silent mute dressed up as a routing change.
+        if (const auto* slot = rack.findSlot (slotId); slot != nullptr && slot->isSampler())
+        {
+            focusSynth (slotId);
+            layerPanel.repaint();
+            groupPanel.repaint();
+            rackPanel.repaint();
+            return;
+        }
+
+        // "Put what I have selected on this synth." Phase 23: a group selection
+        // is mounted as a GROUP (its own output, members' overrides cleared),
+        // loose notes take the per-note override. One call, one rule — the roll
+        // decides which of the two the selection is.
+        if (! pianoRoll.mountSelectionTo (slotId))
+            return;
+
         republish();
         focusSynth (slotId);
         layerPanel.repaint();
+        groupPanel.repaint();
         rackPanel.repaint();
     };
 
@@ -441,10 +626,50 @@ MainComponent::MainComponent()
         focusSynth (slotId);
     };
 
+    //-- Phase 32: the × on a sampler takes its clips with it -----------------
+    // Phase 34: through the question, not straight to the executor — deleting a
+    // card is about to delete music.
+    rackPanel.onSlotRemoveRequested = [this] (int slotId)
+    {
+        requestRemoveSlotAndItsClips (slotId);
+    };
+
+    //-- Phase 32: a block left a sampler with nothing to play ----------------
+    pianoRoll.onSampleReferencesChanged = [this]
+    {
+        pruneOrphanSamplerSlots();
+    };
+
     pianoRoll.onSelectionChanged = [this]
     {
         updateRackRoutingFocus();
     };
+
+    //-- Phase 29: the grid's own way out of the spotlight --------------------
+    // The roll cannot clear it itself — the spotlight is the rack's answer to
+    // "what is on this synth", and the session owns it. So the roll asks, and
+    // this is the one place that answers.
+    pianoRoll.onClearSpotlight = [this]
+    {
+        focusSynth (-1);
+        layerPanel.repaint();
+        groupPanel.repaint();
+        rackPanel.repaint();
+        pianoRoll.repaint();
+    };
+
+    //-- Phase 24: the inline boxes ask what a hosted synth can automate ------
+    // Wiring lives here because the plugin host is the session's: a plugin may
+    // only be inspected from the message thread, and this lambda is only ever
+    // called from a menu or a paint on that thread. With nothing loaded it
+    // answers "no parameters" and the boxes offer the three built-in targets.
+    pianoRoll.setPluginParamLister ([this] (int slotId) -> std::vector<PluginParamInfo>
+    {
+        // One implementation, in the host, because the host is what owns the
+        // plugin instances. The roll asks, the rack menu asks, the same answer
+        // comes back.
+        return pluginParamsForSlot (slotId);
+    });
 
     //-- Phase 16: group actions the roll cannot finish on its own -----------
     pianoRoll.onGroupAutomationRequested = [this] (int, int groupId, int target)
@@ -484,12 +709,19 @@ MainComponent::MainComponent()
 
         juce::PopupMenu menu;
         menu.addSectionHeader (group->getName());
-        menu.addItem (1, utf8 ("创建自动化 · 组音量"), true,
-                      automation.contains (AutomationOwner::group, groupId,
-                                           (int) GroupAutomationTarget::level));
-        menu.addItem (5, utf8 ("创建自动化 · 组声相"), true,
-                      automation.contains (AutomationOwner::group, groupId,
-                                           (int) GroupAutomationTarget::pan));
+
+        // Phase 42: one verb, one entry — the parameters are the submenu.
+        {
+            juce::PopupMenu autoMenu;
+            autoMenu.addItem (1, utf8 ("组音量"), true,
+                              automation.contains (AutomationOwner::group, groupId,
+                                                   (int) GroupAutomationTarget::level));
+            autoMenu.addItem (5, utf8 ("组声相"), true,
+                              automation.contains (AutomationOwner::group, groupId,
+                                                   (int) GroupAutomationTarget::pan));
+            menu.addSubMenu (utf8 ("创建自动化"), autoMenu);
+        }
+
         menu.addItem (2, utf8 ("挂载音源…"));
         menu.addSeparator();
         menu.addItem (3, utf8 ("跟随图层输出"), group->getOutputSlotId() >= 0);
@@ -592,6 +824,18 @@ MainComponent::MainComponent()
         showChannelMenu (channel, pos);
     };
 
+    mixerPanel.buildStripAutomationItems = [this] (juce::PopupMenu& menu, int channel,
+                                                   MixerPanel::StripControl control)
+    {
+        fillStripAutomationItems (menu, channel, control);
+    };
+
+    mixerPanel.onStripAutomationChosen = [this] (int channel, MixerPanel::StripControl control,
+                                                 int result)
+    {
+        applyStripAutomationChoice (channel, control, result);
+    };
+
     mixerPanel.onInsertOpenRequested = [this] (int channel, int slot)
     {
         openInsertEditor (channel, slot);
@@ -602,14 +846,19 @@ MainComponent::MainComponent()
         resetLayerNoteRouting (layerIndex);
     };
 
-    mixerPanel.levelSource = [this] (int channel)
+    mixerPanel.levelSource = [this] (int channel, int side)
     {
         // Phase 11: a strip's meter is the CHANNEL's signal (post-insert), not a
         // layer's. A synth that bypasses the console never lights a strip —
         // which is the honest reading: nothing is arriving there.
+        //
+        // Phase 26: one side at a time. The strip draws two bars and the engine
+        // keeps two numbers, so the answer is per side; "loudest of the two"
+        // would draw the same bar twice and turn a stereo meter back into a
+        // mono one with extra pixels.
         return channel == MixerModel::masterChannel
-                 ? audio.getPlayback().getMasterPeak (0)
-                 : audio.getPlayback().getChannelPeak (channel);
+                 ? audio.getPlayback().getMasterPeak (side)
+                 : audio.getPlayback().getChannelPeakSide (channel, side);
     };
 
     // Phase 10: the app opens on a blank session — one empty layer, no synths,
@@ -651,6 +900,30 @@ MainComponent::MainComponent()
     {
         audio.getPlayback().auditionNote (pitch, velocity, slotId, retrigger);
     };
+
+    //-- Phase 39: the keyboard, wired before anything can press a key --------
+    midiHub = std::make_unique<MidiInputHub>();
+
+    // Called on the MIDI thread. Only atomics and the engine's lock-free queue
+    // are touched here: the model belongs to the message thread, which is why
+    // the answer to "which synth" is cached in `liveTargetSlot`.
+    midiHub->onNote = [this] (int pitch, float velocity, bool on)
+    {
+        if (on)
+            audio.getPlayback().noteOnLive (liveTargetSlot.load (std::memory_order_relaxed),
+                                            pitch, velocity);
+        else
+            audio.getPlayback().noteOffLive (pitch);
+    };
+
+    // The panels that claim plain letters — the roll groups on G and erases on
+    // Delete — would swallow the note keys. A KeyListener is called BEFORE the
+    // focused component's own handler, which is exactly the precedence the
+    // typing keyboard needs.
+    pianoRoll.addKeyListener (&typingForwarder);
+    envelopePanel.addKeyListener (&typingForwarder);
+
+    refreshLiveTarget();
 
     cancelPendingUpdate();                   // building the blank session is not an edit
     history.clear();
@@ -835,6 +1108,9 @@ void MainComponent::toggleMixerWindow()
             if (safe != nullptr)
                 safe->closeMixerWindow();
         };
+
+        // Phase 43: 空格 and the typing keyboard while the console has focus.
+        mixerWindow->setKeyForwarder (&pluginForwarder);
     }
     else
     {
@@ -854,11 +1130,508 @@ juce::Image MainComponent::createMixerSnapshot (int width, int height)
     return mixerPanel.createComponentSnapshot (mixerPanel.getLocalBounds(), true);
 }
 
+juce::Image MainComponent::createFileBrowserSnapshot (int width, int height)
+{
+    // The panel is laid out by the splitter, so it is grown for the shot and put
+    // back afterwards: same class, same paint code, just a taller window than
+    // the shell gives it.
+    const auto previous = filePanel.getBounds();
+
+    filePanel.setSize (width, height);
+
+    auto image = filePanel.createComponentSnapshot (filePanel.getLocalBounds(), true);
+
+    filePanel.setBounds (previous);
+    return image;
+}
+
+juce::Image MainComponent::createClipCloseupSnapshot (int width, int height)
+{
+    // Same trick as the browser: grown for the shot, put back afterwards. Then
+    // zoomed onto the demo block, because the fades and their handles are the
+    // point and they are tiny at the opening scale.
+    const auto previousBounds     = pianoRoll.getBounds();
+    const float previousBeatWidth = pianoRoll.getBeatWidth();
+    const double previousScroll   = pianoRoll.getScrollBeats();
+
+    // The highlight goes off for this frame. Since Phase 30 it no longer dims
+    // anything, but it still paints rings and a wash over the notes that reach
+    // the focused synth — and this shot is about what a SELECTION looks like,
+    // on notes and on the block at the same time.
+    const int previousFocus = focusedSlotId;
+    focusSynth (-1);
+
+    const auto* layer = stack.getActiveLayer();
+    const auto* clip  = (layer != nullptr && ! layer->getSamples().empty())
+                          ? &layer->getSamples().front() : nullptr;
+
+    pianoRoll.setSize (width, height);
+    pianoRoll.setBeatWidth (juce::jmax (pianoRoll.getBeatWidth(), 150.0f));
+
+    if (clip != nullptr)
+        pianoRoll.setScrollBeats (juce::jmax (0.0, clip->startBeat - 0.6));
+
+    auto image = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
+
+    pianoRoll.setBounds (previousBounds);
+    pianoRoll.setBeatWidth (previousBeatWidth);
+    pianoRoll.setScrollBeats (previousScroll);
+    focusSynth (previousFocus);
+
+    return image;
+}
+
+juce::Image MainComponent::createSpotlightSnapshot (int width, int height)
+{
+    // Same staging trick as the other framed shots: grown and zoomed for the
+    // frame, put back afterwards. The zoom is the point — a highlight is a ring
+    // and a wash on notes that are 12 px tall at the opening scale.
+    const auto previousBounds     = pianoRoll.getBounds();
+    const float previousBeatWidth = pianoRoll.getBeatWidth();
+    const double previousScroll   = pianoRoll.getScrollBeats();
+    const int    previousFocus    = focusedSlotId;
+
+    pianoRoll.setSize (width, height);
+    pianoRoll.setBeatWidth (juce::jmax (pianoRoll.getBeatWidth(), 90.0f));
+    pianoRoll.setScrollBeats (2.0);
+
+    // The first instrument, not the sampler: the demo's melody plays on it, and
+    // a highlighted note is the thing this frame has to show.
+    focusSynth (rack.getFirstInstrumentSlotId());
+
+    auto image = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
+
+    focusSynth (previousFocus);
+    pianoRoll.setBounds (previousBounds);
+    pianoRoll.setBeatWidth (previousBeatWidth);
+    pianoRoll.setScrollBeats (previousScroll);
+
+    return image;
+}
+
+juce::Image MainComponent::createStretchSnapshot (int width, int height)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || layer->getSamples().empty())
+        return {};
+
+    // Same staging trick as the other framed shots: grown and zoomed for the
+    // frame, put back afterwards.
+    const auto   previousBounds     = pianoRoll.getBounds();
+    const float  previousBeatWidth  = pianoRoll.getBeatWidth();
+    const double previousScroll     = pianoRoll.getScrollBeats();
+
+    const SampleEvent sourceClip = layer->getSamples().front();
+
+    // Three answers to "make it shorter", on the same file. The lengths are
+    // chosen so each ratio is readable: halving is a clean octave / 2x, and
+    // 0.75 leaves a pitch of +5.0 semitones — a number with a decimal in it,
+    // which proves the badge is computing and not printing a constant.
+    struct Frame { StretchMode mode; double scale; int pitch; double beat; };
+
+    // Placed near the view the roll opens at, because a snapshot cannot move the
+    // camera: the shell re-fits the scale whenever it lays the pane out, so the
+    // frame has to work at whatever zoom the layout picks (~110 px/beat here).
+    const Frame frames[3]
+    {
+        { StretchMode::resample, 0.40, 81, 19.6 },
+        { StretchMode::tempo,    0.40, 74, 22.0 },
+        { StretchMode::pitch,    0.50, 67, 24.4 }
+    };
+
+    std::vector<int> added;
+
+    for (const auto& f : frames)
+    {
+        SampleEvent clip = sourceClip;
+        clip.startBeat   = f.beat;
+        clip.pitch       = f.pitch;
+        clip.lengthBeats = sourceClip.lengthBeats * f.scale;
+        clip.gainDb      = 0.0f;
+        clip.stretchMode = f.mode;
+        clip.fadeInBeats  = 0.0;      // the fades are Phase 29's story, not this one
+        clip.fadeOutBeats = 0.0;
+        clip.groupId      = -1;
+
+        added.push_back (layer->addSample (std::move (clip)));
+    }
+
+    // The note inspector is open by this point in the sequence (the main frame
+    // documents it), and it floats over the left of the grid. Close it if it has
+    // anything to close: this frame is about three blocks, not about that box.
+    pianoRoll.closeNoteAutomation();
+
+    pianoRoll.setSize (width, height);
+    pianoRoll.setBeatWidth (juce::jmax (pianoRoll.getBeatWidth(), 72.0f));
+    pianoRoll.setScrollBeats (19.3);
+
+    auto image = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
+
+    pianoRoll.setBounds (previousBounds);
+    pianoRoll.setBeatWidth (previousBeatWidth);
+    pianoRoll.setScrollBeats (previousScroll);
+
+    // The three blocks leave with the frame they came for.
+    pianoRoll.setSampleSelection (added);
+    pianoRoll.deleteSelectedSamples();
+
+    return image;
+}
+
+juce::Image MainComponent::createGroupMuteSnapshot (int width, int height)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || layer->getGroups().empty())
+        return {};
+
+    // Reached through findGroup, not through getGroups().front(): the list is
+    // handed out read-only, and a snapshot is allowed to borrow the model, not
+    // to reach into it.
+    auto* group = layer->findGroup (layer->getGroups().front().getId());
+
+    if (group == nullptr)
+        return {};
+
+    const auto   previousBounds     = pianoRoll.getBounds();
+    const float  previousBeatWidth  = pianoRoll.getBeatWidth();
+    const double previousScroll     = pianoRoll.getScrollBeats();
+
+    // Muted for this frame only. The demo itself is not muted on purpose: a
+    // fixture that ships silent would be a picture of the feature and a lie
+    // about the mix.
+    const bool wasMuted = group->isMuted();
+    group->setMuted (true);
+
+    // Selecting the group puts the MIXED selection on screen next to the pill
+    // that says the group is silent — the two halves of this phase in one frame.
+    pianoRoll.selectGroup (group->getId());
+
+    pianoRoll.setSize (width, height);
+    pianoRoll.setBeatWidth (juce::jmax (pianoRoll.getBeatWidth(), 64.0f));
+    pianoRoll.setScrollBeats (7.0);
+
+    auto image = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
+
+    group->setMuted (wasMuted);
+    pianoRoll.setBounds (previousBounds);
+    pianoRoll.setBeatWidth (previousBeatWidth);
+    pianoRoll.setScrollBeats (previousScroll);
+
+    return image;
+}
+
+//==============================================================================
+juce::Image MainComponent::createAutomationStackSnapshot (int width, int height)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr)
+        return {};
+
+    const int layerIndex = stack.getActiveLayerIndex();
+
+    // The note to inspect: the longest one that is ALSO in a group. A stack
+    // picture needs all three layers live, and two of the three are addressed
+    // through membership — picking the longest note outright would usually land
+    // on an ungrouped one and photograph a two-layer stack.
+    //
+    // Collected by id, then resolved through findNote: getNotes() hands out a
+    // read-only list, and this frame has to write a curve into the note it picks.
+    int    chosenId     = -1;
+    double chosenLength = -1.0;
+
+    for (const auto& note : layer->getNotes())
+        if (note.groupId >= 0 && note.lengthBeats > chosenLength)
+        {
+            chosenLength = note.lengthBeats;
+            chosenId     = note.id;
+        }
+
+    auto* chosen = chosenId >= 0 ? layer->findNote (chosenId) : nullptr;
+
+    if (chosen == nullptr)
+        return {};
+
+    auto* group = layer->findGroup (chosen->groupId);
+
+    if (group == nullptr)
+        return {};
+
+    //-- Everything this frame borrows, saved so it can be handed back --------
+    auto& volumeLane = layer->automationFor (LayerAutomationTarget::volume);
+
+    const auto savedVolumePoints = volumeLane.getPoints();
+    const bool savedVolumeOn     = volumeLane.isEnabled();
+
+    auto& groupLane = group->getLevelAutomation();
+
+    const auto savedGroupPoints = groupLane.getPoints();
+    const bool savedGroupOn     = groupLane.isEnabled();
+
+    const auto route = routing::resolve (*layer, *chosen, rack);
+    auto* slot = rack.findSlot (route.slotId);
+
+    std::vector<AutomationPoint> savedSlotPoints;
+    bool savedSlotOn = false;
+
+    if (slot != nullptr)
+    {
+        auto& lane = slot->automationFor (SlotAutomationTarget::level);
+        savedSlotPoints = lane.getPoints();
+        savedSlotOn     = lane.isEnabled();
+    }
+
+    const auto savedEnvelope = chosen->envelope;
+    const auto savedTarget   = chosen->modTarget;
+
+    //-- Three shapes a reader can tell apart --------------------------------
+    // Placed inside the note's own span (it is one beat long), because a lane
+    // that only turns at beat 6 and beat 14 samples as a flat rule across a
+    // one-beat note — a true picture of nothing. Three different periods, so the
+    // product cannot look like a scaled copy of any single layer.
+    const double beat = chosen->startBeat;
+    const double span = juce::jmax (0.25, chosen->lengthBeats);
+
+    volumeLane.loadPoints ({ { 0.0,            0.95f },
+                             { beat,           0.90f },
+                             { beat + span * 0.35, 0.45f },
+                             { beat + span * 0.75, 0.80f },
+                             { beat + span,    0.55f },
+                             { 64.0,           0.45f } });
+    volumeLane.setEnabled (true);
+
+    groupLane.loadPoints ({ { 0.0,            0.85f },
+                            { beat,           0.35f },
+                            { beat + span * 0.45, 0.95f },
+                            { beat + span * 0.80, 0.50f },
+                            { beat + span,    0.85f },
+                            { 64.0,           0.60f } });
+    groupLane.setEnabled (true);
+
+    if (slot != nullptr)
+    {
+        auto& lane = slot->automationFor (SlotAutomationTarget::level);
+        lane.loadPoints ({ { 0.0,            1.0f },
+                           { beat,           1.0f },
+                           { beat + span * 0.55, 0.60f },
+                           { beat + span,    0.85f },
+                           { 64.0,           0.75f } });
+        lane.setEnabled (true);
+    }
+
+    chosen->modTarget = NoteModTarget::level;
+    chosen->envelope = NoteEnvelope::makeADSR();
+    chosen->envelope.setEnabled (true);
+
+    //-- The frame -----------------------------------------------------------
+    envelopePanel.openFor (layerIndex, chosen->id);
+    envelopePanel.setSize (width, height);
+    envelopePanel.resized();
+
+    auto image = envelopePanel.createComponentSnapshot (envelopePanel.getLocalBounds(), true);
+
+    envelopePanel.close();
+
+    //-- Hand it all back ----------------------------------------------------
+    volumeLane.loadPoints (savedVolumePoints);
+    volumeLane.setEnabled (savedVolumeOn);
+
+    groupLane.loadPoints (savedGroupPoints);
+    groupLane.setEnabled (savedGroupOn);
+
+    if (slot != nullptr)
+    {
+        auto& lane = slot->automationFor (SlotAutomationTarget::level);
+        lane.loadPoints (savedSlotPoints);
+        lane.setEnabled (savedSlotOn);
+    }
+
+    chosen->envelope = savedEnvelope;
+    chosen->modTarget = savedTarget;
+
+    stack.touchLayers();
+
+    return image;
+}
+
+//==============================================================================
+juce::Image MainComponent::createSlotParamAutomationSnapshot (int width, int height)
+{
+    // The first synth the demo ships, whatever it is. The point of the frame is
+    // the ROW: its name column says which synth, and its parameter column says
+    // 音源参数 — the two things the card menu's submenu is asking for.
+    auto* slot = rack.getSlot (0);
+
+    if (slot == nullptr)
+        return {};
+
+    const int  slotId        = slot->id;
+    const auto savedTarget   = slot->automationTarget;
+    const bool savedExpanded = slot->automationExpanded;
+    const int  savedParam    = slot->getPluginParam();
+    const auto savedPoints   = slot->getPluginAutomation().getPoints();
+    const bool savedOn       = slot->getPluginAutomation().isEnabled();
+
+    rack.setPluginParam (slotId, 0);
+
+    auto& lane = slot->getPluginAutomation();
+    lane.loadPoints ({ { 0.0, 0.30f }, { 4.0, 0.95f },
+                       { 10.0, 0.45f }, { 16.0, 0.80f }, { 64.0, 0.55f } });
+    lane.setEnabled (true);
+
+    rack.setAutomationTarget (slotId, SlotAutomationTarget::plugin);
+    rack.setAutomationExpanded (slotId, true);
+
+    // A row, and the row lit — a list where the new line is at the bottom under
+    // three others shows the label but not the fact that it is selected.
+    const int trackId = automation.addTrack (AutomationOwner::slot, slotId,
+                                             (int) SlotAutomationTarget::plugin);
+
+    if (trackId > 0)
+    {
+        automation.selectTrack (trackId);
+        automationWindow.revealTrack (trackId);
+    }
+
+    automationWindow.setSize (width, height);
+    automationWindow.resized();
+
+    auto image = automationWindow.createComponentSnapshot (automationWindow.getLocalBounds(), true);
+
+    //-- Hand it all back -----------------------------------------------------
+    if (trackId > 0)
+        automation.removeTrack (trackId);
+
+    lane.loadPoints (savedPoints);
+    lane.setEnabled (savedOn);
+
+    rack.setPluginParam (slotId, savedParam);
+    rack.setAutomationTarget (slotId, savedTarget);
+    rack.setAutomationExpanded (slotId, savedExpanded);
+
+    return image;
+}
+
+//==============================================================================
+void MainComponent::showDemoMixedSelection(){    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr)
+        return;
+
+    // Phase 29: the shot shows what a marquee can produce — notes AND the block
+    // selected at the same time.
+    //
+    // Phase 35: it also shows what a CLICK can produce, now that the demo's
+    // block is a member of 组 A. Building the two lists by hand here was the
+    // manual work this phase replaces; calling the same command the label calls
+    // means the picture cannot show a selection the user could not make.
+    if (! layer->getGroups().empty())
+    {
+        pianoRoll.selectGroup (layer->getGroups().front().getId());
+        return;
+    }
+
+    std::vector<int> notes;
+
+    for (const auto& note : layer->getNotes())
+        if (notes.size() < 4 && note.startBeat >= 12.0 && note.startBeat <= 20.0)
+            notes.push_back (note.id);
+
+    std::vector<int> clips;
+
+    for (const auto& clip : layer->getSamples())
+        clips.push_back (clip.id);
+
+    pianoRoll.setMixedSelection (notes, clips);
+}
+
+namespace
+{
+    /** Phase 34: the question both cascade deletions ask, in words.
+
+        One builder for the prompt and for the snapshot that documents it: a
+        picture of a dialog whose text was typed a second time is a picture of a
+        dialog that no longer exists. */
+    juce::String samplerCascadeMessage (const juce::String& slotName,
+                                        int mounted,
+                                        const juce::StringArray& names)
+    {
+        juce::String text = utf8 ("「")
+                              + (slotName.isNotEmpty() ? slotName : utf8 ("采样音源"))
+                              + utf8 ("」正被 ") + juce::String (mounted) + utf8 (" 个采样块使用：\n")
+                              + names.joinIntoString (utf8 ("、"));
+
+        if (mounted > names.size())
+            text << utf8 (" 等");
+
+        return text + utf8 ("\n\n删除这个采样音源，这些采样块会一起从钢琴窗上消失。");
+    }
+
+    /** The two answers, in one place — see samplerCascadeMessage(). Both
+        questions use them: "删除 / 取消" reads correctly whether the thing being
+        deleted is a card or an orphan. */
+    void addSamplerCascadeButtons (juce::AlertWindow& alert)
+    {
+        alert.addButton (utf8 ("删除"), 1, juce::KeyPress ((int) 'd'));
+        alert.addButton (utf8 ("取消"), 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    }
+}
+
+juce::Image MainComponent::createSamplerLinkSnapshot()
+{
+    // Phase 32: the clip is the subject, so the notes are let go — a mixed
+    // selection would put two kinds of white ring on screen and muddy which one
+    // the rack is answering.
+    if (auto* layer = stack.getActiveLayer())
+    {
+        std::vector<int> clips;
+
+        for (const auto& clip : layer->getSamples())
+            clips.push_back (clip.id);
+
+        // Phase 33: nothing else is called here on purpose. Selecting a block
+        // is what lights its sampler, so the highlight in this frame is the
+        // automatic chain doing its job — setSampleSelection notifies, the host
+        // re-derives the focus, the rack draws a second outline. A manual
+        // updateRackRoutingFocus() here would photograph the wiring instead of
+        // the behaviour, which is the whole point of a drop being selected.
+        pianoRoll.setSampleSelection (clips);
+    }
+
+    return createComponentSnapshot (getLocalBounds(), true);
+}
+
+juce::Image MainComponent::createSamplerPromptSnapshot()
+{
+    // Phase 34: a dialog lives in its own window, and a headless run cannot
+    // photograph a modal one. So the window is BUILT — never shown, never
+    // entered into a modal state — and rendered. Text and buttons come from the
+    // same two builders the real prompt uses: a fixture typed here would drift
+    // and the picture would document a question nobody is asked.
+    juce::AlertWindow alert (utf8 ("删除采样音源？"),
+                             samplerCascadeMessage (utf8 ("采样 · Kick 01"), 2,
+                                                    juce::StringArray { utf8 ("Kick A"),
+                                                                        utf8 ("Kick B") }),
+                             juce::MessageBoxIconType::WarningIcon,
+                             nullptr);
+
+    addSamplerCascadeButtons (alert);
+
+    return alert.createComponentSnapshot (alert.getLocalBounds(), true);
+}
+
 //==============================================================================
 //  Phase 8: new project
 //==============================================================================
 void MainComponent::buildSession (bool withEmptyLayer)
 {
+    // The layers and the rack are replaced one after the other, so for a moment
+    // the new layers see the old rack. A sweep in that window would delete the
+    // previous session's samplers while their replacement has not arrived yet.
+    const juce::ScopedValueSetter<bool> noSweep (suspendSamplerPrune, true);
+
     envelopePanel.close();
     pianoRoll.closeNoteAutomation();
     closeMixerWindow();
@@ -1033,7 +1806,18 @@ SettingsWindow* MainComponent::ensureSettingsWindow()
 {
     if (settingsWindow == nullptr)
     {
-        settingsWindow = std::make_unique<SettingsWindow> (plugins, audio.getDeviceManager());
+        settingsWindow = std::make_unique<SettingsWindow> (plugins, audio.getDeviceManager(),
+                                                           *midiHub);
+
+        // Phase 39: the page asks, the host decides. Switching the source has to
+        // release the notes the old one was holding, and that is a job for the
+        // thing that knows both sides.
+        settingsWindow->onMidiSourcesChanged = [this] (MidiSources sources)
+        {
+            setMidiSources (sources);
+        };
+
+        settingsWindow->getLiveTargetName = [this] { return getLiveTargetName(); };
 
         settingsWindow->onAddInstrument = [this] (const juce::PluginDescription& description)
         {
@@ -1069,6 +1853,35 @@ juce::Image MainComponent::createSettingsSnapshot (int tabIndex, int width, int 
     window->refresh();
 
     return window->createPageSnapshot (tabIndex, width, height);
+}
+
+juce::Image MainComponent::createMidiKeyboardSnapshot()
+{
+    // The keyboard alone: the FL Studio map with nothing competing for the
+    // space. Off, the page is two unticked boxes and a sentence.
+    const auto previous = getMidiSources();
+
+    setMidiSources ({ true, false });
+
+    const auto image = createSettingsSnapshot (1);
+
+    setMidiSources (previous);
+    return image;
+}
+
+juce::Image MainComponent::createMidiBothSnapshot()
+{
+    // Both switches on, which is the state the whole phase exists for: the map
+    // and the device list have to share one page without either being cropped
+    // into the other. A picture is the only way to check that.
+    const auto previous = getMidiSources();
+
+    setMidiSources ({ true, true });
+
+    const auto image = createSettingsSnapshot (1);
+
+    setMidiSources (previous);
+    return image;
 }
 
 bool MainComponent::addPluginInstrument (const juce::PluginDescription& description)
@@ -1214,7 +2027,7 @@ void MainComponent::showRackAddMenu (juce::Point<int> screenPosition)
     });
 }
 
-void MainComponent::showRackCardMenu (int slotId, juce::Point<int> screenPosition)
+void MainComponent::fillRackCardMenu (juce::PopupMenu& menu, int slotId)
 {
     auto* slot = rack.findSlot (slotId);
 
@@ -1229,11 +2042,33 @@ void MainComponent::showRackCardMenu (int slotId, juce::Point<int> screenPositio
         if (entry.isInstrument)
             instruments.push_back (entry.description);
 
-    juce::PopupMenu menu;
-    menu.addSectionHeader (slot->name + utf8 (" · 输出到 ")
+    menu.addSectionHeader (slot->getDisplayName() + utf8 (" · 输出到 ")
                              + (slot->sendsToMixer() ? utf8 ("混音器通道 ")
                                                        + juce::String (slot->mixerChannel + 1)
                                                      : utf8 ("主输出")));
+
+    //-- Phase 38: the plugin's own window ------------------------------------
+    // A hosted instrument HAS a UI of its own, and until now there was no way to
+    // reach it from the rack at all: openPluginEditor existed, but only the
+    // mixer's insert menu called it. A plugin you cannot open is a plugin whose
+    // every parameter is stuck at its default.
+    //
+    // Above 替换音源 because it is what you want most of the time, and it says
+    // "未载入" instead of going missing when the instance is not loaded —
+    // "the item is greyed out" is a much cheaper bug report than "it does
+    // nothing".
+    {
+        const bool hosted  = slot->isPlugin();
+        const bool loaded  = hosted && slot->pluginId > 0
+                               && plugins.isLoaded (slot->pluginId);
+
+        menu.addItem (41, ! hosted        ? utf8 ("打开插件界面（非插件音源）")
+                            : loaded      ? utf8 ("打开插件界面")
+                                          : utf8 ("打开插件界面 · 未载入"),
+                      loaded);
+    }
+
+    menu.addSeparator();
 
     //-- Replace the instrument ----------------------------------------------
     juce::PopupMenu replace;
@@ -1253,150 +2088,231 @@ void MainComponent::showRackCardMenu (int slotId, juce::Point<int> screenPositio
         vst.addItem (199, plugins.hasScanned() ? utf8 ("没有找到已安装的乐器")
                                                : utf8 ("尚未扫描"), false);
     else
-        addPluginItems (vst, instruments, 200);
+        addPluginItems (vst, instruments, 200, slot->pluginName);
 
     replace.addSeparator();
     replace.addSubMenu (utf8 ("VST3 乐器"), vst, ! instruments.empty());
 
-    menu.addSubMenu (utf8 ("替换音源"), replace, true);
+    menu.addSubMenu (utf8 ("替换音源"), replace, ! slot->isSampler());
 
     //-- Console send ---------------------------------------------------------
+    // Phase 25: the ceiling is 127 strips, so the list is the LIVE ones. A menu
+    // with 127 entries is not a menu, and the ids below start at 1000 because
+    // 21 + channel would otherwise collide with the automation and delete items
+    // further down this very menu.
     juce::PopupMenu send;
     send.addItem (20, utf8 ("不发送（直接到主输出）"), true, ! slot->sendsToMixer());
 
-    for (int ch = 0; ch < MixerModel::numChannels; ++ch)
-        send.addItem (21 + ch, utf8 ("通道 ") + juce::String (ch + 1), true,
+    const int liveChannels = mixerPanel.getStripCount() - 1;
+
+    for (int ch = 0; ch < liveChannels; ++ch)
+        send.addItem (kSendToChannelBase + ch, utf8 ("通道 ") + juce::String (ch + 1), true,
                       slot->mixerChannel == ch);
 
     menu.addSubMenu (utf8 ("发送到混音器通道"), send, true);
 
     //-- Automation -----------------------------------------------------------
     // Phase 14: no badge on the card any more, so the card menu is the only
-    // way in. Same wording as the layer row's menu: the item names both the
-    // action and the parameter it will automate.
-    menu.addItem (30, utf8 ("创建自动化 · 滤波器"), true,
-                  automation.contains (AutomationOwner::slot, slotId, 0));
-    menu.addItem (31, utf8 ("创建自动化 · 音量"), true,
-                  automation.contains (AutomationOwner::slot, slotId, 1));
-    menu.addItem (32, slot->automationExpanded ? utf8 ("收起面板中的曲线")
-                                               : utf8 ("在面板中展开曲线"), true);
+    // way in.
+    //
+    // Phase 42: ONE submenu, and the synth's own parameters live inside it.
+    // Three top-level rows whose names all began with 创建自动化 · read like a
+    // list of parameters; the verb is one verb, so it is one entry. The
+    // parameters come from the same lister the roll's boxes use, which is why a
+    // VST that is loaded offers them and a slot that has never had one says so
+    // instead of showing an empty menu.
+    {
+        juce::PopupMenu autoMenu;
+
+        addSlotAutomationItems (autoMenu, slotId, 30);
+
+        autoMenu.addSeparator();
+        autoMenu.addItem (32, slot->automationExpanded ? utf8 ("收起面板中的曲线")
+                                                       : utf8 ("在面板中展开曲线"), true);
+
+        menu.addSubMenu (utf8 ("创建自动化"), autoMenu);
+    }
 
     menu.addSeparator();
 
     //-- Phase 16: the explicit form of the old click = re-route gesture ------
     // A plain click now spotlights the synth instead of moving notes onto it,
     // so the destructive half needs a place where it says what it does.
-    menu.addItem (33, utf8 ("把选中音符挂到该音源"), ! pianoRoll.getSelection().empty());
-    menu.addItem (34, utf8 ("高亮这个音源"), true, focusedSlotId == slotId);
+    // Phase 27: a sampler holds a file and has no oscillator, so "put my notes
+    // on it" is not an action that can do anything except mute them.
+    menu.addItem (33, utf8 ("把选中音符挂到该音源"),
+                  ! pianoRoll.getSelection().empty() && ! slot->isSampler());
+
+    // Phase 29: this is a TOGGLE now. It used to set the spotlight and nothing
+    // else, so the only way to take the veil off was to open a project — the
+    // grid stayed grey and the item that caused it kept saying "highlight".
+    menu.addItem (34, focusedSlotId == slotId ? utf8 ("取消高亮（显示全部）")
+                                              : utf8 ("高亮这个音源"),
+                  true, focusedSlotId == slotId);
 
     menu.addSeparator();
     menu.addItem (40, utf8 ("删除这个音源"), rack.getNumSlots() > 1);
+}
+
+void MainComponent::applyRackCardChoice (int result, int slotId)
+{
+    if (rack.findSlot (slotId) == nullptr)
+        return;                     // the card was deleted while the menu was up
+
+    if (result >= 10 && result <= 13)
+    {
+        static const Waveform bench[4] { Waveform::sine, Waveform::saw,
+                                         Waveform::square, Waveform::triangle };
+
+        // The slot id survives, so every layer route, note override and
+        // automation track still points at the same instrument.
+        rack.replaceWithNative (slotId, bench[result - 10]);
+        reconcilePlugins();          // the old instance has no owner now
+        rackPanel.repaint();
+        repaint();
+        return;
+    }
+
+    if (result == 20)
+    {
+        rack.setMixerChannel (slotId, -1);
+        mixerPanel.repaint();
+        return;
+    }
+
+    if (result >= kSendToChannelBase && result < kSendToChannelBase + MixerModel::maxChannels)
+    {
+        const int channel = result - kSendToChannelBase;
+        rack.setMixerChannel (slotId, channel);
+        mixerPanel.setSelectedChannel (channel);   // show where it went
+        mixerPanel.repaint();
+        return;
+    }
+
+    if (applySlotAutomationChoice (result, slotId, 30))
+        return;
+
+    if (result == 32)
+    {
+        if (auto* current = rack.findSlot (slotId))
+            rack.setAutomationExpanded (slotId, ! current->automationExpanded);
+
+        return;
+    }
+
+    if (result == 33)
+    {
+        // Same call the card's plain click makes (Phase 23): a group goes to
+        // the group, loose notes to their own overrides.
+        if (pianoRoll.mountSelectionTo (slotId))
+        {
+            republish();
+            focusSynth (slotId);
+            layerPanel.repaint();
+            groupPanel.repaint();
+            rackPanel.repaint();
+        }
+
+        return;
+    }
+
+    if (result == 34)
+    {
+        // Toggle, and hand the keyboard back to the roll: the menu was the last
+        // thing with focus, and a roll that answers Delete only after you click
+        // it is a roll that looks broken for one keystroke.
+        focusSynth (focusedSlotId == slotId ? -1 : slotId);
+        pianoRoll.grabKeyboardFocus();
+        return;
+    }
+
+    if (result == 40)
+    {
+        // Phase 32: one entry point for "delete a synth" — the × and this item
+        // must agree about what happens to the clips mounted on a sampler.
+        // Phase 34: both go through the question for the same reason.
+        requestRemoveSlotAndItsClips (slotId);
+        return;
+    }
+
+    if (result == 41)
+    {
+        // Phase 38: the hosted instrument's own editor. Same window class the
+        // mixer inserts use, so a plugin opened from the rack behaves exactly
+        // like one opened from a channel strip (one window per instance, and
+        // the window closes itself when the instance is unloaded).
+        auto* slot = rack.findSlot (slotId);
+
+        if (slot == nullptr || ! slot->isPlugin())
+            return;
+
+        if (plugins.getProcessorForEditor (slot->pluginId) == nullptr)
+        {
+            showMessage (utf8 ("插件没有载入"),
+                         utf8 ("这个 VST3 在当前会话里没能加载，所以没有界面可开。\n")
+                           + utf8 ("可以在「替换音源」里换一个乐器，或在插件管理器里重新扫描。"),
+                         true);
+            return;
+        }
+
+        openPluginEditor (slot->pluginId, slot->getDisplayName());
+        return;
+    }
+
+    //-- A VST3 from the sub-menu --------------------------------------------
+    // Phase 21: the choice can arrive long after the menu was built (it is now
+    // reachable through a hover sub-menu inside a value menu), so the library
+    // is re-read here instead of carrying a captured copy around.
+    if (result < 200)
+        return;
+
+    std::vector<juce::PluginDescription> instruments;
+
+    for (const auto& entry : plugins.getLibrary())
+        if (entry.isInstrument)
+            instruments.push_back (entry.description);
+
+    const int index = result - 200;
+
+    if (! juce::isPositiveAndBelow (index, (int) instruments.size()))
+        return;
+
+    juce::String error;
+    const int instanceId = plugins.load (instruments[(size_t) index], &error);
+
+    if (instanceId <= 0)
+    {
+        showMessage (utf8 ("无法载入插件"),
+                     instruments[(size_t) index].name + "\n\n"
+                       + (error.isNotEmpty() ? error : utf8 ("插件格式不支持或文件已损坏")),
+                     true);
+        return;
+    }
+
+    rack.replaceWithPlugin (slotId, instruments[(size_t) index], instanceId);
+    reconcilePlugins();
+    rackPanel.repaint();
+    repaint();
+}
+
+void MainComponent::showRackCardMenu (int slotId, juce::Point<int> screenPosition)
+{
+    if (rack.findSlot (slotId) == nullptr)
+        return;
+
+    juce::PopupMenu menu;
+    fillRackCardMenu (menu, slotId);
 
     juce::Component::SafePointer<MainComponent> safe (this);
 
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (
                             juce::Rectangle<int> (screenPosition.x, screenPosition.y, 1, 1)),
-                        [safe, slotId, instruments] (int result)
+                        [safe, slotId] (int result)
     {
         if (safe == nullptr || result <= 0)
             return;
 
-        if (safe->rack.findSlot (slotId) == nullptr)
-            return;                 // the card was deleted while the menu was up
-
-        if (result >= 10 && result <= 13)
-        {
-            static const Waveform bench[4] { Waveform::sine, Waveform::saw,
-                                             Waveform::square, Waveform::triangle };
-
-            // The slot id survives, so every layer route, note override and
-            // automation track still points at the same instrument.
-            safe->rack.replaceWithNative (slotId, bench[result - 10]);
-            safe->reconcilePlugins();          // the old instance has no owner now
-            safe->rackPanel.repaint();
-            safe->repaint();
-            return;
-        }
-
-        if (result == 20)
-        {
-            safe->rack.setMixerChannel (slotId, -1);
-            safe->mixerPanel.repaint();
-            return;
-        }
-
-        if (result >= 21 && result < 21 + MixerModel::numChannels)
-        {
-            const int channel = result - 21;
-            safe->rack.setMixerChannel (slotId, channel);
-            safe->mixerPanel.setSelectedChannel (channel);   // show where it went
-            safe->mixerPanel.repaint();
-            return;
-        }
-
-        if (result == 30 || result == 31)
-        {
-            safe->ensureAutomationTrack (AutomationOwner::slot, slotId, result - 30);
-            return;
-        }
-
-        if (result == 32)
-        {
-            auto* current = safe->rack.findSlot (slotId);
-
-            if (current != nullptr)
-                safe->rack.setAutomationExpanded (slotId, ! current->automationExpanded);
-
-            return;
-        }
-
-        if (result == 33)
-        {
-            safe->pianoRoll.routeSelectionTo (slotId);
-            safe->republish();
-            safe->focusSynth (slotId);
-            safe->layerPanel.repaint();
-            safe->rackPanel.repaint();
-            return;
-        }
-
-        if (result == 34)
-        {
-            safe->focusSynth (slotId);
-            return;
-        }
-
-        if (result == 40)
-        {
-            safe->rack.removeSlot (slotId);
-            safe->reconcilePlugins();
-            safe->republish();
-            safe->rackPanel.repaint();
-            safe->mixerPanel.repaint();
-            return;
-        }
-
-        const int index = result - 200;
-
-        if (! juce::isPositiveAndBelow (index, (int) instruments.size()))
-            return;
-
-        juce::String error;
-        const int instanceId = safe->plugins.load (instruments[(size_t) index], &error);
-
-        if (instanceId <= 0)
-        {
-            safe->showMessage (utf8 ("无法载入插件"),
-                               instruments[(size_t) index].name + "\n\n"
-                                 + (error.isNotEmpty() ? error : utf8 ("插件格式不支持或文件已损坏")),
-                               true);
-            return;
-        }
-
-        safe->rack.replaceWithPlugin (slotId, instruments[(size_t) index], instanceId);
-        safe->reconcilePlugins();
-        safe->rackPanel.repaint();
-        safe->repaint();
+        safe->applyRackCardChoice (result, slotId);
     });
 }
 
@@ -1455,6 +2371,11 @@ void MainComponent::openPluginEditor (int instanceId, const juce::String& displa
     auto window = std::make_unique<PluginEditorWindow> (*processor, displayName, instanceId);
 
     window->onCloseRequest = [this, instanceId] { closePluginEditor (instanceId); };
+
+    // Phase 42: the plugin's window is a separate top-level component, so a key
+    // pressed inside it never reaches this one. The window installs the
+    // forwarder on itself and on its content (the plugin's own editor).
+    window->setKeyForwarder (&pluginForwarder);
 
     pluginWindows[instanceId] = std::move (window);
 }
@@ -1580,24 +2501,48 @@ void MainComponent::reconcilePlugins()
 
 void MainComponent::updateRackRoutingFocus()
 {
-    // The selection is the *default* driver of the spotlight: picking notes on
-    // a sheet should light up the synth they play on. Clicking a card sets the
-    // focus explicitly and does not go through here, so the card cannot snap
-    // back to the selection it was just asked to ignore.
-    if (! pianoRoll.getSelection().empty())
-    {
-        const int resolved = pianoRoll.getSelectedRoutingSlotId();
+    // Phase 30: selecting notes no longer switches the spotlight ON. It used
+    // to: `focusedSlotId = resolved` on every selection change. That is how the
+    // grid "went grey" without anyone asking for it — click a note and the whole
+    // sheet dimmed, and the only way back was a gesture almost nobody finds. A
+    // highlight is now something the user turns on (a card's 高亮 item) and
+    // turns off (empty grid / Esc / the same item).
+    //
+    // Phase 32: a CLIP is the exception, because a clip is mounted on a sampler
+    // and the sampler is not a place the music "happens to come out of" — it
+    // holds the file. Selecting a block is how you say "this sample", so the
+    // card that owns it lights up. That is a positive mark (a second outline
+    // around one card), not a veil, so it cannot repeat the Phase 30 mistake.
+    const int clipSampler = pianoRoll.selectedSamplerSlotId();
 
-        if (resolved >= 0)
-            focusedSlotId = resolved;
+    if (clipSampler >= 0)
+    {
+        focusedSlotId = clipSampler;
+        focusFromSampleSelection = true;
+    }
+    else if (focusFromSampleSelection)
+    {
+        // The selection that caused the highlight is gone. Only take the
+        // highlight away when WE put it there — a card the user lit by hand has
+        // to survive every later click on the grid.
+        focusedSlotId = -1;
+        focusFromSampleSelection = false;
     }
 
+    // The rack still needs to know whether anything is SELECTED — that is what
+    // decides whether a plain card click mounts or merely inspects — and that is
+    // a different question, answered by setSelectionActive in applyFocus().
     applyFocus();
 }
 
 void MainComponent::focusSynth (int slotId)
 {
     focusedSlotId = (slotId >= 0 && rack.findSlot (slotId) != nullptr) ? slotId : -1;
+
+    // An explicit choice outranks the one the clip selection was making, and it
+    // must not be revoked by the next selection change.
+    focusFromSampleSelection = false;
+
     applyFocus();
 }
 
@@ -1608,11 +2553,490 @@ void MainComponent::applyFocus()
     if (focusedSlotId >= 0 && rack.findSlot (focusedSlotId) == nullptr)
         focusedSlotId = -1;
 
+    // Phase 23: "is there a selection" is not "is a synth spotlit". The rack
+    // needs the first one — it decides whether a plain card click mounts the
+    // selection or merely inspects a synth.
+    //
+    // Phase 32: a selected CLIP is a selection too. Without it, clicking a
+    // sampler card while a block is selected fell through to "inspect only",
+    // which is the one gesture the user makes to say "play this sample on that
+    // one".
+    rackPanel.setSelectionActive (! pianoRoll.getSelection().empty()
+                                   || ! pianoRoll.getSampleSelection().empty());
     rackPanel.setRoutingFocus (focusedSlotId, focusedSlotId >= 0);
     pianoRoll.setFocusSlotId (focusedSlotId);
     layerPanel.setFocusSlotId (focusedSlotId);
     groupPanel.setFocusSlotId (focusedSlotId);
+
+    // Phase 39: the MIDI thread reads this, so it is cached rather than derived
+    // there. Kept in applyFocus() because "which synth is spotlit" and "which
+    // layer is active" are the two inputs, and both land here.
+    refreshLiveTarget();
 }
+
+//==============================================================================
+//  Phase 39: playing the rack's synth from a keyboard
+//==============================================================================
+void MainComponent::setMidiSources (MidiSources next)
+{
+    if (midiHub == nullptr)
+        return;
+
+    const auto previous = midiHub->getSources();
+
+    if (previous == next)
+        return;
+
+    // A source that goes away must not leave notes behind — that is the
+    // difference between silence and a chord no key can ever release.
+    //
+    // Per source, though, not wholesale: turning the controller ON while a
+    // chord is held on the computer keyboard must not interrupt it. That is the
+    // entire point of Phase 40's two switches.
+    if (previous.typingKeyboard && ! next.typingKeyboard)
+        releaseAllTypingNotes();
+
+    if (previous.externalController && ! next.externalController)
+        audio.getPlayback().allLiveNotesOff();   // a port cannot say what it holds
+
+    midiHub->setSources (next);
+
+    // Leaving the controller source closes its ports; the device ticks have to
+    // stop claiming they are open.
+    if (! next.externalController)
+        midiHub->refreshDevices();
+
+    refreshLiveTarget();
+}
+
+MidiSources MainComponent::getMidiSources() const noexcept
+{
+    return midiHub != nullptr ? midiHub->getSources() : MidiSources {};
+}
+
+bool MainComponent::typingKeyboardLive() const noexcept
+{
+    return midiHub != nullptr && midiHub->getSources().typingKeyboard;
+}
+
+int MainComponent::getLiveTargetSlot() const
+{
+    // Phase 43: the rule moved into Routing.h — the piano roll's key column was
+    // asking a different question and answering with the layer's internal synth
+    // while this one played the spotlit VST. One question, one function.
+    if (const auto* layer = stack.getLayer (stack.getActiveLayerIndex()))
+        return routing::auditionSlotId (focusedSlotId, *layer, rack);
+
+    return -1;
+}
+
+juce::String MainComponent::getLiveTargetName() const
+{
+    const int slotId = getLiveTargetSlot();
+
+    if (slotId < 0)
+        return utf8 ("无：机架里还没有音源");
+
+    return rack.getSlotName (slotId);
+}
+
+void MainComponent::refreshLiveTarget()
+{
+    liveTargetSlot.store (getLiveTargetSlot(), std::memory_order_relaxed);
+}
+
+void MainComponent::liveNoteOn (int pitch, float velocity)
+{
+    audio.getPlayback().noteOnLive (getLiveTargetSlot(), pitch, velocity);
+}
+
+void MainComponent::liveNoteOff (int pitch)
+{
+    audio.getPlayback().noteOffLive (pitch);
+}
+
+void MainComponent::setTypingOctave (int octaves)
+{
+    const int clamped = juce::jlimit (-4, 4, octaves);
+
+    if (clamped == typingOctave)
+        return;
+
+    // Keys held across the shift keep the note they started: their release is
+    // matched by the stored note, not re-derived from the new mapping.
+    typingOctave = clamped;
+}
+
+//==============================================================================
+bool MainComponent::handleTypingKeyDown (const juce::KeyPress& key)
+{
+    if (! typingKeyboardLive())
+        return false;
+
+    // Ctrl and Alt combinations stay shortcuts — Ctrl+S has to keep saving even
+    // with the keyboard routed to the synth.
+    if (key.getModifiers().isCommandDown() || key.getModifiers().isAltDown())
+        return false;
+
+    const int code = key.getKeyCode() != 0 ? key.getKeyCode()
+                                           : (int) key.getTextCharacter();
+
+    // Octave shift. The two keys that cannot be notes: the number row is the
+    // upper octave's black keys in FL Studio's layout, so the numpad is what is
+    // left, and it is also where every DAW puts it.
+    if (code == juce::KeyPress::numberPadAdd || code == juce::KeyPress::numberPadSubtract)
+    {
+        setTypingOctave (typingOctave + (code == juce::KeyPress::numberPadAdd ? 1 : -1));
+        return true;
+    }
+
+    const int note = typing::noteForKeyCode (code, typingOctave);
+
+    if (note < 0)
+        return false;
+
+    // Auto-repeat: a held key keeps firing keyPressed. One note, not twelve.
+    for (const auto& held : typingHeld)
+        if (held.first == code && held.second == note)
+            return true;
+
+    liveNoteOn (note, typingVelocity);
+    typingHeld.push_back ({ code, note });
+    return true;
+}
+
+bool MainComponent::releaseTypingKeysThatAreUp()
+{
+    if (typingHeld.empty())
+        return false;
+
+    bool released = false;
+
+    for (auto it = typingHeld.begin(); it != typingHeld.end(); )
+    {
+        if (juce::KeyPress::isKeyCurrentlyDown (it->first))
+        {
+            ++it;
+            continue;
+        }
+
+        liveNoteOff (it->second);
+        it = typingHeld.erase (it);
+        released = true;
+    }
+
+    return released;
+}
+
+void MainComponent::releaseAllTypingNotes()
+{
+    for (const auto& held : typingHeld)
+        liveNoteOff (held.second);
+
+    typingHeld.clear();
+}
+
+bool MainComponent::keyStateChanged (bool isKeyDown)
+{
+    juce::ignoreUnused (isKeyDown);
+
+    // The only "a key came up" signal JUCE has: ask which mapped keys are still
+    // down. It arrives from whichever panel has focus, because key-state
+    // changes walk up the parent chain like key presses do.
+    return releaseTypingKeysThatAreUp();
+}
+
+//==============================================================================
+//  Phase 32: clips and the samplers that hold them
+//==============================================================================
+void MainComponent::removeSlotAndItsClips (int slotId)
+{
+    const auto* slot = rack.findSlot (slotId);
+
+    if (slot == nullptr)
+        return;
+
+    // The rack has always kept one slot: an empty rack has nothing to play
+    // anything, and "the last card cannot be closed" is the rule the × states.
+    if (rack.getNumSlots() <= 1)
+        return;
+
+    const bool isSampler = slot->isSampler();
+
+    // Phase 34: held across the block deletion below. deleteSamplesMountedOn()
+    // notifies, and a sweep inside that notification would see the very slot we
+    // are holding as an orphan and ask a second question about it — the user
+    // would be told the card is gone while it is still on screen.
+    const juce::ScopedValueSetter<bool> guard (pruningSamplers, true);
+
+    // The blocks first, the slot second. A clip naming a slot that no longer
+    // exists is a dangling mount; deleting the slot first would create one for
+    // as long as the next line takes to run, and every listener in between
+    // (audio, panels, undo) would see it.
+    if (isSampler)
+        pianoRoll.deleteSamplesMountedOn (slotId);
+
+    // Phase 34: the slot is gone, so a "keep it" verdict about it is meaningless
+    // — and leaving the id behind would make a future slot that reuses it
+    // silently exempt from the sweep.
+    pruneDeclinedSlots.erase (slotId);
+
+    rack.removeSlot (slotId);
+
+    reconcilePlugins();
+    mixerPanel.repaint();
+    rackPanel.repaint();
+    repaint();
+}
+
+//==============================================================================
+//  Phase 34: nothing that deletes music happens without being announced
+//==============================================================================
+void MainComponent::installSamplerCascadePrompt()
+{
+    askSamplerCascade = [] (const juce::String& title,
+                            const juce::String& body,
+                            std::function<void (bool)> onAnswer)
+    {
+        auto* alert = new juce::AlertWindow (title, body,
+                                             juce::MessageBoxIconType::WarningIcon,
+                                             nullptr);
+
+        addSamplerCascadeButtons (*alert);
+
+        alert->enterModalState (true,
+                                juce::ModalCallbackFunction::create (
+                                    [answer = std::move (onAnswer)] (int result)
+                                    {
+                                        if (answer != nullptr)
+                                            answer (result == 1);
+                                    }),
+                                true);          // delete when dismissed
+    };
+}
+
+void MainComponent::requestRemoveSlotAndItsClips (int slotId)
+{
+    const auto* slot = rack.findSlot (slotId);
+
+    if (slot == nullptr)
+        return;
+
+    // Same rule as the executor: the last card cannot be closed. Asking about a
+    // deletion that is then going to be refused is worse than not asking.
+    if (rack.getNumSlots() <= 1)
+        return;
+
+    if (! slot->isSampler())
+    {
+        removeSlotAndItsClips (slotId);
+        return;
+    }
+
+    const int mounted = pianoRoll.countSamplesMountedOn (slotId);
+
+    // Nothing on the grid is holding this file: the cascade has nothing to
+    // announce, and a prompt with no cost in it is noise.
+    if (mounted <= 0)
+    {
+        removeSlotAndItsClips (slotId);
+        return;
+    }
+
+    const auto names = pianoRoll.namesOfSamplesMountedOn (slotId, 4);
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+
+    askSamplerCascade (utf8 ("删除采样音源？"),
+                       samplerCascadeMessage (slot->getDisplayName(), mounted, names),
+                       [safe, slotId] (bool confirmed)
+                       {
+                           if (safe != nullptr && confirmed)
+                               safe->removeSlotAndItsClips (slotId);
+                       });
+}
+
+void MainComponent::removeSamplerSlots (const std::vector<int>& slotIds)
+{
+    // Held for the whole pass, not per slot: removeSlot() notifies, and this
+    // function is reached from a notification.
+    const juce::ScopedValueSetter<bool> guard (pruningSamplers, true);
+
+    bool changed = false;
+
+    for (const int id : slotIds)
+    {
+        const auto* slot = rack.findSlot (id);
+
+        if (slot == nullptr || ! slot->isSampler())
+            continue;
+
+        // One has to stay, or the rack has nothing to add the next one to.
+        if (rack.getNumSlots() <= 1)
+            break;
+
+        pruneDeclinedSlots.erase (id);
+        rack.removeSlot (id);
+        changed = true;
+    }
+
+    if (! changed)
+        return;
+
+    applyFocus();
+    rackPanel.repaint();
+    mixerPanel.repaint();
+    repaint();
+}
+
+void MainComponent::pruneOrphanSamplerSlots()
+{
+    // Three reasons to keep out: we are already inside a sweep (removeSlot
+    // notifies, and this is reached from a notification); an undo is restoring
+    // layers and rack in two steps; a session rebuild or a project load is doing
+    // the same. In all three the layers and the rack are momentarily talking
+    // about different songs, and a sweep there would delete a sampler that the
+    // next line is about to reference.
+    if (pruningSamplers || restoringHistory || suspendSamplerPrune)
+        return;
+
+    // Fast out. The sweep is now reached from every notesChanged, which during a
+    // note drag means every mouse move; a song without samplers must not pay for
+    // a walk over every clip to discover there is nothing to walk to.
+    bool anySampler = false;
+
+    for (int i = 0; i < rack.getNumSlots() && ! anySampler; ++i)
+        if (const auto* slot = rack.getSlot (i); slot != nullptr && slot->isSampler())
+            anySampler = true;
+
+    if (! anySampler)
+        return;
+
+    // Phase 34: a prompt is already on screen, or queued behind the current
+    // gesture. Asking a second time before the first answer arrives would mean
+    // one dialog per mouse move.
+    if (prunePromptQueued)
+        return;
+
+    if (orphanSamplerIds().empty())
+        return;
+
+    // Phase 34: the deletion now needs an answer, and the sweep is usually
+    // reached from inside a drag. Ask from the message queue so the mouse-up
+    // that the gesture is waiting for is not swallowed by a modal window.
+    prunePromptQueued = true;
+
+    if (! deferSamplerPrompt)
+    {
+        askToPruneOrphanSamplerSlots();
+        return;
+    }
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+
+    juce::MessageManager::callAsync ([safe]
+    {
+        if (safe != nullptr)
+            safe->askToPruneOrphanSamplerSlots();
+    });
+}
+
+std::vector<int> MainComponent::orphanSamplerIds()
+{
+    // What every clip on every layer still names. A sampler that appears in
+    // this list has something to play; one that does not is holding a file for
+    // nobody.
+    std::vector<int> referenced;
+
+    for (int i = 0; i < stack.getNumLayers(); ++i)
+        if (const auto* layer = stack.getLayer (i))
+            for (const auto& clip : layer->getSamples())
+                if (clip.outputSlotId >= 0)
+                    referenced.push_back (clip.outputSlotId);
+
+    std::vector<int> orphans;
+
+    for (int i = 0; i < rack.getNumSlots(); ++i)
+    {
+        const auto* slot = rack.getSlot (i);
+
+        if (slot == nullptr || ! slot->isSampler())
+            continue;
+
+        const bool named = std::find (referenced.begin(), referenced.end(), slot->id)
+                             != referenced.end();
+
+        // Being named again retires the "keep it" verdict: it was an answer
+        // about a sampler with nothing to play, and that stopped being true.
+        if (named)
+        {
+            pruneDeclinedSlots.erase (slot->id);
+            continue;
+        }
+
+        if (pruneDeclinedSlots.find (slot->id) == pruneDeclinedSlots.end())
+            orphans.push_back (slot->id);
+    }
+
+    return orphans;
+}
+
+void MainComponent::askToPruneOrphanSamplerSlots()
+{
+    // Re-discovered rather than carried over: the model may have moved on while
+    // the prompt sat in the queue, and a question about a slot that some clip
+    // names again is a question about nothing.
+    std::vector<int> orphans = orphanSamplerIds();
+
+    // "The rack keeps one slot" — offering to delete a card that the executor is
+    // going to refuse is not a question, it is a bug report waiting to happen.
+    const int removable = juce::jmax (0, rack.getNumSlots() - 1);
+
+    if ((int) orphans.size() > removable)
+        orphans.resize ((size_t) removable);
+
+    if (orphans.empty())
+    {
+        prunePromptQueued = false;
+        return;
+    }
+
+    juce::StringArray names;
+
+    for (const int id : orphans)
+        if (const auto* slot = rack.findSlot (id))
+            names.add (slot->getDisplayName().isNotEmpty() ? slot->getDisplayName() : utf8 ("采样音源"));
+
+    const juce::String detail = (orphans.size() == 1
+                                   ? utf8 ("钢琴窗里已经没有采样块使用这个采样音源：\n")
+                                   : utf8 ("钢琴窗里已经没有采样块使用这些采样音源：\n"))
+                                + names.joinIntoString (utf8 ("、"))
+                                + utf8 ("\n\n要删掉吗？");
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+
+    askSamplerCascade (utf8 ("清理不再使用的采样音源？"), detail,
+                       [safe, orphans] (bool confirmed)
+                       {
+                           if (safe == nullptr)
+                               return;
+
+                           safe->prunePromptQueued = false;
+
+                           if (confirmed)
+                           {
+                               safe->removeSamplerSlots (orphans);
+                               return;
+                           }
+
+                           // "Keep it" is remembered: the sweep runs on every
+                           // model change, and re-asking on the next drag would
+                           // turn an answer into a nag.
+                           for (const int id : orphans)
+                               safe->pruneDeclinedSlots.insert (id);
+                       });
+}
+
 
 void MainComponent::showGroupMountMenu (int layerIndex, int groupId, juce::Point<int> screenPosition)
 {
@@ -1637,7 +3061,14 @@ void MainComponent::showGroupMountMenu (int layerIndex, int groupId, juce::Point
         if (slot == nullptr)
             continue;
 
-        menu.addItem (10 + slot->id, slot->name, true,
+        // Phase 27: a group is mounted on an INSTRUMENT. A sampler holds a
+        // file, not a player, so offering it here would mean "mount this group
+        // on a slot that cannot sound a note" — and the user would have no way
+        // to tell that from "the group went silent".
+        if (slot->isSampler())
+            continue;
+
+        menu.addItem (10 + slot->id, slot->getDisplayName(), true,
                       group->getOutputSlotId() == slot->id);
     }
 
@@ -1734,8 +3165,16 @@ void MainComponent::showSettingsMenu (juce::Point<int> screenPosition)
 //==============================================================================
 //  Phase 8: model listeners -> undo capture
 //==============================================================================
-void MainComponent::layersChanged()             { modelChanged(); }
-void MainComponent::notesChanged()              { modelChanged(); }
+// Phase 33: the sampler sweep hangs off the MODEL, not off the roll's delete
+// command. It used to be a callback the piano roll fired from
+// deleteSelectedSamples() — which meant every other way a block can disappear
+// (a cut, an undo, a paste that replaced one, a group prune, code that edits the
+// model directly) left its sampler behind, and the rule "no clip, no sampler"
+// was true only for the one path someone remembered to wire. A block cannot
+// vanish without one of these two notifications, so this is where the rule
+// belongs. pruneOrphanSamplerSlots() is cheap when there is nothing to do.
+void MainComponent::layersChanged()             { modelChanged(); pruneOrphanSamplerSlots(); }
+void MainComponent::notesChanged()              { modelChanged(); pruneOrphanSamplerSlots(); }
 void MainComponent::rackChanged()
 {
     reconcilePlugins();       // a removed slot may be the last user of a plugin
@@ -1761,24 +3200,11 @@ bool MainComponent::startAudio()
 
 void MainComponent::playTransport()
 {
+    // Phase 33: no anchor to remember any more. Stop rewinds to zero, and the
+    // position playback starts from is simply wherever the playhead already is
+    // — see stopDecision().
     audio.play();
     pianoRoll.setTransportActive (audio.isTransportEngaged());
-
-    rackPanel.repaint();
-    repaint (topBarBounds);
-}
-
-void MainComponent::pauseTransport()
-{
-    audio.pause();
-
-    const double beats = audio.getPositionBeats();
-
-    pianoRoll.setPlayheadBeat (beats);
-    pianoRoll.setTransportActive (audio.isTransportEngaged());
-    layerPanel.setPlayheadBeat (beats);
-    rackPanel.setPlayheadBeat (beats);
-    automationWindow.setPlayheadBeat (beats);
 
     rackPanel.repaint();
     repaint (topBarBounds);
@@ -1805,25 +3231,47 @@ void MainComponent::locatePlayhead (double beats)
 }
 
 void MainComponent::stopTransport()
-{    audio.stopTransport();
+{
+    // Phase 33: a stop press only acts while something is running.
+    //
+    // Pressed while stopped it does NOT rewind, because the playhead is also the
+    // "start playback here" control: click bar 20, then hit stop by reflex, and
+    // being thrown back to the top would be the transport undoing a positioning
+    // gesture. Return (and the ruler) are how you rewind deliberately — see
+    // rewindTransport().
+    //
+    // The engine's stopTransport() always rewinds (that is what its own name
+    // promises, and what the offline renderer relies on), so the park position
+    // is written straight after it — both calls happen inside one message and no
+    // view is repainted between them.
+    if (! stopDecision (audio.isTransportEngaged()).stop)
+        return;
 
-    pianoRoll.setPlayheadBeat (0.0);
+    parkTransportAt (stopDecision (true).beat);
+}
+
+void MainComponent::rewindTransport()
+{
+    // The explicit rewind: from anywhere, rolling or not, back to the top.
+    parkTransportAt (0.0);
+}
+
+void MainComponent::parkTransportAt (double target)
+{
+    const double beat = juce::jmax (0.0, target);
+
+    audio.stopTransport();
+    audio.setPositionBeats (beat);
+
+    pianoRoll.setPlayheadBeat (beat);
     pianoRoll.setTransportActive (false);
-    envelopePanel.setPlayheadBeat (-1.0);
-    layerPanel.setPlayheadBeat (-1.0);
-    rackPanel.setPlayheadBeat (-1.0);
-    automationWindow.setPlayheadBeat (-1.0);
+    envelopePanel.setPlayheadBeat (beat);
+    layerPanel.setPlayheadBeat (beat);
+    rackPanel.setPlayheadBeat (beat);
+    automationWindow.setPlayheadBeat (beat);
 
     rackPanel.repaint();
     repaint (topBarBounds);
-}
-
-void MainComponent::togglePlay()
-{
-    if (audio.isPlaying())
-        pauseTransport();
-    else
-        playTransport();
 }
 
 void MainComponent::setBpm (double newBpm)
@@ -1840,6 +3288,33 @@ void MainComponent::setBpm (double newBpm)
 
 void MainComponent::timerCallback()
 {
+    // Phase 39: a key released while another window had focus never produces a
+    // key-up event here, and a stuck note is the worst thing a keyboard can do.
+    // This sits above the transport early-out on purpose: playing an instrument
+    // with the transport stopped is the normal case, not an exception.
+    if (! typingHeld.empty())
+        releaseTypingKeysThatAreUp();
+
+    // The active layer can change without the spotlight moving, and the MIDI
+    // thread only ever reads the cache.
+    refreshLiveTarget();
+
+    // Phase 42: meters are not transport state, so they are updated ABOVE the
+    // early-out below. With the updates inside it, stopping the transport froze
+    // the last frame of every meter on screen — the engine had already let go of
+    // the values, but nothing repainted them, and 右上角的 master 表 stayed at
+    // whatever the last loud block was until something else forced a redraw.
+    //
+    // The `hasMeters()` half is the other side of that coin: once every bar has
+    // fallen to the floor there is nothing left to draw, so the rack's 60 Hz
+    // repaint stops instead of running for the rest of the session.
+    if (audio.isPlaying() || audio.getPlayback().hasMeters())
+    {
+        rackPanel.updateMeters();
+        mixerPanel.updateMeters();
+        repaint (getMasterMeterBounds());
+    }
+
     if (! audio.isPlaying())
         return;
 
@@ -1852,12 +3327,9 @@ void MainComponent::timerCallback()
     layerPanel.setPlayheadBeat (beats);
     rackPanel.setPlayheadBeat (beats);
     automationWindow.setPlayheadBeat (beats);
-    rackPanel.updateMeters();
-    mixerPanel.updateMeters();
 
     // Only the numbers that actually change are repainted, not the whole bar.
     repaint (getPositionReadoutBounds().expanded (2, 0));
-    repaint (getMasterMeterBounds());
 }
 
 //==============================================================================
@@ -2013,7 +3485,28 @@ void MainComponent::buildDemoContent()
                                                         loaded.buffer->lengthSeconds(),
                                                         audio.getBpm())));
 
-            layer->addSample (std::move (clip));
+            // Phase 27: the demo's clip is mounted on a sampler, exactly like a
+            // dropped one. Leaving it unmounted would mean the fixture never
+            // exercises the feature it is supposed to demonstrate — and the
+            // rack in the snapshot would show two instruments and no sampler.
+            clip.outputSlotId = rack.addSampler (loaded.buffer, clip.path, clip.name);
+
+            // Phase 29: the demo block wears its fades, because a feature with
+            // no example in the demo is a feature nobody discovers. A short
+            // fade in and a longer fade out: the two different lengths are the
+            // point — the handles are independent.
+            clip.fadeInBeats  = 0.5;
+            clip.fadeOutBeats = 1.5;
+
+            const int clipId = layer->addSample (std::move (clip));
+
+            // Phase 35: the block joins 组 A, which is the group this sheet
+            // already has — so the demo contains a MIXED group out of the box.
+            // Without a member of each kind in one group, the new rule ("select
+            // the whole group" → both kinds lit) has nothing to demonstrate and
+            // the roll would keep showing groups as a notes-only idea.
+            if (auto* groupA = layer->getGroups().empty() ? nullptr : &layer->getGroups().front())
+                layer->assignSamplesToGroup ({ clipId }, groupA->getId());
         }
 
         // First run only: point the browser at the folder holding that file, so
@@ -2186,11 +3679,10 @@ void MainComponent::republish()
     mixerPanel.repaint();
 }
 
-void MainComponent::showChannelMenu (int channel, juce::Point<int> screenPos)
+void MainComponent::fillChannelMenu (juce::PopupMenu& menu, int channel)
 {
     const bool isMaster  = channel == MixerModel::masterChannel;
     const int  slotId    = isMaster ? -1 : mixerPanel.slotIdOnChannel (channel);
-    const bool hasSource = isMaster || slotId >= 0;
     const int  count     = mixer.getChannelCount();
 
     juce::String title;
@@ -2205,26 +3697,35 @@ void MainComponent::showChannelMenu (int channel, juce::Point<int> screenPos)
                   + (slotId >= 0 ? rack.getSlotName (slotId) : utf8 ("无音源"));
     }
 
-    juce::PopupMenu menu;
     menu.addSectionHeader (title);
 
-    if (isMaster)
+    // Phase 42: the parameters of a strip's own synth are in the same submenu,
+    // because a channel strip IS a synth's console view. One verb = one entry:
+    // 创建自动化, and the list of what can be automated lives inside it.
     {
-        menu.addItem (1, utf8 ("创建自动化 · 主输出音量"), true,
-                      automation.contains (AutomationOwner::master, 0, 0));
-        menu.addItem (2, utf8 ("创建自动化 · 主输出声相"), true,
-                      automation.contains (AutomationOwner::master, 0, 1));
-    }
-    else
-    {
-        // Phase 18 / item 10: a channel with no source GREYS the automation
-        // items instead of answering with a dialog. The menu then says both
-        // "this is where automation lives" and "there is nothing to automate
-        // yet" in one glance, and never steals focus to say it.
-        menu.addItem (1, utf8 ("创建自动化 · 滤波器"), hasSource,
-                      hasSource && automation.contains (AutomationOwner::slot, slotId, 0));
-        menu.addItem (2, utf8 ("创建自动化 · 音量"), hasSource,
-                      hasSource && automation.contains (AutomationOwner::slot, slotId, 1));
+        juce::PopupMenu autoMenu;
+
+        if (isMaster)
+        {
+            autoMenu.addItem (1, utf8 ("主输出音量"), true,
+                              automation.contains (AutomationOwner::master, 0, 0));
+            autoMenu.addItem (2, utf8 ("主输出声相"), true,
+                              automation.contains (AutomationOwner::master, 0, 1));
+            autoMenu.addItem (3, utf8 ("主输出静音"), true,
+                              automation.contains (AutomationOwner::master, 0, 2));
+        }
+        else if (slotId >= 0)
+        {
+            addSlotAutomationItems (autoMenu, slotId, 1);
+        }
+        else
+        {
+            // Phase 18 / item 10 said the same thing as a greyed pair of items.
+            // A submenu with nothing in it says it once, and says why.
+            autoMenu.addItem (1, utf8 ("这个通道还没有音源"), false, false);
+        }
+
+        menu.addSubMenu (utf8 ("创建自动化"), autoMenu);
     }
 
     menu.addSeparator();
@@ -2232,69 +3733,178 @@ void MainComponent::showChannelMenu (int channel, juce::Point<int> screenPos)
 
     if (! isMaster)
     {
-        // Only the last strip can be deleted: a channel is an INDEX, and
-        // renumbering a live one would silently re-point every synth routed to
-        // it. Growing and shrinking therefore always happens at the top end.
-        menu.addItem (21, utf8 ("删除通道条"),
-                      count > MixerModel::minChannels && channel == count - 1);
+        // Phase 26: ANY strip can go, not just the top one. `removeChannelAt`
+        // closes the gap and renumbers, and `deleteStrip` unplugs the synths
+        // feeding this strip before that happens — the pair is what makes "the
+        // strip is gone" true for every reference at once.
+        //
+        // Greyed (not hidden) at the floor: eight strips is the shipped console,
+        // and a delete that cannot run should say so where it lives.
+        menu.addItem (21, utf8 ("删除通道条"), mixer.canRemoveChannel());
         menu.addItem (22, utf8 ("增加通道条"), count < MixerModel::maxChannels);
     }
+}
+
+void MainComponent::applyChannelChoice (int result, int channel)
+{
+    const bool isMaster = channel == MixerModel::masterChannel;
+    const int  slotId   = isMaster ? -1 : mixerPanel.slotIdOnChannel (channel);
+
+    if (isMaster)
+    {
+        // Phase 43: 1..3 = 主音量 / 主声相 / 主静音, i.e. lane index = result - 1.
+        if (result >= 1 && result <= MixerModel::numMasterParameters)
+        {
+            ensureAutomationTrack (AutomationOwner::master, 0, result - 1);
+            return;
+        }
+    }
+    else if (slotId >= 0 && applySlotAutomationChoice (result, slotId, 1))
+    {
+        return;
+    }
+
+    if (result == 20)
+    {
+        mixerPanel.resetStrip (channel);
+        repaint();
+
+        return;
+    }
+
+    if (result == 21)
+    {
+        // Phase 26: this channel, not the last one. The panel keeps the
+        // selection pointing at a live strip, so nothing here has to.
+        mixerPanel.deleteStrip (channel);
+
+        repaint();
+
+        return;
+    }
+
+    if (result == 22)
+    {
+        mixer.addChannel();
+        repaint();
+    }
+}
+
+//==============================================================================
+//  Phase 43: one control, one automation line
+//==============================================================================
+namespace
+{
+    /** The id the host's single automation item uses inside a control's menu.
+        Nothing else in that menu is above `MixerPanel::stripMenuActionId`. */
+    constexpr int kStripAutoItemId = 100;
+}
+
+void MainComponent::fillStripAutomationItems (juce::PopupMenu& menu, int channel,
+                                              MixerPanel::StripControl control)
+{
+    const bool isMaster = channel == MixerModel::masterChannel;
+
+    if (isMaster)
+    {
+        // The master strip has three lanes and no solo: it feeds the device, so
+        // "solo the output" is not a thing you can mean.
+        int lane = -1;
+        juce::String text;
+
+        if (control == MixerPanel::StripControl::fader)     { lane = 0; text = utf8 ("创建主输出音量自动化"); }
+        else if (control == MixerPanel::StripControl::pan)  { lane = 1; text = utf8 ("创建主输出声相自动化"); }
+        else if (control == MixerPanel::StripControl::mute) { lane = 2; text = utf8 ("创建静音自动化"); }
+
+        if (lane < 0)
+            return;
+
+        menu.addItem (kStripAutoItemId, text, true,
+                      automation.contains (AutomationOwner::master, 0, lane));
+        return;
+    }
+
+    const int slotId = mixerPanel.slotIdOnChannel (channel);
+
+    if (slotId < 0)
+    {
+        // A strip with nothing routed into it has no curve to point at, and the
+        // line says why instead of vanishing.
+        menu.addItem (kStripAutoItemId, utf8 ("这个通道还没有音源"), false, false);
+        return;
+    }
+
+    SlotAutomationTarget target = SlotAutomationTarget::level;
+    juce::String         text   = utf8 ("创建音量自动化");
+
+    switch (control)
+    {
+        case MixerPanel::StripControl::fader: target = SlotAutomationTarget::level; break;
+        case MixerPanel::StripControl::pan:   target = SlotAutomationTarget::pan;
+                                              text   = utf8 ("创建声相自动化"); break;
+        case MixerPanel::StripControl::mute:  target = SlotAutomationTarget::mute;
+                                              text   = utf8 ("创建静音自动化"); break;
+        case MixerPanel::StripControl::solo:  target = SlotAutomationTarget::solo;
+                                              text   = utf8 ("创建独奏自动化"); break;
+    }
+
+    menu.addItem (kStripAutoItemId, text, true,
+                  automation.contains (AutomationOwner::slot, slotId, (int) target));
+}
+
+void MainComponent::applyStripAutomationChoice (int channel, MixerPanel::StripControl control,
+                                                int result)
+{
+    if (result != kStripAutoItemId)
+        return;
+
+    if (channel == MixerModel::masterChannel)
+    {
+        const int lane = control == MixerPanel::StripControl::fader ? 0
+                       : control == MixerPanel::StripControl::pan   ? 1
+                       : control == MixerPanel::StripControl::mute  ? 2
+                                                                    : -1;
+
+        if (lane >= 0)
+            ensureAutomationTrack (AutomationOwner::master, 0, lane);
+
+        return;
+    }
+
+    const int slotId = mixerPanel.slotIdOnChannel (channel);
+
+    if (slotId < 0)
+        return;
+
+    const int target = control == MixerPanel::StripControl::fader ? (int) SlotAutomationTarget::level
+                     : control == MixerPanel::StripControl::pan   ? (int) SlotAutomationTarget::pan
+                     : control == MixerPanel::StripControl::mute  ? (int) SlotAutomationTarget::mute
+                                                                  : (int) SlotAutomationTarget::solo;
+
+    ensureAutomationTrack (AutomationOwner::slot, slotId, target);
+}
+
+void MainComponent::showChannelMenu (int channel, juce::Point<int> screenPos)
+{
+    juce::PopupMenu menu;
+    fillChannelMenu (menu, channel);
 
     juce::Component::SafePointer<MainComponent> safe (this);
 
     menu.showMenuAsync (juce::PopupMenu::Options()
                             .withTargetScreenArea (juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1))
                             .withMinimumWidth (ui::px (170)),
-                        [safe, channel, slotId, isMaster] (int result)
+                        [safe, channel] (int result)
                         {
                             if (safe == nullptr || result <= 0)
                                 return;
 
-                            if (result == 1 || result == 2)
-                            {
-                                const int target = result - 1;
-
-                                if (isMaster)
-                                    safe->ensureAutomationTrack (AutomationOwner::master, 0, target);
-                                else if (slotId >= 0)
-                                    safe->ensureAutomationTrack (AutomationOwner::slot, slotId, target);
-
-                                return;
-                            }
-
-                            if (result == 20)
-                            {
-                                safe->mixerPanel.resetStrip (channel);
-                                safe->repaint();
-
-                                return;
-                            }
-
-                            if (result == 21)
-                            {
-                                safe->mixerPanel.deleteLastStrip();
-                                safe->mixerPanel.setSelectedChannel (
-                                    juce::jmin (safe->mixer.getChannelCount() - 1,
-                                                safe->mixerPanel.getSelectedChannel()));
-                                safe->repaint();
-
-                                return;
-                            }
-
-                            if (result == 22)
-                            {
-                                safe->mixer.addChannel();
-                                safe->repaint();
-                            }
+                            safe->applyChannelChoice (result, channel);
                         });
 }
 
-void MainComponent::showAutomationMenu (AutomationOwner owner, int ownerId, juce::Point<int> screenPos)
+void MainComponent::fillAutomationMenu (juce::PopupMenu& menu, AutomationOwner owner, int ownerId)
 {
-    // The master bus is the one owner whose id is legitimately 0.
-    if (owner != AutomationOwner::master && ownerId <= 0)
-        return;
-
     bool expanded = false;
     juce::String ownerName;
 
@@ -2325,44 +3935,59 @@ void MainComponent::showAutomationMenu (AutomationOwner owner, int ownerId, juce
     else if (auto* slot = rack.findSlot (ownerId))
     {
         expanded  = slot->automationExpanded;
-        ownerName = slot->name;
+        ownerName = slot->getDisplayName();
     }
 
     // Phase 14: no more "自动化" dropdown badges anywhere. The only way to
     // create a track is a context menu on the control itself, and the item
     // spells out what it will create. The tick means "this curve already has a
     // row", so the menu doubles as the place to find an existing curve.
+    //
+    // Phase 21: this is now also a SUB-MENU of the numeric control's value
+    // menu, so it is built into a caller's menu instead of showing itself.
 
-    juce::PopupMenu menu;
     menu.addSectionHeader (ownerName + (owner == AutomationOwner::layer ? utf8 (" · 图层自动化")
                                         : owner == AutomationOwner::group ? utf8 (" · 编组自动化")
                                         : owner == AutomationOwner::master ? utf8 (" · 主输出自动化")
                                                                           : utf8 (" · 音源自动化")));
 
+    juce::PopupMenu autoMenu;
+
     if (owner == AutomationOwner::group)
     {
         // Phase 20: a group has two automatable parameters now, so it is listed
         // exactly like a layer. (Phase 16 said one, and said so in this menu.)
-        menu.addItem (1, utf8 ("创建自动化 · 组音量"), true,
-                      automation.contains (AutomationOwner::group, ownerId,
-                                           (int) GroupAutomationTarget::level));
-        menu.addItem (2, utf8 ("创建自动化 · 组声相"), true,
-                      automation.contains (AutomationOwner::group, ownerId,
-                                           (int) GroupAutomationTarget::pan));
+        autoMenu.addItem (1, utf8 ("组音量"), true,
+                          automation.contains (AutomationOwner::group, ownerId,
+                                               (int) GroupAutomationTarget::level));
+        autoMenu.addItem (2, utf8 ("组声相"), true,
+                          automation.contains (AutomationOwner::group, ownerId,
+                                               (int) GroupAutomationTarget::pan));
+    }
+    else if (owner == AutomationOwner::slot)
+    {
+        // Phase 42: a synth's menu is the same one the rack card builds, ids and
+        // all — 滤波器 / 音量 / 音源参数 ▶.
+        addSlotAutomationItems (autoMenu, ownerId, 1);
     }
     else
     {
         const bool isMaster = owner == AutomationOwner::master;
 
-        menu.addItem (1, utf8 ("创建自动化 · ") + (owner == AutomationOwner::layer ? utf8 ("音量")
-                                                                                  : isMaster ? utf8 ("主音量")
-                                                                                             : utf8 ("滤波器")),
-                      true, automation.contains (owner, ownerId, 0));
-        menu.addItem (2, utf8 ("创建自动化 · ") + (owner == AutomationOwner::layer ? utf8 ("声相")
-                                                                                  : isMaster ? utf8 ("主声相")
-                                                                                             : utf8 ("音量")),
-                      true, automation.contains (owner, ownerId, 1));
+        autoMenu.addItem (1, isMaster ? utf8 ("主音量") : utf8 ("音量"), true,
+                          automation.contains (owner, ownerId, 0));
+        autoMenu.addItem (2, isMaster ? utf8 ("主声相") : utf8 ("声相"), true,
+                          automation.contains (owner, ownerId, 1));
+
+        // Phase 43: the master's third lane. A layer has no mute lane of its own
+        // (its mute is the layer panel's switch), so this item exists only here.
+        if (isMaster)
+            autoMenu.addItem (3, utf8 ("主静音"), true,
+                              automation.contains (owner, ownerId, 2));
     }
+
+    // Phase 42: the verb is the menu, the parameters are inside it.
+    menu.addSubMenu (utf8 ("创建自动化"), autoMenu);
 
     // Only an owner that HAS an inline lane in a panel can be expanded there.
     // The master bus has no面板 row, so its two verbs are the two parameters.
@@ -2371,37 +3996,70 @@ void MainComponent::showAutomationMenu (AutomationOwner owner, int ownerId, juce
         menu.addSeparator();
         menu.addItem (3, expanded ? utf8 ("收起面板中的曲线") : utf8 ("在面板中展开曲线"), true);
     }
+}
+
+void MainComponent::showAutomationMenu (AutomationOwner owner, int ownerId, juce::Point<int> screenPos)
+{
+    // The master bus is the one owner whose id is legitimately 0.
+    if (owner != AutomationOwner::master && ownerId <= 0)
+        return;
+
+    juce::PopupMenu menu;
+    fillAutomationMenu (menu, owner, ownerId);
 
     juce::Component::SafePointer<MainComponent> safe (this);
 
     menu.showMenuAsync (juce::PopupMenu::Options()
                             .withTargetScreenArea (juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1)),
-                        [safe, owner, ownerId, expanded] (int result)
+                        [safe, owner, ownerId] (int result)
                         {
                             if (safe == nullptr || result <= 0)
                                 return;
 
-                            if (result == 3)
-                            {
-                                if (owner == AutomationOwner::layer)
-                                {
-                                    const int index = safe->stack.indexOfLayerId (ownerId);
-
-                                    if (index >= 0)
-                                        safe->stack.setLayerAutomationExpanded (index, ! expanded);
-                                }
-                                else if (owner == AutomationOwner::slot)
-                                {
-                                    safe->rack.setAutomationExpanded (ownerId, ! expanded);
-                                }
-
-                                return;
-                            }
-
-                            // Everything else is a parameter choice: lane on,
-                            // track added, row revealed.
-                            safe->ensureAutomationTrack (owner, ownerId, result - 1);
+                            safe->applyAutomationChoice (result, owner, ownerId);
                         });
+}
+
+void MainComponent::applyAutomationChoice (int result, AutomationOwner owner, int ownerId)
+{
+    // Phase 43: id 3 means "展开/收起曲线" only for an owner that HAS a panel row.
+    // The master just gained a third PARAMETER with the same id — it has no
+    // in-panel curve, so 3 there is 主静音 and must fall through to the lane.
+    if (result == 3
+        && (owner == AutomationOwner::layer || owner == AutomationOwner::slot))
+    {
+        // Re-read the state instead of trusting a copy taken when the menu was
+        // built: the same curve can be toggled from three places, and the menu
+        // may now be reached through a hover sub-menu that stayed open longer.
+        if (owner == AutomationOwner::layer)
+        {
+            const int index = stack.indexOfLayerId (ownerId);
+
+            if (index >= 0)
+            {
+                const bool expanded = stack.getLayer (index) != nullptr
+                                        && stack.getLayer (index)->isAutomationExpanded();
+                stack.setLayerAutomationExpanded (index, ! expanded);
+            }
+        }
+        else if (owner == AutomationOwner::slot)
+        {
+            if (auto* slot = rack.findSlot (ownerId))
+                rack.setAutomationExpanded (ownerId, ! slot->automationExpanded);
+        }
+
+        return;
+    }
+
+    // Everything else is a parameter choice: lane on, track added, row revealed.
+    //
+    // Phase 42: a synth's submenu hands out the same ids the rack card does
+    // (1 = 滤波器, 2 = 音量, 101 + index = a plugin parameter), so the same
+    // reader decides what the click meant.
+    if (owner == AutomationOwner::slot && applySlotAutomationChoice (result, ownerId, 1))
+        return;
+
+    ensureAutomationTrack (owner, ownerId, result - 1);
 }
 
 void MainComponent::ensureAutomationTrack (AutomationOwner owner, int ownerId, int target)
@@ -2465,7 +4123,27 @@ void MainComponent::ensureAutomationTrack (AutomationOwner owner, int ownerId, i
         if (slot == nullptr)
             return;
 
-        const auto lane = (SlotAutomationTarget) juce::jlimit (0, 1, target);
+        auto lane = (SlotAutomationTarget) juce::jlimit (0, numSlotAutomationTargets - 1,
+                                                         target);
+
+        // Phase 42: a `plugin` lane with no parameter chosen is a row that
+        // renders nothing. Take the instrument's first parameter — the one the
+        // plugin itself calls its first — so the row means something the moment
+        // it exists, and fall back to the filter when there are none.
+        if (lane == SlotAutomationTarget::plugin && ! slot->drivesPluginParam())
+        {
+            const auto params = pluginParamsForSlot (ownerId);
+
+            if (! params.empty())
+                rack.setPluginParam (ownerId, params.front().index);
+            else
+                lane = SlotAutomationTarget::filter;
+
+            slot = rack.findSlot (ownerId);
+
+            if (slot == nullptr)
+                return;
+        }
 
         slot->automationFor (lane).setEnabled (true);
         rack.setAutomationTarget (ownerId, lane);
@@ -2496,19 +4174,215 @@ void MainComponent::ensureRackAutomationTrack (int slotId)
 }
 
 //==============================================================================
+//  Phase 42: automating a hosted instrument's own parameters
+//==============================================================================
+std::vector<PluginParamInfo> MainComponent::pluginParamsForSlot (int slotId)
+{
+    std::vector<PluginParamInfo> out;
+
+    const auto* targetSlot = rack.findSlot (slotId);
+
+    if (targetSlot == nullptr || targetSlot->pluginId <= 0)
+        return out;
+
+    // The message thread only: `getProcessorForEditor` hands out the live
+    // instance, and this is only ever called from a menu build or a paint.
+    auto* instance = plugins.getProcessorForEditor (targetSlot->pluginId);
+
+    if (instance == nullptr)
+        return out;
+
+    const auto& parameters = instance->getParameters();
+
+    for (int i = 0; i < parameters.size(); ++i)
+    {
+        auto* parameter = parameters[i];
+
+        if (parameter == nullptr)
+            continue;
+
+        PluginParamInfo info;
+        info.index        = i;
+        info.name         = parameter->getName (64);
+        info.defaultValue = parameter->getDefaultValue();
+
+        if (info.name.isEmpty())
+            info.name = utf8 ("参数 ") + juce::String (i + 1);
+
+        out.push_back (std::move (info));
+    }
+
+    return out;
+}
+
+void MainComponent::ensureSlotPluginParamTrack (int slotId, int paramIndex)
+{
+    auto* slot = rack.findSlot (slotId);
+
+    if (slot == nullptr || paramIndex < 0)
+        return;
+
+    // Parameter first: the lane is only meaningful with an address, and a track
+    // pointing at parameter -1 would render nothing while looking finished.
+    rack.setPluginParam (slotId, paramIndex);
+    slot = rack.findSlot (slotId);
+
+    if (slot == nullptr)
+        return;
+
+    auto& lane = slot->getPluginAutomation();
+
+    // A brand-new lane starts flat at 1.0 — "the parameter's full value" — which
+    // would jump the knob the moment the curve is created. Starting at the value
+    // the parameter actually has means creating automation changes nothing until
+    // the user draws something.
+    if (! lane.isEnabled() || lane.getPoints().size() <= 2)
+    {
+        float current = 1.0f;
+
+        if (auto* instance = plugins.getProcessorForEditor (slot->pluginId))
+            if (juce::isPositiveAndBelow (paramIndex, instance->getParameters().size()))
+                if (auto* parameter = instance->getParameters()[paramIndex])
+                    current = parameter->getValue();
+
+        lane.resetFlat (current, juce::jmax (1.0, audio.getPlayback().getLengthBeats()));
+    }
+
+    lane.setEnabled (true);
+
+    rack.setAutomationTarget (slotId, SlotAutomationTarget::plugin);
+    rack.setAutomationExpanded (slotId, true);
+
+    const int trackId = automation.addTrack (AutomationOwner::slot, slotId,
+                                             (int) SlotAutomationTarget::plugin);
+
+    if (trackId > 0)
+        automationWindow.revealTrack (trackId);
+
+    republish();
+    automationWindow.repaint();
+    rackPanel.repaint();
+}
+
+void MainComponent::addSlotAutomationItems (juce::PopupMenu& menu, int slotId, int idBase)
+{
+    auto* slot = rack.findSlot (slotId);
+
+    if (slot == nullptr)
+        return;
+
+    menu.addItem (idBase, utf8 ("滤波器"), ! slot->isSampler(),
+                  automation.contains (AutomationOwner::slot, slotId,
+                                       (int) SlotAutomationTarget::filter));
+    menu.addItem (idBase + 1, utf8 ("音量"), true,
+                  automation.contains (AutomationOwner::slot, slotId,
+                                       (int) SlotAutomationTarget::level));
+    // Phase 43: 声相 / 静音 / 独奏, in their own id band — `idBase + 3` would be
+    // 33 on a rack card, and 33/34/35 are already spoken for there (see
+    // kSlotAutoTargetBase). `+ 0..2` maps to pan/mute/solo.
+    menu.addItem (idBase + kSlotAutoTargetBase, utf8 ("声相"), true,
+                  automation.contains (AutomationOwner::slot, slotId,
+                                       (int) SlotAutomationTarget::pan));
+    menu.addItem (idBase + kSlotAutoTargetBase + 1, utf8 ("静音"), true,
+                  automation.contains (AutomationOwner::slot, slotId,
+                                       (int) SlotAutomationTarget::mute));
+    menu.addItem (idBase + kSlotAutoTargetBase + 2, utf8 ("独奏"), true,
+                  automation.contains (AutomationOwner::slot, slotId,
+                                       (int) SlotAutomationTarget::solo));
+
+    const auto params = pluginParamsForSlot (slotId);
+
+    // Same ceiling the roll's parameter boxes use: a plugin with a thousand
+    // parameters is a plugin whose menu cannot be read, and the tail is said out
+    // loud rather than silently dropped.
+    constexpr int maxListed = 64;
+
+    juce::PopupMenu paramMenu;
+
+    if (params.empty())
+    {
+        paramMenu.addItem (idBase + 2, slot->isPlugin() ? utf8 ("插件未载入，没有可自动化的参数")
+                                                        : utf8 ("这个音源没有插件参数"),
+                           false, false);
+    }
+    else
+    {
+        for (int i = 0; i < (int) params.size() && i < maxListed; ++i)
+        {
+            const auto& info = params[(size_t) i];
+
+            paramMenu.addItem (idBase + kSlotAutoParamBase + info.index, info.name, true,
+                               slot->drivesPluginParam()
+                                 && slot->getPluginParam() == info.index
+                                 && automation.contains (AutomationOwner::slot, slotId,
+                                                         (int) SlotAutomationTarget::plugin));
+        }
+
+        // The "there are more" line sits one below where the parameter ids start:
+        // a number in a band nothing else can be, because the obvious
+        // `idBase + 3` is 声相 now and 34 on a card is the spotlight.
+        if ((int) params.size() > maxListed)
+            paramMenu.addItem (idBase + kSlotAutoParamBase - 1,
+                               utf8 ("还有 ") + juce::String ((int) params.size() - maxListed)
+                                                 + utf8 (" 个参数没有列出"), false, false);
+    }
+
+    menu.addSubMenu (utf8 ("音源参数"), paramMenu);
+}
+
+bool MainComponent::applySlotAutomationChoice (int result, int slotId, int idBase)
+{
+    // Phase 43: the higher band first. 20030 is also ">= 10030", so testing the
+    // parameter band first would read 声相 as parameter 10030 and quietly pick a
+    // plugin parameter that does not exist.
+    if (result >= idBase + kSlotAutoTargetBase)
+    {
+        switch (result - idBase - kSlotAutoTargetBase)
+        {
+            case 0: ensureAutomationTrack (AutomationOwner::slot, slotId,
+                                           (int) SlotAutomationTarget::pan);  return true;
+            case 1: ensureAutomationTrack (AutomationOwner::slot, slotId,
+                                           (int) SlotAutomationTarget::mute); return true;
+            case 2: ensureAutomationTrack (AutomationOwner::slot, slotId,
+                                           (int) SlotAutomationTarget::solo); return true;
+            default: return true;      // inside our band, so it was ours
+        }
+    }
+
+    if (result >= idBase + kSlotAutoParamBase)
+    {
+        ensureSlotPluginParamTrack (slotId, result - idBase - kSlotAutoParamBase);
+        return true;
+    }
+
+    if (result == idBase)
+    {
+        ensureAutomationTrack (AutomationOwner::slot, slotId,
+                               (int) SlotAutomationTarget::filter);
+        return true;
+    }
+
+    if (result == idBase + 1)
+    {
+        ensureAutomationTrack (AutomationOwner::slot, slotId,
+                               (int) SlotAutomationTarget::level);
+        return true;
+    }
+
+    return false;
+}
+
+//==============================================================================
 juce::Rectangle<int> MainComponent::getPlayButtonBounds() const
 {
     return { ui::px (188), topBarBounds.getY() + ui::px (12), ui::px (34), ui::px (28) };
 }
 
-juce::Rectangle<int> MainComponent::getPauseButtonBounds() const
-{
-    return { ui::px (226), topBarBounds.getY() + ui::px (12), ui::px (30), ui::px (28) };
-}
-
 juce::Rectangle<int> MainComponent::getStopButtonBounds() const
 {
-    return { ui::px (260), topBarBounds.getY() + ui::px (12), ui::px (30), ui::px (28) };
+    // Phase 32: the pause plate's slot. Two buttons, side by side, 4 px apart —
+    // the same rhythm the pair had when there were three.
+    return { ui::px (226), topBarBounds.getY() + ui::px (12), ui::px (30), ui::px (28) };
 }
 
 juce::Rectangle<int> MainComponent::getPositionReadoutBounds() const
@@ -2528,18 +4402,23 @@ juce::Rectangle<int> MainComponent::getMasterMeterBounds() const
 }
 
 //-- Phase 6: the file cluster -----------------------------------------------
-// Three buttons right-aligned against the master meter. They live in the top
-// bar rather than a menu because saving and bouncing are the two actions this
-// phase is about, and a menu would hide both of them.
+// Phase 25: 保存 / 载入 / 导出 moved out of the right edge and into the edit
+// cluster, between 新建 and 撤销. They were parked against the master meter,
+// which is the far corner of the window from the project they belong to; a file
+// verb now sits next to the other project verb instead of across the screen.
 juce::Rectangle<int> MainComponent::getFileClusterBounds() const
 {
-    return { getWidth() - ui::px (196 + 12 + 186), topBarBounds.getY() + ui::px (12),
-             ui::px (186), ui::px (28) };
+    // Union of the three, derived from the first one so there is a single place
+    // that decides where the cluster starts.
+    return getSaveButtonBounds().getUnion (getExportButtonBounds());
 }
 
 juce::Rectangle<int> MainComponent::getSaveButtonBounds() const
 {
-    return getFileClusterBounds().withWidth (ui::px (58));
+    // A section break after 新建: history and files are two different jobs even
+    // though they now share a row.
+    return { getNewButtonBounds().getRight() + ui::px (10), topBarBounds.getY() + ui::px (12),
+             ui::px (58), ui::px (28) };
 }
 
 juce::Rectangle<int> MainComponent::getLoadButtonBounds() const
@@ -2554,17 +4433,21 @@ juce::Rectangle<int> MainComponent::getExportButtonBounds() const
 
 juce::Rectangle<int> MainComponent::getProjectNameBounds() const
 {
-    auto nameArea = getFileClusterBounds().withX (getFileClusterBounds().getX() - ui::px (164))
-                                          .withWidth (ui::px (156));
+    // Still right-aligned against the master meter: the project's name is a
+    // status readout, not a control, so it stays where it was when the file
+    // buttons left this corner.
+    const juce::Rectangle<int> nameArea { getWidth() - ui::px (558), topBarBounds.getY() + ui::px (14),
+                                          ui::px (156), ui::px (24) };
 
     // Only when it cannot possibly overlap the device status text.
     return getWidth() >= ui::px (1360) ? nameArea : juce::Rectangle<int>();
 }
 
 //-- Phase 8: the edit cluster ------------------------------------------------
-// New / undo / redo / mixer / settings sit between the tempo field and the
-// device status. Left to right in the order they are reached for: the project
-// action first, then the two history buttons, then the console, then settings.
+// New / save / load / export / undo / redo / mixer / settings sit between the
+// tempo field and the device status. Order: the project action first, then the
+// three file verbs (Phase 25 moved them here), then history, then the console,
+// then settings.
 juce::Rectangle<int> MainComponent::getNewButtonBounds() const
 {
     return { ui::px (486), topBarBounds.getY() + ui::px (12), ui::px (54), ui::px (28) };
@@ -2572,14 +4455,16 @@ juce::Rectangle<int> MainComponent::getNewButtonBounds() const
 
 juce::Rectangle<int> MainComponent::getUndoButtonBounds() const
 {
-    return { getNewButtonBounds().getRight() + ui::px (6), topBarBounds.getY() + ui::px (12),
-             ui::px (46), ui::px (28) };
+    // Phase 25: an icon, not the word. Two glyphs in a 32 px plate, which also
+    // wins back the room the three file buttons needed.
+    return { getExportButtonBounds().getRight() + ui::px (10), topBarBounds.getY() + ui::px (12),
+             ui::px (32), ui::px (28) };
 }
 
 juce::Rectangle<int> MainComponent::getRedoButtonBounds() const
 {
     return { getUndoButtonBounds().getRight() + ui::px (4), topBarBounds.getY() + ui::px (12),
-             ui::px (46), ui::px (28) };
+             ui::px (32), ui::px (28) };
 }
 
 juce::Rectangle<int> MainComponent::getMixerButtonBounds() const
@@ -2620,6 +4505,35 @@ void MainComponent::paint (juce::Graphics& g)
 {
     g.fillAll (kAppBackground);
 
+    //-- Phase 22: menu bar ---------------------------------------------------
+    // Darker than the transport bar below it, so the two strips read as
+    // "commands" and "transport" instead of one thick header.
+    {
+        g.setColour (juce::Colour (0xff0a0b0e));
+        g.fillRect (menuBarBounds);
+
+        for (int i = 0; i < numMenus; ++i)
+        {
+            const auto item = getMenuBarItemBounds (i).toFloat();
+            const bool hot  = hoveredMenuItem == i;
+
+            if (hot)
+            {
+                g.setColour (juce::Colours::white.withAlpha (0.10f));
+                g.fillRoundedRectangle (item, ui::pf (4));
+            }
+
+            g.setColour ((hot ? juce::Colours::white : kAccent).withAlpha (hot ? 0.98f : 0.62f));
+            g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.5f))));
+            g.drawText (i == 0 ? utf8 ("文件") : utf8 ("编辑"),
+                        item, juce::Justification::centred, false);
+        }
+
+        g.setColour (kDivider);
+        g.drawHorizontalLine (menuBarBounds.getBottom() - 1,
+                              (float) menuBarBounds.getX(), (float) menuBarBounds.getRight());
+    }
+
     //-- Top bar --------------------------------------------------------------
     g.setColour (kTopBar);
     g.fillRect (topBarBounds);
@@ -2634,9 +4548,8 @@ void MainComponent::paint (juce::Graphics& g)
     {
         const bool playing = audio.isPlaying();
         const bool paused  = audio.isPaused();
-        const bool engaged = audio.isTransportEngaged();
 
-        // One look for three buttons, so they read as a group.
+        // One look for two buttons, so they read as a group.
         auto drawButtonPlate = [&g] (juce::Rectangle<float> button, bool hovered,
                                      bool enabled, juce::Colour tint, bool filled)
         {
@@ -2657,28 +4570,13 @@ void MainComponent::paint (juce::Graphics& g)
             g.fillPath (playGlyph (button));
         }
 
-        //-- Pause -------------------------------------------------------------
-        {
-            auto button = getPauseButtonBounds().toFloat();
-
-            // Paused is a state worth seeing: the plate is lit while it holds.
-            drawButtonPlate (button, hoveringPause, playing || paused, juce::Colours::white, paused);
-
-            g.setColour (juce::Colours::white.withAlpha (playing || paused ? 0.85f : 0.28f));
-
-            const auto bars = pauseGlyph (button);
-
-            g.fillRect (bars.left);
-            g.fillRect (bars.right);
-        }
-
         //-- Stop --------------------------------------------------------------
         {
             auto button = getStopButtonBounds().toFloat();
 
-            drawButtonPlate (button, hoveringStop, engaged, juce::Colours::white, false);
+            drawButtonPlate (button, hoveringStop, playing || paused, juce::Colours::white, false);
 
-            g.setColour (juce::Colours::white.withAlpha (engaged ? 0.62f : 0.28f));
+            g.setColour (juce::Colours::white.withAlpha (playing || paused ? 0.72f : 0.45f));
             g.fillRect (stopGlyph (button));
         }
 
@@ -2731,11 +4629,77 @@ void MainComponent::paint (juce::Graphics& g)
 
             drawLabelButton (getNewButtonBounds(), utf8 ("新建"), hoveringNew, false, false);
 
-            // Undo / redo are words, not symbols: the two circular-arrow glyphs
-            // that every app draws are read right-to-left by half the people who
-            // use them, and there is room here for the unambiguous label.
-            drawLabelButton (getUndoButtonBounds(), utf8 ("撤销"), hoveringUndo, false, false, canUndo());
-            drawLabelButton (getRedoButtonBounds(), utf8 ("重做"), hoveringRedo, false, false, canRedo());
+            //-- Files (Phase 25: moved here, between 新建 and 撤销) -----------
+            {
+                auto drawFileButton = [&] (juce::Rectangle<int> bounds, const juce::String& label,
+                                           bool hovered, bool busy)
+                {
+                    const auto r = bounds.toFloat();
+
+                    drawPlate (r, hovered, true, juce::Colours::white, false);
+
+                    g.setColour (juce::Colours::white.withAlpha (busy ? 0.45f : (hovered ? 0.95f : 0.72f)));
+                    g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.5f))));
+                    g.drawText (label, bounds, juce::Justification::centred, false);
+                };
+
+                drawFileButton (getSaveButtonBounds(), utf8 ("保存"), hoveringSave, false);
+                drawFileButton (getLoadButtonBounds(), utf8 ("载入"), hoveringLoad, false);
+                drawFileButton (getExportButtonBounds(), exporting ? utf8 ("导出中") : utf8 ("导出"),
+                                hoveringExport, exporting);
+            }
+
+            //-- Undo / redo (Phase 25: icons) --------------------------------
+            // The words were unambiguous but wide, and the file verbs needed the
+            // room. A curved arrow with the head on the side it returns to is
+            // read correctly even by people who read the plain circular glyph
+            // as "refresh": the direction is in the arrowhead, not in the loop.
+            {
+                auto drawHistoryButton = [&] (juce::Rectangle<int> bounds, bool redo,
+                                              bool hovered, bool enabled)
+                {
+                    drawPlate (bounds.toFloat(), hovered, enabled, juce::Colours::white, false);
+
+                    const auto r  = bounds.toFloat();
+                    const auto c  = r.getCentre();
+                    const float rad = ui::pf (5.2f);
+                    const float head = ui::pf (3.4f);
+
+                    const juce::Colour ink = juce::Colours::white.withAlpha (enabled ? (hovered ? 0.98f : 0.80f)
+                                                                                    : 0.22f);
+                    g.setColour (ink);
+
+                    juce::Path arrow;
+
+                    // The arc runs over the top from the tail side to the head
+                    // side; JUCE measures the angle clockwise from 12 o'clock.
+                    const float from = redo ? -juce::MathConstants<float>::halfPi
+                                            : juce::MathConstants<float>::halfPi;
+                    const float to   = -from;
+
+                    arrow.addCentredArc (c.x, c.y, rad, rad, 0.0f, from, to, true);
+                    g.strokePath (arrow, juce::PathStrokeType (ui::pf (1.5f),
+                                                               juce::PathStrokeType::mitered,
+                                                               juce::PathStrokeType::rounded));
+
+                    // The head sits at the end of the arc, pointing the way the
+                    // gesture goes: back for undo, on for redo.
+                    const float sign = redo ? 1.0f : -1.0f;
+                    const juce::Point<float> tip { c.x + sign * rad, c.y };
+
+                    juce::Path cap;
+                    cap.startNewSubPath (tip.x - sign * head, tip.y - head);
+                    cap.lineTo (tip.x, tip.y);
+                    cap.lineTo (tip.x - sign * head, tip.y + head);
+
+                    g.strokePath (cap, juce::PathStrokeType (ui::pf (1.5f),
+                                                             juce::PathStrokeType::mitered,
+                                                             juce::PathStrokeType::rounded));
+                };
+
+                drawHistoryButton (getUndoButtonBounds(), false, hoveringUndo, canUndo());
+                drawHistoryButton (getRedoButtonBounds(), true, hoveringRedo, canRedo());
+            }
 
             //-- Mixer ---------------------------------------------------------
             drawLabelButton (getMixerButtonBounds(), utf8 ("混音台"),
@@ -2783,10 +4747,16 @@ void MainComponent::paint (juce::Graphics& g)
             g.fillEllipse ((float) x, (float) topBarBounds.getCentreY() - ui::pf (4),
                            ui::pf (8), ui::pf (8));
 
-            // The file buttons come next; only print the device name if there is
-            // still room for it, otherwise the two would draw over each other on
-            // a narrow window.
-            const int available = getFileClusterBounds().getX() - (x + ui::px (18)) - ui::px (8);
+            // The project name comes next; only print the device name if there
+            // is still room for it, otherwise the two would draw over each
+            // other on a narrow window. Phase 25: the file buttons no longer
+            // bound this from the left — they moved into the edit cluster — so
+            // the limit is the name readout, or the window edge when it is
+            // hidden.
+            const int limitX = getProjectNameBounds().isEmpty()
+                                 ? getWidth() - ui::px (8)
+                                 : getProjectNameBounds().getX() - ui::px (8);
+            const int available = limitX - (x + ui::px (18));
 
             if (available >= ui::px (90))
             {
@@ -2820,46 +4790,21 @@ void MainComponent::paint (juce::Graphics& g)
         mixerlook::drawMeter (g, bars.removeFromTop (ui::pf (9)), playback.getMasterPeak (1), kAccent);
     }
 
-    //-- File actions ----------------------------------------------------------
-    // Save / Load / Export sit in the top bar, not behind a menu: this phase is
-    // about getting the project out of the app, so the way out has to be visible.
+    //-- Project name ----------------------------------------------------------
+    // Phase 25: the file buttons left this corner (they now live between 新建
+    // and 撤销), so what remains here is the readout they used to anchor.
+    if (! getProjectNameBounds().isEmpty())
     {
-        auto drawFileButton = [&g] (juce::Rectangle<int> bounds, const juce::String& label,
-                                    bool hovered, bool accent, bool busy)
-        {
-            const auto r   = bounds.toFloat();
-            const auto tint = accent ? kAccent : juce::Colours::white;
+        const juce::String name = currentProject.existsAsFile()
+                                    ? currentProject.getFileNameWithoutExtension()
+                                    : utf8 ("未命名工程");
 
-            g.setColour (tint.withAlpha (hovered && ! busy ? 0.16f : 0.06f));
-            g.fillRoundedRectangle (r, ui::pf (6));
-
-            g.setColour (tint.withAlpha (hovered && ! busy ? 0.60f : 0.24f));
-            g.drawRoundedRectangle (r, ui::pf (6), 1.0f);
-
-            g.setColour (juce::Colours::white.withAlpha (busy ? 0.45f : (hovered ? 0.95f : 0.66f)));
-            g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.5f))));
-            g.drawText (label, bounds, juce::Justification::centred, false);
-        };
-
-        drawFileButton (getSaveButtonBounds(), utf8 ("保存"), hoveringSave, false, false);
-        drawFileButton (getLoadButtonBounds(), utf8 ("载入"), hoveringLoad, false, false);
-        drawFileButton (getExportButtonBounds(),
-                        exporting ? utf8 ("导出中") : utf8 ("导出"),
-                        hoveringExport, true, exporting);
-
-        if (! getProjectNameBounds().isEmpty())
-        {
-            const juce::String name = currentProject.existsAsFile()
-                                        ? currentProject.getFileNameWithoutExtension()
-                                        : utf8 ("未命名工程");
-
-            g.setColour (dirtyCache ? juce::Colour (0xffffc46b)
-                                    : juce::Colours::white.withAlpha (0.34f));
-            g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
-            g.drawText ((dirtyCache ? juce::String (utf8 ("● ")) : juce::String())
-                          + name + utf8 ("  ·  P20"),
-                        getProjectNameBounds(), juce::Justification::centredRight, true);
-        }
+        g.setColour (dirtyCache ? juce::Colour (0xffffc46b)
+                                : juce::Colours::white.withAlpha (0.34f));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
+        g.drawText ((dirtyCache ? juce::String (utf8 ("● ")) : juce::String())
+                      + name + utf8 ("  ·  P39"),
+                    getProjectNameBounds(), juce::Justification::centredRight, true);
     }
 
     // The space the key hints used to occupy is now the project name: knowing
@@ -2872,6 +4817,11 @@ void MainComponent::paint (juce::Graphics& g)
 void MainComponent::resized()
 {
     auto area = getLocalBounds();
+
+    // Phase 22: the menu bar is its own strip above the transport. Putting it
+    // inside the transport bar would have meant carving 100 px out of a row
+    // that is already full at the minimum window width.
+    menuBarBounds = area.removeFromTop (ui::px (24));
 
     topBarBounds = area.removeFromTop (ui::px (52));
 
@@ -2889,10 +4839,16 @@ void MainComponent::resized()
     {
         const int minTop = ui::px (150);
         const int minBot = ui::px (110);
-        const int limit  = juce::jmax (0, leftColumn.getHeight() - minTop - minBot);
+        const int band   = splitterThickness;
+
+        // The band is part of what the lower pane costs the column, so the
+        // clamp has to count it — otherwise the splitter can be pushed off the
+        // bottom of the window and there is no way to drag it back.
+        const int limit  = juce::jmax (0, leftColumn.getHeight() - minTop - minBot - band);
         filePaneHeight   = juce::jlimit (minBot, juce::jmax (minBot, limit), filePaneHeight);
 
-        auto lower = leftColumn.removeFromBottom (filePaneHeight);
+        auto lower = leftColumn.removeFromBottom (filePaneHeight + band);
+        leftSplitter.setBounds (lower.removeFromTop (band));
         layerPanel.setBounds (leftColumn);
         filePanel.setBounds (lower);
     }
@@ -2900,10 +4856,13 @@ void MainComponent::resized()
     {
         const int minTop = ui::px (180);
         const int minBot = ui::px (120);
-        const int limit  = juce::jmax (0, rightColumn.getHeight() - minTop - minBot);
+        const int band   = splitterThickness;
+
+        const int limit  = juce::jmax (0, rightColumn.getHeight() - minTop - minBot - band);
         groupPaneHeight  = juce::jlimit (minBot, juce::jmax (minBot, limit), groupPaneHeight);
 
-        auto lower = rightColumn.removeFromBottom (groupPaneHeight);
+        auto lower = rightColumn.removeFromBottom (groupPaneHeight + band);
+        rightSplitter.setBounds (lower.removeFromTop (band));
         rackPanel.setBounds (rightColumn);
         groupPanel.setBounds (lower);
     }
@@ -2965,15 +4924,22 @@ void MainComponent::mouseDown (const juce::MouseEvent& e)
 {
     const auto pos = e.getPosition();
 
-    if (getPlayButtonBounds().contains (pos))
+    // Phase 22: the menu bar owns its strip.
+    if (menuBarBounds.contains (pos))
     {
-        playTransport();
+        for (int i = 0; i < numMenus; ++i)
+            if (getMenuBarItemBounds (i).contains (pos))
+            {
+                showMenuBarMenu (i);
+                return;
+            }
+
         return;
     }
 
-    if (getPauseButtonBounds().contains (pos))
+    if (getPlayButtonBounds().contains (pos))
     {
-        pauseTransport();
+        playTransport();
         return;
     }
 
@@ -3027,8 +4993,22 @@ void MainComponent::mouseMove (const juce::MouseEvent& e)
 {
     const auto pos = e.getPosition();
 
+    //-- Phase 22: menu bar hover -------------------------------------------
+    {
+        int over = -1;
+
+        for (int i = 0; i < numMenus; ++i)
+            if (getMenuBarItemBounds (i).contains (pos))
+                over = i;
+
+        if (over != hoveredMenuItem)
+        {
+            hoveredMenuItem = over;
+            repaint (menuBarBounds);
+        }
+    }
+
     const bool newPlay   = getPlayButtonBounds().contains (pos);
-    const bool newPause  = getPauseButtonBounds().contains (pos);
     const bool newStop   = getStopButtonBounds().contains (pos);
     const bool newSave   = getSaveButtonBounds().contains (pos);
     const bool newLoad   = getLoadButtonBounds().contains (pos);
@@ -3039,18 +5019,18 @@ void MainComponent::mouseMove (const juce::MouseEvent& e)
     const bool newMixer  = getMixerButtonBounds().contains (pos);
     const bool newGear   = getSettingsButtonBounds().contains (pos);
 
-    setMouseCursor ((newPlay || newPause || newStop || newSave || newLoad || newExport
-                      || newNew || newUndo || newRedo || newMixer || newGear)
+    setMouseCursor ((newPlay || newStop || newSave || newLoad || newExport
+                      || newNew || newUndo || newRedo || newMixer || newGear
+                      || hoveredMenuItem >= 0)
                       ? juce::MouseCursor::PointingHandCursor
                       : juce::MouseCursor::NormalCursor);
 
-    if (newPlay != hoveringPlay || newPause != hoveringPause || newStop != hoveringStop
+    if (newPlay != hoveringPlay || newStop != hoveringStop
          || newSave != hoveringSave || newLoad != hoveringLoad || newExport != hoveringExport
          || newNew != hoveringNew || newUndo != hoveringUndo || newRedo != hoveringRedo
          || newMixer != hoveringMixer || newGear != hoveringSettings)
     {
         hoveringPlay   = newPlay;
-        hoveringPause  = newPause;
         hoveringStop   = newStop;
         hoveringSave   = newSave;
         hoveringLoad   = newLoad;
@@ -3066,11 +5046,17 @@ void MainComponent::mouseMove (const juce::MouseEvent& e)
 
 void MainComponent::mouseExit (const juce::MouseEvent&)
 {
-    if (hoveringPlay || hoveringPause || hoveringStop
+    if (hoveredMenuItem >= 0)
+    {
+        hoveredMenuItem = -1;
+        repaint (menuBarBounds);
+    }
+
+    if (hoveringPlay || hoveringStop
          || hoveringSave || hoveringLoad || hoveringExport
          || hoveringNew || hoveringUndo || hoveringRedo || hoveringMixer || hoveringSettings)
     {
-        hoveringPlay = hoveringPause = hoveringStop = false;
+        hoveringPlay = hoveringStop = false;
         hoveringSave = hoveringLoad = hoveringExport = false;
         hoveringNew = hoveringUndo = hoveringRedo = hoveringMixer = hoveringSettings = false;
         repaint (topBarBounds);
@@ -3079,16 +5065,43 @@ void MainComponent::mouseExit (const juce::MouseEvent&)
 
 bool MainComponent::keyPressed (const juce::KeyPress& key)
 {
+    // Phase 39: with the source set to the typing keyboard, a note key is a
+    // note before it is a shortcut. The KeyListener on the panels covers the
+    // case where they have focus; this covers the host holding it.
+    if (handleTypingKeyDown (key))
+        return true;
+
     if (key.getModifiers().isCommandDown())
     {
         const auto character = juce::CharacterFunctions::toUpperCase (
                                   (juce::juce_wchar) (key.getKeyCode() != 0 ? key.getKeyCode()
                                                                             : key.getTextCharacter()));
 
-        if (character == 'S') { askToSaveProject();  return true; }
+        if (character == 'S')
+        {
+            // Phase 22: 保存 writes where it already points; 另存为 always asks.
+            if (key.getModifiers().isShiftDown()) askToSaveProject();
+            else                                  saveProject();
+
+            return true;
+        }
+
         if (character == 'O') { askToLoadProject();  return true; }
         if (character == 'E') { askToExportAudio();  return true; }
         if (character == 'N') { requestNewProject(); return true; }
+        if (character == 'Q') { requestQuit();       return true; }
+
+        // Phase 22: copy / cut / paste. The roll only claims these when it has
+        // a curve box selected; otherwise they fall through to here.
+        if (character == 'C' && ! key.getModifiers().isShiftDown())
+        {
+            copyEditSelection();
+            return true;
+        }
+
+        if (character == 'X') { cutEditSelection();   return true; }
+        if (character == 'V') { pasteEditSelection(); return true; }
+
         if (character == 'Z')
         {
             if (key.getModifiers().isShiftDown()) redo();
@@ -3105,20 +5118,350 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
         return true;
     }
 
+    // Phase 33: space is a PLAY/STOP toggle. Phase 32 had made it stop-only,
+    // which left the keyboard unable to start playback at all — playing is the
+    // one transport verb a key has to be able to do.
     if (key == juce::KeyPress::spaceKey)
     {
-        togglePlay();
+        if (spaceStartsPlayback (audio.isTransportEngaged()))
+            playTransport();
+        else
+            stopTransport();
+
         return true;
     }
 
-    // Return to zero, the way a DAW's transport keys behave.
+    // Return is the other verb: rewind to the top, whatever the state.
     if (key == juce::KeyPress::returnKey)
     {
-        stopTransport();
+        rewindTransport();
         return true;
     }
 
     return false;
+}
+
+bool MainComponent::handleGlobalKeyPress (const juce::KeyPress& key)
+{
+    // A text field inside the plugin's own editor is a text field: typing a
+    // preset name is not playing notes, and "every letter plays a note" would
+    // make the plugin's own search boxes unusable. Everything else — space,
+    // return, the note keys, the Ctrl commands — goes through the same handler
+    // the main window uses, so there is one key map and not two.
+    if (auto* focused = juce::Component::getCurrentlyFocusedComponent())
+        if (dynamic_cast<juce::TextEditor*> (focused) != nullptr)
+            return false;
+
+    return keyPressed (key);
+}
+
+//==============================================================================
+//-- Phase 22: menu bar --------------------------------------------------------
+namespace
+{
+    /** The modifier the user actually presses. The menu lists the shortcut the
+        keyboard handler listens for, so these two strings and keyPressed() have
+        to agree — they are written next to each other on purpose. */
+   #if JUCE_MAC
+    const juce::String kCommandKey ("Cmd+");
+   #else
+    const juce::String kCommandKey ("Ctrl+");
+   #endif
+}
+
+juce::Rectangle<int> MainComponent::getMenuBarItemBounds (int index) const
+{
+    if (! juce::isPositiveAndBelow (index, numMenus))
+        return {};
+
+    static constexpr int widths[numMenus] { 54, 54 };   // design px
+
+    int x = menuBarBounds.getX() + ui::px (8);
+
+    for (int i = 0; i < index; ++i)
+        x += ui::px (widths[i]);
+
+    return { x, menuBarBounds.getY() + ui::px (2), ui::px (widths[index]),
+             menuBarBounds.getHeight() - ui::px (4) };
+}
+
+void MainComponent::fillFileMenu (juce::PopupMenu& menu) const
+{
+    const bool hasProject = currentProject.existsAsFile();
+
+    auto addCommand = [&menu] (int id, const juce::String& text,
+                               const juce::String& keys, bool enabled = true)
+    {
+        juce::PopupMenu::Item item;
+
+        item.itemID               = id;
+        item.text                 = text;
+        item.isEnabled            = enabled;
+        item.shortcutKeyDescription = keys;
+
+        menu.addItem (item);
+    };
+
+    addCommand (1, utf8 ("新建"),        kCommandKey + "N");
+    addCommand (2, utf8 ("打开…"),       kCommandKey + "O");
+    addCommand (3, utf8 ("保存"),        kCommandKey + "S");
+    addCommand (4, utf8 ("另存为…"),     kCommandKey + "Shift+S");
+
+    menu.addSeparator();
+    addCommand (5, utf8 ("退出"),        kCommandKey + "Q");
+
+    juce::ignoreUnused (hasProject);
+}
+
+void MainComponent::fillEditMenu (juce::PopupMenu& menu) const
+{
+    auto addCommand = [&menu] (int id, const juce::String& text,
+                               const juce::String& keys, bool enabled = true)
+    {
+        juce::PopupMenu::Item item;
+
+        item.itemID               = id;
+        item.text                 = text;
+        item.isEnabled            = enabled;
+        item.shortcutKeyDescription = keys;
+
+        menu.addItem (item);
+    };
+
+    addCommand (11, utf8 ("撤销"), kCommandKey + "Z",         canUndo());
+    addCommand (12, utf8 ("重做"), kCommandKey + "Shift+Z",   canRedo());
+
+    menu.addSeparator();
+
+    addCommand (13, utf8 ("复制"), kCommandKey + "C",         canCopyEditSelection());
+    addCommand (14, utf8 ("剪切"), kCommandKey + "X",         canCutEditSelection());
+    addCommand (15, utf8 ("粘贴"), kCommandKey + "V",         canPasteEditSelection());
+
+    menu.addSeparator();
+
+    // The menu says which clipboard it will act on, so "粘贴" is never a guess.
+    juce::String where;
+
+    if (pianoRoll.canPasteAutomationCurve())
+        where = utf8 ("当前：自动化曲线");
+    else if (pianoRoll.canPasteNotes() && pianoRoll.canPasteSamples())
+    {
+        // Phase 29: copy fills both clipboards in one gesture, so "both" is a
+        // real state and the header has to name both — a line that said only
+        // "8 个音符" would describe half of what the paste will do.
+        where = utf8 ("音符 ") + juce::String (pianoRoll.getNoteClipboardSize())
+                  + utf8 (" · 采样 ") + juce::String (pianoRoll.getSampleClipboardSize());
+    }
+    else if (pianoRoll.canPasteNotes())
+    {
+        where = utf8 ("当前：") + juce::String (pianoRoll.getNoteClipboardSize()) + utf8 (" 个音符");
+
+        // Phase 24: a whole-group copy is not "N notes". The paste makes a
+        // SECOND group carrying its name, mount and curves, so the status line
+        // has to say so — otherwise the menu describes a paste that never runs.
+        if (pianoRoll.isGroupClipboard())
+        {
+            where = utf8 ("整体：组「") + pianoRoll.getGroupClipboardName() + utf8 ("」");
+
+            if (const int lanes = pianoRoll.getGroupClipboardLiveLanes(); lanes > 0)
+                where += utf8 (" · ") + juce::String (lanes) + utf8 (" 条曲线");
+        }
+    }
+    else if (pianoRoll.canPasteSamples())
+        where = utf8 ("剪贴板：") + juce::String (pianoRoll.getSampleClipboardSize()) + utf8 (" 个采样");
+    else
+        where = utf8 ("剪贴板为空");
+
+    menu.addSectionHeader (utf8 ("粘贴目标 · ") + where);
+}
+
+void MainComponent::applyFileChoice (int itemId)
+{
+    switch (itemId)
+    {
+        case 1: requestNewProject(); break;
+        case 2: askToLoadProject();  break;
+        case 3: saveProject();       break;
+        case 4: askToSaveProject();  break;
+        case 5: requestQuit();       break;
+        default: break;
+    }
+}
+
+void MainComponent::applyEditChoice (int itemId)
+{
+    switch (itemId)
+    {
+        case 11: undo(); break;
+        case 12: redo(); break;
+        case 13: copyEditSelection(); break;
+        case 14: cutEditSelection();  break;
+        case 15: pasteEditSelection(); break;
+        default: break;
+    }
+}
+
+void MainComponent::showMenuBarMenu (int index)
+{
+    juce::PopupMenu menu;
+
+    if (index == 0)
+        fillFileMenu (menu);
+    else
+        fillEditMenu (menu);
+
+    hoveredMenuItem = index;
+    repaint (menuBarBounds);
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+
+    menu.showMenuAsync (juce::PopupMenu::Options()
+                            .withTargetComponent (this)
+                            .withTargetScreenArea (localAreaToGlobal (getMenuBarItemBounds (index))),
+                        [safe, index] (int result)
+                        {
+                            if (safe == nullptr)
+                                return;
+
+                            safe->hoveredMenuItem = -1;
+                            safe->repaint (safe->menuBarBounds);
+
+                            if (result <= 0)
+                                return;
+
+                            if (index == 0)
+                                safe->applyFileChoice (result);
+                            else
+                                safe->applyEditChoice (result);
+                        });
+}
+
+void MainComponent::saveProject()
+{
+    if (! currentProject.existsAsFile())
+    {
+        // Never saved: this IS "save as", so ask for a path.
+        askToSaveProject();
+        return;
+    }
+
+    juce::String error;
+
+    // No "saved!" dialog on the happy path: Ctrl+S is pressed while working,
+    // and a modal box every few seconds is a reason to stop pressing it.
+    if (! saveProjectToFile (currentProject, error))
+        showMessage (utf8 ("保存失败"), error, true);
+}
+
+void MainComponent::requestQuit()
+{
+    // Exactly the close button's path, because it is the one that knows how to
+    // ask about unsaved work and how to hand the quitting over to the dialog.
+    if (! handleCloseRequest())
+        return;
+
+    if (auto* app = juce::JUCEApplication::getInstance())
+        app->systemRequestedQuit();
+}
+
+//==============================================================================
+//-- Phase 22: copy / cut / paste ---------------------------------------------
+bool MainComponent::canCopyEditSelection() const
+{
+    return pianoRoll.canCopyAutomationCurve()
+             || ! pianoRoll.getSelection().empty()
+             || ! pianoRoll.getSampleSelection().empty();
+}
+
+bool MainComponent::canCutEditSelection() const
+{
+    return canCopyEditSelection();
+}
+
+bool MainComponent::canPasteEditSelection() const
+{
+    return pianoRoll.canPasteAutomationCurve() || pianoRoll.canPasteNotes()
+             || pianoRoll.canPasteSamples();
+}
+
+void MainComponent::copyEditSelection()
+{
+    // One rule, stated once: a selected curve answers first. If you can see a
+    // box with a lit frame, that box is what Ctrl+C copies — anything else
+    // would make the answer depend on invisible state.
+    if (pianoRoll.canCopyAutomationCurve() && pianoRoll.copyAutomationCurve())
+        return;
+
+    // Phase 29: then everything that is selected — notes AND clips. A marquee
+    // can hold both, and copying one of them would be the invisible choice this
+    // whole design keeps out of the clipboard.
+    if (! pianoRoll.getSelection().empty() || ! pianoRoll.getSampleSelection().empty())
+        pianoRoll.copySelectionToClipboards();
+}
+
+void MainComponent::cutEditSelection()
+{
+    if (pianoRoll.canCopyAutomationCurve() && pianoRoll.cutAutomationCurve())
+    {
+        repaint();
+        return;
+    }
+
+    if (! pianoRoll.getSelection().empty() || ! pianoRoll.getSampleSelection().empty())
+    {
+        pianoRoll.copySelectionToClipboards();
+
+        // Cut is copy-then-delete over BOTH kinds, through the same two entry
+        // points a user would use: nothing here can delete something the copy
+        // did not take, and both are no-ops when nothing of that kind is
+        // selected.
+        pianoRoll.deleteSelectedSamples();
+        pianoRoll.deleteSelectedNotes();
+    }
+
+    repaint();
+}
+
+void MainComponent::pasteEditSelection()
+{
+    if (pianoRoll.canPasteAutomationCurve())
+    {
+        askHowToPasteCurve();
+        return;
+    }
+
+    // Phase 29: paste everything both clipboards hold. Copy fills both from one
+    // gesture, so this is not a choice between them — it is the same selection
+    // coming back.
+    pianoRoll.pasteEditClipboard();
+    repaint();
+}
+
+void MainComponent::askHowToPasteCurve()
+{
+    if (! pianoRoll.canPasteAutomationCurve())
+        return;
+
+    auto* window = new juce::AlertWindow (utf8 ("粘贴自动化曲线"),
+                                          pianoRoll.describeCurvePaste(),
+                                          juce::MessageBoxIconType::QuestionIcon);
+
+    window->addButton (utf8 ("拉伸"), 1, juce::KeyPress (juce::KeyPress::returnKey));
+    window->addButton (utf8 ("不拉伸"), 2);
+    window->addButton (utf8 ("取消"), 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+
+    window->enterModalState (true,
+                             juce::ModalCallbackFunction::create ([safe] (int result)
+                             {
+                                 if (safe == nullptr || result <= 0)
+                                     return;
+
+                                 safe->pianoRoll.pasteAutomationCurve (result == 1);
+                                 safe->repaint();
+                             }),
+                             true);      // deleteWhenDismissed
 }
 
 //==============================================================================
@@ -3157,7 +5500,19 @@ bool MainComponent::loadProjectFromFile (const juce::File& file, juce::String& e
 
     // project::load parses into temporaries and only commits at the end, so a
     // corrupt file leaves the open session exactly as it was.
-    if (! project::load (file, stack, rack, newBpm, error, &mixer, &automation, &plugins))
+    //
+    // Phase 33: the commit itself replaces the layers and then the rack, and the
+    // notification from the first half would let the sampler sweep run against a
+    // rack that still belongs to the previous song. The sweep below runs once,
+    // on the finished session.
+    bool loaded = false;
+
+    {
+        const juce::ScopedValueSetter<bool> noSweep (suspendSamplerPrune, true);
+        loaded = project::load (file, stack, rack, newBpm, error, &mixer, &automation, &plugins);
+    }
+
+    if (! loaded)
         return false;
 
     // Loading a different song rewinds: leaving the playhead mid-timeline over
@@ -3189,6 +5544,12 @@ bool MainComponent::loadProjectFromFile (const juce::File& file, juce::String& e
     pianoRoll.closeNoteAutomation();
 
     currentProject = file;
+
+    // Phase 32: a file written by an older build can carry samplers that no
+    // clip names any more (deleting a clip used to leave them behind). Loading
+    // is the one moment the reference rule can be applied to the whole project
+    // at once, and the sweep is silent when there is nothing to drop.
+    pruneOrphanSamplerSlots();
 
     // A different song: the undo history of the previous one is meaningless now
     // (undone far enough it would teleport the user into another project), and
@@ -3528,9 +5889,78 @@ void MainComponent::setDemoPlayheadBeats (double beats)
 }
 
 //==============================================================================
-void MainComponent::openDemoNoteAutomation()
+void MainComponent::showDemoNoteSelection()
 {
-    auto* layer = stack.getActiveLayer();
+    if (auto* layer = stack.getActiveLayer())
+    {
+        std::vector<int> ids;
+
+        for (const auto& note : layer->getNotes())
+            if (ids.size() < 3 && note.groupId < 0)
+                ids.push_back (note.id);
+
+        pianoRoll.setSelection (ids);
+    }
+}
+
+void MainComponent::showDemoSampleSelection()
+{
+    // Phase 28: a clip, not a note. Clips and notes are mutually exclusive
+    // selections, so selecting the block necessarily clears the notes above —
+    // which is what the screenshot should show.
+    if (auto* layer = stack.getActiveLayer())
+        if (! layer->getSamples().empty())
+            pianoRoll.setSampleSelection ({ layer->getSamples().front().id });
+}
+
+void MainComponent::prepareSnapshotBrowser()
+{
+    // A fixture tree so the browser image documents the FEATURE (a real
+    // hierarchy, four levels deep) rather than whatever directories happen to
+    // exist on the machine that built this binary. It lives in the temp folder
+    // and is added with persist = false, so the user's folder list is untouched.
+    const auto root = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                        .getChildFile ("atomic-browser-demo");
+
+    const auto drums  = root.getChildFile ("Drums");
+    const auto kicks  = drums.getChildFile ("Kicks");
+    const auto hard   = kicks.getChildFile ("Hard");
+    const auto snares = drums.getChildFile ("Snares");
+    const auto bass   = root.getChildFile ("Bass");
+    const auto pads   = root.getChildFile ("Pad");
+
+    if (! root.isDirectory())
+    {
+        for (auto* dir : { &drums, &kicks, &hard, &snares, &bass, &pads })
+            dir->createDirectory();
+
+        writeTestSampleFile (hard.getChildFile ("kick-hard-01.wav"), 0.30, 44100.0, 1, 55.0);
+        writeTestSampleFile (kicks.getChildFile ("kick-soft-01.wav"), 0.30, 44100.0, 1, 70.0);
+        writeTestSampleFile (snares.getChildFile ("snare-tight.wav"), 0.20, 44100.0, 1, 220.0);
+        writeTestSampleFile (bass.getChildFile ("sub-01.wav"), 0.40, 44100.0, 1, 55.0);
+        writeTestSampleFile (pads.getChildFile ("warm-pad.wav"), 0.50, 44100.0, 1, 330.0);
+        writeTestSampleFile (root.getChildFile ("top-loop.wav"), 0.40, 44100.0, 1, 440.0);
+    }
+
+    // The shell's browser is filled from the machine's own folder list. The
+    // shot wants THIS tree and nothing else, and the folder list must not be
+    // rewritten on the way out.
+    filePanel.clearFoldersForSnapshot();
+    filePanel.addFolder (root, false);
+
+    // The scan is asynchronous by design; a screenshot needs the result NOW, so
+    // this is the one place that waits for it.
+    filePanel.waitForPendingScans();
+
+    // Phase 33: the tree now opens FOLDED, so a frame of it would be one row and
+    // two triangles. One branch is unfolded here — without touching the real
+    // store — so the picture documents BOTH states: Drums open, everything
+    // underneath it still closed.
+    filePanel.setSubFolderExpanded (drums, true, false);
+}
+
+void MainComponent::openDemoNoteAutomation()
+{    auto* layer = stack.getActiveLayer();
 
     if (layer == nullptr)
         return;
@@ -3546,6 +5976,76 @@ void MainComponent::openDemoNoteAutomation()
 
     if (best != nullptr)
         pianoRoll.openNoteAutomation (stack.getActiveLayerIndex(), best->id);
+}
+
+void MainComponent::openDemoGroupAutomation()
+{
+    // Phase 21: the group's version of the call above, for the snapshot. Opens
+    // the box on the biggest group of the active sheet and makes sure its level
+    // curve has a shape to photograph — a flat line would leave the reader
+    // wondering whether the box works at all.
+    pianoRoll.closeNoteAutomation();
+
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || layer->getGroups().empty())
+        return;
+
+    const auto& groups = layer->getGroups();
+
+    const int index = stack.getActiveLayerIndex();
+
+    // Widest group gives the most readable curve, because the box is as wide as
+    // the group's own beat span.
+    int    bestGroup = groups.front().getId();
+    double bestSpan  = 0.0;
+
+    for (const auto& group : groups)
+    {
+        double lo = 1.0e9, hi = -1.0e9;
+
+        for (const auto& note : layer->getNotes())
+            if (note.groupId == group.getId())
+            {
+                lo = juce::jmin (lo, note.startBeat);
+                hi = juce::jmax (hi, note.endBeat());
+            }
+
+        if (hi - lo > bestSpan)
+        {
+            bestSpan  = hi - lo;
+            bestGroup = group.getId();
+        }
+    }
+
+    pianoRoll.openGroupAutomation (index, bestGroup, 0);
+
+    if (auto* group = layer->findGroup (bestGroup))
+    {
+        auto& lane = group->automationFor (GroupAutomationTarget::level);
+
+        if (lane.getPoints().size() < 3)
+        {
+            // A ramp across the group: quiet at the head, full at the tail. Any
+            // curve would do; this one is obviously a curve.
+            double lo = 0.0, hi = 4.0;
+
+            for (const auto& note : layer->getNotes())
+                if (note.groupId == bestGroup)
+                {
+                    lo = note.startBeat;
+                    hi = juce::jmax (hi, note.endBeat());
+                }
+
+            lane.resetFlat (0.35f, pianoRoll.getTimelineBeats());
+            lane.addPoint (lo + (hi - lo) * 0.5, 0.55f, pianoRoll.getTimelineBeats());
+            lane.addPoint (hi, 0.95f, pianoRoll.getTimelineBeats());
+            lane.setEnabled (true);
+        }
+    }
+
+    stack.notifyNotesChanged();
+    repaint();
 }
 
 //==============================================================================
@@ -3635,14 +6135,36 @@ void MainComponent::showDemoRoutingOverride()
     republish();
     updateRackRoutingFocus();
 
-    // Phase 16: park the spotlight on the synth the demo just borrowed onto.
-    // Called after updateRackRoutingFocus() because that one re-derives the
-    // focus from the selection and would otherwise undo this.
-    focusSynth (otherSlot);
+    // Phase 30: this used to park the spotlight on the borrowed synth. It no
+    // longer does — the demo is the picture of what a project looks like at
+    // rest, and a permanent highlight badge in the corner of it says "you are
+    // in a mode" when nobody clicked anything. The override pill above already
+    // states the routing in words ("3 notes on Synth B").
 
     layerPanel.repaint();
     rackPanel.repaint();
     pianoRoll.repaint();
+    repaint();
+}
+
+void MainComponent::showDemoConsoleRouting()
+{
+    // Phase 23 photo staging: 通道 1 → 通道 2 → 通道 3 → 主输出. That chain is
+    // the requirement in one glance (two strips feeding a third, which feeds the
+    // master), and a console where every chip reads "主输出" documents nothing
+    // about the feature.
+    //
+    // Deliberately done AFTER the self-test, like every other staging helper
+    // here: it changes the audible topology, and the audio checks must keep
+    // running against the plain console they were written for.
+    if (mixer.getChannelCount() < 3)
+        return;
+
+    mixer.setChannelOutput (0, 1);
+    mixer.setChannelOutput (1, 2);
+
+    republish();
+    mixerPanel.repaint();
     repaint();
 }
 
@@ -3651,6 +6173,7 @@ juce::String MainComponent::runSelfTest()
 {
     juce::String report (utf8 ("AtomicDAW — headless rule check (Phase 1 + 2 + 3 + 4 + 5 + 6 + 7)\n"));
     int failures = 0;
+
 
     auto check = [&report, &failures] (const juce::String& name, bool passed, const juce::String& detail)
     {
@@ -3663,6 +6186,37 @@ juce::String MainComponent::runSelfTest()
 
         if (! passed)
             ++failures;
+
+        // ATOMIC_TRACE=1 echoes every line as it happens. The whole report is
+        // written to the log at the very END of the run, so a check that takes
+        // the harness down with it would otherwise leave nothing behind —
+        // "which check was it" is worth an env var.
+        static const bool echo = juce::SystemStats::getEnvironmentVariable ("ATOMIC_TRACE", "") == "1";
+
+        if (echo)
+            std::cout << (passed ? "[PASS] " : "[FAIL] ") << name << std::endl;
+    };
+
+    //-- Phase 34: the cascade deletions ask, and the answers are scripted -----
+    // Two things about the question are swapped out for the whole run:
+    //   * the dialogs — a headless run cannot click "删除", so the answer is a
+    //     variable the checks can set, and the call is counted so "did it ask?"
+    //     is testable at all;
+    //   * the deferral — the real app asks from the message queue (the sweep is
+    //     often inside a drag), and there is no loop to pump in here.
+    // Both are restored at the very end, after the demo has been rebuilt.
+    int  samplerPromptCount  = 0;
+    bool samplerPromptAnswer = true;
+
+    deferSamplerPrompt = false;
+    askSamplerCascade = [&samplerPromptCount, &samplerPromptAnswer]
+                        (const juce::String&, const juce::String&,
+                         std::function<void (bool)> onAnswer)
+    {
+        ++samplerPromptCount;
+
+        if (onAnswer != nullptr)
+            onAnswer (samplerPromptAnswer);
     };
 
     //-- Phase 10: what a fresh session looks like ----------------------------
@@ -4129,7 +6683,7 @@ juce::String MainComponent::runSelfTest()
                  && PianoRollComponent::envelopeProgress (probe, 8.01) < 0.0,
                "3.99 / 8.01");
 
-        //-- Play / pause / stop ----------------------------------------------
+        //-- Play / stop -------------------------------------------------------
         // play(false): the state machine without taking the sound card.
         AudioEngine transport (t4, r4);
 
@@ -4138,16 +6692,31 @@ juce::String MainComponent::runSelfTest()
                transport.isPlaying() && transport.isTransportEngaged(), "playing");
 
         transport.setPositionBeats (8.0);
-        transport.pause();
-        check ("Pause holds the playhead where it was",
-               transport.isPaused() && std::abs (transport.getPositionBeats() - 8.0) < 1.0e-9,
-               "paused at beat 8");
-
         transport.stopTransport();
-        check ("Stop rewinds to the top",
+        check ("The engine's own stop rewinds to the top",
                transport.getTransportState() == TransportState::stopped
                  && transport.getPositionBeats() == 0.0,
                "stopped at beat 0");
+
+        // Phase 33: the STOP button, as one pure function. Running -> stop and
+        // rewind to zero. Idle -> nothing at all, because the playhead is also
+        // the "play from here" control and a reflex stop must not rewind it.
+        const auto whileRunning = stopDecision (true);
+        const auto whileIdle    = stopDecision (false);
+
+        check ("Stop while running ends the run at zero",
+               whileRunning.stop && whileRunning.beat == 0.0,
+               juce::String (whileRunning.beat, 1));
+
+        check ("Stop while already stopped does nothing (the playhead is a choice)",
+               ! whileIdle.stop,
+               whileIdle.stop ? "it rewound" : "left alone");
+
+        // Phase 33: the space bar. Idle -> play, rolling -> stop. Phase 32 had
+        // it stop-only, which is why the keyboard could not start playback.
+        check ("Space plays when idle and stops while rolling",
+               spaceStartsPlayback (false) && ! spaceStartsPlayback (true),
+               "idle=play / rolling=stop");
     }
 
     //-- Phase 5: faders, pan, mute / solo, macro automation -----------------
@@ -5490,7 +8059,7 @@ juce::String MainComponent::runSelfTest()
             layers.setLayerOutputSlot (0, hostRack.addPluginSynth (synthDescription, instanceId));
             layers.setLayerLevelDb (0, 0.0f);
             layers.setLayerPan (0, 0.0f);
-            layers.getLayer (0)->addNote ({ 0, 60, 0.0, 2.0, 0.9f });
+            const int hostedNoteId = layers.getLayer (0)->addNote ({ 0, 60, 0.0, 2.0, 0.9f });
 
             PlaybackEngine engine;
             engine.setSampleRate (44100.0);
@@ -5541,6 +8110,57 @@ juce::String MainComponent::runSelfTest()
             check ("Plugin output still obeys the master fader",
                    faderRatio > 0.40f && faderRatio < 0.60f,
                    "-6 dB master  ->  x" + juce::String (faderRatio, 3));
+
+            //-- Phase 24: a curve really moves a hosted parameter ---------------
+            // End to end, through the same three pieces the editor uses: the
+            // plugin's own parameter list, the note's `modPluginParam`, and the
+            // published curve. The fixture synth's one parameter is the
+            // amplitude, so "did the automation happen" is audible — half the
+            // note is rendered with the curve pulled to zero.
+            auto* instance = host.getProcessorForEditor (instanceId);
+            const int paramCount = instance != nullptr ? instance->getParameters().size() : 0;
+            const juce::String paramName = paramCount > 0 ? instance->getParameters()[0]->getName (64)
+                                                          : juce::String();
+
+            auto* hostedNote = layers.getLayer (0)->findNote (hostedNoteId);
+            float openHalf = 0.0f, closedHalf = 0.0f, dipRatio = 1.0f;
+
+            if (hostedNote != nullptr)
+            {
+                NoteEnvelope dip;
+                // Down to zero a third of the way in, so the drop is over well
+                // before the half-way mark: the parameter is written once per
+                // render chunk, and a dip that straddled the boundary would
+                // measure the chunk size instead of the automation.
+                dip.loadPoints ({ { 0.0f, 1.0f }, { 0.25f, 1.0f }, { 0.35f, 0.0f }, { 1.0f, 0.0f } });
+                dip.setEnabled (true);
+
+                hostedNote->envelope       = dip;
+                hostedNote->modPluginParam = 0;
+
+                juce::AudioBuffer<float> autoBuffer;
+                autoBuffer.setSize (2, 44100);
+                autoBuffer.clear();
+
+                engine.publishSchedule (layers, hostRack, 120.0, 0.0, &mix);
+                engine.resetMixState();
+                engine.renderWindow (0.0, 44100, autoBuffer, nullptr);
+
+                openHalf  = autoBuffer.getRMSLevel (0, 0, 22050);
+                closedHalf = autoBuffer.getRMSLevel (0, 22050, 22050);
+                dipRatio  = openHalf > 1.0e-4f ? closedHalf / openHalf : 1.0f;
+
+                hostedNote->modPluginParam = -1;
+                hostedNote->envelope = NoteEnvelope::makeFlat();
+            }
+
+            check ("A note's curve moves a hosted instrument's parameter",
+                   hostedNote != nullptr && paramCount >= 1 && paramName == "Level"
+                     && openHalf > 0.002f && dipRatio < 0.15f,
+                   juce::String (paramCount) + " param(s), [0] = " + paramName
+                     + " / first half " + juce::String (openHalf, 4)
+                     + " -> second " + juce::String (closedHalf, 4)
+                     + "  (x" + juce::String (dipRatio, 3) + ")");
 
             //-- ... and a hosted effect sits in a channel chain -----------------
             // Tested with a built-in synth routed to channel 1: a hosted
@@ -5628,12 +8248,35 @@ juce::String MainComponent::runSelfTest()
                 const int noteId    = layer->getNotes().front().id;
                 const int layerSlot = layer->getOutputSlotId();
 
+                focusSynth (-1);          // the state a fresh session is in
                 pianoRoll.setSelection ({ noteId });
 
-                check ("Selecting notes highlights the synth they resolve to",
-                       rackPanel.hasRoutingFocus() && rackPanel.getRoutingFocusSlotId() == layerSlot,
+                // Phase 30: the selection no longer spotlights anything. It used
+                // to, and that is how the grid lit up (and, while the veil still
+                // existed, dimmed) on a click nobody had asked to be a mode. The
+                // rack still has to hear that something IS selected — that is
+                // what arms the card's plain click — so both halves of the old
+                // rule are checked, one inverted.
+                check ("Selecting notes does not switch the synth highlight on",
+                       ! rackPanel.hasRoutingFocus()
+                         && pianoRoll.getFocusSlotId() < 0
+                         && pianoRoll.getSelectedRoutingSlotId() == layerSlot,
                        "focus " + juce::String (rackPanel.getRoutingFocusSlotId())
                          + " / resolves to " + juce::String (pianoRoll.getSelectedRoutingSlotId()));
+
+                // Phase 23: the same selection arms the card's plain click. The
+                // two facts are separate on purpose — a spotlit synth is not a
+                // reason to re-route anything.
+                const bool armed = rackPanel.isSelectionActive();
+
+                pianoRoll.setSelection ({});
+                const bool disarmed = ! rackPanel.isSelectionActive();
+
+                pianoRoll.setSelection ({ noteId });
+
+                check ("A live selection arms the rack's click-to-mount",
+                       armed && disarmed && rackPanel.isSelectionActive(),
+                       armed ? "armed with a selection, disarmed without" : "stayed cold");
 
                 int otherSlot = -1;
 
@@ -5802,19 +8445,16 @@ juce::String MainComponent::runSelfTest()
 
     //-- Transport glyphs -----------------------------------------------------
     // Phase 13 enlarged the buttons and the icons stayed behind: the play
-    // triangle's fixed 12 px insets ate all but 4 px of its height, and the
-    // pause bars hung off the same 12 px, which left them sitting below the
-    // plate's centre. Both are plain geometry, so both are testable without a
-    // display — and the next resize cannot quietly undo the fix.
+    // triangle's fixed 12 px insets ate all but 4 px of its height. The glyph is
+    // plain geometry, so it is testable without a display — and the next resize
+    // cannot quietly undo the fix. Phase 32 removed the pause plate from this
+    // set; what is left is measured here, plus the gap it left behind.
     {
-        const auto playButton  = getPlayButtonBounds().toFloat();
-        const auto pauseButton = getPauseButtonBounds().toFloat();
-        const auto stopButton  = getStopButtonBounds().toFloat();
+        const auto playButton = getPlayButtonBounds().toFloat();
+        const auto stopButton = getStopButtonBounds().toFloat();
 
-        const auto play  = playGlyph (playButton).getBounds();
-        const auto bars  = pauseGlyph (pauseButton);
-        const auto pause = bars.left.getUnion (bars.right);
-        const auto stop  = stopGlyph (stopButton);
+        const auto play = playGlyph (playButton).getBounds();
+        const auto stop = stopGlyph (stopButton);
 
         constexpr float tol = 0.5f;
 
@@ -5831,22 +8471,22 @@ juce::String MainComponent::runSelfTest()
                juce::String (play.getCentreX() - playButton.getCentreX(), 2) + " / "
                  + juce::String (play.getCentreY() - playButton.getCentreY(), 2));
 
-        check ("The pause bars sit on the plate's centre, not at the bottom",
-               std::abs (pause.getCentreY() - pauseButton.getCentreY()) < tol
-                 && std::abs (pause.getCentreX() - pauseButton.getCentreX()) < tol
-                 && pause.getHeight() > pauseButton.getHeight() * 0.4f,
-               juce::String (pause.getCentreY() - pauseButton.getCentreY(), 2));
-
-        check ("The pause bars are equal, with a gap between them",
-               std::abs (bars.left.getWidth() - bars.right.getWidth()) < 0.01f
-                 && bars.right.getX() > bars.left.getRight(),
-               juce::String (bars.left.getWidth(), 1) + " x " + juce::String (bars.left.getHeight(), 1));
-
         check ("The stop square is centred and square",
                std::abs (stop.getWidth() - stop.getHeight()) < 0.01f
                  && std::abs (stop.getCentreX() - stopButton.getCentreX()) < tol
                  && std::abs (stop.getCentreY() - stopButton.getCentreY()) < tol,
                juce::String (stop.getWidth(), 1) + " px");
+
+        // Phase 32: two plates, 4 px apart, no orphan gap where the pause plate
+        // used to be. A hole in a transport cluster reads as a missing button.
+        const float gap = stopButton.getX() - playButton.getRight();
+
+        check ("Play and stop sit side by side with no hole between them",
+               gap > 0.0f && gap <= ui::pf (6)
+                 && std::abs (stopButton.getWidth() - (float) ui::px (30)) < 0.01f
+                 && playButton.getRight() > (float) ui::px (200),
+               juce::String (gap, 1) + utf8 (" px 间隙, stop x=")
+                 + juce::String (stopButton.getX(), 1));
     }
 
     //-- One gutter for both timelines ----------------------------------------
@@ -6388,9 +9028,13 @@ juce::String MainComponent::runSelfTest()
         }
 
         //-- The console grows, shrinks and resets ------------------------------
+        // Phase 25: the ceiling is 127 strips and a fresh session opens with
+        // eight, so those are two different numbers now. The old check asserted
+        // they were the same, which read as "a 9th strip is refused".
         const int countBefore = mixer.getChannelCount();
+        const int ceiling     = MixerModel::maxChannels;
 
-        while (mixer.getChannelCount() < MixerModel::maxChannels)
+        while (mixer.getChannelCount() < ceiling)
             mixer.addChannel();
 
         const bool refusedAboveCeiling = ! mixer.addChannel();
@@ -6398,13 +9042,17 @@ juce::String MainComponent::runSelfTest()
         const int shrunk = mixer.getChannelCount();
         mixer.addChannel();
 
-        check ("The console refuses a 9th strip and accepts 1..8",
-               countBefore == MixerModel::maxChannels
+        check ("The console refuses a 128th strip and accepts 1..127",
+               countBefore == MixerModel::defaultChannels
+                 && ceiling == 127
                  && refusedAboveCeiling
-                 && shrunk == MixerModel::maxChannels - 1
-                 && mixer.getChannelCount() == MixerModel::maxChannels,
+                 && shrunk == ceiling - 1
+                 && mixer.getChannelCount() == ceiling,
                juce::String (countBefore) + " / " + juce::String (shrunk) + " / "
                  + juce::String (mixer.getChannelCount()));
+
+        // Back to the eight the rest of the frame photographs.
+        mixer.setChannelCount (countBefore);
 
         // Reset means "factory", not "unplugged": the fader goes back to unity,
         // the inserts are cleared, and whatever was routed stays routed.
@@ -6574,6 +9222,348 @@ juce::String MainComponent::runSelfTest()
                    juce::String (PianoRollComponent::numToolButtons) + utf8 (" 个按钮，右端 ")
                      + juce::String (roll.getToolButtonBounds (7).getRight())
                      + " / 栏宽 " + juce::String (roll.getToolbarArea().getWidth()));
+
+            // Phase 21: 编组 / 解组 are one pair, so the magnet had to move past
+            // them. The order is the whole request, so the order is the check.
+            const auto ungroup = roll.getToolButtonBounds (6);
+            const auto magnet  = roll.getToolButtonBounds (7);
+
+            check ("Ungroup sits directly left of the magnet now",
+                   ungroup.getRight() <= magnet.getX()
+                     && magnet.getRight() <= roll.getToolbarArea().getRight(),
+                   juce::String (ungroup.getX()) + ".." + juce::String (magnet.getRight())
+                     + " / 栏宽 " + juce::String (roll.getToolbarArea().getWidth()));
+        }
+
+        //-- Phase 21: both side columns split ---------------------------------
+        {
+            resized();
+
+            const bool leftStacked  = leftSplitter.getY() <= layerPanel.getBottom()
+                                        && filePanel.getY() == leftSplitter.getBottom();
+            const bool rightStacked = rightSplitter.getY() <= rackPanel.getBottom()
+                                        && groupPanel.getY() == rightSplitter.getBottom();
+
+            const int fileBefore  = filePanel.getHeight();
+            const int groupBefore = groupPanel.getHeight();
+
+            leftSplitter.simulateDrag (-ui::px (40));      // drag up = taller list
+            rightSplitter.simulateDrag (-ui::px (30));
+
+            const int fileAfter  = filePanel.getHeight();
+            const int groupAfter = groupPanel.getHeight();
+
+            check ("Dragging the left band makes the file tree taller",
+                   leftStacked && fileAfter > fileBefore && layerPanel.getHeight() > ui::px (100),
+                   juce::String (fileBefore) + " -> " + juce::String (fileAfter) + " px");
+
+            check ("Dragging the right band makes the group list taller",
+                   rightStacked && groupAfter > groupBefore && rackPanel.getHeight() > ui::px (100),
+                   juce::String (groupBefore) + " -> " + juce::String (groupAfter) + " px");
+
+            // Phase 25: the band must keep up with the pointer. 40 px of travel
+            // has to be 40 px of height, and the check below is what the old
+            // incremental callback could not pass: it clamped the overshoot into
+            // oblivion, so pulling back down moved the band only after the
+            // pointer had retraced the whole lost distance.
+            check ("The left band tracks the pointer one for one",
+                   fileAfter - fileBefore == ui::px (40),
+                   juce::String (fileAfter - fileBefore) + " px for 40 px of travel");
+
+            // One continuous gesture: 40 px up, far past the floor, then back to
+            // 40 px of travel. Absolute travel has to land on exactly the height
+            // that 40 px means — no dead zone from the overshoot.
+            leftSplitter.simulateDrag (ui::px (10000), true);      // still the same drag
+            const int atFloor = filePanel.getHeight();
+            leftSplitter.simulateDrag (-ui::px (40), true);
+
+            check ("A band dragged past its limit comes back with the pointer",
+                   atFloor < fileAfter && filePanel.getHeight() == fileAfter,
+                   juce::String (atFloor) + " px at the limit -> "
+                     + juce::String (filePanel.getHeight()) + utf8 (" px at 40 px of travel"));
+
+            // Put the columns back the way the rest of the frame expects them.
+            leftSplitter.simulateDrag (ui::px (40));
+            rightSplitter.simulateDrag (ui::px (30));
+        }
+
+        //-- Phase 21: a new group is a row in the list straight away ----------
+        {
+            if (auto* sheet = stack.getActiveLayer())
+            {
+                std::vector<int> detached;
+
+                for (const auto& note : sheet->getNotes())
+                    if (note.groupId < 0)
+                        detached.push_back (note.id);
+
+                if (detached.size() >= 2)
+                {
+                    const int before = groupPanel.getNumRows();
+
+                    pianoRoll.setSelection ({ detached[0], detached[1] });
+                    const int gid   = pianoRoll.groupSelection();
+                    const int after = groupPanel.getNumRows();
+
+                    check ("A group made in the roll is a row in the list right away",
+                           gid >= 0 && after == before + 1,
+                           juce::String (before) + " -> " + juce::String (after) + utf8 (" 行"));
+
+                    pianoRoll.ungroupSelection();
+                    pianoRoll.setSelection ({});
+                }
+            }
+        }
+
+        //-- Phase 21: the group's inline curve box ----------------------------
+        {
+            LayerStack t;
+            RackModel  r;
+
+            t.addLayer (utf8 ("组"), palette::layer1);
+
+            auto* layer = t.getLayer (0);
+
+            // Around middle C: a fresh roll centres its vertical scroll there,
+            // and the box is anchored to notes that are actually on screen.
+            const int a   = layer->addNote ({ 0, 72, 1.0, 2.0, 0.9f });
+            const int b   = layer->addNote ({ 0, 76, 4.0, 2.0, 0.9f });
+            const int gid = layer->addGroup (utf8 ("G"), palette::layer1);
+            layer->assignNotesToGroup ({ a, b }, gid);
+
+            PianoRollComponent roll (t, r);
+            roll.setSize (1400, 520);
+
+            const auto handle = roll.getGroupAutomationHandleBounds (0, gid);
+
+            roll.openGroupAutomation (0, gid, 0);
+
+            const auto* group  = layer->findGroup (gid);
+            const auto  box    = roll.getGroupAutomationBoxBounds (0, gid);
+            const bool  laneOn = group != nullptr
+                                   && group->automationFor (GroupAutomationTarget::level).isEnabled();
+
+            // Members span beats 1..6, so the box must be exactly that wide.
+            const float expected = (float) ((6.0 - 1.0) * roll.getBeatWidth());
+
+            check ("A group's curve box is as wide as the group",
+                   ! box.isEmpty()
+                     && std::abs (box.getWidth() - juce::jmax (expected, 22.0f)) < 1.5f,
+                   juce::String (box.getWidth(), 1) + " px vs " + juce::String (expected, 1)
+                     + " px" + (handle.isEmpty() ? utf8 (" · 无手柄") : utf8 (" · 有手柄")));
+
+            check ("The pill's curve handle exists and sits inside the pill",
+                   ! handle.isEmpty(),
+                   handle.toString() + " | 成员 " + juce::String (layer->countNotesInGroup (gid)));
+
+            check ("Opening the group box switches its lane on",
+                   roll.isGroupAutomationOpen() && roll.getExpandedGroupId() == gid && laneOn,
+                   laneOn ? "lane on" : "lane still off");
+
+            roll.openNoteAutomation (0, a);
+
+            check ("Only one inline box is open at a time",
+                   roll.isNoteAutomationOpen() && ! roll.isGroupAutomationOpen(),
+                   roll.isNoteAutomationOpen() ? "note box won" : "neither box opened");
+        }
+
+        //-- Phase 22: a multi-note drag is rigid ------------------------------
+        {
+            LayerStack t;
+            RackModel  r;
+
+            t.addLayer (utf8 ("拖动"), palette::layer1);
+
+            auto* layer = t.getLayer (0);
+
+            layer->addNote ({ 0, 60, 1.0, 1.0, 0.9f });
+            layer->addNote ({ 0, 64, 2.0, 1.0, 0.9f });
+            layer->addNote ({ 0, 67, 4.0, 1.0, 0.9f });
+
+            std::vector<NoteEvent> originals (layer->getNotes().begin(), layer->getNotes().end());
+
+            PianoRollComponent roll (t, r);
+            roll.setSize (1400, 520);
+
+            // Everybody wants to go 3 beats left; there is 1 beat of travel
+            // before the leftmost note reaches beat 0.
+            const auto farLeft = roll.clampMove (originals, -3.0, 0, false);
+
+            // ... and a drag off the top must stop the block, not stack it on 127.
+            const auto up = roll.clampMove (originals, 0.0, 200, false);
+
+            check ("The leftmost note pins the whole block at beat 0",
+                   std::abs (farLeft.beats + 1.0) < 1.0e-9,
+                   "delta " + juce::String (farLeft.beats, 3) + " beats");
+
+            check ("A block dragged past the top keeps its intervals",
+                   up.pitch == 60 && (67 + up.pitch) == 127,
+                   "pitch delta " + juce::String (up.pitch));
+        }
+
+        //-- Phase 22: the group box and its curve share both edges ------------
+        {
+            LayerStack t;
+            RackModel  r;
+
+            t.addLayer (utf8 ("对齐"), palette::layer1);
+
+            auto* layer = t.getLayer (0);
+
+            const int a   = layer->addNote ({ 0, 72, 1.0, 1.0, 0.9f });
+            const int b   = layer->addNote ({ 0, 76, 5.0, 1.0, 0.9f });
+            const int gid = layer->addGroup (utf8 ("G"), palette::layer1);
+            layer->assignNotesToGroup ({ a, b }, gid);
+
+            PianoRollComponent roll (t, r);
+            roll.setSize (1400, 520);
+            roll.openGroupAutomation (0, gid, 0);
+
+            const auto box    = roll.getGroupAutomationBoxBounds (0, gid);
+            const auto curve  = roll.getGroupCurveBounds();
+            const auto first  = roll.getNoteScreenBounds (0, a);
+            const auto last   = roll.getNoteScreenBounds (0, b);
+
+            // The note block is drawn 1.5 px narrower than its beat span (the
+            // gap between neighbours), so the box's right edge sits inside that
+            // gap — the tolerance says so instead of pretending it is exact.
+            check ("The group box spans exactly the group's first and last note",
+                   ! box.isEmpty() && std::abs (box.getX() - first.getX()) < 1.0f
+                     && box.getRight() >= last.getRight()
+                     && box.getRight() - last.getRight() < 2.0f,
+                   box.toString() + " vs note " + first.toString() + " .. "
+                     + juce::String (last.getRight(), 1));
+
+            check ("The curve fills the box edge to edge",
+                   ! curve.isEmpty() && std::abs (curve.getX() - box.getX()) < 0.01f
+                     && std::abs (curve.getRight() - box.getRight()) < 0.01f,
+                   "curve " + juce::String (curve.getX(), 1) + ".." + juce::String (curve.getRight(), 1)
+                     + " / box " + juce::String (box.getX(), 1) + ".." + juce::String (box.getRight(), 1));
+        }
+
+        //-- Phase 22: copying a curve from one box to another -----------------
+        {
+            LayerStack t;
+            RackModel  r;
+
+            t.addLayer (utf8 ("曲线"), palette::layer1);
+
+            auto* layer = t.getLayer (0);
+
+            // Three groups: the source (5 beats), a shorter one (3) and a longer
+            // one (9). Stretch, truncation and the zero tail all get a target.
+            const int n1 = layer->addNote ({ 0, 72,  1.0, 1.0, 0.9f });
+            const int n2 = layer->addNote ({ 0, 76,  5.0, 1.0, 0.9f });
+            const int n3 = layer->addNote ({ 0, 79, 10.0, 1.0, 0.9f });
+            const int n4 = layer->addNote ({ 0, 81, 12.0, 1.0, 0.9f });
+            const int n5 = layer->addNote ({ 0, 84, 20.0, 1.0, 0.9f });
+            const int n6 = layer->addNote ({ 0, 86, 28.0, 1.0, 0.9f });
+
+            const int g1 = layer->addGroup (utf8 ("源"), palette::layer1);
+            const int g2 = layer->addGroup (utf8 ("短"), palette::layer1);
+            const int g3 = layer->addGroup (utf8 ("长"), palette::layer1);
+
+            layer->assignNotesToGroup ({ n1, n2 }, g1);
+            layer->assignNotesToGroup ({ n3, n4 }, g2);
+            layer->assignNotesToGroup ({ n5, n6 }, g3);
+
+            PianoRollComponent roll (t, r);
+            roll.setSize (1400, 520);
+
+            auto* source = layer->findGroup (g1);
+            source->automationFor (GroupAutomationTarget::level)
+                  .loadPoints ({ { 1.0, 0.2f }, { 3.0, 0.9f }, { 6.0, 0.4f } });
+            source->automationFor (GroupAutomationTarget::level).setEnabled (true);
+
+            roll.openGroupAutomation (0, g1, 0);
+            const bool copied = roll.copyAutomationCurve();
+
+            //-- stretch into the 3-beat group
+            roll.openGroupAutomation (0, g2, 0);
+            const bool stretched = roll.pasteAutomationCurve (true);
+            const float stretchedEnd = layer->findGroup (g2)
+                                         ->automationFor (GroupAutomationTarget::level)
+                                         .valueAtBeat (13.0);
+
+            check ("A copied curve knows its own length",
+                   copied && roll.hasCurveClipboard()
+                     && std::abs (roll.getCurveClipboardLengthBeats() - 5.0) < 1.0e-6
+                     && roll.getCurveClipboardPointCount() == 3,
+                   juce::String (roll.getCurveClipboardPointCount()) + " points over "
+                     + juce::String (roll.getCurveClipboardLengthBeats(), 2) + " beats");
+
+            check ("Pasting stretched rescales the curve onto the target",
+                   stretched && std::abs ((double) stretchedEnd - 0.4) < 0.02,
+                   "end value " + juce::String (stretchedEnd, 3));
+
+            //-- no stretch into the same short group: the tail is cut off
+            roll.pasteAutomationCurve (false);
+            const float cutEnd = layer->findGroup (g2)
+                                   ->automationFor (GroupAutomationTarget::level)
+                                   .valueAtBeat (13.0);
+
+            check ("Pasting unstretched onto a shorter group truncates the curve",
+                   std::abs ((double) cutEnd - 0.9) < 0.02,
+                   "value at the group's end " + juce::String (cutEnd, 3));
+
+            //-- no stretch into the 9-beat group: the rest is 0
+            roll.openGroupAutomation (0, g3, 0);
+            roll.pasteAutomationCurve (false);
+
+            const auto& longLane = layer->findGroup (g3)->automationFor (GroupAutomationTarget::level);
+
+            check ("Pasting unstretched onto a longer group leaves a zero tail",
+                   std::abs ((double) longLane.valueAtBeat (25.0) - 0.4) < 0.02
+                     && longLane.valueAtBeat (29.0) < 1.0e-6f,
+                   "at beat 25 " + juce::String (longLane.valueAtBeat (25.0), 3)
+                     + " / at 29 " + juce::String (longLane.valueAtBeat (29.0), 3));
+
+            //-- a note's curve onto a group: one representation, two boxes
+            roll.openNoteAutomation (0, n6);
+            const bool noteCopied = roll.copyAutomationCurve();
+
+            roll.openGroupAutomation (0, g2, 0);
+            const bool crossed = roll.pasteAutomationCurve (true);
+
+            const float notePeak = layer->findGroup (g2)
+                                     ->automationFor (GroupAutomationTarget::level)
+                                     .valueAtBeat (10.24);
+
+            check ("A note's envelope can be pasted onto a group's lane",
+                   noteCopied && crossed && notePeak > 0.95f,
+                   "peak where the ADSR peaked: " + juce::String (notePeak, 3));
+        }
+
+        //-- Phase 22: the piano column plays the layer's synth ----------------
+        {
+            LayerStack t;
+            RackModel  r;
+
+            const int slot = r.getFirstSlotId();
+
+            t.addLayer (utf8 ("键"), palette::layer1);
+            t.setLayerOutputSlot (0, slot);
+
+            PianoRollComponent roll (t, r);
+            roll.setSize (1400, 520);
+
+            int   gotSlot  = -1;
+            int   gotPitch = -1;
+            float gotVel   = 0.0f;
+
+            roll.onAuditionRequested = [&] (int s, int p, float v, bool)
+            {
+                gotSlot  = s;
+                gotPitch = p;
+                gotVel   = v;
+            };
+
+            roll.auditionPitchOnActiveLayer (72);
+
+            check ("A piano key sounds the synth its layer is routed to",
+                   gotSlot == slot && gotPitch == 72 && gotVel > 0.0f,
+                   "slot " + juce::String (gotSlot) + " / pitch " + juce::String (gotPitch)
+                     + " / vel " + juce::String (gotVel, 2));
         }
 
         //-- The preview voice -------------------------------------------------
@@ -6719,13 +9709,4200 @@ juce::String MainComponent::runSelfTest()
         }
     }
 
-    report << "\n  " << (failures == 0 ? "ALL CHECKS PASSED" : juce::String (failures) + " CHECK(S) FAILED") << "\n";
+    //-- Phase 23: strip-to-strip routing --------------------------------------
+    {
+        MixerModel m;
+
+        bool allToMaster = true;
+
+        for (int c = 0; c < m.getChannelCount(); ++c)
+            allToMaster = allToMaster && m.getChannelOutput (c) == MixerModel::masterChannel;
+
+        check ("Every strip starts plugged into the master",
+               allToMaster && MixerModel::masterChannel == MixerModel::numChannels
+                 && m.getChannelCount() == MixerModel::defaultChannels,
+               juce::String (m.getChannelCount()) + " strips -> master");
+
+        const bool chained  = m.setChannelOutput (0, 1) && m.setChannelOutput (1, 2);
+        const bool noLoops  = ! m.setChannelOutput (2, 0)      // 0 -> 1 -> 2 -> 0
+                                && ! m.setChannelOutput (1, 1); // a strip into itself
+
+        check ("A strip can feed another strip, but a loop is refused",
+               chained && noLoops && m.getChannelOutput (0) == 1 && m.getChannelOutput (1) == 2,
+               "0->1->2, 2->0 rejected");
+
+        // Shrinking the console must not leave a route pointing at a strip that
+        // no longer exists: the signal would land in a bus nobody reads.
+        m.setChannelCount (2);
+
+        check ("Shrinking the console re-plugs a route whose strip is gone",
+               m.getChannelOutput (0) == 1 && m.getChannelOutput (1) == MixerModel::masterChannel,
+               "1 -> 2 became 1 -> master");
+    }
+
+    //-- ... and the renderer actually sums that way ---------------------------
+    // The important half: routing a strip into another strip MOVES its signal.
+    // A test that only checked "the destination is audible" would pass just as
+    // well if the signal had been copied to both places.
+    {
+        LayerStack t;
+        RackModel  r;
+        MixerModel m;
+
+        const int slot = r.getSlotIdAt (0);
+        t.addLayer (utf8 ("链"), palette::layer1);
+        t.setLayerOutputSlot (0, slot);
+        t.setLayerLevelDb (0, 0.0f);
+
+        const int noteId = t.getLayer (0)->addNote ({ 0, 60, 0.0, 4.0, 0.9f });
+        t.getLayer (0)->findNote (noteId)->envelope = NoteEnvelope::makeFlat();
+        r.setMixerChannel (slot, 0);
+
+        PlaybackEngine engine;
+        engine.setSampleRate (44100.0);
+
+        auto render = [&] (MixerModel& model) -> RenderStats
+        {
+            engine.publishSchedule (t, r, 120.0, 0.0, &model);
+            engine.resetMixState();
+            return engine.renderOffline (1.0);
+        };
+
+        const auto flat = render (m);
+
+        m.setChannelOutput (0, 1);
+        const auto chained = render (m);
+
+        const float ratio = chained.peak / juce::jmax (1.0e-6f, flat.peak);
+
+        check ("Sending a strip into another strip moves its signal there",
+               flat.peakForChannel (1) == 0.0f
+                 && chained.peakForChannel (0) > 0.001f
+                 && chained.peakForChannel (1) > 0.001f,
+               juce::String (flat.peakForChannel (1), 3) + " -> "
+                 + juce::String (chained.peakForChannel (1), 3));
+
+        check ("The destination sums it once, so the master is unchanged",
+               std::abs (ratio - 1.0f) < 1.0e-3f, "x" + juce::String (ratio, 4));
+    }
+
+    //-- Phase 23: clicking a synth mounts the selection there ----------------
+    {
+        LayerStack t;
+        RackModel  r;
+
+        const int slotA = r.getSlotIdAt (0);
+        const int slotB = r.getSlotIdAt (1);
+
+        t.addLayer (utf8 ("挂载"), palette::layer1);
+        t.setLayerOutputSlot (0, slotA);
+
+        auto* layer = t.getLayer (0);
+        const int n1 = layer->addNote ({ 0, 60, 0.0, 2.0, 0.9f });
+        const int n2 = layer->addNote ({ 0, 64, 2.0, 2.0, 0.9f });
+        const int n3 = layer->addNote ({ 0, 67, 4.0, 2.0, 0.9f });
+
+        PianoRollComponent roll (t, r);
+        roll.setSize (1200, 520);
+
+        roll.setSelection ({ n1 });
+        const bool looseMounted = roll.mountSelectionTo (slotB);
+
+        check ("A loose selection takes a per-note override",
+               looseMounted && layer->findNote (n1) != nullptr
+                 && layer->findNote (n1)->outputSlotOverride == slotB,
+               "slot " + juce::String (layer->findNote (n1)->outputSlotOverride));
+
+        roll.setSelection ({ n2, n3 });
+        const int groupId = roll.groupSelection();
+
+        roll.setSelection (layer->getGroupNoteIds (groupId));
+        const bool groupMounted = roll.mountSelectionTo (slotA);
+
+        const auto* group = layer->findGroup (groupId);
+
+        check ("A group selection mounts the GROUP, not twelve overrides",
+               groupMounted && group != nullptr && group->getOutputSlotId() == slotA
+                 && layer->findNote (n2)->outputSlotOverride == -1
+                 && layer->findNote (n3)->outputSlotOverride == -1,
+               group != nullptr ? "group -> " + juce::String (group->getOutputSlotId())
+                                : juce::String ("no group"));
+    }
+
+    //-- Phase 23: the console keeps its shape --------------------------------
+    {
+        const int wideWidth  = ui::px (1180);
+        const int wideHeight = ui::px (300);
+
+        mixerPanel.setSize (wideWidth, wideHeight);
+
+        const bool masterFirst = mixerPanel.displaySlotFor (MixerModel::masterChannel) == 0
+                                   && mixerPanel.channelForDisplaySlot (0) == MixerModel::masterChannel
+                                   && mixerPanel.displaySlotFor (0) == 1;
+
+        check ("The master strip is display slot 0 and is not a channel",
+               masterFirst && mixerPanel.slotIdOnChannel (MixerModel::masterChannel) < 0,
+               "master at slot 0");
+
+        check ("A strip is a fixed width, so the row grows instead of squeezing",
+               mixerPanel.getTotalStripWidth() == MixerPanel::stripWidth * mixerPanel.getStripCount()
+                 && ! mixerPanel.isStripScrollNeeded()
+                 && mixerPanel.getMaxStripScroll() == 0,
+               juce::String (mixerPanel.getStripCount()) + " strips x "
+                 + juce::String (MixerPanel::stripWidth) + " px");
+
+        // Narrower than the row: the scrollbar appears and the scroll clamps.
+        mixerPanel.setSize (ui::px (700), wideHeight);
+
+        const bool needsBar = mixerPanel.isStripScrollNeeded()
+                                && mixerPanel.getMaxStripScroll() > 0;
+        const int  travel   = mixerPanel.getMaxStripScroll();
+
+        mixerPanel.setStripScrollX (100000);
+        const bool clampsHigh = mixerPanel.getStripScrollX() == travel;
+
+        mixerPanel.setSize (wideWidth, wideHeight);
+        const bool clampsBack = mixerPanel.getStripScrollX() == 0
+                                  && ! mixerPanel.isStripScrollNeeded();
+
+        check ("A console that does not fit gets a horizontal scrollbar",
+               needsBar && clampsHigh && clampsBack,
+               needsBar ? juce::String (mixerPanel.getTotalStripWidth()) + " px of strips, "
+                            + juce::String (travel) + " px of travel"
+                        : juce::String ("no scrollbar needed"));
+    }
+
+    //-- Phase 23: the route survives a save / load ---------------------------
+    {
+        LayerStack savedStack;
+        RackModel  savedRack;
+        MixerModel savedMixer;
+
+        savedStack.addLayer (utf8 ("存"), palette::layer1);
+
+        const int slot = savedRack.getSlotIdAt (0);
+        savedStack.setLayerOutputSlot (0, slot);
+
+        savedMixer.setChannelCount (4);
+        savedMixer.setChannelOutput (0, 1);
+        savedMixer.setChannelOutput (1, 2);
+
+        const juce::String xml = project::toXmlText (savedStack, savedRack, 120.0, &savedMixer, nullptr);
+
+        LayerStack loadedStack;
+        RackModel  loadedRack;
+        MixerModel loadedMixer;
+        double     loadedBpm = 0.0;
+        juce::String error;
+
+        const bool parsed = project::fromXmlText (xml, loadedStack, loadedRack, loadedBpm, error,
+                                                  &loadedMixer, nullptr);
+
+        check ("A channel's output survives save and load",
+               parsed
+                 && loadedMixer.getChannelCount() == 4
+                 && loadedMixer.getChannelOutput (0) == 1
+                 && loadedMixer.getChannelOutput (1) == 2
+                 && loadedMixer.getChannelOutput (2) == MixerModel::masterChannel,
+               error.isNotEmpty() ? error : juce::String ("2 strips chained, 2 on the master"));
+    }
+
+    //-- Phase 24: one note out of a mounted group ---------------------------
+    // Each of this phase's blocks is an immediately-invoked lambda rather than
+    // a bare scope. runSelfTest is one function, so a bare scope does NOT free
+    // its locals — they all live in the same (already enormous) frame, and
+    // Phase 24's four extra LayerStack / PianoRollComponent / PlaybackEngine
+    // sets pushed it past the 1 MB stack. A lambda is its own frame, so the
+    // cost is the largest block instead of the sum of all of them.
+    [&] {
+        LayerStack t;
+        RackModel  r;
+
+        const int slotA = r.getSlotIdAt (0);
+        const int slotB = r.getSlotIdAt (1);
+
+        t.addLayer (utf8 ("局部"), palette::layer2);
+        t.setLayerOutputSlot (0, slotA);
+
+        auto* layer = t.getLayer (0);
+        const int n1 = layer->addNote ({ 0, 60, 0.0, 1.0, 0.9f });
+        const int n2 = layer->addNote ({ 0, 62, 1.0, 1.0, 0.9f });
+        const int n3 = layer->addNote ({ 0, 64, 2.0, 1.0, 0.9f });
+
+        PianoRollComponent roll (t, r);
+        roll.setSize (1200, 520);
+
+        roll.setSelection ({ n1, n2, n3 });
+        const int groupId = roll.groupSelection();
+
+        // The whole group moves to synth B...
+        roll.setSelection (layer->getGroupNoteIds (groupId));
+        const bool mounted = roll.mountSelectionTo (slotB);
+
+        // ...then ONE member is pulled back to synth A.
+        roll.setSelection ({ n2 });
+        const bool single = roll.mountSelectionTo (slotA);
+
+        const auto* group = layer->findGroup (groupId);
+        const auto r1 = routing::resolve (*layer, *layer->findNote (n1), r);
+        const auto r2 = routing::resolve (*layer, *layer->findNote (n2), r);
+        const auto r3 = routing::resolve (*layer, *layer->findNote (n3), r);
+
+        check ("One note can leave its group's synth without dragging the group along",
+               mounted && single && group != nullptr && group->getOutputSlotId() == slotB
+                 && r1.slotId == slotB && r3.slotId == slotB
+                 && r2.slotId == slotA && r2.overridden && ! r2.viaGroup,
+               "group -> " + juce::String (group != nullptr ? group->getOutputSlotId() : -1)
+                 + " / lone note -> " + juce::String (r2.slotId)
+                 + (r2.overridden ? " (override)" : " (NOT an override)"));
+    } ();
+
+    //-- Phase 24: a curve driving a hosted instrument's parameter ------------
+    [&] {
+        LayerStack t;
+        RackModel  r;
+
+        const int externalSlot = r.getSlotIdAt (0);
+        const int internalSlot = r.getSlotIdAt (1);
+
+        // A fake instance id: publish only needs `pluginId > 0` to decide that a
+        // synth is hosted, and the headless harness has no plugins to load.
+        // Nothing renders here, so no missing instance is ever asked for audio.
+        r.getSlot (0)->pluginId   = 9001;
+        r.getSlot (0)->pluginName = "FakeSynth";
+
+        t.addLayer (utf8 ("外部"), palette::layer3);
+        t.setLayerOutputSlot (0, externalSlot);
+
+        auto* layer = t.getLayer (0);
+        const int noteId = layer->addNote ({ 0, 60, 0.0, 4.0, 0.9f });
+
+        auto* note = layer->findNote (noteId);
+        note->modPluginParam = 7;
+
+        NoteEnvelope curve;
+        curve.loadPoints ({ { 0.0f, 0.2f }, { 0.5f, 1.0f }, { 1.0f, 0.1f } });
+        curve.setEnabled (true);
+        note->envelope = curve;
+
+        const int groupId = layer->addGroup (utf8 ("外部组"), groupPalette::group2);
+        layer->assignNotesToGroup ({ noteId }, groupId);
+
+        auto* group = layer->findGroup (groupId);
+        group->setOutputSlotId (externalSlot);
+        group->setPluginParam (3);
+        group->getPluginAutomation().resetFlat (0.5f, 64.0);
+        group->getPluginAutomation().setEnabled (true);
+
+        PianoRollComponent roll (t, r);
+        roll.setSize (1200, 520);
+
+        roll.setPluginParamLister ([externalSlot] (int slotId) -> std::vector<PluginParamInfo>
+        {
+            if (slotId != externalSlot)
+                return {};
+
+            return { { 0, "Cutoff", 0.5f }, { 3, "Resonance", 0.2f }, { 7, "Drive", 0.0f } };
+        });
+
+        PlaybackEngine engine;
+        engine.setSampleRate (44100.0);
+        engine.publishSchedule (t, r, 120.0);
+
+        const auto schedule = engine.getSchedule();
+
+        const bool twoCurves = schedule != nullptr && schedule->pluginParams.size() == 2;
+
+        // Group first (priority 1), note last (priority 2): ascending order is
+        // the whole conflict rule, so the ordering itself is the assertion.
+        const auto& groupCurve = twoCurves ? schedule->pluginParams[0] : PluginParamCurve {};
+        const auto& noteCurve  = twoCurves ? schedule->pluginParams[1] : PluginParamCurve {};
+
+        check ("A note's envelope drives a hosted parameter, in absolute beats",
+               twoCurves
+                 && noteCurve.pluginId == 9001 && noteCurve.paramIndex == 7
+                 && noteCurve.priority == 2
+                 && noteCurve.points.size() == 3
+                 && std::abs (noteCurve.startBeat - 0.0) < 1.0e-9
+                 && std::abs (noteCurve.endBeat - 4.0) < 1.0e-9
+                 && std::abs (noteCurve.points[1].beat - 2.0) < 1.0e-6
+                 && std::abs (noteCurve.points[1].value - 1.0f) < 1.0e-6f,
+               juce::String ((int) schedule->pluginParams.size()) + " curve(s), note at param "
+                 + juce::String (noteCurve.paramIndex) + " over "
+                 + juce::String (noteCurve.endBeat - noteCurve.startBeat, 2) + " beats");
+
+        check ("A group's third lane drives a hosted parameter over the group's span",
+               twoCurves
+                 && groupCurve.pluginId == 9001 && groupCurve.paramIndex == 3
+                 && groupCurve.priority == 1
+                 && std::abs (groupCurve.startBeat - 0.0) < 1.0e-9
+                 && std::abs (groupCurve.endBeat - 4.0) < 1.0e-9,
+               "group at param " + juce::String (groupCurve.paramIndex)
+                 + ", priority " + juce::String (groupCurve.priority));
+
+        check ("The parameter list comes from the synth, and an internal one has none",
+               (int) roll.pluginParamsForSlot (externalSlot).size() == 3
+                 && roll.pluginParamName (externalSlot, 3) == "Resonance"
+                 && roll.pluginParamsForSlot (internalSlot).empty()
+                 && roll.resolvedSlotForNote (*note) == externalSlot,
+               roll.noteTargetLabel (*note));
+
+        // An internal synth has three things to drive and no parameter list, so
+        // a leftover `modPluginParam` has to mean "no curve at all" — not
+        // "drive parameter 7 of nothing". Both the note and the group have to
+        // be moved: the group's mount outranks the layer, and the note is in it.
+        group->setOutputSlotId (internalSlot);
+        layer->setOutputSlotId (internalSlot);
+        engine.publishSchedule (t, r, 120.0);
+
+        const auto internalSchedule = engine.getSchedule();
+
+        check ("A curve aimed at an internal synth publishes nothing",
+               internalSchedule != nullptr && internalSchedule->pluginParams.empty(),
+               juce::String (internalSchedule != nullptr ? (int) internalSchedule->pluginParams.size()
+                                                         : -1)
+                 + " plugin curve(s)");
+
+        group->setOutputSlotId (externalSlot);
+        layer->setOutputSlotId (externalSlot);
+    } ();
+
+    //-- Phase 24: copying a group copies the GROUP --------------------------
+    [&] {
+        LayerStack t;
+        RackModel  r;
+
+        const int slotA = r.getSlotIdAt (0);
+        const int slotB = r.getSlotIdAt (1);
+
+        t.addLayer (utf8 ("复制组"), palette::layer4);
+        t.setLayerOutputSlot (0, slotA);
+
+        auto* layer = t.getLayer (0);
+        const int n1 = layer->addNote ({ 0, 60, 0.0, 1.0, 0.9f });
+        const int n2 = layer->addNote ({ 0, 64, 1.0, 1.0, 0.9f });
+        const int n3 = layer->addNote ({ 0, 67, 2.0, 1.0, 0.9f });
+
+        PianoRollComponent roll (t, r);
+        roll.setSize (1200, 520);
+
+        roll.setSelection ({ n1, n2, n3 });
+        const int groupId = roll.groupSelection();
+
+        auto* group = layer->findGroup (groupId);
+        group->setOutputSlotId (slotB);
+        group->setLevelDb (-6.0f);
+        group->getLevelAutomation().resetFlat (0.25f, 64.0);
+        group->getLevelAutomation().setEnabled (true);
+
+        const auto originalName = group->getName();
+
+        roll.selectGroup (groupId);
+        const bool copied   = roll.copyNotesToClipboard();
+        const bool groupish = roll.isGroupClipboard();
+        const int  before   = (int) layer->getGroups().size();
+
+        const bool pasted = roll.pasteNotesFromClipboard();
+        const int  after  = (int) layer->getGroups().size();
+
+        const NoteGroup* copy = nullptr;
+
+        for (const auto& candidate : layer->getGroups())
+            if (candidate.getId() != groupId)
+                copy = &candidate;
+
+        const bool shiftedCurve = copy != nullptr
+                                    && copy->getLevelAutomation().getPoints().size() >= 2
+                                    && std::abs (copy->getLevelAutomation().getPoints().front().beat - 3.0) < 1.0e-6;
+
+        check ("Copying a group pastes a second group, not its notes",
+               copied && groupish && pasted && after == before + 1 && copy != nullptr
+                 && copy->getName() != originalName
+                 && copy->getOutputSlotId() == slotB
+                 && std::abs (copy->getLevelDb() + 6.0f) < 1.0e-4f
+                 && copy->getLevelAutomation().isEnabled()
+                 && layer->countNotesInGroup (groupId) == 3
+                 && layer->countNotesInGroup (copy->getId()) == 3,
+               juce::String (before) + " -> " + juce::String (after) + " groups, copy = "
+                 + (copy != nullptr ? copy->getName() : juce::String ("none")));
+
+        check ("A pasted group's absolute-beat curve moves with it",
+               shiftedCurve,
+               copy != nullptr && ! copy->getLevelAutomation().getPoints().empty()
+                 ? "first point at beat " + juce::String (copy->getLevelAutomation().getPoints().front().beat, 2)
+                 : juce::String ("no curve on the copy"));
+
+        //-- Phase 24: the box's grid is the roll's grid, and it snaps --------
+        roll.openGroupAutomation (0, groupId, 0);
+
+        const auto curve = roll.getGroupCurveBounds();
+        const auto grid  = roll.getGridBounds();
+        const double scroll = roll.getScrollBeats();
+        const double bw     = (double) roll.getBeatWidth();
+
+        // The group spans beats 0..3, so its curve area must start at beat 0's
+        // x and be exactly three beats wide. That equality is what makes a grid
+        // drawn through screenXForBeat() land ON the roll's own grid lines —
+        // a decorative quarter-marker grid could never pass this.
+        const float expectX = (float) (grid.getX() + (0.0 - scroll) * bw);
+
+        roll.setSnapEnabled (true);
+        const double snapped = roll.snapCurveBeat (1.37, { 0.0, 3.0 });
+        const double clamped = roll.snapCurveBeat (9.0, { 0.0, 3.0 });
+
+        roll.setSnapEnabled (false);
+        const double raw = roll.snapCurveBeat (1.37, { 0.0, 3.0 });
+
+        roll.setSnapEnabled (true);
+
+        check ("The group's curve area is measured in the roll's own beats",
+               std::abs (curve.getX() - expectX) < 0.6f
+                 && std::abs (curve.getWidth() - 3.0f * (float) bw) < 0.6f,
+               "x " + juce::String (curve.getX(), 1) + " vs " + juce::String (expectX, 1)
+                 + ", width " + juce::String (curve.getWidth(), 1)
+                 + " vs " + juce::String (3.0f * (float) bw, 1));
+
+        check ("A curve point snaps to the grid, and stays inside the group",
+               std::abs (snapped - 1.25) < 1.0e-9
+                 && std::abs (clamped - 3.0) < 1.0e-9
+                 && std::abs (raw - 1.37) < 1.0e-9,
+               "1.37 -> " + juce::String (snapped, 2)
+                 + ", past the end -> " + juce::String (clamped, 2)
+                 + ", snap off -> " + juce::String (raw, 2));
+    } ();
+
+    //-- Phase 25: the group is an object, and resizing is per note -----------
+    // Two separate complaints, one block: the bracket around a group is what
+    // says "this is one thing" (so grabbing it must move the group), and the
+    // tail of one note is NOT the tail of its neighbours (so resizing must not
+    // touch them). Both are tested on the same two-note group.
+    [&]
+    {
+        LayerStack t;
+        RackModel  r;
+        PianoRollComponent roll (t, r);
+        roll.setSize (1200, 520);
+
+        t.addLayer (utf8 ("组拖"), palette::layer1);
+
+        auto* layer = t.getLayer (0);
+
+        // Around middle C on purpose: the frame hit test only answers for what
+        // is on screen (a note scrolled out of view has no bracket to grab), and
+        // a default roll opens with the middle of the pitch range in view.
+        const int left  = layer->addNote ({ 0, 80, 4.0, 1.0, 0.9f });
+        const int right = layer->addNote ({ 0, 78, 8.0, 1.0, 0.9f });
+
+        roll.setSelection ({ left, right });
+
+        const int groupId = roll.groupSelection();
+        const auto* group = layer->findGroup (groupId);
+
+        // A point on the bracket but NOT on a note: above the two of them, in
+        // the middle. Before this the click fell through to the marquee and
+        // quietly deselected the group, which is why the group could not be
+        // moved.
+        const auto leftBounds  = roll.getNoteScreenBounds (0, left);
+        const auto rightBounds = roll.getNoteScreenBounds (0, right);
+        const auto framePoint  = juce::Point<float> ((leftBounds.getRight() + rightBounds.getX()) * 0.5f,
+                                                     leftBounds.getY() + leftBounds.getHeight() * 0.5f);
+
+        check ("The bracket around a group answers for the group",
+               group != nullptr
+                 && roll.getGroupFrameAt (framePoint) == groupId
+                 && roll.getEditableNoteIdAt (framePoint) == -1,
+               juce::String (groupId) + utf8 (" at ") + framePoint.toString()
+                 + " / frame -> " + juce::String (roll.getGroupFrameAt (framePoint))
+                 + " / note -> " + juce::String (roll.getEditableNoteIdAt (framePoint))
+                 + " / group " + (group != nullptr ? juce::String ("found") : juce::String ("null")));
+
+        // A point outside the group must NOT answer for it, or the bracket
+        // would swallow the whole canvas.
+        check ("The bracket does not extend past its own group",
+               roll.getGroupFrameAt (juce::Point<float> (rightBounds.getRight() + ui::pf (40),
+                                                        rightBounds.getBottom() + ui::pf (40))) == -1,
+               "outside -> -1");
+
+        //-- Resizing one note leaves its neighbour alone ----------------------
+        roll.setSelection ({ left, right });
+
+        const double rightLengthBefore = layer->findNote (right)->lengthBeats;
+        const double leftLengthBefore  = layer->findNote (left)->lengthBeats;
+
+        const bool resized = roll.simulateNoteResize (right, 11.0, true);
+
+        const double rightAfter = layer->findNote (right)->lengthBeats;
+        const double leftAfter  = layer->findNote (left)->lengthBeats;
+
+        check ("Dragging one tail resizes only the note that was grabbed",
+               resized
+                 && std::abs (rightAfter - 3.0) < 1.0e-9      // 8..11
+                 && std::abs (leftAfter - leftLengthBefore) < 1.0e-9
+                 && std::abs (rightLengthBefore - 1.0) < 1.0e-9,
+               "right " + juce::String (rightAfter, 2) + utf8 (" 拍 / left ")
+                 + juce::String (leftAfter, 2) + utf8 (" 拍"));
+
+        // The same rule at the other end: trimming the front of one member does
+        // not move its neighbour's head.
+        const double leftStartBefore = layer->findNote (left)->startBeat;
+        roll.simulateNoteResize (right, 9.0, false);
+
+        check ("Trimming one head leaves the neighbour's head where it was",
+               std::abs (layer->findNote (left)->startBeat - leftStartBefore) < 1.0e-9
+                 && std::abs (layer->findNote (right)->startBeat - 9.0) < 1.0e-9,
+               "left stays at " + juce::String (layer->findNote (left)->startBeat, 2)
+                 + ", right trimmed to " + juce::String (layer->findNote (right)->startBeat, 2));
+    } ();
+
+    //-- Phase 25: mono monitoring is a listen control, not a mix control -----
+    [&]
+    {
+        MixerModel m;
+
+        check ("A fresh strip listens in stereo",
+               ! m.isChannelMono (0) && ! m.isChannelMono (MixerModel::defaultChannels - 1),
+               "off");
+
+        m.setChannelMono (0, true);
+        const bool hiddenIgnored = (m.setChannelMono (MixerModel::maxChannels - 1, true),
+                                    ! m.isChannelMono (MixerModel::maxChannels - 1));
+
+        check ("Mono is per strip, and a strip that does not exist is ignored",
+               m.isChannelMono (0) && ! m.isChannelMono (1) && hiddenIgnored,
+               "0 on / 1 off / out-of-range off");
+
+        m.resetToDefault();
+
+        check ("Reset puts every strip back to stereo",
+               ! m.isChannelMono (0),
+               m.isChannelMono (0) ? juce::String ("still mono") : juce::String ("stereo"));
+
+        // The button has to live somewhere the strip is not already using: the
+        // readout row was the only slack left, and the check says so rather than
+        // trusting a comment.
+        check ("The mono button has pixels of its own",
+               mixerPanel.monoButtonHasOwnPixels(),
+               mixerPanel.monoButtonHasOwnPixels() ? juce::String ("clear")
+                                                   : juce::String ("overlapping"));
+    } ();
+
+    //-- Phase 25: a mono strip really puts the left channel on the right -----
+    // The number that proves it: a strip panned hard left is silent in the
+    // right output, and mono monitoring has to break that silence.
+    [&]
+    {
+        LayerStack t;
+        RackModel  r;
+        MixerModel m;
+        PlaybackEngine engine;
+
+        const int slot = r.getSlotIdAt (0);
+        t.addLayer (utf8 ("单声道"), palette::layer1);
+        t.setLayerOutputSlot (0, slot);
+        t.setLayerLevelDb (0, 0.0f);
+        t.setLayerPan (0, -1.0f);        // hard left
+
+        const int noteId = t.getLayer (0)->addNote ({ 0, 60, 0.0, 4.0, 0.9f });
+        t.getLayer (0)->findNote (noteId)->envelope = NoteEnvelope::makeFlat();
+
+        r.setMixerChannel (slot, 0);
+
+        auto rightChannelPeak = [&] (bool mono)
+        {
+            m.setChannelMono (0, mono);
+
+            juce::AudioBuffer<float> out;
+            out.setSize (2, 22050);
+            out.clear();
+
+            engine.publishSchedule (t, r, 120.0, 0.0, &m);
+            engine.resetMixState();
+            engine.renderWindow (0.10, 22050, out, nullptr);
+
+            return out.getMagnitude (1, 0, 22050);
+        };
+
+        const float stereoRight = rightChannelPeak (false);
+        const float monoRight   = rightChannelPeak (true);
+
+        m.setChannelMono (0, false);
+
+        check ("Mono monitoring moves a hard-left strip into the right speaker",
+               stereoRight < 0.01f && monoRight > 0.05f,
+               "right peak " + juce::String (stereoRight, 3) + " -> " + juce::String (monoRight, 3));
+    } ();
+
+    //-- Phase 26: the console keeps eight strips, and ANY strip can go -------
+    [&]
+    {
+        MixerModel m;
+
+        check ("A fresh console cannot be deleted below the shipped eight",
+               m.getChannelCount() == MixerModel::deletionFloor
+                 && ! m.canRemoveChannel() && ! m.removeChannel (),
+               juce::String (m.getChannelCount()) + utf8 (" 条，删除被拒绝"));
+
+        m.addChannel();                       // 9
+
+        check ("One strip above the floor, the delete controls come alive",
+               m.canRemoveChannel() && m.removeChannel()
+                 && m.getChannelCount() == MixerModel::deletionFloor
+                 && ! m.canRemoveChannel(),
+               "9 -> 8" + juce::String (utf8 ("，到 8 条后又锁死")));
+
+        // A middle strip is not a truncation: the row closes up, and everything
+        // that pointed at a strip above the hole follows it down one number.
+        m.addChannel(); m.addChannel(); m.addChannel();       // 11
+        m.setInsertType (3, 0, fx::Type::drive);              // the strip that dies
+        m.setChannelMono (3, true);
+        m.setInsertType (4, 0, fx::Type::delay);              // the strip that slides down
+        m.setChannelOutput (5, 3);                            // feeds the doomed strip
+        m.setChannelOutput (7, 6);                            // feeds a strip above it
+
+        const bool removedMiddle = m.removeChannelAt (3);
+
+        check ("Deleting a middle strip closes the gap and renumbers the routes",
+               removedMiddle && m.getChannelCount() == 10
+                 && m.getInsert (3, 0).type == fx::Type::delay
+                 && ! m.isChannelMono (3)
+                 && m.getChannelOutput (4) == MixerModel::masterChannel
+                 && m.getChannelOutput (6) == 5,
+               "count " + juce::String (m.getChannelCount())
+                 + ", ins3=" + juce::String ((int) m.getInsert (3, 0).type)
+                 + " (delay=" + juce::String ((int) fx::Type::delay) + ")"
+                 + ", mono3=" + juce::String ((int) m.isChannelMono (3))
+                 + ", out4=" + juce::String (m.getChannelOutput (4))
+                 + ", out6=" + juce::String (m.getChannelOutput (6)));
+    } ();
+
+    //-- Phase 26: deleting a strip unplugs the synths that were sending there -
+    [&]
+    {
+        LayerStack t;
+        RackModel  r;
+        MixerModel m;
+        MixerPanel panel (t, r, m);
+
+        const int senderId = r.getSlotIdAt (0);
+        const int otherId  = r.getSlotIdAt (1);
+
+        m.addChannel();                       // 9
+        m.addChannel();                       // 10
+        r.setMixerChannel (senderId, 4);
+        r.setMixerChannel (otherId, 6);
+
+        const bool removed = panel.deleteStrip (4);
+
+        check ("Deleting a strip unplugs the synths that were sending to it",
+               removed && m.getChannelCount() == 9
+                 && r.getSlot (0) != nullptr && r.getSlot (0)->mixerChannel == -1
+                 && r.getSlot (1) != nullptr && r.getSlot (1)->mixerChannel == 5,
+               "sender -> " + juce::String (r.getSlot (0) != nullptr ? r.getSlot (0)->mixerChannel : -99)
+                 + ", the one above it follows the renumber -> "
+                 + juce::String (r.getSlot (1) != nullptr ? r.getSlot (1)->mixerChannel : -99));
+
+        m.setChannelCount (MixerModel::deletionFloor);
+
+        check ("At the floor the panel refuses even a valid index",
+               ! panel.deleteStrip (0) && m.getChannelCount() == MixerModel::deletionFloor,
+               juce::String (m.getChannelCount()) + utf8 (" 条，拒绝删除"));
+    } ();
+
+    //-- Phase 26: the master has its own mono button --------------------------
+    [&]
+    {
+        LayerStack t;
+        RackModel  r;
+        MixerModel m;
+        PlaybackEngine engine;
+
+        const int slot = r.getSlotIdAt (0);
+        t.addLayer (utf8 ("主单声道"), palette::layer1);
+        t.setLayerOutputSlot (0, slot);
+        t.setLayerLevelDb (0, 0.0f);
+        t.setLayerPan (0, -1.0f);            // hard left, through a real strip
+
+        const int noteId = t.getLayer (0)->addNote ({ 0, 60, 0.0, 4.0, 0.9f });
+        t.getLayer (0)->findNote (noteId)->envelope = NoteEnvelope::makeFlat();
+
+        r.setMixerChannel (slot, 0);
+
+        auto rightOfMaster = [&] (bool masterMono)
+        {
+            m.setMasterMono (masterMono);
+
+            juce::AudioBuffer<float> out;
+            out.setSize (2, 22050);
+            out.clear();
+
+            engine.publishSchedule (t, r, 120.0, 0.0, &m);
+            engine.resetMixState();
+            engine.renderWindow (0.10, 22050, out, nullptr);
+
+            return out.getMagnitude (1, 0, 22050);
+        };
+
+        const float stereoRight = rightOfMaster (false);
+        const float monoRight   = rightOfMaster (true);
+
+        m.setMasterMono (false);
+
+        // The strip is untouched, so its own meter still says "hard left" — the
+        // fold happens at the very end of the master chain, not on the way in.
+        check ("The master's mono button folds the whole mix, after the inserts",
+               stereoRight < 0.01f && monoRight > 0.05f
+                 && ! m.isChannelMono (0),
+               "master right peak " + juce::String (stereoRight, 3)
+                 + " -> " + juce::String (monoRight, 3));
+
+        check ("The meter is two bars per strip, master included",
+               mixerPanel.stereoMeterHasOwnPixels(),
+               mixerPanel.stereoMeterHasOwnPixels() ? juce::String ("two bars")
+                                                    : mixerPanel.describeMeterGeometry());
+    } ();
+
+    //-- Phase 26: v13 remembers how the master was being listened to ----------
+    [&]
+    {
+        LayerStack s1;
+        RackModel  r1;
+        MixerModel m1;
+
+        s1.addLayer (utf8 ("往返"), palette::layer1);
+        s1.getLayer (0)->addNote ({ 0, 60, 0.0, 1.0, 0.8f });
+        m1.setMasterMono (true);
+        m1.setChannelMono (1, true);
+
+        const auto xml = project::toXmlText (s1, r1, 120.0, &m1, nullptr);
+
+        LayerStack s2;
+        RackModel  r2;
+        MixerModel m2;
+        double bpm2 = 0.0;
+        juce::String error;
+
+        const bool loaded = project::fromXmlText (xml, s2, r2, bpm2, error, &m2, nullptr, nullptr);
+
+        check ("A project remembers the master's mono button (v13)",
+               loaded && m2.isMasterMono() && m2.isChannelMono (1) && ! m2.isChannelMono (0),
+               loaded ? juce::String ("master mono ") + (m2.isMasterMono() ? "on" : "off")
+                      : error);
+    } ();
+
+    //-- Phase 27: the fader gives up half its row to the stereo meter --------
+    [&]
+    {
+        check ("The fader takes half the row and the meter takes the rest",
+               mixerPanel.faderYieldedHalfTheRow(),
+               mixerPanel.describeControlGeometry());
+    } ();
+
+    //-- Phase 27: dropping a file grows a sampler for it ---------------------
+    const auto phase27Dir = juce::File::getSpecialLocation (juce::File::tempDirectory);
+    const auto phase27A   = phase27Dir.getChildFile ("atomic-phase27-a.wav");
+    const auto phase27B   = phase27Dir.getChildFile ("atomic-phase27-b.wav");
+
+    if (! phase27A.existsAsFile() || phase27A.getSize() < 1024)
+        writeTestSampleFile (phase27A, 1.0, 44100.0, 2, 330.0);
+
+    if (! phase27B.existsAsFile() || phase27B.getSize() < 1024)
+        writeTestSampleFile (phase27B, 2.0, 44100.0, 2, 165.0);
+
+    [&]
+    {
+        const int before = (int) rack.getSamplerSlotIds().size();
+        const int clipId = pianoRoll.addSampleAt (40.0, 40, phase27A);
+
+        const auto ids = rack.getSamplerSlotIds();
+        const auto* clip = clipId > 0 ? stack.getActiveLayer()->findSample (clipId) : nullptr;
+        const auto* grown = ids.empty() ? nullptr : rack.findSlot (ids.back());
+
+        check ("A dropped clip grows a sampler and is mounted on it",
+               clipId > 0 && (int) ids.size() == before + 1
+                 && clip != nullptr && grown != nullptr && grown->isSampler()
+                 && clip->outputSlotId == grown->id,
+               "clips " + juce::String (clipId) + ", samplers "
+                 + juce::String (before) + " -> " + juce::String ((int) ids.size())
+                 + ", mount " + juce::String (clip != nullptr ? clip->outputSlotId : -99));
+
+        // The same file again must not leave a twin behind: the second drop
+        // simply points at the sampler the first one created.
+        const int again = pianoRoll.addSampleAt (44.0, 40, phase27A);
+
+        check ("Dropping the same file twice reuses its sampler",
+               again > 0 && (int) rack.getSamplerSlotIds().size() == before + 1,
+               juce::String ((int) rack.getSamplerSlotIds().size()) + utf8 (" 个采样音源"));
+    } ();
+
+    //-- Phase 27: the mount, not the clip, decides what you hear -------------
+    [&]
+    {
+        LayerStack     t;
+        RackModel      r;
+        MixerModel     m;
+        PlaybackEngine engine;
+
+        t.addLayer (utf8 ("采样切换"), palette::layer1);
+        t.setLayerLevelDb (0, 0.0f);
+
+        const auto loadA = loadSampleFile (phase27A);
+        const auto loadB = loadSampleFile (phase27B);
+
+        const int samplerA = r.addSampler (loadA.buffer, phase27A.getFullPathName(), "A");
+        const int samplerB = r.addSampler (loadB.buffer, phase27B.getFullPathName(), "B");
+
+        SampleEvent clip;
+        clip.name        = "A";
+        clip.path        = phase27A.getFullPathName();
+        clip.audio       = loadA.buffer;
+        clip.startBeat   = 0.0;
+        clip.lengthBeats = 8.0;               // 4 s at 120 bpm: longer than both files
+        clip.pitch       = 60;
+        clip.laneSpan    = 4;
+        clip.outputSlotId = samplerA;
+
+        const int clipId = t.getLayer (0)->addSample (clip);
+
+        const auto peakAt = [&] (double startSeconds)
+        {
+            juce::AudioBuffer<float> out;
+            out.setSize (2, 22050);
+            out.clear();
+
+            engine.publishSchedule (t, r, 120.0, 0.0, &m);
+            engine.resetMixState();
+            engine.renderWindow (startSeconds, 22050, out, nullptr);
+
+            return out.getMagnitude (0, 0, 22050);
+        };
+
+        const float earlyA = peakAt (0.10);   // both files are still playing
+
+        const float lateA = peakAt (1.40);    // A is 1 s long: silence by now
+
+        t.getLayer (0)->findSample (clipId)->outputSlotId = samplerB;
+
+        const float lateB = peakAt (1.40);    // B is 2 s long: still sounding
+
+        check ("A clip plays the sampler it is mounted on",
+               earlyA > 0.01f && lateA < 0.005f && lateB > 0.01f,
+               "0.1s " + juce::String (earlyA, 4)
+                 + ", 1.4s on A " + juce::String (lateA, 4)
+                 + ", 1.4s on B " + juce::String (lateB, 4));
+
+        check ("The two samplers stayed two separate slots",
+               samplerA != samplerB
+                 && r.getSamplerSlotIds().size() == 2
+                 && r.findSlot (samplerA)->sampleBuffer != r.findSlot (samplerB)->sampleBuffer,
+               juce::String ((int) r.getSamplerSlotIds().size()) + utf8 (" 个采样音源"));
+    } ();
+
+    //-- Phase 27: a clip can sit in a group and keeps its own sampler --------
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("A clip can join a group of notes", false, "no active layer");
+            return;
+        }
+
+        const auto loaded = loadSampleFile (phase27A);
+        const int samplerId = rack.addSampler (loaded.buffer, phase27A.getFullPathName(), "P27");
+
+        const int n1 = layer->addNote ({ 0, 80, 1.0, 2.0, 0.9f });
+        const int n2 = layer->addNote ({ 0, 82, 5.0, 2.0, 0.9f });
+        const int gid = layer->addGroup (utf8 ("P27 组"), groupPalette::group1);
+        layer->assignNotesToGroup ({ n1, n2 }, gid);
+
+        SampleEvent clip;
+        clip.name        = "P27";
+        clip.path        = phase27A.getFullPathName();
+        clip.audio       = loaded.buffer;
+        clip.startBeat   = 5.0;
+        clip.lengthBeats = 2.0;
+        clip.pitch       = 78;
+        clip.laneSpan    = 2;
+        clip.outputSlotId = samplerId;
+
+        const int clipId = layer->addSample (clip);
+        layer->assignSamplesToGroup ({ clipId }, gid);
+
+        check ("A clip can join a group of notes",
+               layer->countSamplesInGroup (gid) == 1
+                 && layer->getGroupIdOfSample (clipId) == gid,
+               juce::String (layer->countSamplesInGroup (gid)) + utf8 (" 个采样在组内"));
+
+        const int layerIndex = stack.getActiveLayerIndex();
+        const auto frame    = pianoRoll.groupFrameOf (layerIndex, gid);
+        const auto clipBox  = pianoRoll.getSampleScreenBounds (layerIndex, clipId);
+
+        check ("The group frame reaches around the clip, not just the notes",
+               ! frame.isEmpty() && ! clipBox.isEmpty() && frame.contains (clipBox),
+               "frame " + frame.toString() + " clip " + clipBox.toString());
+
+        // Moving the group moves the clip with it. The clip's own rectangle has
+        // to land in the same place a note would: same delta, no separate rule.
+        const double noteBefore = layer->findNote (n1)->startBeat;
+        const double clipBefore = layer->findSample (clipId)->startBeat;
+
+        const bool moved = pianoRoll.simulateGroupMove (layerIndex, gid, 2.0, 0);
+
+        check ("Dragging the group drags its clip",
+               moved && juce::approximatelyEqual (layer->findSample (clipId)->startBeat,
+                                                 clipBefore + 2.0)
+                 && juce::approximatelyEqual (layer->findNote (n1)->startBeat, noteBefore + 2.0),
+               "clip " + juce::String (clipBefore) + " -> "
+                 + juce::String (layer->findSample (clipId)->startBeat));
+
+        // Re-mounting the group must NOT re-point the clip. This is the whole
+        // promise of "the group is a statement about its notes".
+        auto* group = layer->findGroup (gid);
+
+        if (group == nullptr)
+        {
+            check ("Re-mounting a group leaves its clips alone", false, "group vanished");
+            return;
+        }
+
+        const int layerDefault = routing::layerSlotId (*layer, rack);
+        const int mountTo = (layerDefault == rack.getSlotIdAt (0)) ? rack.getSlotIdAt (1)
+                                                                  : rack.getSlotIdAt (0);
+
+        const int clipIsoBefore = routing::resolveSample (*layer, *layer->findSample (clipId), rack).slotId;
+        const int noteIsoBefore = routing::resolve (*layer, *layer->findNote (n1), rack).slotId;
+
+        group->setOutputSlotId (mountTo);
+
+        const int clipIsoAfter = routing::resolveSample (*layer, *layer->findSample (clipId), rack).slotId;
+        const int noteIsoAfter = routing::resolve (*layer, *layer->findNote (n1), rack).slotId;
+
+        check ("Re-mounting a group moves its notes and leaves its clip alone",
+               noteIsoAfter == mountTo && noteIsoBefore == layerDefault
+                 && clipIsoBefore == samplerId && clipIsoAfter == samplerId,
+               "note " + juce::String (noteIsoBefore) + " -> " + juce::String (noteIsoAfter)
+                 + ", clip " + juce::String (clipIsoBefore) + " -> " + juce::String (clipIsoAfter));
+
+        group->setOutputSlotId (-1);
+    } ();
+
+    //-- Phase 27: what the block DRAWS follows the mount too -----------------
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("The block's waveform follows its mount", false, "no active layer");
+            return;
+        }
+
+        const auto loadA = loadSampleFile (phase27A);
+        const auto loadB = loadSampleFile (phase27B);
+
+        const int slotA = rack.addSampler (loadA.buffer, phase27A.getFullPathName(), "WA");
+        const int slotB = rack.addSampler (loadB.buffer, phase27B.getFullPathName(), "WB");
+
+        SampleEvent clip;
+        clip.name        = "W";
+        clip.path        = phase27A.getFullPathName();
+        clip.audio       = loadA.buffer;
+        clip.startBeat   = 0.0;
+        clip.lengthBeats = 2.0;
+        clip.pitch       = 60;
+        clip.laneSpan    = 2;
+        clip.outputSlotId = slotA;
+
+        const int clipId = layer->addSample (clip);
+
+        const auto first = pianoRoll.clipAudio (*layer, *layer->findSample (clipId));
+
+        layer->findSample (clipId)->outputSlotId = slotB;
+
+        const auto second = pianoRoll.clipAudio (*layer, *layer->findSample (clipId));
+
+        // Both answers come from routing::resolveSample, which is also what the
+        // engine publishes. Drawing the clip's own buffer while the engine read
+        // the sampler's would be one waveform on screen and another in the air.
+        //
+        // Compared against the SLOT's buffer, not against this call's freshly
+        // decoded one: addSampler reuses the sampler that already holds that
+        // path, so the buffer by then is the one from the earlier load — same
+        // file, different shared_ptr. "Which file is this" is the question, and
+        // the slot is what answers it.
+        const auto slotABuffer = rack.findSlot (slotA) != nullptr ? rack.findSlot (slotA)->sampleBuffer
+                                                                  : std::shared_ptr<const SampleBuffer>();
+        const auto slotBBuffer = rack.findSlot (slotB) != nullptr ? rack.findSlot (slotB)->sampleBuffer
+                                                                  : std::shared_ptr<const SampleBuffer>();
+
+        check ("The block's waveform follows its mount",
+               first != nullptr && slotABuffer != nullptr && slotBBuffer != nullptr
+                 && first == slotABuffer && second == slotBBuffer && first != second,
+               juce::String (first == slotABuffer ? "A" : "?")
+                 + " -> " + juce::String (second == slotBBuffer ? "B" : "?"));
+    } ();
+
+    //-- Phase 27: v14 keeps samplers, mounts and clip membership -------------
+    [&]
+    {
+        LayerStack s1;
+        RackModel  r1;
+
+        s1.addLayer (utf8 ("往返"), palette::layer1);
+
+        const auto loaded = loadSampleFile (phase27A);
+        const int samplerId = r1.addSampler (loaded.buffer, phase27A.getFullPathName(), "往返采样");
+
+        SampleEvent clip;
+        clip.name        = "往返";
+        clip.path        = phase27A.getFullPathName();
+        clip.audio       = loaded.buffer;
+        clip.startBeat   = 2.0;
+        clip.lengthBeats = 3.0;
+        clip.pitch       = 60;
+        clip.laneSpan    = 2;
+        clip.outputSlotId = samplerId;
+
+        const int clipId = s1.getLayer (0)->addSample (clip);
+        const int gid = s1.getLayer (0)->addGroup (utf8 ("G"), groupPalette::group1);
+        s1.getLayer (0)->assignSamplesToGroup ({ clipId }, gid);
+
+        const auto xml = project::toXmlText (s1, r1, 120.0);
+
+        LayerStack s2;
+        RackModel  r2;
+        double bpm2 = 0.0;
+        juce::String error;
+
+        const bool ok = project::fromXmlText (xml, s2, r2, bpm2, error, nullptr, nullptr, nullptr);
+
+        const auto* restored = (s2.getLayer (0) != nullptr && s2.getLayer (0)->getSampleCount() == 1)
+                                 ? &s2.getLayer (0)->getSamples().front() : nullptr;
+
+        const auto ids = r2.getSamplerSlotIds();
+        const auto* restoredSlot = ids.empty() ? nullptr : r2.findSlot (ids.front());
+
+        check ("A project keeps samplers, clip mounts and clip membership (v14)",
+               ok && ids.size() == 1 && restoredSlot != nullptr
+                 && restoredSlot->isSampler() && restoredSlot->sampleBuffer != nullptr
+                 && restored != nullptr && restored->outputSlotId == ids.front()
+                 && restored->groupId == gid,
+               ok ? juce::String ("samplers ") + juce::String ((int) ids.size())
+                      + ", mount " + juce::String (restored != nullptr ? restored->outputSlotId : -99)
+                      + ", group " + juce::String (restored != nullptr ? restored->groupId : -99)
+                  : error);
+    } ();
+
+    //-- Phase 28: the browser is a tree, and scanning does not block ---------
+    [&]
+    {
+        const auto root = phase27Dir.getChildFile ("atomic-phase28-tree");
+
+        // A fresh tree every run: a leftover from the last one would make "the
+        // folder is new" false and the check would fail for the wrong reason.
+        root.deleteRecursively();
+
+        const auto first  = root.getChildFile ("First");
+        const auto nested = first.getChildFile ("Nested");
+        const auto deeper = nested.getChildFile ("Deeper");
+
+        for (auto* dir : { &first, &nested, &deeper })
+            dir->createDirectory();
+
+        writeTestSampleFile (root.getChildFile ("top.wav"), 0.2, 44100.0, 1, 440.0);
+        writeTestSampleFile (first.getChildFile ("one.wav"), 0.2, 44100.0, 1, 440.0);
+        writeTestSampleFile (deeper.getChildFile ("deep.wav"), 0.2, 44100.0, 1, 440.0);
+
+        // Unregister a leftover from an earlier run, so addFolder is really
+        // adding rather than silently ignoring a duplicate.
+        for (int i = filePanel.getNumFolders() - 1; i >= 0; --i)
+            if (filePanel.getFolder (i) == root)
+                filePanel.removeFolder (i);
+
+        // Drain the folders the store file contributed at construction time:
+        // otherwise "progress starts at zero" would be reading THEIR progress.
+        filePanel.waitForPendingScans();
+
+        const int foldersBefore = filePanel.getNumFolders();
+
+        filePanel.addFolder (root);
+
+        // The point of the async scan: addFolder returns at once and the list
+        // is not filled yet, so the click that added a huge library costs a
+        // click, not a freeze.
+        const float startProgress = filePanel.getScanProgress();
+
+        check ("Adding a folder starts a background scan instead of blocking",
+               filePanel.isScanning() && filePanel.getNumFolders() == foldersBefore + 1,
+               juce::String (filePanel.isScanning() ? "scanning" : "idle")
+                 + ", folders " + juce::String (filePanel.getNumFolders()));
+
+        const bool finished = filePanel.waitForPendingScans (15000);
+
+        check ("The scan finishes and reports it is done",
+               finished && ! filePanel.isScanning() && filePanel.getScanProgress() > 0.99f,
+               finished ? juce::String (filePanel.getScanProgress() * 100.0f, 1) + "%"
+                        : juce::String ("timeout"));
+
+        // 0 at the start and 1 at the end is what makes the header line a
+        // progress report rather than decoration.
+        check ("Scan progress runs from zero to one",
+               startProgress < 0.01f && filePanel.getScanProgress() > 0.99f,
+               juce::String (startProgress * 100.0f, 1) + "% -> "
+                 + juce::String (filePanel.getScanProgress() * 100.0f, 1) + "%");
+
+        // Phase 33: a scanned tree arrives FOLDED — that is the new default and
+        // the check below is about nesting, so the two branches are opened
+        // first. `persist = false`: this fixture's temp paths have no business
+        // in the user's store file.
+        filePanel.setSubFolderExpanded (first, true, false);
+        filePanel.setSubFolderExpanded (nested, true, false);
+        filePanel.setSubFolderExpanded (deeper, true, false);   // the leaf branch holds deep.wav
+
+        auto rows = filePanel.buildRows();
+
+        int rootRow = -1, nestedRow = -1, deepRow = -1, deepestIndent = 0;
+
+        for (int i = 0; i < (int) rows.size(); ++i)
+        {
+            const auto& row = rows[(size_t) i];
+
+            if (row.kind == FileBrowserPanel::Row::Kind::rootFolder && row.file == root)
+                rootRow = i;
+            else if (row.kind == FileBrowserPanel::Row::Kind::subFolder && row.label == "Nested")
+                nestedRow = i;
+            else if (row.kind == FileBrowserPanel::Row::Kind::file
+                       && row.file.getFileName() == "deep.wav")
+                deepRow = i;
+
+            if (row.kind == FileBrowserPanel::Row::Kind::file)
+                deepestIndent = juce::jmax (deepestIndent, row.indent);
+        }
+
+        // root(0) -> First(1) -> Nested(2) -> Deeper(3) -> deep.wav(4).
+        check ("Nested folders are drawn as nested rows",
+               rootRow >= 0 && nestedRow >= 0 && deepRow >= 0 && deepestIndent == 4,
+               "root " + juce::String (rootRow) + ", nested " + juce::String (nestedRow)
+                 + ", deep " + juce::String (deepRow) + ", deepest indent "
+                 + juce::String (deepestIndent));
+
+        const int rowsBeforeFold = (int) rows.size();
+
+        filePanel.setSubFolderExpanded (nested, false, false);
+
+        const auto folded = filePanel.buildRows();
+        bool nestedStillThere = false, deepHidden = true;
+
+        for (const auto& row : folded)
+        {
+            if (row.kind == FileBrowserPanel::Row::Kind::subFolder && row.label == "Nested")
+                nestedStillThere = true;
+            else if (row.kind == FileBrowserPanel::Row::Kind::file
+                       && row.file.getFileName() == "deep.wav")
+                deepHidden = false;
+        }
+
+        check ("Folding a branch keeps its folder row and hides everything under it",
+               nestedStillThere && deepHidden && (int) folded.size() < rowsBeforeFold,
+               juce::String ((int) folded.size()) + " / " + juce::String (rowsBeforeFold)
+                 + utf8 (" 行"));
+
+        filePanel.setSubFolderExpanded (nested, true, false);
+
+        check ("Unfolding brings the branch back",
+               (int) filePanel.buildRows().size() == rowsBeforeFold,
+               juce::String ((int) filePanel.buildRows().size()));
+
+        // Leave the store file as we found it, and take the fixture with us.
+        for (int i = filePanel.getNumFolders() - 1; i >= 0; --i)
+            if (filePanel.getFolder (i) == root)
+                filePanel.removeFolder (i);
+
+        root.deleteRecursively();
+    } ();
+
+    //-- Phase 28: clips are selectable, and selection means movable ----------
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        const int a = pianoRoll.addSampleAt (60.0, 60, phase27A);
+        const int b = pianoRoll.addSampleAt (70.0, 70, phase27A);
+
+        pianoRoll.setSampleSelection ({ a, b });
+
+        check ("Selecting clips lets go of the notes",
+               a > 0 && b > 0 && pianoRoll.getSelection().empty()
+                 && pianoRoll.getSampleSelection().size() == 2,
+               "clips " + juce::String (a) + "/" + juce::String (b)
+                 + ", notes " + juce::String ((int) pianoRoll.getSelection().size()));
+
+        const auto* clipA = layer->findSample (a);
+        const auto* clipB = layer->findSample (b);
+
+        if (clipA == nullptr || clipB == nullptr)
+        {
+            check ("Phase 28 clip fixtures exist", false, "addSampleAt failed");
+            return;
+        }
+
+        const double aStart = clipA->startBeat, bStart = clipB->startBeat;
+        const int    aPitch = clipA->pitch,     bPitch = clipB->pitch;
+
+        const bool moved = pianoRoll.simulateSampleMove (2.0, 3);
+
+        check ("Two selected clips drag as one rigid block",
+               moved
+                 && std::abs (clipA->startBeat - (aStart + 2.0)) < 1.0e-9
+                 && std::abs (clipB->startBeat - (bStart + 2.0)) < 1.0e-9
+                 && clipA->pitch == aPitch + 3 && clipB->pitch == bPitch + 3,
+               "d beat " + juce::String (clipA->startBeat - aStart, 3)
+                 + " / " + juce::String (clipB->startBeat - bStart, 3)
+                 + ", d pitch " + juce::String (clipA->pitch - aPitch)
+                 + " / " + juce::String (clipB->pitch - bPitch));
+
+        const int beforeDup = layer->getSampleCount();
+        const auto copies   = pianoRoll.duplicateSelectedSamples();
+
+        check ("Duplicate copies every selected block and selects the copies",
+               (int) copies.size() == 2 && layer->getSampleCount() == beforeDup + 2
+                 && pianoRoll.getSampleSelection() == copies,
+               juce::String ((int) copies.size()) + utf8 (" 份，共 ")
+                 + juce::String (layer->getSampleCount()) + utf8 (" 块"));
+
+        const int beforeDelete = layer->getSampleCount();
+        const bool deleted     = pianoRoll.deleteSelectedSamples();
+
+        check ("Delete removes exactly the selected blocks",
+               deleted && layer->getSampleCount() == beforeDelete - 2
+                 && pianoRoll.getSampleSelection().empty(),
+               juce::String (beforeDelete) + " -> " + juce::String (layer->getSampleCount()));
+
+        pianoRoll.setSampleSelection ({ a });
+
+        const bool copied      = pianoRoll.copySamplesToClipboard();
+        const int  beforePaste = layer->getSampleCount();
+        const bool pasted      = pianoRoll.pasteSamplesFromClipboard();
+
+        check ("Clipboard copy/paste round-trips a block",
+               copied && pasted && layer->getSampleCount() == beforePaste + 1
+                 && pianoRoll.getSampleSelection().size() == 1,
+               juce::String (beforePaste) + " -> " + juce::String (layer->getSampleCount()));
+
+        // Take this check's own blocks back out; the demo fixture may keep its.
+        std::vector<int> mine { a, b };
+
+        for (int id : pianoRoll.getSampleSelection())
+            mine.push_back (id);
+
+        pianoRoll.setSampleSelection (mine);
+        pianoRoll.deleteSelectedSamples();
+    } ();
+
+    //-- Phase 37: a paste snaps, and a repeat steps past the last one -------
+    // Two promises, both broken by the same two lines of the old paste: the
+    // anchor was snapped and THEN pushed by the clipboard length, so (a) a
+    // block whose length is not whole grid steps handed the next paste a beat
+    // off the grid, and (b) every Ctrl+V read the same anchor, so the second
+    // paste landed exactly on the first and the earlier pastes looked like they
+    // had been dragged away.
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("Phase 37 needs a layer", false, "no active layer");
+            return;
+        }
+
+        const bool savedSnap = pianoRoll.isSnapEnabled();
+        pianoRoll.setSnapEnabled (true);
+
+        // 0.375 beats = 1.5 grid steps at the 1/16 grid. Half a step is exactly
+        // the amount that used to fall through.
+        const int src     = pianoRoll.addSampleAt (400.0, 45, phase27A);
+        auto*     srcClip = layer->findSample (src);
+
+        if (srcClip == nullptr)
+        {
+            check ("Phase 37 fixture exists", false, "addSampleAt failed");
+            pianoRoll.setSnapEnabled (savedSnap);
+            return;
+        }
+
+        srcClip->lengthBeats = 0.375;
+
+        //-- (a) an off-grid playhead still produces an on-grid landing ------
+        pianoRoll.setSampleSelection ({ src });
+        pianoRoll.copySamplesToClipboard();
+        pianoRoll.setPlayheadBeat (401.1);
+        pianoRoll.pasteSamplesFromClipboard();
+
+        const auto   first     = pianoRoll.getSampleSelection();
+        const auto*  firstClip = first.empty() ? nullptr : layer->findSample (first.front());
+        const double firstBeat = firstClip != nullptr ? firstClip->startBeat : -1.0;
+        const double firstStep = firstBeat / PianoRollComponent::gridDivision;
+
+        check ("With snap on, a paste lands on a grid line",
+               firstClip != nullptr && std::abs (firstBeat - 401.0) < 1.0e-9
+                 && std::abs (firstStep - std::round (firstStep)) < 1.0e-9,
+               "landed on " + juce::String (firstBeat, 4));
+
+        //-- (b) the second Ctrl+V starts after the first, and leaves it alone -
+        pianoRoll.pasteSamplesFromClipboard();
+
+        const auto  second      = pianoRoll.getSampleSelection();
+        const auto* secondClip  = second.empty() ? nullptr : layer->findSample (second.front());
+        const auto* firstAgain  = first.empty() ? nullptr : layer->findSample (first.front());
+        const double secondBeat = secondClip != nullptr ? secondClip->startBeat : -1.0;
+
+        check ("A second paste starts after the first and leaves it where it was",
+               secondClip != nullptr
+                 && std::abs (secondBeat - 401.5) < 1.0e-9
+                 && firstAgain != nullptr
+                 && std::abs (firstAgain->startBeat - firstBeat) < 1.0e-9,
+               "first " + juce::String (firstBeat, 4) + ", second " + juce::String (secondBeat, 4));
+
+        //-- (c) a paste on top of its source moves off it, on the grid too ---
+        // 400 + 0.375 = 400.375 would be the old answer; the grid makes it 400.5.
+        pianoRoll.setSampleSelection ({ src });
+        pianoRoll.setPlayheadBeat (400.0);
+        pianoRoll.copySamplesToClipboard();          // a fresh copy, a fresh streak
+        pianoRoll.pasteSamplesFromClipboard();
+
+        const auto  shifted      = pianoRoll.getSampleSelection();
+        const auto* shiftedClip  = shifted.empty() ? nullptr : layer->findSample (shifted.front());
+        const double shiftedBeat = shiftedClip != nullptr ? shiftedClip->startBeat : -1.0;
+
+        check ("A paste on top of its source moves past it, and lands on the grid",
+               shiftedClip != nullptr && std::abs (shiftedBeat - 400.5) < 1.0e-9,
+               "landed on " + juce::String (shiftedBeat, 4));
+
+        //-- (d) moving the playhead ends the streak -------------------------
+        pianoRoll.setPlayheadBeat (420.0);
+        pianoRoll.pasteSamplesFromClipboard();
+
+        const auto  moved     = pianoRoll.getSampleSelection();
+        const auto* movedClip = moved.empty() ? nullptr : layer->findSample (moved.front());
+
+        check ("Moving the playhead ends the streak",
+               movedClip != nullptr && std::abs (movedClip->startBeat - 420.0) < 1.0e-9,
+               "landed on " + juce::String (movedClip != nullptr ? movedClip->startBeat : -1.0, 4));
+
+        // Take out everything this block created, source included.
+        std::vector<int> mine { src };
+
+        for (int id : first)   mine.push_back (id);
+        for (int id : second)  mine.push_back (id);
+        for (int id : shifted) mine.push_back (id);
+        for (int id : moved)   mine.push_back (id);
+
+        pianoRoll.setSampleSelection (mine);
+        pianoRoll.deleteSelectedSamples();
+        pianoRoll.setPlayheadBeat (-1.0);
+        pianoRoll.setSnapEnabled (savedSnap);
+    } ();
+
+    //-- Phase 38: the 编组 button sees clips; a VST3 shows its name and loads -
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("Phase 38 needs a layer", false, "no active layer");
+            return;
+        }
+
+        //-- (a) a clip-only selection is a selection -------------------------
+        // Phase 35 made groupSelection() accept clips, and the G key kept up.
+        // The toolbar button did not: it asked `! selection.empty()`, which is
+        // a question about NOTES, so a selected clip left 编组 greyed out and
+        // clicking it did nothing at all.
+        const int clipId = pianoRoll.addSampleAt (500.0, 45, phase27A);
+
+        pianoRoll.setSelection ({});
+        pianoRoll.setSampleSelection ({ clipId });
+
+        check (utf8 ("A clip-only selection satisfies the 编组 button's predicate"),
+               pianoRoll.hasAnySelection() && pianoRoll.getSelection().empty()
+                 && (int) pianoRoll.getSampleSelection().size() == 1,
+               "notes " + juce::String ((int) pianoRoll.getSelection().size())
+                 + ", clips " + juce::String ((int) pianoRoll.getSampleSelection().size()));
+
+        const int grouped  = pianoRoll.groupSelection();
+        const auto* clipIn = layer->findSample (clipId);
+
+        check ("...and the clip really lands in a group",
+               grouped > 0 && clipIn != nullptr && clipIn->groupId == grouped,
+               "groupId " + juce::String (clipIn != nullptr ? clipIn->groupId : -99));
+
+        pianoRoll.setSampleSelection ({ clipId });
+        pianoRoll.deleteSelectedSamples();
+
+        //-- (b) replacing an instrument with a VST3 --------------------------
+        // No real bundle: `load` needs a scanned library and a native VST3,
+        // neither of which a headless run can be asked to provide. The id is
+        // what everything downstream keys on, so an id that resolves to nothing
+        // is a faithful test of every step except the plugin's own DSP.
+        const int slotId = rack.addSynth();
+        auto*     slot   = rack.findSlot (slotId);
+
+        if (slot == nullptr)
+        {
+            check ("Phase 38 needs a rack slot", false, "addSynth failed");
+            return;
+        }
+
+        const juce::String before = slot->getDisplayName();
+
+        juce::PluginDescription description;
+        description.name             = "Atomic Test Synth";
+        description.manufacturerName = "Atomic";
+        description.pluginFormatName = "VST3";
+
+        rack.replaceWithPlugin (slotId, description, 4242);
+        slot = rack.findSlot (slotId);
+
+        check ("Replacing an instrument with a VST3 changes what the slot IS",
+               slot != nullptr && slot->isPlugin() && slot->pluginId == 4242,
+               slot != nullptr ? juce::String ("pluginId ") + juce::String (slot->pluginId)
+                               : juce::String ("slot gone"));
+
+        // The card title used to stay on "Synth A" and only the small pill
+        // changed, which is exactly what "替换没有成功" looks like from the
+        // outside. The name is now derived from what the slot holds.
+        check (utf8 ("...and the card names the plugin instead of the old Synth A"),
+               slot != nullptr && slot->getDisplayName() == "Atomic Test Synth"
+                 && rack.getSlotName (slotId) == "Atomic Test Synth",
+               "card \"" + (slot != nullptr ? slot->getDisplayName() : juce::String()) + "\""
+                 + utf8 ("（原 ") + before + "）");
+
+        // The audio thread may not read the rack: the id has to reach the
+        // published slot or the notes keep playing the oscillator.
+        {
+            auto published   = audio.getPlayback().getSchedule();
+            int  publishedId = -1;
+
+            if (published != nullptr)
+                for (const auto& mix : published->slots)
+                    if (mix.slotId == slotId)
+                        publishedId = mix.pluginId;
+
+            check ("...and the plugin id reaches the renderer, not just the card",
+                   publishedId == 4242,
+                   "published " + juce::String (publishedId));
+        }
+
+        //-- (c) and back again ----------------------------------------------
+        // Derived naming, not a stored one: an overwritten `name` could never
+        // give this back.
+        rack.replaceWithNative (slotId, Waveform::square);
+        slot = rack.findSlot (slotId);
+
+        check ("Replacing it back with an oscillator restores the slot's own name",
+               slot != nullptr && ! slot->isPlugin() && slot->pluginId == 0
+                 && slot->getDisplayName() == before,
+               "card \"" + (slot != nullptr ? slot->getDisplayName() : juce::String()) + "\"");
+
+        //-- (d) and once for real -------------------------------------------
+        // The headless harness ships Atomic Test Synth, so at least one VST3
+        // can be loaded here without touching the user's library. This is the
+        // whole "替换没有成功" path end to end: load, mount, name, and the
+        // condition 打开插件界面 is enabled on.
+        juce::PluginDescription realSynth;
+
+        for (const auto& entry : plugins.getLibrary())
+            if (entry.isInstrument && entry.description.name.containsIgnoreCase ("Test Synth"))
+                realSynth = entry.description;
+
+        if (realSynth.name.isNotEmpty())
+        {
+            juce::String loadError;
+            const int    realId = plugins.load (realSynth, &loadError);
+
+            rack.replaceWithPlugin (slotId, realSynth, realId);
+            slot = rack.findSlot (slotId);
+
+            check (utf8 ("A real VST3 can be loaded and mounted by 替换音源"),
+                   realId > 0 && slot != nullptr && slot->pluginId == realId
+                     && plugins.isLoaded (realId),
+                   "instance " + juce::String (realId)
+                     + (loadError.isNotEmpty() ? juce::String (" / ") + loadError : juce::String()));
+
+            check (utf8 ("...so 打开插件界面 has an editor to open"),
+                   plugins.getProcessorForEditor (realId) != nullptr,
+                   slot != nullptr ? slot->getDisplayName() : juce::String ("no slot"));
+        }
+
+        rack.replaceWithNative (slotId, Waveform::saw);
+        reconcilePlugins();            // the instance we loaded has no owner now
+        rack.removeSlot (slotId);
+        focusSynth (-1);
+    } ();
+
+    //-- Phase 39: a keyboard plays the synth --------------------------------
+    [&]
+    {
+        //-- The FL Studio layout -----------------------------------------
+        // Read back from the ONE table the key handler, the settings diagram
+        // and this check all use. "The picture matches what plays" is then not
+        // a claim, it is the same data twice.
+        bool everyKeyAgrees = true;
+
+        for (const auto& binding : typing::bindings())
+        {
+            const int upper = (int) juce::CharacterFunctions::toUpperCase (binding.key);
+
+            everyKeyAgrees = everyKeyAgrees
+                               && typing::noteForKeyCode (upper)
+                                    == typing::lowestNote + binding.semitone;
+        }
+
+        check ("Every FL Studio key plays the note it is drawn on",
+               everyKeyAgrees && (int) typing::bindings().size() == 24,
+               "24 keys, Z = MIDI " + juce::String (typing::noteForKeyCode ('Z')));
+
+        // The piano pattern, spot-checked where it actually lives: the gaps in
+        // the black-key rows are E-F and B-C, and nothing else.
+        check ("The letter gaps are the piano's gaps: C# D# then F# G# A#",
+               typing::noteForKeyCode ('S') == 61 && typing::noteForKeyCode ('D') == 63
+                 && typing::noteForKeyCode ('G') == 66 && typing::noteForKeyCode ('H') == 68
+                 && typing::noteForKeyCode ('J') == 70,
+               "S " + juce::String (typing::noteForKeyCode ('S'))
+                 + " D " + juce::String (typing::noteForKeyCode ('D'))
+                 + " G " + juce::String (typing::noteForKeyCode ('G')));
+
+        check ("The upper octave starts one octave above where the lower one ends",
+               typing::noteForKeyCode ('M') == 71 && typing::noteForKeyCode ('Q') == 72
+                 && typing::noteForKeyCode ('U') == 83,
+               "M " + juce::String (typing::noteForKeyCode ('M'))
+                 + " / Q " + juce::String (typing::noteForKeyCode ('Q'))
+                 + " / U " + juce::String (typing::noteForKeyCode ('U')));
+
+        check ("The diagram is built from the same table it describes",
+               typing::rowKeys (typing::Row::lowerWhite) == "Z X C V B N M"
+                 && typing::rowNotes (typing::Row::lowerWhite) == "C4 D4 E4 F4 G4 A4 B4"
+                 && typing::rowKeys (typing::Row::upperBlack) == "2 3 5 6 7",
+               typing::rowKeys (typing::Row::lowerWhite) + " = "
+                 + typing::rowNotes (typing::Row::lowerWhite));
+
+        check ("Octave shift moves the whole layout, and clamps instead of inventing notes",
+               typing::noteForKeyCode ('Z', 1) == 72
+                 && typing::noteForKeyCode ('Z', -1) == 48
+                 && typing::noteForKeyCode ('U', 4) == -1
+                 && typing::noteForKeyCode ('!') == -1,
+               "Z+1 " + juce::String (typing::noteForKeyCode ('Z', 1)));
+
+        //-- The voice: a note with a real end -----------------------------
+        {
+            LayerStack as;
+            RackModel  ar;
+            PlaybackEngine engine;
+
+            const int aSlot = ar.getFirstSlotId();
+            as.addLayer (utf8 ("演奏"), palette::layer1);
+            as.setLayerOutputSlot (0, aSlot);
+
+            engine.publishSchedule (as, ar, 120.0, 0.0, nullptr);
+            engine.resetMixState();
+
+            check ("Nothing is held before a key is pressed",
+                   ! engine.hasLiveNotes() && engine.getLiveVoiceCount() == 0, "idle");
+
+            engine.noteOnLive (aSlot, 69, 0.9f);
+            engine.beginLiveBlock();
+
+            juce::AudioBuffer<float> held;
+            held.setSize (2, 4096);
+            held.clear();
+            engine.renderLive (held, 4096);
+
+            const float heldPeak = held.getMagnitude (0, 0, 4096);
+
+            check ("A held key sounds its synth with the transport stopped",
+                   engine.hasLiveNotes() && engine.getLiveVoiceCount() == 1
+                     && heldPeak > 0.001f,
+                   "peak " + juce::String (heldPeak, 4));
+
+            // Two keys held at once is the whole difference between a keyboard
+            // and a monophonic preview: one more voice, and more sound.
+            engine.noteOnLive (aSlot, 76, 0.9f);
+            engine.beginLiveBlock();
+
+            juce::AudioBuffer<float> chord;
+            chord.setSize (2, 4096);
+            chord.clear();
+            engine.renderLive (chord, 4096);
+
+            const float chordRms = chord.getRMSLevel (0, 0, 4096);
+            const float heldRms  = held.getRMSLevel (0, 0, 4096);
+
+            check ("Two keys are two voices, and a chord is louder than one note",
+                   engine.getLiveVoiceCount() == 2 && chordRms > heldRms * 1.15f,
+                   "voices " + juce::String (engine.getLiveVoiceCount())
+                     + " / rms " + juce::String (heldRms, 4) + " → " + juce::String (chordRms, 4));
+
+            //-- And it lets go -------------------------------------------
+            engine.noteOffLive (69);
+            engine.noteOffLive (76);
+            engine.beginLiveBlock();
+
+            juce::AudioBuffer<float> tail;
+            tail.setSize (2, 4096);
+
+            for (int block = 0; block < 40; ++block)
+            {
+                tail.clear();
+                engine.renderLive (tail, 4096);
+            }
+
+            check ("A released key stops: no voice is left and the tail is silent",
+                   engine.getLiveVoiceCount() == 0 && ! engine.hasLiveNotes()
+                     && tail.getMagnitude (0, 0, 4096) < 1.0e-4f,
+                   "voices " + juce::String (engine.getLiveVoiceCount())
+                     + " / tail " + juce::String (tail.getMagnitude (0, 0, 4096), 6));
+
+            //-- "Let go of everything" is one queued event --------------------
+            // It has to be: the callers are a settings click and a source
+            // switch, both on the message thread, and the voice pool belongs to
+            // the audio thread.
+            engine.noteOnLive (aSlot, 60, 0.9f);
+            engine.noteOnLive (aSlot, 67, 0.9f);
+            engine.beginLiveBlock();
+
+            juce::AudioBuffer<float> scratch;
+            scratch.setSize (2, 4096);
+            scratch.clear();
+            engine.renderLive (scratch, 4096);
+
+            const int beforeAllOff = engine.getLiveVoiceCount();
+
+            engine.allLiveNotesOff();
+            engine.beginLiveBlock();
+
+            for (int block = 0; block < 20; ++block)
+            {
+                scratch.clear();
+                engine.renderLive (scratch, 4096);
+            }
+
+            check ("\"Let go of everything\" releases voices it never looked at",
+                   beforeAllOff == 2 && engine.getLiveVoiceCount() == 0
+                     && ! engine.hasLiveNotes(),
+                   "before " + juce::String (beforeAllOff)
+                     + " / after " + juce::String (engine.getLiveVoiceCount()));
+        }
+
+        //-- Which synth a key goes to --------------------------------------
+        const int synthSlot = rack.addSynth();
+
+        if (synthSlot <= 0)
+        {
+            check ("Phase 39 needs a rack slot", false, "addSynth failed");
+            return;
+        }
+
+        focusSynth (synthSlot);
+
+        check ("A played key goes to the spotlit synth",
+               getLiveTargetSlot() == synthSlot,
+               "slot " + juce::String (getLiveTargetSlot())
+                 + utf8 (" / ") + getLiveTargetName());
+
+        //-- Phase 40: two switches, and the keyboard is on out of the box ----
+        // This has to come FIRST: every line below flips a switch, and "out of
+        // the box" is a property of the session as it was built.
+        check ("Out of the box the computer keyboard already plays",
+               getMidiSources().typingKeyboard && ! getMidiSources().externalController,
+               midiSourcesName (getMidiSources()));
+
+        setMidiSources ({ false, false });
+
+        check ("Both switches off is silence, and the letters go back to the editor",
+               ! getMidiSources().any() && ! typingKeyboardLive() && typingHeld.empty()
+                 && ! handleTypingKeyDown (juce::KeyPress ('Z', juce::ModifierKeys(), 'z')),
+               midiSourcesName (getMidiSources()));
+
+        setMidiSources ({ true, false });
+
+        const bool claimed = handleTypingKeyDown (juce::KeyPress ('Z', juce::ModifierKeys(), 'z'));
+
+        check ("With the keyboard on, Z is a note and not a shortcut",
+               claimed && typingHeld.size() == 1
+                 && typingHeld.front().second == typing::noteForKeyCode ('Z', getTypingOctave()),
+               "held " + juce::String ((int) typingHeld.size())
+                 + " / note " + juce::String (typingHeld.empty() ? -1 : typingHeld.front().second));
+
+        // Numpad +/- move the whole layout, and the moved layout is what plays.
+        handleTypingKeyDown (juce::KeyPress (juce::KeyPress::numberPadAdd,
+                                            juce::ModifierKeys(), 0));
+
+        const bool shifted = handleTypingKeyDown (juce::KeyPress ('X', juce::ModifierKeys(), 'x'));
+
+        check ("Numpad + shifts an octave, and X now plays the note one octave up",
+               shifted && getTypingOctave() == 1 && typingHeld.size() == 2
+                 && typingHeld.back().second == 74,
+               "octave " + juce::String (getTypingOctave())
+                 + " / X = " + juce::String (typingHeld.empty() ? -1 : typingHeld.back().second));
+
+        check ("Ctrl+Z is still undo, not a note",
+               ! handleTypingKeyDown (juce::KeyPress ('Z', juce::ModifierKeys::ctrlModifier, 'z')),
+               "unclaimed");
+
+        //-- Phase 40: the two sources coexist --------------------------------
+        // The switch that turns the controller ON must not disturb what the
+        // computer keyboard is holding. Phase 39's radio could not express this
+        // at all: choosing one switched the other off, and released its notes.
+        const int heldBeforeController = (int) typingHeld.size();
+
+        setMidiSources ({ true, true });
+
+        check ("Turning the controller on does not interrupt the keys already down",
+               typingKeyboardLive() && getMidiSources().externalController
+                 && (int) typingHeld.size() == heldBeforeController,
+               "held " + juce::String ((int) typingHeld.size())
+                 + " / " + midiSourcesName (getMidiSources()));
+
+        const bool alsoPlays = handleTypingKeyDown (juce::KeyPress ('C', juce::ModifierKeys(), 'c'));
+
+        check ("With both on, the computer keyboard still plays",
+               alsoPlays && typingHeld.size() == (size_t) heldBeforeController + 1,
+               "held " + juce::String ((int) typingHeld.size()));
+
+        check ("The pair has a name of its own, not just the two parts",
+               midiSourcesName ({ true, true }) == utf8 ("电脑键盘 + 外部 MIDI 控制器"),
+               midiSourcesName ({ true, true }));
+
+        // The other direction: the keyboard switch owns only its own keys.
+        setMidiSources ({ false, true });
+
+        check ("Turning the keyboard off leaves the controller switch alone",
+               ! typingKeyboardLive() && getMidiSources().externalController
+                 && typingHeld.empty()
+                 && ! handleTypingKeyDown (juce::KeyPress ('Z', juce::ModifierKeys(), 'z')),
+               midiSourcesName (getMidiSources()));
+
+        // And turning the last switch off has to let go of the voices this side
+        // cannot name. The engine-level proof that one queued "all off" really
+        // silences them is the check further up; what is checked here is that
+        // the switch queues it and clears the keyboard bookkeeping.
+        setMidiSources ({ false, false });
+        audio.getPlayback().beginLiveBlock();          // apply the all-off
+
+        check ("Turning both switches off stops the keyboard and lets go of everything",
+               ! getMidiSources().any() && ! typingKeyboardLive() && typingHeld.empty(),
+               "held " + juce::String ((int) typingHeld.size())
+                 + " / " + midiSourcesName (getMidiSources()));
+
+        setMidiSources ({ true, false });              // back to the default
+        audio.getPlayback().beginLiveBlock();
+
+        setTypingOctave (0);
+        rack.removeSlot (synthSlot);
+        focusSynth (-1);
+    } ();
+
+    //-- Phase 41: a released key lets go of a hosted instrument ---------------
+    // The report: 选中外部音源后，电脑键盘输入的 MIDI 会一直持续，音源一直响.
+    //
+    // The engine kept a pitch → synth table so a note-off — which carries
+    // nothing but a pitch — could find the instrument that started it. That
+    // table was only written at the bottom of the oscillator branch, and a
+    // hosted instrument returns long before reaching it, so its releases
+    // arrived with no slot id and were dropped. Every key left the VST holding
+    // its note; nothing but a restart could stop it.
+    [&]
+    {
+        juce::PluginDescription testSynth;
+
+        for (const auto& entry : plugins.getLibrary())
+            if (entry.isInstrument && entry.description.name.containsIgnoreCase ("Test Synth"))
+                testSynth = entry.description;
+
+        if (testSynth.name.isEmpty())
+        {
+            check (utf8 ("Phase 41 需要内置的 Test Synth"), false, utf8 ("没找到"));
+            return;
+        }
+
+        // "选中的是一块 VST 卡片" has to mean "the keys go there". Otherwise the
+        // spotlight is decoration and the keys play whatever the layer points
+        // at, which looks exactly like the wrong synth answering.
+        {
+            const int vstSlot = rack.addSynth();
+
+            rack.replaceWithPlugin (vstSlot, testSynth, 4242);
+            focusSynth (vstSlot);
+
+            const int target = getLiveTargetSlot();
+
+            rack.replaceWithNative (vstSlot, Waveform::saw);
+            reconcilePlugins();                 // instance 4242 has no owner now
+            rack.removeSlot (vstSlot);
+            focusSynth (-1);
+
+            check (utf8 ("选中的 VST 卡片就是键盘打向的那块音源"),
+                   target == vstSlot,
+                   "target " + juce::String (target) + utf8 (" / 卡片 ")
+                     + juce::String (vstSlot));
+        }
+
+        //-- And the release really reaches the plugin ------------------------
+        // With the bundled instrument, not a fake id: "the note-off arrived"
+        // is only true if the synth's own gate closed, which is audible.
+        PluginHost host;
+        host.setPlayConfig (44100.0, 512);
+
+        juce::String loadError;
+        const int instance = host.load (testSynth, &loadError);
+
+        LayerStack layers;
+        RackModel  hostRack;
+
+        layers.addLayer (utf8 ("外部音源"), palette::layer1);
+        const int liveSlot = hostRack.addPluginSynth (testSynth, instance);
+
+        layers.setLayerOutputSlot (0, liveSlot);
+        layers.setLayerLevelDb (0, 0.0f);
+        layers.setLayerPan (0, 0.0f);
+
+        PlaybackEngine engine;
+        engine.setSampleRate (44100.0);
+        engine.setPluginHost (&host);
+        engine.prepareToPlay (44100.0, 512);
+        engine.publishSchedule (layers, hostRack, 120.0, 0.0, nullptr);
+        engine.resetMixState();
+
+        auto renderLiveBlocks = [&engine] (int blocks)
+        {
+            juce::AudioBuffer<float> out;
+            out.setSize (2, 4096);
+
+            float peak = 0.0f;
+
+            for (int i = 0; i < blocks; ++i)
+            {
+                out.clear();
+                engine.renderLive (out, 4096);
+                peak = juce::jmax (peak, out.getMagnitude (0, 0, 4096));
+            }
+
+            return peak;
+        };
+
+        engine.noteOnLive (liveSlot, 69, 0.9f);
+        engine.beginLiveBlock();
+
+        const float heldPeak = renderLiveBlocks (1);
+
+        check (utf8 ("按下的键让 VST 音源发声"),
+               instance > 0 && heldPeak > 0.01f,
+               "instance " + juce::String (instance) + utf8 (" / peak ")
+                 + juce::String (heldPeak, 4)
+                 + (loadError.isNotEmpty() ? " / " + loadError : juce::String()));
+
+        // The fixture closes its gate on the note-off in the same block, so
+        // "silent immediately" is the sharpest possible statement of "the
+        // note-off arrived at all".
+        engine.noteOffLive (69);
+        engine.beginLiveBlock();
+
+        const float releasedPeak = renderLiveBlocks (1);
+
+        check (utf8 ("松开按键，同一个 block 之内 VST 就闭嘴了"),
+               releasedPeak < 1.0e-5f,
+               "peak " + juce::String (releasedPeak, 6));
+
+        // And the instrument is handed back when its tail is over. A held list
+        // that still names the key would keep it engaged for ever — which is
+        // the same drone, one layer down (6 s of tail at 44.1 kHz, then the
+        // slot must go back in the pool).
+        const float afterTailPeak = renderLiveBlocks (70);
+
+        check (utf8 ("...而且尾音结束后音源被交还，引擎不再认为自己按着东西"),
+               afterTailPeak < 1.0e-5f && ! engine.hasLiveNotes(),
+               "peak " + juce::String (afterTailPeak, 6)
+                 + (engine.hasLiveNotes() ? utf8 (" / 仍然占着") : utf8 (" / 已交还")));
+
+        engine.setPluginHost (nullptr);
+    } ();
+
+    //-- Phase 42: four reports -------------------------------------------------
+    [&]
+    {
+        juce::PluginDescription testSynth;
+
+        for (const auto& entry : plugins.getLibrary())
+            if (entry.isInstrument && entry.description.name.containsIgnoreCase ("Test Synth"))
+                testSynth = entry.description;
+
+        //-- (1) 插件窗口在前台时，空格和电脑键盘还得能弹 ---------------------
+        // The window is a separate top-level component: without a forwarder on
+        // it, every key the user presses "in the synth" is the synth's alone.
+        if (testSynth.name.isNotEmpty())
+        {
+            const int instanceId = plugins.load (testSynth);
+
+            openPluginEditor (instanceId, "Atomic Test Synth");
+
+            auto window = pluginWindows.find (instanceId);
+            const bool opened = instanceId > 0 && window != pluginWindows.end()
+                                  && window->second != nullptr;
+
+            const bool forwards = opened && window->second->hasKeyForwarder();
+
+            const bool wasEngaged = audio.isTransportEngaged();
+            const bool claimed = pluginForwarder.keyPressed (
+                                     juce::KeyPress (juce::KeyPress::spaceKey),
+                                     opened ? window->second.get() : nullptr);
+
+            const bool moved = audio.isTransportEngaged() != wasEngaged;
+
+            if (audio.isTransportEngaged())
+                stopTransport();               // leave the session as we found it
+
+            check (utf8 ("插件窗口开着时，空格仍然开始/停止走带"),
+                   opened && forwards && claimed && moved,
+                   opened ? (forwards ? utf8 ("窗口已接管按键") : utf8 ("窗口没有按键转发"))
+                          : utf8 ("窗口没打开（本次会话没有桌面？）"));
+
+            if (window != pluginWindows.end())
+                pluginWindows.erase (window);
+
+            reconcilePlugins();
+        }
+        else
+        {
+            check (utf8 ("Phase 42 需要内置的 Test Synth"), false, utf8 ("没找到"));
+        }
+
+        //-- (2)+(3) 创建自动化：一个母菜单，里面才有音源参数 -----------------
+        // The ids are the contract between the menu and the click handler, so
+        // this exercises the handler with the exact ids the submenu hands out.
+        const int menuSlot = rack.addSynth();
+        auto*     menuCard = rack.findSlot (menuSlot);
+
+        if (menuCard == nullptr)
+        {
+            check (utf8 ("Phase 42 需要一个机架槽"), false, "addSynth failed");
+            return;
+        }
+
+        const bool pluginItem = applySlotAutomationChoice (1 + kSlotAutoParamBase, menuSlot, 1);
+        menuCard = rack.findSlot (menuSlot);
+
+        check (utf8 ("「创建自动化 ▸ 音源参数」真的建出一行音源参数曲线"),
+               pluginItem && menuCard != nullptr && menuCard->drivesPluginParam()
+                 && menuCard->getPluginParam() == 0
+                 && menuCard->automationTarget == SlotAutomationTarget::plugin
+                 && menuCard->getPluginAutomation().isEnabled()
+                 && automation.contains (AutomationOwner::slot, menuSlot,
+                                         (int) SlotAutomationTarget::plugin),
+               menuCard != nullptr ? (utf8 ("参数 ") + juce::String (menuCard->getPluginParam())
+                                        + (menuCard->getPluginAutomation().isEnabled() ? utf8 (" / 曲线已开")
+                                                                                       : utf8 (" / 曲线没开")))
+                                   : juce::String ("卡没了"));
+
+        // The two rows that were there before are inside the same submenu now,
+        // under different ids — the dispatch has to still find them.
+        const bool filterItem = applySlotAutomationChoice (1, menuSlot, 1);
+        const bool levelItem  = applySlotAutomationChoice (2, menuSlot, 1);
+
+        check (utf8 ("母菜单里的滤波器 / 音量还走原来那条路"),
+               filterItem && levelItem
+                 && automation.contains (AutomationOwner::slot, menuSlot,
+                                         (int) SlotAutomationTarget::filter)
+                 && automation.contains (AutomationOwner::slot, menuSlot,
+                                         (int) SlotAutomationTarget::level),
+               utf8 ("轨道数 ") + juce::String (automation.getNumTracks()));
+
+        // The rack card builds the same submenu with its own id base (30), so
+        // the same parameter has to be reachable there too.
+        const bool cardItem = applySlotAutomationChoice (30 + kSlotAutoParamBase, menuSlot, 30);
+
+        check (utf8 ("音源卡片右键用另一套 id 也能建同样的曲线"), cardItem,
+               utf8 ("id ") + juce::String (30 + kSlotAutoParamBase));
+
+        automation.removeTracksForOwner (AutomationOwner::slot, menuSlot);
+        rack.removeSlot (menuSlot);
+
+        //-- (3a) 它还得能存进工程文件 ----------------------------------------
+        // A curve that only exists until the next save is not automation. v18
+        // adds the third lane and the slot's `pluginparam`; a v17 file has
+        // neither and must still open (tested by the older round-trip above).
+        {
+            LayerStack ts;
+            RackModel  rs;
+            const int  sid = rs.getFirstSlotId();
+            auto*      saved = rs.findSlot (sid);
+
+            if (saved == nullptr)
+            {
+                check (utf8 ("Phase 42 需要一个机架槽"), false, "no slot");
+                return;
+            }
+
+            // A project with no layer is not a project: the parser refuses one,
+            // and the point here is the slot's third lane, not that rule.
+            ts.addLayer (utf8 ("参数"), palette::layer1);
+            ts.setLayerOutputSlot (0, sid);
+
+            saved->setPluginParam (3);
+            rs.setAutomationTarget (sid, SlotAutomationTarget::plugin);
+            rs.setAutomationExpanded (sid, true);
+
+            auto& savedLane = saved->getPluginAutomation();
+            savedLane.resetFlat (0.4f, 8.0);
+            savedLane.addPoint (5.0, 0.9f, 8.0);
+            savedLane.setEnabled (true);
+
+            const auto xml = project::toXmlText (ts, rs, 120.0, nullptr, nullptr);
+
+            LayerStack ts2;
+            RackModel  rs2;
+            double     bpmBack = 0.0;
+            juce::String error;
+
+            const bool parsed = project::fromXmlText (xml, ts2, rs2, bpmBack, error);
+            const auto* restored = rs2.findSlot (sid);
+
+            check (utf8 ("音源参数曲线存得进工程文件，也读得回来"),
+                   parsed && restored != nullptr
+                     && restored->getPluginParam() == 3
+                     && restored->automationTarget == SlotAutomationTarget::plugin
+                     && restored->automationExpanded
+                     && restored->getPluginAutomation().isEnabled()
+                     && restored->getPluginAutomation().hasSameShapeAs (savedLane),
+                   utf8 ("参数 ") + juce::String (restored != nullptr ? restored->getPluginParam() : -99)
+                     + utf8 (" / ") + juce::String (restored != nullptr
+                                                      ? (int) restored->getPluginAutomation().getPoints().size() : 0)
+                     + utf8 (" 点") + (error.isNotEmpty() ? " / " + error : juce::String()));
+        }
+
+        //-- (3) 这条曲线要真的驱动插件，不是只存在模型里 ----------------------
+        if (testSynth.name.isEmpty())
+            return;
+
+        PluginHost host;
+        host.setPlayConfig (44100.0, 512);
+
+        const int instance = host.load (testSynth);
+
+        LayerStack t;
+        RackModel  r;
+        const int slotId = r.addPluginSynth (testSynth, instance);
+
+        t.addLayer (utf8 ("音源参数"), palette::layer1);
+        t.setLayerOutputSlot (0, slotId);
+        t.setLayerLevelDb (0, 0.0f);
+        t.setLayerPan (0, 0.0f);
+        t.getLayer (0)->addNote ({ 0, 60, 0.0, 8.0, 0.9f });
+
+        auto* slot = r.findSlot (slotId);
+        slot->setPluginParam (0);                    // the fixture's one parameter
+        slot->getPluginAutomation().resetFlat (1.0f, 8.0);
+        slot->getPluginAutomation().addPoint (4.0, 0.0f, 8.0);
+
+        PlaybackEngine engine;
+        engine.setSampleRate (44100.0);
+        engine.setPluginHost (&host);
+        engine.prepareToPlay (44100.0, 512);
+        engine.resetMixState();
+
+        // Two renders of the same two seconds: one with the slot's curve on, one
+        // without. "The parameter moved" is not audible; "the second half is
+        // quieter than the first" is.
+        auto renderHalves = [&] (bool laneOn)
+        {
+            slot->getPluginAutomation().setEnabled (laneOn);
+            engine.publishSchedule (t, r, 120.0, 0.0, nullptr);
+            engine.resetMixState();
+
+            juce::AudioBuffer<float> buffer;
+            buffer.setSize (2, 44100 * 2);
+            buffer.clear();
+
+            engine.renderWindow (0.0, 44100 * 2, buffer, nullptr);
+
+            return std::pair<float, float> { buffer.getRMSLevel (0, 0, 44100),
+                                             buffer.getRMSLevel (0, 44100, 44100) };
+        };
+
+        const auto flat  = renderHalves (false);
+        const auto swept = renderHalves (true);
+
+        engine.publishSchedule (t, r, 120.0, 0.0, nullptr);
+
+        auto published = engine.getSchedule();
+        int  publishedParam = -2, publishedPlugin = 0;
+
+        if (published != nullptr)
+            for (const auto& curve : published->pluginParams)
+                if (curve.pluginId == instance)
+                {
+                    publishedParam  = curve.paramIndex;
+                    publishedPlugin = curve.pluginId;
+                }
+
+        const float flatRatio  = flat.first  > 1.0e-5f ? flat.second  / flat.first  : 0.0f;
+        const float sweptRatio = swept.first > 1.0e-5f ? swept.second / swept.first : 1.0f;
+
+        check (utf8 ("音源参数曲线被发布到引擎，并且真的把插件参数压下去了"),
+               instance > 0 && publishedParam == 0 && publishedPlugin == instance
+                 && flatRatio > 0.8f && sweptRatio < 0.6f,
+               utf8 ("发布参数 ") + juce::String (publishedParam)
+                 + utf8 (" / 前后半比 ") + juce::String (flatRatio, 2)
+                 + utf8 (" → ") + juce::String (sweptRatio, 2));
+
+        engine.setPluginHost (nullptr);
+
+        //-- (4) 电平计要自己落回零 ------------------------------------------
+        // The bar used to be a maximum that never came down: every render path
+        // stored peaks with `jmax`, and the only decay was the idle branch of
+        // the device callback — which a rolling-but-silent transport never
+        // reached. The fall is now per block and expressed in dB per second, so
+        // it is the same fall at any buffer size.
+        {
+            LayerStack mt;
+            RackModel  mr;
+            const int meterSlot = mr.getFirstSlotId();
+
+            mt.addLayer (utf8 ("电平"), palette::layer1);
+            mt.setLayerOutputSlot (0, meterSlot);
+            mt.getLayer (0)->addNote ({ 0, 60, 0.0, 4.0, 0.9f });
+
+            PlaybackEngine me;
+            me.setSampleRate (44100.0);
+            me.prepareToPlay (44100.0, 512);
+            me.publishSchedule (mt, mr, 120.0, 0.0, nullptr);
+
+            auto arm = [&]
+            {
+                // A block, not a window: the block path is the one that feeds the
+                // meters (a window is an offline probe, not a listening session).
+                me.resetMixState();
+                me.setPositionBeats (0.5);
+
+                juce::AudioBuffer<float> buffer (2, 512);
+                buffer.clear();
+
+                me.renderNextBlock (buffer, 512);
+
+                return juce::jmax (me.getMasterPeak (0), me.getMasterPeak (1));
+            };
+
+            const float loud = arm();
+
+            // One second of fall, measured in two different block sizes. The
+            // law is -50 dB/s, so both should land on about 0.32 % of the peak.
+            const auto fallOneSecond = [&] (int blockSize)
+            {
+                const float before = arm();
+                const int   blocks = (int) std::lround (44100.0 / (double) blockSize);
+
+                for (int i = 0; i < blocks; ++i)
+                    me.decayMeters (blockSize);
+
+                const float after = me.getMasterPeak (0);
+                return before > 1.0e-6f ? after / before : 0.0f;
+            };
+
+            const float fall512 = fallOneSecond (512);
+            const float fall256 = fallOneSecond (256);
+            const float expected = (float) std::pow (10.0, -2.5);
+
+            check (utf8 ("电平每秒落 50 dB，且与缓冲大小无关"),
+                   loud > 0.01f
+                     && std::abs (fall512 - expected) < expected * 0.10f
+                     && std::abs (fall256 - fall512) < expected * 0.05f,
+                   utf8 ("峰值 ") + juce::String (loud, 4)
+                     + utf8 (" / 512 ") + juce::String (fall512, 5)
+                     + utf8 (" / 256 ") + juce::String (fall256, 5)
+                     + utf8 (" / 应为 ") + juce::String (expected, 5));
+
+            // And it really reaches zero, which is what "不归零" was about.
+            arm();
+
+            for (int i = 0; i < 400; ++i)          // ~4.6 s of 512-frame blocks
+                me.decayMeters (512);
+
+            check (utf8 ("安静下来之后电平回到零，窗口也可以停止重绘"),
+                   me.getMasterPeak (0) < 1.0e-4f && ! me.hasMeters(),
+                   utf8 ("peak ") + juce::String (me.getMasterPeak (0), 6));
+        }
+    } ();
+
+    //-- Phase 43: five reports -------------------------------------------------
+    [&]
+    {
+        //-- (1) 混音台在前台时，空格还得能开始/停止走带 ----------------------
+        // Same hole Phase 42 plugged for a plugin's editor: the console is its
+        // own top-level window, so its keys never reach this component.
+        if (! isMixerWindowOpen())
+            toggleMixerWindow();
+
+        const bool mixerOpen = isMixerWindowOpen() && mixerWindow != nullptr;
+        const bool forwards  = mixerOpen && mixerWindow->hasKeyForwarder();
+
+        const bool wasEngaged = audio.isTransportEngaged();
+        const bool claimed    = forwards && pluginForwarder.keyPressed (
+                                            juce::KeyPress (juce::KeyPress::spaceKey),
+                                            mixerWindow.get());
+        const bool moved      = audio.isTransportEngaged() != wasEngaged;
+
+        if (audio.isTransportEngaged())
+            stopTransport();
+
+        if (isMixerWindowOpen())
+            toggleMixerWindow();               // leave the session as we found it
+
+        check (utf8 ("混音台窗口在前台时，空格仍然开始/停止走带"),
+               mixerOpen && forwards && claimed && moved,
+               ! mixerOpen ? utf8 ("窗口没打开")
+                           : (forwards ? utf8 ("窗口已接管按键") : utf8 ("窗口没有按键转发")));
+
+        //-- (2) 文件树上沿的起始高度 -----------------------------------------
+        // 250 design px showed a header and two rows. The check is on the stored
+        // height, not on the component: a component's height depends on the
+        // window it happens to be in, this number IS the setting.
+        check (utf8 ("文件树上沿的起始高度抬高了，图层列表仍留着地板"),
+               getFilePaneHeight() >= ui::px (370)
+                 && filePanel.getHeight() >= ui::px (330)
+                 && layerPanel.getHeight() >= ui::px (150),
+               utf8 ("文件栏 ") + juce::String (getFilePaneHeight())
+                 + utf8 (" / 图上 ") + juce::String (filePanel.getHeight())
+                 + utf8 (" / 图层 ") + juce::String (layerPanel.getHeight()));
+
+        //-- (3) 琴键和电脑键盘必须打向同一台音源 -----------------------------
+        {
+            auto* layer = stack.getActiveLayer();
+
+            if (layer == nullptr)
+            {
+                check (utf8 ("Phase 43 需要一个活动图层"), false, "no layer");
+                return;
+            }
+
+            const int layerSlot = routing::layerSlotId (*layer, rack);
+            const int spotSlot  = rack.addSynth();      // a second instrument
+
+            if (spotSlot < 0)
+            {
+                check (utf8 ("Phase 43 需要一个第二音源"), false, "addSynth failed");
+                return;
+            }
+
+            focusSynth (spotSlot);
+
+            int  heard = -1;
+            auto saved = pianoRoll.onAuditionRequested;
+
+            pianoRoll.onAuditionRequested = [&heard] (int slotId, int, float, bool)
+            {
+                heard = slotId;
+            };
+
+            pianoRoll.auditionPitchOnActiveLayer (60, false);
+            pianoRoll.onAuditionRequested = saved;
+
+            const int keyboardTarget = getLiveTargetSlot();
+
+            focusSynth (-1);
+
+            check (utf8 ("选中另一台音源时，点钢琴窗琴键和敲电脑键盘打向同一台音源"),
+                   spotSlot != layerSlot && heard == spotSlot && keyboardTarget == spotSlot,
+                   utf8 ("琴键 ") + juce::String (heard)
+                     + utf8 (" / 键盘 ") + juce::String (keyboardTarget)
+                     + utf8 (" / 图层默认 ") + juce::String (layerSlot));
+
+            rack.removeSlot (spotSlot);
+        }
+
+        //-- (4) 效果器可以换位置，换的是真正的处理顺序 -----------------------
+        {
+            MixerModel mm;
+            LayerStack t;
+            RackModel  r;
+
+            const int sid = r.getFirstSlotId();
+
+            t.addLayer (utf8 ("效果器顺序"), palette::layer1);
+            t.setLayerOutputSlot (0, sid);
+            t.getLayer (0)->addNote ({ 0, 60, 0.0, 8.0, 0.9f });
+
+            // Into channel 1, so the inserts have something to process: a synth
+            // that bypasses the console never meets an insert.
+            r.setMixerChannel (sid, 0);
+
+            PlaybackEngine e;
+            e.setSampleRate (44100.0);
+            e.prepareToPlay (44100.0, 512);
+
+            auto renderRms = [&]
+            {
+                e.publishSchedule (t, r, 120.0, 0.0, &mm);
+                e.resetMixState();
+
+                juce::AudioBuffer<float> buffer (2, 88200);
+                buffer.clear();
+                e.renderWindow (0.0, 88200, buffer, nullptr);
+
+                return buffer.getRMSLevel (0, 0, 88200);
+            };
+
+            // 驱动 → 低通 and 低通 → 驱动 are two different sounds from the same
+            // two boxes. If moving one did nothing, these numbers would match.
+            mm.setInsertType (0, 0, fx::Type::drive);
+            mm.setInsertType (0, 1, fx::Type::lowPass);
+            mm.setInsertParam (0, 0, 0.95f, 0.0f);
+            mm.setInsertParam (0, 1, 0.25f, 0.0f);
+
+            const float driveFirst = renderRms();
+
+            const bool chainMoved = mm.moveInsert (0, 0, 1);
+
+            const float filterFirst = renderRms();
+
+            const float biggest = juce::jmax (driveFirst, filterFirst);
+            const float diff    = biggest > 1.0e-6f ? std::abs (driveFirst - filterFirst) / biggest : 0.0f;
+
+            check (utf8 ("效果器换位置以后，处理链的顺序也换了（声音跟着变）"),
+                   chainMoved
+                     && mm.getInsert (0, 0).type == fx::Type::lowPass
+                     && mm.getInsert (0, 1).type == fx::Type::drive
+                     && driveFirst > 1.0e-4f && filterFirst > 1.0e-4f
+                     && diff > 0.02f,
+                   utf8 ("驱动在前 ") + juce::String (driveFirst, 4)
+                     + utf8 (" / 低通在前 ") + juce::String (filterFirst, 4)
+                     + utf8 (" / 差 ") + juce::String (diff * 100.0f, 1) + "%");
+        }
+
+        //-- (5) 四个控件各管自己的自动化，不再挂通道菜单 ---------------------
+        {
+            const int sid = rack.getFirstInstrumentSlotId();
+
+            if (sid < 0)
+            {
+                check (utf8 ("Phase 43 需要一个音源"), false, "no instrument");
+                return;
+            }
+
+            rack.setMixerChannel (sid, 0);
+
+            struct MenuSummary
+            {
+                juce::StringArray texts;
+                bool hasSubmenu = false;
+                bool offTopic   = false;
+            };
+
+            auto describe = [&] (MixerPanel::StripControl control)
+            {
+                juce::PopupMenu menu;
+                mixerPanel.fillControlMenu (menu, 0, control);
+
+                MenuSummary summary;
+
+                for (juce::PopupMenu::MenuItemIterator it (menu); it.next();)
+                {
+                    const auto& item = it.getItem();
+
+                    if (item.isSeparator)
+                        continue;
+
+                    if (item.subMenu != nullptr)
+                        summary.hasSubmenu = true;
+
+                    summary.texts.add (item.text);
+
+                    // The channel menu items that used to live in here.
+                    if (item.text.contains (utf8 ("通道")) || item.text.contains (utf8 ("删除"))
+                        || item.text.contains (utf8 ("重置")))
+                        summary.offTopic = true;
+                }
+
+                return summary;
+            };
+
+            const auto fader = describe (MixerPanel::StripControl::fader);
+            const auto pan   = describe (MixerPanel::StripControl::pan);
+            const auto mute  = describe (MixerPanel::StripControl::mute);
+            const auto solo  = describe (MixerPanel::StripControl::solo);
+
+            const bool eachHasItsOwn =
+                   fader.texts.joinIntoString ("|").contains (utf8 ("创建音量自动化"))
+                && pan.texts.joinIntoString ("|").contains (utf8 ("创建声相自动化"))
+                && mute.texts.joinIntoString ("|").contains (utf8 ("创建静音自动化"))
+                && solo.texts.joinIntoString ("|").contains (utf8 ("创建独奏自动化"));
+
+            const bool clean = ! (fader.hasSubmenu || pan.hasSubmenu || mute.hasSubmenu
+                                   || solo.hasSubmenu || fader.offTopic || pan.offTopic
+                                   || mute.offTopic || solo.offTopic);
+
+            check (utf8 ("音量 / 声相 / 静音 / 独奏 的右键菜单各只有自己那一行自动化，不再挂通道菜单"),
+                   eachHasItsOwn && clean,
+                   fader.texts.joinIntoString (utf8 (" / ")));
+
+            // And the line really works: same table the strip and the card use.
+            applyStripAutomationChoice (0, MixerPanel::StripControl::mute, 100);
+
+            const bool muteTrack = automation.contains (AutomationOwner::slot, sid,
+                                                        (int) SlotAutomationTarget::mute);
+
+            applyStripAutomationChoice (0, MixerPanel::StripControl::solo, 100);
+
+            check (utf8 ("静音 / 独奏 的自动化真的能建出轨道"),
+                   muteTrack
+                     && automation.contains (AutomationOwner::slot, sid,
+                                             (int) SlotAutomationTarget::solo),
+                   utf8 ("轨道数 ") + juce::String (automation.getNumTracks()));
+
+            automation.removeTracksForOwner (AutomationOwner::slot, sid);
+            rack.findSlot (sid)->automationFor (SlotAutomationTarget::mute).setEnabled (false);
+            rack.findSlot (sid)->automationFor (SlotAutomationTarget::solo).setEnabled (false);
+        }
+
+        //-- (6) 静音是一道闸 / (7) 声相是加法 / (8) 独奏让别的槽闭嘴 ----------
+        {
+            LayerStack t;
+            RackModel  r;
+
+            const int sid = r.getFirstSlotId();
+
+            t.addLayer (utf8 ("静音"), palette::layer1);
+            t.setLayerOutputSlot (0, sid);
+            t.getLayer (0)->addNote ({ 0, 60, 0.0, 8.0, 0.9f });
+
+            auto* slot = r.findSlot (sid);
+
+            if (slot == nullptr)
+            {
+                check (utf8 ("Phase 43 需要一个槽"), false, "no slot");
+                return;
+            }
+
+            PlaybackEngine e;
+            e.setSampleRate (44100.0);
+            e.prepareToPlay (44100.0, 512);
+
+            auto renderPeak = [&] (int side)
+            {
+                e.publishSchedule (t, r, 120.0, 0.0, nullptr);
+                e.resetMixState();
+
+                juce::AudioBuffer<float> buffer (2, 88200);
+                buffer.clear();
+                e.renderWindow (0.0, 88200, buffer, nullptr);
+
+                return buffer.getMagnitude (side, 0, 88200);
+            };
+
+            const float openPeak = renderPeak (0);
+
+            //-- (6) mute: a gate at 0.5, not a second volume --------------------
+            auto& muteLane = slot->automationFor (SlotAutomationTarget::mute);
+            muteLane.resetFlat (0.0f, 8.0);
+            muteLane.setEnabled (true);
+
+            const float mutedPeak = renderPeak (0);
+
+            muteLane.setEnabled (false);
+
+            check (utf8 ("静音曲线拉到底就是真的没声音（闸，不是第二个音量）"),
+                   openPeak > 0.01f && mutedPeak < 1.0e-4f,
+                   utf8 ("开 ") + juce::String (openPeak, 4)
+                     + utf8 (" / 关 ") + juce::String (mutedPeak, 6));
+
+            //-- (7) pan: added to the strip's pan, -1..+1 ----------------------
+            auto& panLane = slot->automationFor (SlotAutomationTarget::pan);
+            panLane.resetFlat (1.0f, 8.0);         // curve 1.0 = hard right
+            panLane.setEnabled (true);
+
+            const float leftPeak  = renderPeak (0);
+            const float rightPeak = renderPeak (1);
+
+            panLane.setEnabled (false);
+
+            check (utf8 ("声相曲线是加法：拉到右端，左声道就没有了"),
+                   rightPeak > 0.01f && leftPeak < rightPeak * 0.2f,
+                   utf8 ("左 ") + juce::String (leftPeak, 4)
+                     + utf8 (" / 右 ") + juce::String (rightPeak, 4));
+        }
+
+        //-- (8) solo ----------------------------------------------------------
+        {
+            LayerStack t;
+            RackModel  r;
+
+            const int a = r.getFirstSlotId();
+            const int b = r.addSynth();
+
+            if (b < 0)
+            {
+                check (utf8 ("Phase 43 需要第二个音源"), false, "addSynth failed");
+                return;
+            }
+
+            // Two identical sheets on two identical synths: summed, they are one
+            // signal at twice the amplitude. Solo one of them and the peak halves
+            // — a ratio, not an amplitude, so the oscillator's own level drops out.
+            t.addLayer (utf8 ("A"), palette::layer1);
+            t.addLayer (utf8 ("B"), palette::layer1);
+            t.setLayerOutputSlot (0, a);
+            t.setLayerOutputSlot (1, b);
+            t.getLayer (0)->addNote ({ 0, 60, 0.0, 8.0, 0.9f });
+            t.getLayer (1)->addNote ({ 0, 60, 0.0, 8.0, 0.9f });
+
+            auto* slotA = r.findSlot (a);
+
+            if (slotA == nullptr)
+            {
+                check (utf8 ("Phase 43 需要一个槽"), false, "no slot");
+                return;
+            }
+
+            PlaybackEngine e;
+            e.setSampleRate (44100.0);
+            e.prepareToPlay (44100.0, 512);
+
+            auto renderPeak = [&]
+            {
+                e.publishSchedule (t, r, 120.0, 0.0, nullptr);
+                e.resetMixState();
+
+                juce::AudioBuffer<float> buffer (2, 44100);
+                buffer.clear();
+                e.renderWindow (0.0, 44100, buffer, nullptr);
+
+                return buffer.getMagnitude (0, 0, 44100);
+            };
+
+            const float both = renderPeak();
+
+            auto& soloLane = slotA->automationFor (SlotAutomationTarget::solo);
+            soloLane.resetFlat (1.0f, 8.0);
+            soloLane.setEnabled (true);
+
+            const float soloed = renderPeak();
+
+            soloLane.setEnabled (false);
+
+            const float ratio = both > 1.0e-5f ? soloed / both : 0.0f;
+
+            check (utf8 ("独奏曲线打开以后，没被独奏的音源闭嘴（峰值减半）"),
+                   both > 0.01f && ratio > 0.40f && ratio < 0.60f,
+                   utf8 ("两台 ") + juce::String (both, 4)
+                     + utf8 (" / 独奏一台 ") + juce::String (soloed, 4)
+                     + utf8 (" / 比 ") + juce::String (ratio, 2));
+        }
+    } ();
+
+    //-- Phase 29: a block is a window — trim both ends, fade both ends ------
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("Phase 29 needs a layer", false, "no active layer");
+            return;
+        }
+
+        const int index = stack.getActiveLayerIndex();
+        const int a = pianoRoll.addSampleAt (80.0, 55, phase27A);
+        const int b = pianoRoll.addSampleAt (86.0, 62, phase27A);
+
+        auto* clip = layer->findSample (a);
+
+        if (clip == nullptr || b <= 0)
+        {
+            check ("Phase 29 clip fixtures exist", false, "addSampleAt failed");
+            return;
+        }
+
+        const double natural = clip->lengthBeats;     // 1.0 s at 120 BPM = 2.0 beats
+        const double start   = clip->startBeat;
+
+        //-- 3: the tail stops at the end of the file -------------------------
+        pianoRoll.simulateSampleTrim (a, start + 12.0, true);
+        const double afterLonger = clip->lengthBeats;
+
+        check ("A block cannot be dragged longer than the file it plays",
+               std::abs (afterLonger - natural) < 1.0e-6,
+               utf8 ("自然 ") + juce::String (natural, 3) + utf8 (" 拖到 12 拍后 → ")
+                 + juce::String (afterLonger, 3));
+
+        pianoRoll.simulateSampleTrim (a, start + natural * 0.5, true);
+        const double afterShorter = clip->lengthBeats;
+
+        pianoRoll.simulateSampleTrim (a, start + 12.0, true);
+        const double backOut = clip->lengthBeats;
+
+        check ("...but a block at full length can still be shortened, then back out to the limit",
+               afterShorter < natural - 1.0e-6 && std::abs (backOut - natural) < 1.0e-6,
+               juce::String (natural, 3) + utf8 (" → ") + juce::String (afterShorter, 3)
+                 + utf8 (" → ") + juce::String (backOut, 3));
+
+        //-- 3: the head trims the WINDOW, not the start of the file ---------
+        const double endBefore    = clip->endBeat();
+        const double offsetBefore = clip->sourceOffsetSeconds;
+
+        pianoRoll.simulateSampleTrim (a, start + 0.5, false);
+
+        const double expectedOffset = 0.5 * 60.0 / juce::jmax (1.0, audio.getBpm());
+
+        check ("Trimming the head moves the window and leaves the tail where it was",
+               std::abs (clip->sourceOffsetSeconds - expectedOffset) < 1.0e-6
+                 && std::abs (clip->endBeat() - endBefore) < 1.0e-6
+                 && std::abs (clip->startBeat - (start + 0.5)) < 1.0e-6,
+               "offset " + juce::String (offsetBefore, 4) + utf8 (" → ")
+                 + juce::String (clip->sourceOffsetSeconds, 4) + utf8 (" 秒, 尾 ")
+                 + juce::String (clip->endBeat(), 3));
+
+        pianoRoll.simulateSampleTrim (a, start - 8.0, false);
+
+        check ("The head cannot be dragged back past the first sample of the file",
+               std::abs (clip->sourceOffsetSeconds) < 1.0e-6
+                 && std::abs (clip->startBeat - start) < 1.0e-6,
+               "offset " + juce::String (clip->sourceOffsetSeconds, 4) + utf8 (", 起点 ")
+                 + juce::String (clip->startBeat, 3));
+
+        //-- 4: two independent fades ----------------------------------------
+        pianoRoll.simulateSampleFade (a, false, 0.5);
+        pianoRoll.simulateSampleFade (a, true, 1.0);
+
+        check ("Both fades can be set independently",
+               std::abs (clip->fadeInBeats - 0.5) < 1.0e-9
+                 && std::abs (clip->fadeOutBeats - 1.0) < 1.0e-9,
+               utf8 ("淡入 ") + juce::String (clip->fadeInBeats, 3)
+                 + utf8 (", 淡出 ") + juce::String (clip->fadeOutBeats, 3));
+
+        pianoRoll.simulateSampleFade (a, false, 99.0);
+        const double clampedFade = clip->fadeInBeats;
+        pianoRoll.simulateSampleFade (a, false, 0.5);
+
+        check ("A fade cannot be longer than the block it lives in",
+               std::abs (clampedFade - clip->lengthBeats) < 1.0e-9,
+               juce::String (clampedFade, 3) + utf8 (" vs 块长 ")
+                 + juce::String (clip->lengthBeats, 3));
+
+        // The handle is a pixel position derived from the fade: if these two
+        // disagree, the thing you grab is not the thing you set.
+        const auto rect    = pianoRoll.getSampleScreenBounds (index, a);
+        const float beatW  = (float) (rect.getWidth() / juce::jmax (1.0e-9, clip->lengthBeats));
+        const float xIn    = pianoRoll.getSampleFadeHandleX (index, a, false);
+        const float xOut   = pianoRoll.getSampleFadeHandleX (index, a, true);
+
+        check ("Each fade handle sits on the fade it sets",
+               std::abs (xIn  - (rect.getX() + 0.5f * beatW)) < 0.75f
+                 && std::abs (xOut - (rect.getRight() - 1.0f * beatW)) < 0.75f
+                 && xIn < xOut,
+               "in " + juce::String (xIn, 1) + "/" + juce::String (rect.getX() + 0.5f * beatW, 1)
+                 + ", out " + juce::String (xOut, 1) + "/" + juce::String (rect.getRight() - beatW, 1));
+
+        //-- 2: one sweep, both kinds ----------------------------------------
+        const int noteId = pianoRoll.addNoteAt (86.0, 62);
+        const auto noteRect = pianoRoll.getNoteScreenBounds (index, noteId);
+        const auto clipRect = pianoRoll.getSampleScreenBounds (index, b);
+
+        if (noteId <= 0 || noteRect.isEmpty() || clipRect.isEmpty())
+        {
+            check ("Phase 29 marquee fixtures exist", false, "note or clip has no rectangle");
+            return;
+        }
+
+        const auto sweep = clipRect.getUnion (noteRect).expanded (2.0f);
+        const bool swept = pianoRoll.simulateMarquee (sweep);
+
+        const auto& noteHits = pianoRoll.getSelection();
+        const auto& clipHits = pianoRoll.getSampleSelection();
+
+        check ("A marquee grabs notes and clips in one sweep",
+               swept
+                 && std::find (noteHits.begin(), noteHits.end(), noteId) != noteHits.end()
+                 && std::find (clipHits.begin(), clipHits.end(), b) != clipHits.end(),
+               utf8 ("音符 ") + juce::String ((int) noteHits.size())
+                 + utf8 (", 采样 ") + juce::String ((int) clipHits.size()));
+
+        // Delete has to take the WHOLE mixed selection: keeping half of it would
+        // be the worst kind of surprise, because the half left behind is the
+        // half you were not looking at.
+        const int notesBefore = (int) layer->getNotes().size();
+        const int clipsBefore = layer->getSampleCount();
+
+        pianoRoll.keyPressed (juce::KeyPress (juce::KeyPress::deleteKey));
+
+        check ("Delete takes the whole mixed selection, not half of it",
+               (int) layer->getNotes().size() == notesBefore - (int) noteHits.size()
+                 && layer->getSampleCount() == clipsBefore - (int) clipHits.size()
+                 && pianoRoll.getSelection().empty()
+                 && pianoRoll.getSampleSelection().empty(),
+               utf8 ("音符 ") + juce::String (notesBefore) + "→"
+                 + juce::String ((int) layer->getNotes().size())
+                 + utf8 (", 采样 ") + juce::String (clipsBefore) + "→"
+                 + juce::String (layer->getSampleCount()));
+
+        //-- 1: the greyed grid is not a dead end ----------------------------
+        const int slotId = rack.getFirstInstrumentSlotId();
+        focusSynth (slotId);
+
+        const bool chipShown = ! pianoRoll.getSpotlightExitChipBounds().isEmpty();
+        const bool pressed   = pianoRoll.keyPressed (juce::KeyPress (juce::KeyPress::escapeKey));
+
+        check ("Esc clears the spotlight, so the highlight can always come back off",
+               slotId >= 0 && chipShown && pressed
+                 && focusedSlotId < 0 && pianoRoll.getFocusSlotId() < 0
+                 && pianoRoll.getSpotlightExitChipBounds().isEmpty(),
+               juce::String (chipShown ? utf8 ("有") : utf8 ("无")) + utf8 (" chip, 清除后 focus ")
+                 + juce::String (pianoRoll.getFocusSlotId()));
+
+        // The rack's own item was a one-way door: it set the spotlight and
+        // nothing could unset it from there either.
+        applyRackCardChoice (34, slotId);
+        const bool lit = focusedSlotId == slotId;
+        applyRackCardChoice (34, slotId);
+
+        check (utf8 ("The rack's 高亮 item is a toggle now"),
+               lit && focusedSlotId < 0,
+               juce::String (lit ? utf8 ("亮起") : utf8 ("没亮")) + utf8 (", 再点一次 → focus ")
+                 + juce::String (focusedSlotId));
+    } ();
+
+    //-- Phase 29: v15 keeps the window offset and the fades ------------------
+    [&]
+    {
+        LayerStack s1;
+        RackModel  r1;
+
+        s1.addLayer (utf8 ("窗口"), palette::layer1);
+
+        SampleEvent clip;
+        clip.name        = "window";
+        clip.startBeat   = 2.0;
+        clip.lengthBeats = 1.5;
+        clip.pitch       = 60;
+        clip.laneSpan    = 2;
+        clip.sourceOffsetSeconds = 0.375;
+        clip.fadeInBeats  = 0.25;
+        clip.fadeOutBeats = 0.5;
+
+        s1.getLayer (0)->addSample (clip);
+
+        const auto xml = project::toXmlText (s1, r1, 120.0);
+
+        LayerStack s2;
+        RackModel  r2;
+        double bpm2 = 0.0;
+        juce::String error;
+
+        const bool ok = project::fromXmlText (xml, s2, r2, bpm2, error, nullptr, nullptr, nullptr);
+
+        const auto* back = (s2.getLayer (0) != nullptr && s2.getLayer (0)->getSampleCount() == 1)
+                             ? &s2.getLayer (0)->getSamples().front() : nullptr;
+
+        check ("A v15 project keeps the clip window and its fades",
+               ok && back != nullptr
+                 && std::abs (back->sourceOffsetSeconds - 0.375) < 1.0e-9
+                 && std::abs (back->fadeInBeats - 0.25) < 1.0e-9
+                 && std::abs (back->fadeOutBeats - 0.5) < 1.0e-9,
+               ok && back != nullptr
+                 ? "offset " + juce::String (back->sourceOffsetSeconds, 4)
+                     + ", fade " + juce::String (back->fadeInBeats, 3) + "/"
+                     + juce::String (back->fadeOutBeats, 3)
+                 : error);
+    } ();
+
+    //-- Phase 30: the waveform is CUT by a trim, never rescaled ---------------
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("Phase 30 needs a layer", false, "no active layer");
+            return;
+        }
+
+        const int index = stack.getActiveLayerIndex();
+        const int id    = pianoRoll.addSampleAt (92.0, 50, phase27A);   // 1 s @ 120 BPM = 2 beats
+
+        auto* clip = layer->findSample (id);
+
+        if (clip == nullptr)
+        {
+            check ("Phase 30 clip fixture exists", false, "addSampleAt failed");
+            return;
+        }
+
+        const double fileBeats   = SampleEvent::beatsForSeconds (1.0, audio.getBpm());
+        const double startBefore = clip->startBeat;
+
+        // A block that outruns its file: exactly what dropping a short file onto
+        // the grid produces, because the drop rounds the length UP to the grid.
+        clip->lengthBeats = fileBeats + 1.5;
+
+        const float widthBefore = pianoRoll.getSampleScreenBounds (index, id).getWidth();
+        const int   colsBefore  = pianoRoll.sampleWaveColumnCount (id);
+
+        check ("A block longer than its file shows a wave that stops at the file",
+               colsBefore > 0 && (float) colsBefore < widthBefore - 1.0f,
+               utf8 ("波 ") + juce::String (colsBefore) + utf8 (" px / 块 ")
+                 + juce::String (widthBefore, 1) + " px");
+
+        //-- 3: the trim cuts the picture, it does not redraw it --------------
+        pianoRoll.simulateSampleTrim (id, startBefore + fileBeats + 0.5, true);
+
+        const float widthAfter = pianoRoll.getSampleScreenBounds (index, id).getWidth();
+        const int   colsAfter  = pianoRoll.sampleWaveColumnCount (id);
+
+        // The block got narrower; the wave did NOT. That is the difference
+        // between "cut" and "squeeze", and it is the whole point: the same audio
+        // has to keep the same pixels so a trim cannot be mistaken for a
+        // different sound.
+        check ("Trimming the tail cuts the waveform instead of squeezing it",
+               widthAfter < widthBefore - 1.0f && colsAfter == colsBefore,
+               utf8 ("块 ") + juce::String (widthBefore, 1) + utf8 ("→")
+                 + juce::String (widthAfter, 1) + utf8 (" px, 波 ")
+                 + juce::String (colsBefore) + utf8 ("→") + juce::String (colsAfter) + " px");
+
+        //-- 2: a trim is reversible ------------------------------------------
+        pianoRoll.simulateSampleTrim (id, startBefore + 0.5, false);   // head in by half a beat
+
+        const double trimmedStart = clip->startBeat;
+        const bool   restored     = pianoRoll.restoreSampleLength (id);
+
+        const float widthRestored = pianoRoll.getSampleScreenBounds (index, id).getWidth();
+        const int   colsRestored  = pianoRoll.sampleWaveColumnCount (id);
+
+        check (utf8 ("恢复原始长度 puts the window back on the whole file"),
+               restored
+                 && std::abs (clip->sourceOffsetSeconds) < 1.0e-9
+                 && std::abs (clip->lengthBeats - fileBeats) < 1.0e-6
+                 && std::abs (clip->startBeat - startBefore) < 1.0e-6,
+               utf8 ("起点 ") + juce::String (startBefore, 3) + utf8 ("→")
+                 + juce::String (trimmedStart, 3) + utf8 ("→") + juce::String (clip->startBeat, 3)
+                 + utf8 (", offset ") + juce::String (clip->sourceOffsetSeconds, 4)
+                 + utf8 (", 长 ") + juce::String (clip->lengthBeats, 3));
+
+        // ...and the restored block is exactly the file: the wave fills it edge
+        // to edge, which is the 1:1 case the fixed scale has to hit dead on.
+        check ("A restored block is exactly as wide as its audio",
+               colsRestored > 0 && std::abs ((float) colsRestored - widthRestored) <= 1.0f,
+               utf8 ("波 ") + juce::String (colsRestored) + utf8 (" px / 块 ")
+                 + juce::String (widthRestored, 1) + " px");
+
+        pianoRoll.setSampleSelection ({ id });
+        pianoRoll.deleteSelectedSamples();
+    } ();
+
+    //-- Phase 30: the spotlight highlights, it does not veil -----------------
+    [&]
+    {
+        const int slotId = rack.getFirstInstrumentSlotId();
+
+        if (slotId < 0)
+        {
+            check ("Phase 30 needs an instrument to focus", false, "no instrument slot");
+            return;
+        }
+
+        // Photographed, not asserted about a flag: the claim is about brightness,
+        // so the check measures brightness. Same component, same size, same
+        // state except the one variable under test.
+        const auto previousBounds = pianoRoll.getBounds();
+        pianoRoll.setSize (ui::px (900), ui::px (420));
+
+        auto averageBrightness = [&] (const juce::Image& img)
+        {
+            // The whole frame, not getGridArea() (private): every part of the
+            // roll that is not a note is constant between the two shots, so an
+            // average over all of it still isolates the one thing that changed.
+            const auto area = img.isValid() ? img.getBounds().reduced (ui::px (4))
+                                            : juce::Rectangle<int>();
+
+            if (area.isEmpty())
+                return 0.0;
+
+            juce::Image::BitmapData px (img, juce::Image::BitmapData::readOnly);
+
+            double sum = 0.0;
+            int    n   = 0;
+
+            for (int y = area.getY(); y < area.getBottom(); y += 3)
+                for (int x = area.getX(); x < area.getRight(); x += 3)
+                {
+                    sum += px.getPixelColour (x, y).getBrightness();
+                    ++n;
+                }
+
+            return n > 0 ? sum / (double) n : 0.0;
+        };
+
+        focusSynth (-1);
+        const auto  plainShot = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
+        const double plainAvg = averageBrightness (plainShot);
+
+        focusSynth (slotId);
+        const auto  litShot = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
+        const double litAvg = averageBrightness (litShot);
+
+        check ("Focusing a synth no longer darkens the piano roll",
+               plainAvg > 0.02 && litAvg > plainAvg * 0.92,
+               utf8 ("亮度 ") + juce::String (plainAvg, 3) + utf8 (" → ")
+                 + juce::String (litAvg, 3));
+
+        //-- 1: and the grid itself is the way out ----------------------------
+        const bool dismissed = pianoRoll.dismissSpotlight();
+
+        check ("Clicking the empty grid ends the spotlight",
+               dismissed && focusedSlotId < 0 && pianoRoll.getFocusSlotId() < 0,
+               juce::String (dismissed ? utf8 ("已退出") : utf8 ("没反应"))
+                 + utf8 (", focus ") + juce::String (pianoRoll.getFocusSlotId()));
+
+        pianoRoll.setBounds (previousBounds);
+        focusSynth (-1);
+    } ();
+
+    //-- Phase 31: the ruler zooms around the point you pressed --------------
+    [&]
+    {
+        const auto   grid           = pianoRoll.getGridBounds();
+        const float  anchorX        = grid.getX() + grid.getWidth() * 0.62f;
+        const float  elsewhereX     = grid.getX() + grid.getWidth() * 0.22f;
+        const float  previousWidth  = pianoRoll.getBeatWidth();
+        const double previousScroll = pianoRoll.getScrollBeats();
+
+        // Park the view where it can scroll both ways: a clamped scroll is the
+        // one case where the anchor legitimately cannot be honoured, and a test
+        // that sat on it would pass for the wrong reason.
+        pianoRoll.setScrollBeats (8.0);
+
+        const auto beatAt = [&] (float x)
+        {
+            return pianoRoll.getScrollBeats()
+                     + (double) (x - grid.getX()) / (double) pianoRoll.getBeatWidth();
+        };
+
+        const double anchorBefore    = beatAt (anchorX);
+        const double elsewhereBefore = beatAt (elsewhereX);
+
+        const bool   zoomedIn = pianoRoll.simulateRulerZoom (anchorX, 140.0f);
+        const double anchorIn = beatAt (anchorX);
+        const double elsewhereIn = beatAt (elsewhereX);
+        const float  widthIn  = pianoRoll.getBeatWidth();
+
+        // Zoom back out, but not past the point where the scroll would have to
+        // go negative: there is no music left of beat 0, and that is the one
+        // case where the anchor legitimately gives way.
+        const bool   zoomedOut = pianoRoll.simulateRulerZoom (anchorX, -80.0f);
+        const double anchorOut = beatAt (anchorX);
+        const float  widthOut  = pianoRoll.getBeatWidth();
+
+        check ("Right-dragging the ruler zooms around the point you pressed",
+               zoomedIn && zoomedOut && widthIn > previousWidth * 1.5f && widthOut < widthIn
+                 && std::abs (anchorIn  - anchorBefore) < 1.0e-6
+                 && std::abs (anchorOut - anchorBefore) < 1.0e-6,
+               utf8 ("锚点拍 ") + juce::String (anchorBefore, 4) + utf8 (" → ")
+                 + juce::String (anchorIn, 4) + utf8 (" → ") + juce::String (anchorOut, 4)
+                 + utf8 (", 宽度 ") + juce::String (previousWidth, 1) + utf8 (" → ")
+                 + juce::String (widthIn, 1) + utf8 (" → ") + juce::String (widthOut, 1));
+
+        // The other half of the claim: it is a ZOOM, not a pan. A beat away from
+        // the anchor has to move, or "the anchor stays put" would be satisfied
+        // by freezing the whole view.
+        check ("...and everything away from that point moves",
+               std::abs (elsewhereIn - elsewhereBefore) > 0.5,
+               juce::String (elsewhereBefore, 3) + utf8 (" → ") + juce::String (elsewhereIn, 3));
+
+        pianoRoll.setBeatWidth (previousWidth);
+        pianoRoll.setScrollBeats (previousScroll);
+    } ();
+
+    //-- Phase 31: "恢复原始长度" is exact, and snapping cannot spoil it ------
+    const auto phase31Dir = juce::File::getSpecialLocation (juce::File::tempDirectory);
+    const auto phase31A   = phase31Dir.getChildFile ("atomic-phase31-a.wav");
+
+    if (! phase31A.existsAsFile() || phase31A.getSize() < 1024)
+    {
+        // 1.37 s on purpose: at 120 BPM that is 2.74 beats, which is NOT on the
+        // 1/16 grid. A length that snapping could reach would prove nothing.
+        writeTestSampleFile (phase31A, 1.37, 44100.0, 2, 330.0);
+    }
+
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("Phase 31 needs a layer", false, "no active layer");
+            return;
+        }
+
+        const int index = stack.getActiveLayerIndex();
+        const int id    = pianoRoll.addSampleAt (100.0, 45, phase31A);
+
+        auto* clip = layer->findSample (id);
+
+        if (clip == nullptr || clip->audio == nullptr)
+        {
+            check ("Phase 31 clip fixture exists", false, "addSampleAt failed");
+            return;
+        }
+
+        const double exactBeats = SampleEvent::beatsForSeconds (clip->audio->lengthSeconds(),
+                                                                audio.getBpm());
+        const double startBeat  = clip->startBeat;
+
+        check ("A dropped block is exactly as long as its file, not rounded to the grid",
+               std::abs (clip->lengthBeats - exactBeats) < 1.0e-9,
+               utf8 ("块 ") + juce::String (clip->lengthBeats, 4) + utf8 (" / 文件 ")
+                 + juce::String (exactBeats, 4) + utf8 (" 拍"));
+
+        // Shorten it with snapping ON (the drag always snaps), then put it back:
+        // the restored length is the file's, to the last sample — a value the
+        // 1/16 grid can never produce, which is the whole point.
+        pianoRoll.simulateSampleTrim (id, startBeat + 0.75, true);
+        const double trimmed = clip->lengthBeats;
+
+        pianoRoll.setSampleSelection ({ id });
+        const int restored = pianoRoll.restoreSelectedSampleLengths();
+
+        check (utf8 ("恢复原始长度 gives the file's exact length, snapping or not"),
+               restored == 1
+                 && std::abs (clip->lengthBeats - exactBeats) < 1.0e-12
+                 && std::abs (clip->startBeat - startBeat) < 1.0e-12
+                 && std::abs (clip->sourceOffsetSeconds) < 1.0e-12,
+               utf8 ("长 ") + juce::String (trimmed, 4) + utf8 (" → ")
+                 + juce::String (clip->lengthBeats, 6) + utf8 ("（文件 ")
+                 + juce::String (exactBeats, 6) + utf8 ("）"));
+
+        // ...and the same end is reachable by dragging the tail out, even though
+        // no grid point lands on it.
+        pianoRoll.simulateSampleTrim (id, startBeat + 0.5, true);
+        pianoRoll.simulateSampleTrim (id, startBeat + exactBeats + 0.03, true);
+
+        check ("...and the tail can be dragged back to exactly the end of the file",
+               std::abs (clip->lengthBeats - exactBeats) < 1.0e-9,
+               juce::String (clip->lengthBeats, 6) + utf8 (" / ") + juce::String (exactBeats, 6));
+
+        //-- Phase 31: a squeezed block shows its whole file -------------------
+        pianoRoll.setSampleStretchMode (id, StretchMode::tempo);
+
+        const int   columns = pianoRoll.sampleWaveColumnCount (id);
+        const float width   = pianoRoll.getSampleScreenBounds (index, id).getWidth();
+
+        check ("A squeezed block draws its whole file, edge to edge",
+               columns > 0 && std::abs ((float) columns - width) <= 1.0f,
+               utf8 ("波 ") + juce::String (columns) + utf8 (" px / 块 ")
+                 + juce::String (width, 1) + " px");
+
+        //-- Phase 31: the engine publishes the RATIO, not just the mode -------
+        // The DSP above is tested as a pure function; this closes the loop the
+        // pure test cannot reach — that a clip's length really does become the
+        // two numbers the renderer reads.
+        clip->stretchMode = StretchMode::tempo;
+        clip->lengthBeats = exactBeats * 0.5;          // half as long → ratio 2
+        audio.getPlayback().publishSchedule (stack, rack, audio.getBpm(), 0.0, &mixer);
+
+        const auto schedule = audio.getPlayback().getSchedule();
+        const ScheduledClip* frozen = nullptr;
+
+        if (schedule != nullptr)
+            for (const auto& scheduled : schedule->clips)
+                if (scheduled.clipId == id)
+                    frozen = &scheduled;
+
+        check ("The engine freezes a clip's stretch ratio, not just its mode",
+               frozen != nullptr
+                 && std::abs (frozen->stretch.speed - 2.0) < 0.01
+                 && std::abs (frozen->stretch.pitch - 1.0) < 1.0e-9,
+               frozen != nullptr ? utf8 ("speed ") + juce::String (frozen->stretch.speed, 4)
+                                     + utf8 (", pitch ") + juce::String (frozen->stretch.pitch, 4)
+                                 : juce::String ("clip not published"));
+
+        pianoRoll.setSampleSelection ({ id });
+        pianoRoll.deleteSelectedSamples();
+    } ();
+
+    //-- Phase 31: the three stretch modes, measured on a sine ----------------
+    [&]
+    {
+        SampleBuffer sine;
+        sine.sampleRate = 44100.0;
+        sine.channels   = 1;
+
+        const int frames = 44100;               // exactly one second of 440 Hz
+        sine.frames.resize ((size_t) frames);
+
+        for (int i = 0; i < frames; ++i)
+            sine.frames[(size_t) i] = (float) std::sin (juce::MathConstants<double>::twoPi
+                                                          * 440.0 * (double) i / 44100.0);
+
+        constexpr double rate = 44100.0;
+
+        // Two properties of the SOUND, which is the only honest way to test a
+        // DSP change: how often the waveform crosses zero (pitch) and how loud
+        // it still is in a window (whether the source has run out yet).
+        const auto measure = [&] (const clipstretch::Playback& pb,
+                                  double from, double to, double& hz) -> double
+        {
+            double peak = 0.0;
+            int    crossings = 0;
+            double previous = clipstretch::read (sine, pb, 0.0, from).left;
+
+            for (int i = (int) (from * rate); i < (int) (to * rate); ++i)
+            {
+                const auto frame = clipstretch::read (sine, pb, 0.0, (double) i / rate);
+
+                peak = juce::jmax (peak, (double) std::abs (frame.left));
+
+                if (previous <= 0.0 && frame.left > 0.0)
+                    ++crossings;
+
+                previous = frame.left;
+            }
+
+            hz = (to > from) ? (double) crossings / (to - from) : 0.0;
+            return peak;
+        };
+
+        double hzFlat = 0.0, hzTape = 0.0, hzTempo = 0.0, hzPitch = 0.0;
+        const double peakFlat  = measure (clipstretch::Playback::make (StretchMode::none, 2.0),
+                                          0.10, 0.40, hzFlat);
+        const double peakTape  = measure (clipstretch::Playback::make (StretchMode::resample, 2.0),
+                                          0.10, 0.40, hzTape);
+        const double peakTempo = measure (clipstretch::Playback::make (StretchMode::tempo, 2.0),
+                                          0.10, 0.40, hzTempo);
+        const double peakPitch = measure (clipstretch::Playback::make (StretchMode::pitch, 2.0),
+                                          0.10, 0.40, hzPitch);
+
+        double ignored = 0.0;
+        const double tailTape  = measure (clipstretch::Playback::make (StretchMode::resample, 2.0),
+                                          0.55, 0.62, ignored);
+        const double tailTempo = measure (clipstretch::Playback::make (StretchMode::tempo, 2.0),
+                                          0.55, 0.62, ignored);
+        const double tailPitch = measure (clipstretch::Playback::make (StretchMode::pitch, 2.0),
+                                          0.55, 0.62, ignored);
+
+        check (utf8 ("原速窗口 neither speeds up nor transposes, whatever the ratio"),
+               peakFlat > 0.9 && std::abs (hzFlat - 440.0) < 4.0,
+               juce::String (hzFlat, 1) + " Hz");
+
+        check (utf8 ("变速变调: twice the speed is also an octave up"),
+               peakTape > 0.5 && std::abs (hzTape - 880.0) < 12.0,
+               juce::String (hzTape, 1) + " Hz (440 × 2)");
+
+        check (utf8 ("只变速不变调: the file is squeezed, the pitch does not move"),
+               peakTempo > 0.5 && std::abs (hzTempo - 440.0) < 8.0,
+               juce::String (hzTempo, 1) + " Hz");
+
+        check (utf8 ("不变速只变调: the pitch moves, the file still passes at its own speed"),
+               peakPitch > 0.5 && std::abs (hzPitch - 880.0) < 12.0 && tailPitch > 0.5,
+               juce::String (hzPitch, 1) + utf8 (" Hz, 0.55 s 处 ")
+                 + juce::String (tailPitch, 2));
+
+        // The two modes that consume the whole file are DONE by 0.55 s; the one
+        // that reads at the file's own speed is still going. Without this the
+        // pitch test above would also pass for a plain resample.
+        check ("...and the two whole-file modes have run out by then",
+               tailTape < 0.02 && tailTempo < 0.02,
+               juce::String (tailTape, 3) + " / " + juce::String (tailTempo, 3));
+
+        // 1:1 is bit-exact: a block that was never stretched still IS the file.
+        // Measured over 256 samples rather than one, because 440 Hz is exactly
+        // at a zero crossing on every half second and a single sample there
+        // would compare two zeroes and prove nothing.
+        const auto identity = clipstretch::Playback::make (StretchMode::none, 2.0);
+        double worst = 0.0;
+        double loudest = 0.0;
+
+        for (int i = 0; i < 256; ++i)
+        {
+            const int idx = (int) (0.5 * rate) + i;
+            const auto frame = clipstretch::read (sine, identity, 0.0, (double) idx / rate);
+
+            worst   = juce::jmax (worst, (double) std::abs (frame.left - sine.frames[(size_t) idx]));
+            loudest = juce::jmax (loudest, (double) std::abs (sine.frames[(size_t) idx]));
+        }
+
+        check ("An unstretched block is bit-exact with its source",
+               loudest > 0.5 && worst < 1.0e-6,
+               utf8 ("最大偏差 ") + juce::String (worst, 9) + utf8 ("（峰值 ")
+                 + juce::String (loudest, 3) + utf8 ("）"));
+    } ();
+
+    //-- Phase 31: v16 keeps the stretch mode ---------------------------------
+    [&]
+    {
+        LayerStack s1;
+        RackModel  r1;
+
+        s1.addLayer (utf8 ("拉伸"), palette::layer1);
+
+        SampleEvent clip;
+        clip.name        = "stretch";
+        clip.startBeat   = 1.0;
+        clip.lengthBeats = 2.0;
+        clip.pitch       = 60;
+        clip.laneSpan    = 2;
+        clip.stretchMode = StretchMode::pitch;
+
+        s1.getLayer (0)->addSample (clip);
+
+        const auto xml = project::toXmlText (s1, r1, 120.0);
+
+        LayerStack s2;
+        RackModel  r2;
+        double bpm2 = 0.0;
+        juce::String error;
+
+        const bool ok = project::fromXmlText (xml, s2, r2, bpm2, error, nullptr, nullptr, nullptr);
+
+        const auto* back = (s2.getLayer (0) != nullptr && s2.getLayer (0)->getSampleCount() == 1)
+                             ? &s2.getLayer (0)->getSamples().front() : nullptr;
+
+        check ("A v16 project keeps a clip's stretch mode",
+               ok && back != nullptr && back->stretchMode == StretchMode::pitch,
+               back != nullptr ? juce::String ((int) back->stretchMode) : error);
+    } ();
+
+    //-- Phase 32: a clip and its sampler are two views of one thing ----------
+    // The reference rule runs BOTH ways here, and the mount carries the file
+    // with it: drop, select, switch, notice the orphan, delete the card.
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("Phase 32 needs a layer", false, "no active layer");
+            return;
+        }
+
+        focusSynth (-1);                    // start from "nothing is highlighted"
+
+        const int a = pianoRoll.addSampleAt (120.0, 45, phase31A);
+        auto*     clipA = layer->findSample (a);
+
+        if (clipA == nullptr || clipA->outputSlotId < 0)
+        {
+            check ("Phase 32 clip fixture exists", false, "addSampleAt failed");
+            return;
+        }
+
+        const int slotA = clipA->outputSlotId;
+
+        check ("A dropped clip grows a sampler and names it",
+               rack.findSlot (slotA) != nullptr && rack.findSlot (slotA)->isSampler(),
+               juce::String ("clip -> slot ") + juce::String (slotA));
+
+        //-- Selecting the block lights the card that holds the file ----------
+        pianoRoll.setSampleSelection ({ a });
+        updateRackRoutingFocus();
+
+        check ("Selecting a clip highlights the sampler it is mounted on",
+               pianoRoll.selectedSamplerSlotId() == slotA && getFocusedSlotId() == slotA,
+               juce::String (slotA) + " / " + juce::String (getFocusedSlotId()));
+
+        //-- ...and letting go takes only THAT highlight away -----------------
+        pianoRoll.setSampleSelection ({});
+        updateRackRoutingFocus();
+
+        check ("Clearing the block selection clears the highlight it caused",
+               getFocusedSlotId() < 0,
+               juce::String (getFocusedSlotId()));
+
+        //-- Switching sampler hands the block that sampler's FILE ------------
+        const int b = pianoRoll.addSampleAt (124.0, 45, phase27B);   // 2 s, other file
+        auto*     clipB = layer->findSample (b);
+
+        if (clipB == nullptr || clipB->outputSlotId == slotA)
+        {
+            check ("Phase 32 second clip exists", false, "addSampleAt failed");
+            return;
+        }
+
+        const int    slotB     = clipB->outputSlotId;
+        const double startBeat = clipA->startBeat;
+        const auto*  targetA   = rack.findSlot (slotB);
+        const double lengthB   = targetA != nullptr && targetA->sampleBuffer != nullptr
+                                   ? SampleEvent::beatsForSeconds (targetA->sampleBuffer->lengthSeconds(),
+                                                                   audio.getBpm())
+                                   : 0.0;
+
+        pianoRoll.setSampleSelection ({ a });
+        pianoRoll.mountSelectedSamplesToSlot (slotB);
+
+        clipA = layer->findSample (a);
+
+        check ("Pointing a clip at another sampler gives it that sampler's sample",
+               clipA != nullptr && lengthB > 0.0
+                 && clipA->outputSlotId == slotB
+                 && clipA->audio == targetA->sampleBuffer
+                 && clipA->name == targetA->name
+                 && std::abs (clipA->lengthBeats - lengthB) < 1.0e-9
+                 && std::abs (clipA->startBeat - startBeat) < 1.0e-9
+                 && std::abs (clipA->sourceOffsetSeconds) < 1.0e-12,
+               clipA != nullptr ? utf8 ("长 ") + juce::String (clipA->lengthBeats, 4)
+                                    + utf8 (" 拍（文件 ") + juce::String (lengthB, 4)
+                                    + utf8 ("），起点 ") + juce::String (clipA->startBeat, 3)
+                                : juce::String ("clip gone"));
+
+        //-- Re-picking the card it is already on must not undo a trim --------
+        // "Show me that synth" is a click people make constantly; if it handed
+        // the block its file again it would silently restore the whole length
+        // and turn a one-click inspection into a lost edit.
+        pianoRoll.simulateSampleTrim (a, startBeat + 1.0, true);
+        const double trimmedBeats = clipA->lengthBeats;
+
+        pianoRoll.setSampleSelection ({ a });
+        pianoRoll.mountSelectedSamplesToSlot (slotB);       // the same sampler
+
+        clipA = layer->findSample (a);
+
+        check ("Re-picking the sampler a block already plays does not undo its trim",
+               clipA != nullptr && std::abs (clipA->lengthBeats - trimmedBeats) < 1.0e-12,
+               clipA != nullptr ? juce::String (trimmedBeats, 4) + utf8 (" → ")
+                                    + juce::String (clipA->lengthBeats, 4)
+                                : juce::String ("clip gone"));
+
+        //-- The sampler nobody names any more is gone ------------------------
+        pruneOrphanSamplerSlots();
+
+        check ("A sampler no clip names any more leaves the rack",
+               rack.findSlot (slotA) == nullptr && rack.findSlot (slotB) != nullptr,
+               juce::String ("slot ") + juce::String (slotA) + utf8 (" 已移除，余 ")
+                 + juce::String (rack.getNumSlots()));
+
+        //-- The other direction: removing the card deletes its blocks --------
+        removeSlotAndItsClips (slotB);
+
+        check ("Deleting a sampler deletes the clips that played through it",
+               rack.findSlot (slotB) == nullptr
+                 && layer->findSample (a) == nullptr
+                 && layer->findSample (b) == nullptr,
+               utf8 ("卡 ") + juce::String (slotB)
+                 + utf8 ("，剩余块 ")
+                 + juce::String ((layer->findSample (a) != nullptr ? 1 : 0)
+                                  + (layer->findSample (b) != nullptr ? 1 : 0)));
+
+        pianoRoll.setSampleSelection ({});
+        focusSynth (-1);
+    } ();
+
+    //-- Phase 33: a drop selects, and no block can vanish orphaned -----------
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("Phase 33 needs a layer", false, "no active layer");
+            return;
+        }
+
+        focusSynth (-1);
+        pianoRoll.setSampleSelection ({});
+
+        //-- A dropped block IS the selection --------------------------------
+        const int dropped = pianoRoll.addSampleAt (200.0, 45, phase31A);
+        auto*     clip    = layer->findSample (dropped);
+
+        if (clip == nullptr)
+        {
+            check ("Phase 33 clip fixture exists", false, "addSampleAt failed");
+            return;
+        }
+
+        const int  droppedSlot = clip->outputSlotId;
+        const auto droppedSel  = pianoRoll.getSampleSelection();
+
+        check ("A dropped block arrives selected",
+               droppedSel.size() == 1 && droppedSel.front() == dropped,
+               juce::String ((int) droppedSel.size()) + utf8 (" 个选中"));
+
+        check ("...and the sampler that now holds its file is highlighted",
+               droppedSlot >= 0 && getFocusedSlotId() == droppedSlot,
+               juce::String ("slot ") + juce::String (droppedSlot) + " / "
+                 + juce::String (getFocusedSlotId()));
+
+        //-- The sweep hangs off the MODEL, not off one delete command --------
+        // This is the case that was broken: remove the block the way anything
+        // else in the program would (a direct model edit plus a notification),
+        // never through PianoRollComponent::deleteSelectedSamples, and the
+        // sampler still has to go.
+        layer->removeSample (dropped);
+        stack.notifyNotesChanged();
+
+        check ("A block removed by any other path still takes its sampler with it",
+               rack.findSlot (droppedSlot) == nullptr,
+               rack.findSlot (droppedSlot) == nullptr
+                 ? juce::String ("slot ") + juce::String (droppedSlot) + utf8 (" 已移除")
+                 : juce::String ("slot ") + juce::String (droppedSlot) + utf8 (" 还在"));
+
+        //-- Cut then paste is a MOVE, not a block pointed at nothing ---------
+        const int cutId = pianoRoll.addSampleAt (210.0, 45, phase27B);
+        auto*     cutClip = layer->findSample (cutId);
+
+        if (cutClip == nullptr)
+        {
+            check ("Phase 33 second fixture exists", false, "addSampleAt failed");
+            return;
+        }
+
+        const int cutSlot = cutClip->outputSlotId;
+
+        pianoRoll.setSampleSelection ({ cutId });
+        const bool cut     = pianoRoll.cutSamplesToClipboard();
+        const bool swept   = rack.findSlot (cutSlot) == nullptr;
+        const bool pasted  = pianoRoll.pasteSamplesFromClipboard();
+
+        const auto pastedSel = pianoRoll.getSampleSelection();
+        const auto* moved    = pastedSel.empty() ? nullptr : layer->findSample (pastedSel.front());
+
+        check ("Cutting a block sweeps its sampler, and pasting mounts a fresh one",
+               cut && swept && pasted && moved != nullptr
+                 && moved->outputSlotId >= 0
+                 && rack.findSlot (moved->outputSlotId) != nullptr,
+               moved != nullptr ? juce::String (cutSlot) + utf8 (" → ")
+                                    + juce::String (moved->outputSlotId)
+                                : juce::String ("nothing pasted"));
+
+        pianoRoll.setSampleSelection ({});
+        focusSynth (-1);
+    } ();
+
+    //-- Phase 34: both cascade deletions ask first ---------------------------
+    // Phase 32 made the two directions automatic. That is right about the RULE
+    // and wrong about the moment: the sweep fires on a mouse move, and the rack
+    // × is one pixel away from "inspect". Neither may delete music silently.
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("Phase 34 needs a layer", false, "no active layer");
+            return;
+        }
+
+        focusSynth (-1);
+        pianoRoll.setSampleSelection ({});
+
+        const int clipId = pianoRoll.addSampleAt (300.0, 45, phase31A);
+        auto*     clip   = layer->findSample (clipId);
+
+        if (clip == nullptr || clip->outputSlotId < 0)
+        {
+            check ("Phase 34 clip fixture exists", false, "addSampleAt failed");
+            return;
+        }
+
+        const int slotId = clip->outputSlotId;
+
+        //-- The roll lost its last block: ask, and honour "keep it" ----------
+        samplerPromptAnswer = false;
+        const int asksBefore = samplerPromptCount;
+
+        // Removed the way anything else in the program does it — a model edit
+        // plus a notification — so the sweep, not the caller, is what notices.
+        layer->removeSample (clipId);
+        stack.notifyNotesChanged();
+
+        check ("The sweep asks before deleting a sampler nothing plays",
+               samplerPromptCount == asksBefore + 1,
+               utf8 ("询问 ") + juce::String (samplerPromptCount - asksBefore) + utf8 (" 次"));
+
+        check ("...and saying no keeps the sampler",
+               rack.findSlot (slotId) != nullptr,
+               juce::String ("slot ") + juce::String (slotId)
+                 + (rack.findSlot (slotId) != nullptr ? utf8 (" 还在") : utf8 (" 没了")));
+
+        //-- ...without coming back on the next mouse move --------------------
+        // The sweep runs on every notesChanged, so an answer that is not
+        // remembered is not an answer, it is a nag.
+        stack.notifyNotesChanged();
+        pruneOrphanSamplerSlots();          // and once more, straight up
+
+        check ("A 'keep it' answer is remembered instead of re-asked",
+               samplerPromptCount == asksBefore + 1 && rack.findSlot (slotId) != nullptr,
+               utf8 ("询问共 ") + juce::String (samplerPromptCount - asksBefore) + utf8 (" 次"));
+
+        //-- Naming it again makes it a question again ------------------------
+        const int again   = pianoRoll.addSampleAt (304.0, 45, phase31A);  // same file → same slot
+        auto*     clipTwo = layer->findSample (again);
+
+        check ("A block that names the sampler again retires the 'keep it' answer",
+               clipTwo != nullptr && clipTwo->outputSlotId == slotId,
+               clipTwo != nullptr ? juce::String ("slot ") + juce::String (clipTwo->outputSlotId)
+                                  : juce::String ("no clip"));
+
+        samplerPromptAnswer = true;
+        const int asksBeforeYes = samplerPromptCount;
+
+        layer->removeSample (again);
+        stack.notifyNotesChanged();
+
+        check ("Answering yes deletes the sampler nothing plays",
+               rack.findSlot (slotId) == nullptr && samplerPromptCount == asksBeforeYes + 1,
+               juce::String ("slot ") + juce::String (slotId)
+                 + (rack.findSlot (slotId) == nullptr ? utf8 (" 已移除") : utf8 (" 还在")));
+
+        //-- The other direction: the card asks before taking blocks ----------
+        const int mounted   = pianoRoll.addSampleAt (310.0, 45, phase27B);
+        auto*     clipM     = layer->findSample (mounted);
+        const int mountedOn = clipM != nullptr ? clipM->outputSlotId : -1;
+
+        if (mountedOn < 0)
+        {
+            check ("Phase 34 mounted fixture exists", false, "addSampleAt failed");
+            return;
+        }
+
+        const int asksBeforeCard = samplerPromptCount;
+
+        samplerPromptAnswer = false;
+        requestRemoveSlotAndItsClips (mountedOn);
+
+        check ("Deleting a card that holds blocks asks first, and no means no",
+               samplerPromptCount == asksBeforeCard + 1
+                 && rack.findSlot (mountedOn) != nullptr
+                 && layer->findSample (mounted) != nullptr,
+               juce::String ("slot ") + juce::String (mountedOn)
+                 + utf8 ("，块 ") + juce::String (layer->findSample (mounted) != nullptr ? 1 : 0));
+
+        samplerPromptAnswer = true;
+        requestRemoveSlotAndItsClips (mountedOn);
+
+        // Exactly one question: deleting the blocks notifies, and a sweep
+        // inside that notification would see the card it is about to remove as
+        // an orphan and ask about it again.
+        check ("...and yes deletes the card and its blocks together",
+               rack.findSlot (mountedOn) == nullptr && layer->findSample (mounted) == nullptr
+                 && samplerPromptCount == asksBeforeCard + 2,
+               juce::String ("slot ") + juce::String (mountedOn)
+                 + utf8 ("，余块 ") + juce::String (layer->findSample (mounted) != nullptr ? 1 : 0)
+                 + utf8 ("，询问 ") + juce::String (samplerPromptCount - asksBeforeCard) + utf8 (" 次"));
+
+        //-- A card with nothing on the grid is not worth a question ----------
+        // Built directly on the rack, so no clip ever names it: this is the
+        // state the prompt must stay quiet about.
+        std::shared_ptr<const SampleBuffer> bareBuffer;
+
+        for (int i = 0; i < rack.getNumSlots() && bareBuffer == nullptr; ++i)
+            if (const auto* s = rack.getSlot (i); s != nullptr && s->isSampler())
+                bareBuffer = s->sampleBuffer;
+
+        const int bare     = rack.addSampler (bareBuffer, {}, utf8 ("裸采样音源"));
+        const int asksBare = samplerPromptCount;
+
+        requestRemoveSlotAndItsClips (bare);
+
+        check ("A sampler nothing is mounted on is deleted without asking",
+               rack.findSlot (bare) == nullptr && samplerPromptCount == asksBare,
+               juce::String ("slot ") + juce::String (bare)
+                 + utf8 ("，询问 ") + juce::String (samplerPromptCount - asksBare) + utf8 (" 次"));
+
+        pianoRoll.setSampleSelection ({});
+        focusSynth (-1);
+        samplerPromptAnswer = true;
+    } ();
+
+    //-- Phase 33: a scanned folder tree opens FOLDED -------------------------
+    // The tree used to arrive fully open, which for a real sample library is a
+    // thousand-row wall the instant the scan finishes. Folded is now the
+    // default and the store remembers the branches that were OPENED.
+    [&]
+    {
+        const auto root  = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                              .getChildFile ("atomic-tree-collapse");
+        const auto inner = root.getChildFile ("Inner");
+
+        if (! inner.isDirectory())
+            inner.createDirectory();
+
+        writeTestSampleFile (inner.getChildFile ("inside.wav"), 0.10, 44100.0, 1, 220.0);
+        writeTestSampleFile (root.getChildFile ("top.wav"), 0.10, 44100.0, 1, 330.0);
+
+        filePanel.clearFoldersForSnapshot();      // view-only; nothing is saved
+        filePanel.addFolder (root, false);
+        filePanel.waitForPendingScans();
+
+        check ("A freshly scanned folder opens folded",
+               filePanel.isFolderExpanded (0)
+                 && ! filePanel.isSubFolderExpanded (inner),
+               utf8 ("根 ") + (filePanel.isFolderExpanded (0) ? "open" : "folded")
+                 + utf8 ("，子目录 ") + (filePanel.isSubFolderExpanded (inner) ? "open" : "folded"));
+
+        filePanel.setSubFolderExpanded (inner, true, false);
+
+        check ("Opening one branch leaves the rest of the tree folded",
+               filePanel.isSubFolderExpanded (inner),
+               "Inner open");
+
+        filePanel.setSubFolderExpanded (inner, false, false);
+
+        check ("...and it folds again", ! filePanel.isSubFolderExpanded (inner), "Inner folded");
+    } ();
+
+    //-- Phase 35: a group is "these members", and a member can be a block -----
+    // Four requirements, and they are one idea seen from three sides: a block
+    // can MAKE a group, a group's label SELECTS its blocks, and a group's strip
+    // REACHES their audio. Membership already existed on the model (Phase 27);
+    // what was missing was a way in, a way to see it, and a reason to care.
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("Phase 35 needs an active layer", false, "no active layer");
+            return;
+        }
+
+        const auto loaded  = loadSampleFile (phase27B);   // 2 s, 165 Hz
+        const int  sampler = rack.addSampler (loaded.buffer, phase27B.getFullPathName(), "P35");
+
+        SampleEvent fixture;
+        fixture.name        = "P35";
+        fixture.path        = phase27B.getFullPathName();
+        fixture.audio       = loaded.buffer;
+        fixture.startBeat   = 60.0;
+        fixture.lengthBeats = 4.0;
+        fixture.pitch       = 84;
+        fixture.laneSpan    = 2;
+        fixture.outputSlotId = sampler;
+
+        const int clipId = layer->addSample (fixture);
+
+        if (clipId <= 0)
+        {
+            check ("Phase 35 clip fixture exists", false, "addSample failed");
+            return;
+        }
+
+        const int groupsBefore = (int) layer->getGroups().size();
+
+        //-- Requirement 1: a block, on its own, is enough to make a group ----
+        pianoRoll.setSampleSelection ({ clipId });
+
+        const int gid = pianoRoll.groupSelection();
+
+        check ("A sample selection makes a group with no notes in it",
+               gid > 0
+                 && layer->countSamplesInGroup (gid) == 1
+                 && layer->countNotesInGroup (gid) == 0
+                 && (int) layer->getGroups().size() == groupsBefore + 1,
+               "gid " + juce::String (gid) + utf8 ("，组内 ")
+                 + juce::String (layer->countSamplesInGroup (gid)) + utf8 (" 个采样"));
+
+        check ("...and the selection reports that group",
+               pianoRoll.getSelectedGroupId() == gid,
+               juce::String (pianoRoll.getSelectedGroupId()));
+
+        //-- Requirement 4: a MIXED group selects both kinds ------------------
+        // Two notes join the same group. This is the case that used to be
+        // impossible to express: "select the whole group" was a question about
+        // notes, and the mixed selection it now writes is what setMixedSelection
+        // exists for.
+        const int n1 = layer->addNote ({ 0, 88, 60.0, 2.0, 0.9f });
+        const int n2 = layer->addNote ({ 0, 90, 64.0, 2.0, 0.9f });
+        layer->assignNotesToGroup ({ n1, n2 }, gid);
+        stack.notifyNotesChanged();
+
+        pianoRoll.selectGroup (gid);
+
+        check ("Selecting a group takes its samples as well as its notes",
+               (int) pianoRoll.getSampleSelection().size() == 1
+                 && pianoRoll.isSampleSelected (clipId),
+               juce::String ((int) pianoRoll.getSampleSelection().size())
+                 + utf8 (" 个采样被选中"));
+
+        check ("A mixed group selects both kinds in one gesture",
+               (int) pianoRoll.getSelection().size() == 2
+                 && (int) pianoRoll.getSampleSelection().size() == 1,
+               juce::String ((int) pianoRoll.getSelection().size()) + utf8 (" 音符 + ")
+                 + juce::String ((int) pianoRoll.getSampleSelection().size()) + utf8 (" 采样"));
+
+        check ("...and the whole group still reads as one group",
+               pianoRoll.getSelectedGroupId() == gid && pianoRoll.isWholeGroupSelected (gid),
+               juce::String (pianoRoll.getSelectedGroupId()));
+
+        // Dragging a mixed group has to take the block with it — the reason a
+        // clip is in a group at all.
+        const double clipBeatBefore = layer->findSample (clipId)->startBeat;
+
+        pianoRoll.simulateGroupMove (stack.getActiveLayerIndex(), gid, 4.0, 1);
+
+        check ("A group move carries its sample block",
+               std::abs (layer->findSample (clipId)->startBeat - (clipBeatBefore + 4.0)) < 1.0e-9,
+               "beat " + juce::String (clipBeatBefore, 2) + " -> "
+                 + juce::String (layer->findSample (clipId)->startBeat, 2));
+
+        //-- Shift+G over the mixed selection empties the group --------------
+        pianoRoll.selectGroup (gid);
+
+        const bool detached = pianoRoll.ungroupSelection();
+
+        check ("Ungrouping a mixed selection takes the blocks out too",
+               detached
+                 && layer->findSample (clipId)->groupId < 0
+                 && layer->findNote (n1)->groupId < 0
+                 && (int) layer->getGroups().size() == groupsBefore,
+               utf8 ("组数 ") + juce::String ((int) layer->getGroups().size())
+                 + utf8 ("，采样归属 ") + juce::String (layer->findSample (clipId)->groupId));
+    } ();
+
+    //-- Phase 35: the group's fader, pan and mute reach a clip's audio -------
+    // The one requirement that cannot be checked on the model: "有效" means
+    // audible. A self-contained session, because a measurement that shares a
+    // bus with the demo project measures the demo project.
+    [&]
+    {
+        LayerStack     t;
+        RackModel      r;
+        MixerModel     m;
+        PlaybackEngine e;
+
+        e.setSampleRate (48000.0);
+        t.addLayer (utf8 ("组内采样"), palette::layer1);
+        t.setLayerLevelDb (0, 0.0f);
+        t.setLayerPan (0, 0.0f);
+
+        const int synth = r.addSynth();
+        t.setLayerOutputSlot (0, synth);
+
+        const auto loaded  = loadSampleFile (phase27B);
+        const int  sampler = r.addSampler (loaded.buffer, phase27B.getFullPathName(), "P35 bus");
+
+        auto* layer = t.getLayer (0);
+
+        SampleEvent clip;
+        clip.name         = "P35";
+        clip.path         = phase27B.getFullPathName();
+        clip.audio        = loaded.buffer;
+        clip.startBeat    = 0.0;                  // 0.0 – 1.0 s at 120 bpm
+        clip.lengthBeats  = 2.0;
+        clip.pitch        = 60;
+        clip.laneSpan     = 2;
+        clip.outputSlotId = sampler;
+
+        const int clipId = layer->addSample (clip);
+
+        // A note that shares the group but not the clock: between beats 8 and
+        // 12 (4.0 – 6.0 s), so the clip's window and the note's window can be
+        // measured without one hiding the other.
+        const int noteId = layer->addNote ({ 0, 57, 8.0, 4.0, 0.8f });
+
+        if (auto* note = layer->findNote (noteId))
+            note->envelope = NoteEnvelope::makeFlat();
+
+        const int gid = layer->addGroup (utf8 ("P35 组"), groupPalette::group1);
+        layer->assignSamplesToGroup ({ clipId }, gid);
+        layer->assignNotesToGroup ({ noteId }, gid);
+
+        auto renderSides = [&] (double from, double span, float& left, float& right)
+        {
+            const int n = juce::jmax (1, (int) std::llround (span * 48000.0));
+            juce::AudioBuffer<float> b (2, n);
+
+            e.resetMixState();
+            e.publishSchedule (t, r, 120.0, 0.0, &m);
+            e.renderWindow (from, n, b, nullptr);
+
+            left  = b.getMagnitude (0, 0, n);
+            right = b.getMagnitude (1, 0, n);
+        };
+
+        auto clipPeak = [&] (double from)
+        {
+            float l = 0.0f, rr = 0.0f;
+            renderSides (from, 0.2, l, rr);
+            return juce::jmax (l, rr);
+        };
+
+        float unityL = 0.0f, unityR = 0.0f;
+        renderSides (0.10, 0.2, unityL, unityR);
+
+        check ("A clip in a group still sounds, and sounds the same",
+               juce::jmax (unityL, unityR) > 0.01f,
+               "L " + juce::String (unityL, 4) + " / R " + juce::String (unityR, 4));
+
+        //-- Volume -----------------------------------------------------------
+        layer->findGroup (gid)->setLevelDb (-6.0f);
+
+        const float minus6 = clipPeak (0.10);
+
+        check ("A -6 dB group fader halves the clip",
+               std::abs (minus6 / juce::jmax (1.0e-6f, juce::jmax (unityL, unityR)) - 0.501f) < 0.06f,
+               "x" + juce::String (minus6 / juce::jmax (1.0e-6f, juce::jmax (unityL, unityR)), 3));
+
+        layer->findGroup (gid)->setLevelDb (0.0f);
+
+        //-- Pan ---------------------------------------------------------------
+        // A clip's pan is a BALANCE (a stereo file already has an image), so
+        // "hard left" must empty the right channel while leaving the left one
+        // where it was.
+        layer->findGroup (gid)->setPan (-1.0f);
+
+        float panL = 0.0f, panR = 0.0f;
+        renderSides (0.10, 0.2, panL, panR);
+
+        check ("Hard left on the group empties the clip's right channel",
+               panL > 0.01f && panR < panL * 0.02f,
+               "L " + juce::String (panL, 3) + " / R " + juce::String (panR, 3));
+
+        layer->findGroup (gid)->setPan (0.0f);
+
+        //-- Mute --------------------------------------------------------------
+        // One flag, applied by GroupMix::gainAt, so the note and the clip cannot
+        // disagree about what "the group is muted" means.
+        layer->findGroup (gid)->setMuted (true);
+
+        const float mutedClip = clipPeak (0.10);
+
+        float noteL = 0.0f, noteR = 0.0f;
+        renderSides (4.20, 0.2, noteL, noteR);
+
+        check ("Muting a group silences its sample block",
+               mutedClip < 1.0e-6f, "clip " + juce::String (mutedClip, 6));
+
+        check ("Muting a group silences its notes too",
+               juce::jmax (noteL, noteR) < 1.0e-6f,
+               "note " + juce::String (juce::jmax (noteL, noteR), 6));
+
+        layer->findGroup (gid)->setMuted (false);
+
+        // The other half of a mute: it has to be reversible without touching the
+        // fader, or "mute" is just "drag the level and remember the old value".
+        float backL = 0.0f, backR = 0.0f;
+        renderSides (4.20, 0.2, backL, backR);
+
+        check ("Unmuting brings the group back at its fader value",
+               juce::jmax (backL, backR) > 0.01f,
+               "L " + juce::String (backL, 4) + " / R " + juce::String (backR, 4));
+
+        //-- And the mute survives a save -------------------------------------
+        // A mute that a reload forgets is worse than no mute: the project would
+        // come back sounding different from the take the user signed off on.
+        layer->findGroup (gid)->setMuted (true);
+
+        LayerStack  reloaded;
+        RackModel   reloadedRack;
+        juce::String error;
+        double      bpmBack = 0.0;
+
+        const auto  xml = project::toXmlText (t, r, 120.0);
+        const bool  read = project::fromXmlText (xml, reloaded, reloadedRack, bpmBack, error);
+
+        const auto* reloadedLayer = reloaded.getLayer (0);
+        const auto* reloadedGroup = reloadedLayer != nullptr ? reloadedLayer->findGroup (gid) : nullptr;
+
+        check ("A group's mute is written to the project file",
+               read && reloadedGroup != nullptr && reloadedGroup->isMuted(),
+               reloadedGroup != nullptr ? (reloadedGroup->isMuted() ? "muted" : "not muted")
+                                        : juce::String ("no group after load"));
+    } ();
+
+
+    //-- Phase 36: three automation layers, one law ---------------------------
+    // Before this phase the level multiply was spelled out inline in the voice
+    // loop and again in the clip loop, and a hosted parameter was written by
+    // whichever curve had the higher priority. These checks hold the law itself
+    // and both callers to the same numbers, so "the overlay says -18 dB" and
+    // "the renderer produced -18 dB" cannot drift apart.
+    [&]
+    {
+        LayerStack t;
+        RackModel  r;
+
+        const int slot = r.getSlotIdAt (0);
+        t.addLayer (utf8 ("叠加"), palette::layer1);
+        t.setLayerOutputSlot (0, slot);
+        t.setLayerLevelDb (0, 0.0f);
+
+        auto* layer = t.getLayer (0);
+        const int noteId = layer->addNote ({ 0, 60, 0.0, 4.0, 1.0f });
+        auto* note = layer->findNote (noteId);
+
+        // The note sits in a group from the start: every check below turns one
+        // layer on at a time, and membership must not be what changes.
+        const int groupId = layer->addGroup (utf8 ("层叠"), groupPalette::group2);
+        layer->assignNotesToGroup ({ noteId }, groupId);
+
+        auto* group = layer->findGroup (groupId);
+
+        if (note == nullptr || group == nullptr)
+        {
+            check ("Phase 36 needs a note and a group", false, "fixture missing");
+            return;
+        }
+
+        // Three curves that all say 0.5, prepared switched OFF. One number for
+        // all three means the product is the only thing that can produce 0.125.
+        auto& layerLane = layer->automationFor (LayerAutomationTarget::volume);
+        layerLane.resetFlat (0.5f, 64.0);
+        layerLane.setEnabled (false);
+
+        auto& slotLane = r.getSlot (0)->automationFor (SlotAutomationTarget::level);
+        slotLane.resetFlat (0.5f, 64.0);
+        slotLane.setEnabled (false);
+
+        auto& groupLane = group->getLevelAutomation();
+        groupLane.resetFlat (0.5f, 64.0);
+        groupLane.setEnabled (false);
+
+        NoteEnvelope halfCurve;
+        halfCurve.loadPoints ({ { 0.0f, 0.5f }, { 1.0f, 0.5f } });
+        halfCurve.setEnabled (false);
+        note->envelope = halfCurve;
+        note->modTarget = NoteModTarget::level;
+
+        PlaybackEngine engine;
+        engine.setSampleRate (44100.0);
+
+        auto peakNow = [&] () -> float
+        {
+            engine.publishSchedule (t, r, 120.0);
+            engine.resetMixState();
+            return engine.renderOffline (1.0).peak;
+        };
+
+        auto renderSides = [&] (float& left, float& right)
+        {
+            engine.publishSchedule (t, r, 120.0);
+            engine.resetMixState();
+
+            juce::AudioBuffer<float> buffer (2, 22050);
+            buffer.clear();
+            engine.renderWindow (0.30, 22050, buffer, nullptr);
+
+            left  = buffer.getMagnitude (0, 0, 22050);
+            right = buffer.getMagnitude (1, 0, 22050);
+        };
+
+        //-- The baseline: three lanes off, the note is untouched -------------
+        const float plain = peakNow();
+
+        check ("With all three layers off the note is at its fader",
+               plain > 0.01f, "peak " + juce::String (plain, 4));
+
+        //-- One layer at a time -----------------------------------------------
+        // Each of the three alone must give exactly half. This is what proves the
+        // layers are independent: a phase that only tested the product could be
+        // passing because one layer was silently doing all the work.
+        layerLane.setEnabled (true);
+        const float macroOnly = peakNow() / plain;
+        layerLane.setEnabled (false);
+
+        check ("The macro layer alone halves the note",
+               std::abs (macroOnly - 0.5f) < 0.02f, "x" + juce::String (macroOnly, 3));
+
+        slotLane.setEnabled (true);
+        const float synthOnly = peakNow() / plain;
+        slotLane.setEnabled (false);
+
+        check ("The synth's own lane is part of the same macro layer",
+               std::abs (synthOnly - 0.5f) < 0.02f, "x" + juce::String (synthOnly, 3));
+
+        groupLane.setEnabled (true);
+        const float groupOnly = peakNow() / plain;
+        groupLane.setEnabled (false);
+
+        check ("The group layer alone halves the note",
+               std::abs (groupOnly - 0.5f) < 0.02f, "x" + juce::String (groupOnly, 3));
+
+        note->envelope.setEnabled (true);
+        const float noteOnly = peakNow() / plain;
+        note->envelope.setEnabled (false);
+
+        check ("The note's own curve alone halves the note",
+               std::abs (noteOnly - 0.5f) < 0.02f, "x" + juce::String (noteOnly, 3));
+
+        //-- All three at once -------------------------------------------------
+        // 0.5 x 0.5 x 0.5. Not the minimum, not the last one written: the
+        // product. A mixer that let one curve win would land on 0.5 here, so the
+        // margin has to be tight enough to tell those apart.
+        layerLane.setEnabled (true);
+        groupLane.setEnabled (true);
+        note->envelope.setEnabled (true);
+
+        const float allThree = peakNow() / plain;
+
+        check ("All three layers multiply: 0.5 x 0.5 x 0.5 = 0.125",
+               std::abs (allThree - 0.125f) < 0.01f, "x" + juce::String (allThree, 4));
+
+        //-- And the law itself, called directly -------------------------------
+        // The renderer is one caller; the overlay painter is another. Pinning
+        // the function is cheaper than pinning every picture of it.
+        check ("The three-layer law is multiply, add, multiply",
+               std::abs (automation::stackLevel (0.5f, 0.5f, 0.5f) - 0.125f) < 1.0e-6f
+                 && std::abs (automation::stackPan (0.3f, 0.3f, 0.3f) - 0.9f) < 1.0e-6f
+                 && std::abs (automation::stackPan (0.8f, 0.8f, 0.0f) - 1.0f) < 1.0e-6f
+                 && std::abs (automation::stackPluginParam (0.5f, 0.5f) - 0.25f) < 1.0e-6f
+                 && std::abs (automation::stackPluginParam (1.0f, 0.6f) - 0.6f) < 1.0e-6f,
+               "level " + juce::String (automation::stackLevel (0.5f, 0.5f, 0.5f), 3)
+                 + " pan " + juce::String (automation::stackPan (0.8f, 0.8f, 0.0f), 2)
+                 + " param " + juce::String (automation::stackPluginParam (0.5f, 0.5f), 3));
+
+        //-- Pan: three angles added, not three gains multiplied ---------------
+        layerLane.setEnabled (false);
+        groupLane.setEnabled (false);
+        note->envelope.setEnabled (false);
+
+        layer->setPan (0.3f);
+        group->setPan (0.3f);
+
+        float panL = 0.0f, panR = 0.0f;
+        renderSides (panL, panR);
+
+        // 0.3 + 0.3 = 0.6 of centre, which is (0.6 + 1) * pi/4 of angle.
+        const float expectedRatio = std::tan ((0.6f + 1.0f) * juce::MathConstants<float>::pi * 0.25f);
+        const float ratio = panR / juce::jmax (1.0e-6f, panL);
+
+        check ("The layer and group pans add up, they do not multiply",
+               std::abs (ratio - expectedRatio) < 0.25f,
+               "R/L " + juce::String (ratio, 3) + utf8 ("，应为 ")
+                 + juce::String (expectedRatio, 3));
+
+        // Clamped once, at the end: 0.8 + 0.8 would be 1.6 without the clamp,
+        // and a pan past hard right is not a louder right, it is a bug.
+        layer->setPan (0.8f);
+        group->setPan (0.8f);
+        renderSides (panL, panR);
+
+        check ("Three pans past hard right clamp to hard right",
+               panR > 0.01f && panL < panR * 0.05f,
+               "L " + juce::String (panL, 4) + " / R " + juce::String (panR, 4));
+
+        layer->setPan (0.0f);
+        group->setPan (0.0f);
+
+        //-- The note's pan curve joins the same sum ---------------------------
+        note->modTarget = NoteModTarget::pan;
+        note->envelope.setEnabled (true);
+        note->envelope.loadPoints ({ { 0.0f, 1.0f }, { 1.0f, 1.0f } });   // +1 offset
+
+        renderSides (panL, panR);
+
+        check ("A note's pan curve is the third term of the same sum",
+               panR > 0.01f && panL < panR * 0.05f,
+               "L " + juce::String (panL, 4) + " / R " + juce::String (panR, 4));
+
+        //-- A level curve that is not a level curve --------------------------
+        // Back on pan, and the overlay must stop counting it as a level factor.
+        // Otherwise the picture would claim a 0.5 level change that the ear does
+        // not get, because the engine is sweeping pan with that curve.
+        {
+            NoteEnvelopePanel panel (t, r);
+            panel.setSize (NoteEnvelopePanel::panelWidth, NoteEnvelopePanel::panelHeight);
+            panel.openFor (0, noteId);
+
+            const auto& overlay = panel.getOverlay();
+
+            check ("A pan curve is drawn as pan, not folded into the level product",
+                   overlay.noteLive == false,
+                   overlay.noteLive ? juce::String (utf8 ("被当成电平曲线"))
+                                    : juce::String (utf8 ("不计入电平")));
+
+            panel.close();
+        }
+
+        //-- The overlay's product is the renderer's product -------------------
+        note->modTarget = NoteModTarget::level;
+        note->envelope.loadPoints ({ { 0.0f, 0.5f }, { 1.0f, 0.5f } });
+        note->envelope.setEnabled (true);
+
+        layerLane.setEnabled (true);
+        groupLane.setEnabled (true);
+
+        note->modTarget = NoteModTarget::level;
+
+        {
+            NoteEnvelopePanel panel (t, r);
+            panel.setSize (NoteEnvelopePanel::panelWidth, NoteEnvelopePanel::panelHeight);
+            panel.openFor (0, noteId);
+
+            const auto& overlay = panel.getOverlay();
+
+            const float drawn = automation::stackLevel (overlay.macroAt (0.5f),
+                                                        overlay.groupAt (0.5f),
+                                                        note->envelope.valueAt (0.5f));
+
+            const float rendered = peakNow() / plain;
+
+            check ("The picture's product and the renderer's product are one number",
+                   overlay.macroLive && overlay.groupLive && overlay.noteLive
+                     && std::abs (drawn - rendered) < 0.01f,
+                   "drawn " + juce::String (drawn, 4)
+                     + " / rendered " + juce::String (rendered, 4));
+
+            panel.close();
+        }
+    } ();
+
+
+    report << "\n  " << (failures == 0 ? "ALL CHECKS PASSED"
+                                        : juce::String (failures) + " CHECK(S) FAILED") << "\n";
 
     // Put the fixture back before leaving: the checks edit the live session
     // (they scroll the roll, send synths around, add layers), so without this
     // the snapshot would photograph the leftovers of the last check instead of
     // the demo.
     loadDemoProject();
+
+    //-- Phase 35: the demo itself carries a mixed group ----------------------
+    // Checked AFTER the rebuild, because the point is what ships to the user:
+    // the snapshot's group pill, its bracket and its count all read off this
+    // state, and a demo that quietly lost the block from the group would make
+    // every picture of this phase a picture of nothing.
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr || layer->getSamples().empty())
+        {
+            check ("The demo has a block to put in a group", false, "no clip");
+            return;
+        }
+
+        const auto& clip = layer->getSamples().front();
+        const auto* group = layer->findGroup (clip.groupId);
+
+        check ("The demo ships a group holding notes AND a block",
+               group != nullptr
+                 && group->getId() == clip.groupId
+                 && layer->countSamplesInGroup (clip.groupId) == 1
+                 && layer->countNotesInGroup (clip.groupId) > 0,
+               group != nullptr ? group->getName() + utf8 ("：")
+                                    + juce::String (layer->countNotesInGroup (group->getId()))
+                                    + utf8 (" 音符 + ")
+                                    + juce::String (layer->countSamplesInGroup (group->getId()))
+                                    + utf8 (" 采样")
+                                : juce::String (utf8 ("块不在任何组里")));
+
+        if (group == nullptr)
+            return;
+
+        const int  layerIndex = stack.getActiveLayerIndex();
+        const auto frame      = pianoRoll.groupFrameOf (layerIndex, group->getId());
+        const auto clipBox    = pianoRoll.getSampleScreenBounds (layerIndex, clip.id);
+
+        check ("...and the bracket reaches around the block",
+               ! frame.isEmpty() && ! clipBox.isEmpty() && frame.contains (clipBox),
+               "frame " + frame.toString() + " clip " + clipBox.toString());
+    } ();
+
+
+    // Phase 34: hand the real dialog and the message-queue deferral back. A
+    // scripted answer left in place would make the running app delete samplers
+    // without ever asking — the exact thing this phase exists to stop.
+    deferSamplerPrompt = true;
+    installSamplerCascadePrompt();
 
     return report;
 }

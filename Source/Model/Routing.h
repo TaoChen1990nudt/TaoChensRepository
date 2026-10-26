@@ -34,10 +34,15 @@ namespace routing
     unless the rack is completely empty. */
 inline int layerSlotId (const Layer& layer, const RackModel& rack)
 {
-    if (rack.findSlot (layer.getOutputSlotId()) != nullptr)
+    if (const auto* slot = rack.findSlot (layer.getOutputSlotId());
+        slot != nullptr && ! slot->isSampler())
         return layer.getOutputSlotId();
 
-    return rack.getFirstSlotId();
+    // Phase 27: fall back to the first INSTRUMENT, not simply the first slot.
+    // A rack can now legitimately start with a sampler, and a sampler has no
+    // oscillator — landing there would mute the whole sheet for a reason the
+    // user cannot see anywhere on screen.
+    return rack.getFirstInstrumentSlotId();
 }
 
 /** Result of resolving one note. Carries *why* it ended up where it did, so the
@@ -104,6 +109,101 @@ inline Resolution resolve (const Layer& layer, const NoteEvent& note, const Rack
         result.danglingGroup = true;
     }
 
+    return result;
+}
+
+//==============================================================================
+/** Where a BARE key goes — the audition voice, the typing keyboard, and the
+    piano roll's own key column all ask this one question.
+
+        1. the focused (spotlit) slot, when it is an instrument
+        2. the layer's default output (`layerSlotId`, which skips samplers)
+
+    Phase 43: this rule used to exist twice. `MainComponent::getLiveTargetSlot()`
+    implemented it for the computer keyboard; `PianoRollComponent` skipped the
+    focus tier and called `layerSlotId` directly for its key column. The two only
+    disagreed in one situation — a VST card focused — and that situation is
+    exactly the one the user hit: the keyboard played the plugin, the piano
+    roll's keys played the layer's internal synth, and both felt like bugs.
+
+    A sampler is skipped for the same reason `layerSlotId` skips one: it has no
+    oscillator, so "play this pitch" would be silent. */
+inline int auditionSlotId (int focusedSlotId, const Layer& layer, const RackModel& rack)
+{
+    if (const auto* slot = rack.findSlot (focusedSlotId))
+        if (! slot->isSampler())
+            return focusedSlotId;
+
+    return layerSlotId (layer, rack);
+}
+
+//==============================================================================
+/** Where a clip plays and WHAT it plays, resolved in one place.
+
+    A clip is not a note, so it does not walk the note tiers. Its own mount is
+    the whole rule above the layer:
+
+        1. sample.outputSlotId, when it names a live SAMPLER slot
+        2. the layer's default output (same resolver the notes use)
+
+    Deliberately absent: the group tier. A group's mount is a statement about
+    the NOTES in it — "these notes are played by that instrument" — and a clip
+    is not played by an instrument, it is played by a sampler. Making a clip
+    follow its group would mean that re-mounting a group silently changes which
+    audio file a clip plays, which is the one thing Phase 27 promised it would
+    not do.
+
+    `audio` is what the renderer should read. A clip mounted on a sampler takes
+    that sampler's buffer; an unmounted one keeps its own, so projects written
+    before samplers existed still sound like themselves. */
+struct SampleResolution
+{
+    int    slotId = -1;                  // the bus this clip feeds
+    std::shared_ptr<const SampleBuffer> audio;
+    bool   viaSampler    = false;
+    bool   danglingMount = false;        // named a sampler that is gone
+    bool   missingAudio  = false;        // nothing to play at all
+};
+
+inline SampleResolution resolveSample (const Layer& layer, const SampleEvent& sample,
+                                       const RackModel& rack)
+{
+    SampleResolution result;
+
+    if (sample.outputSlotId >= 0)
+    {
+        if (const auto* slot = rack.findSlot (sample.outputSlotId); slot != nullptr)
+        {
+            if (slot->isSampler())
+            {
+                result.slotId = slot->id;
+                result.viaSampler = true;
+                result.audio = slot->sampleBuffer != nullptr ? slot->sampleBuffer
+                                                             : sample.audio;
+            }
+            else
+            {
+                // Pointed at an instrument. Instruments do not hold clips, so
+                // the mount carries no audio and the clip keeps its own — but
+                // it still feeds that slot's bus, because "where it comes out"
+                // and "what it plays" are separate questions.
+                result.slotId = slot->id;
+                result.audio  = sample.audio;
+            }
+        }
+        else
+        {
+            result.danglingMount = true;    // falls through to the layer below
+        }
+    }
+
+    if (result.slotId < 0)
+        result.slotId = layerSlotId (layer, rack);
+
+    if (result.audio == nullptr)
+        result.audio = sample.audio;
+
+    result.missingAudio = result.audio == nullptr;
     return result;
 }
 

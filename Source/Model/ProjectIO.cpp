@@ -5,6 +5,11 @@
 namespace atomic
 {
 
+// The rack clamps its own send index without including the mixer; this is the
+// one place both numbers are visible, so this is where they are kept honest.
+static_assert (SynthSlot::maxMixerChannels == MixerModel::numChannels,
+               "SynthSlot::maxMixerChannels must match MixerModel::numChannels");
+
 namespace project
 {
 
@@ -78,12 +83,22 @@ namespace
 
     juce::String slotTargetToText (SlotAutomationTarget target)
     {
-        return target == SlotAutomationTarget::level ? "level" : "filter";
+        return target == SlotAutomationTarget::level  ? "level"
+             : target == SlotAutomationTarget::plugin ? "plugin"
+             : target == SlotAutomationTarget::pan    ? "pan"
+             : target == SlotAutomationTarget::mute   ? "mute"
+             : target == SlotAutomationTarget::solo   ? "solo"
+                                                      : "filter";
     }
 
     SlotAutomationTarget slotTargetFromText (const juce::String& text)
     {
-        return text == "level" ? SlotAutomationTarget::level : SlotAutomationTarget::filter;
+        return text == "level"  ? SlotAutomationTarget::level
+             : text == "plugin" ? SlotAutomationTarget::plugin
+             : text == "pan"    ? SlotAutomationTarget::pan
+             : text == "mute"   ? SlotAutomationTarget::mute
+             : text == "solo"   ? SlotAutomationTarget::solo
+                                : SlotAutomationTarget::filter;
     }
 
     /** Floats are written with enough digits to survive a round trip through
@@ -264,11 +279,37 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
             if (slot->sendsToMixer())
                 xml->setAttribute ("mixer", slot->mixerChannel);
 
+            // Phase 27: a sampler slot writes its kind and the file it holds.
+            // Everything else about the card (fader, pan, send, curves) is
+            // written the same way, because a sampler IS a rack slot — it just
+            // has nothing to oscillate.
+            if (slot->isSampler())
+            {
+                xml->setAttribute ("kind", "sampler");
+
+                if (slot->samplePath.isNotEmpty())
+                    xml->setAttribute ("sample", slot->samplePath);
+            }
+
             if (slot->plugin != nullptr)
                 if (auto descriptionXml = slot->plugin->createXml())
                     xml->addChildElement (descriptionXml.release());
 
-            for (auto target : { SlotAutomationTarget::filter, SlotAutomationTarget::level })
+            // Phase 42: the third lane is written for every slot, like the
+            // other two — an empty curve costs five numbers and means "no
+            // plugin parameter chosen", which reads back as exactly that.
+            if (slot->drivesPluginParam())
+                xml->setAttribute ("pluginparam", slot->getPluginParam());
+
+            // Which lane the card's header is pointed at, said out loud. It used
+            // to be inferred from the ORDER of the <Automation> elements (the
+            // last one won), which is not a rule, it is an accident — and a
+            // third lane would have turned that accident into "always plugin".
+            xml->setAttribute ("autotarget", slotTargetToText (slot->automationTarget));
+
+            for (auto target : { SlotAutomationTarget::filter, SlotAutomationTarget::level,
+                                 SlotAutomationTarget::plugin, SlotAutomationTarget::pan,
+                                 SlotAutomationTarget::mute, SlotAutomationTarget::solo })
                 writeLane (*xml, slot->automationFor (target),
                            slotTargetToText (target),
                            target == slot->automationTarget && slot->automationExpanded);
@@ -282,23 +323,66 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
         mixXml->setAttribute ("masterLevelDb", number (mixer->getMasterLevelDb()));
         mixXml->setAttribute ("masterPan", number (mixer->getMasterPan()));
         mixXml->setAttribute ("masterMuted", (int) mixer->isMasterMuted());
+
+        // v13 (Phase 26): the master strip listens too, and "how it is being
+        // listened to" is part of the session — reopening a project should not
+        // silently un-fold a mono check the user was working under.
+        if (mixer->isMasterMono())
+            mixXml->setAttribute ("masterMono", 1);
         mixXml->setAttribute ("channels", mixer->getChannelCount());
 
-        for (int channel = 0; channel < MixerModel::numChannels; ++channel)
+        // Phase 25: the ceiling is 127 strips, so writing every addressable
+        // channel would put 127 empty <Channel> elements in every file. Only the
+        // live ones are written — plus any hidden strip that still carries an
+        // insert or a route, because shrinking the console and growing it back
+        // used to be lossless and that promise is worth keeping.
+        const auto carriesState = [mixer] (int channel)
+        {
+            if (mixer->getChannelOutput (channel) != MixerModel::masterChannel)
+                return true;
+
+            for (const auto& insert : mixer->getInserts (channel))
+                if (insert.type != fx::Type::none)
+                    return true;
+
+            return false;
+        };
+
+        const int liveCount = mixer->getChannelCount();
+        int highest = liveCount - 1;
+
+        for (int channel = liveCount; channel < MixerModel::numChannels; ++channel)
+            if (carriesState (channel))
+                highest = channel;
+
+        for (int channel = 0; channel <= highest; ++channel)
         {
             auto* channelXml = mixXml->createNewChildElement ("Channel");
             channelXml->setAttribute ("index", channel);
+
+            // v10 (Phase 23): where this strip's output goes. The sentinel is
+            // `masterChannel` (the ceiling, 127) and is also the default, so an
+            // older file that has no `out` attribute reads back as a flat
+            // console — which is what it was.
+            channelXml->setAttribute ("out", mixer->getChannelOutput (channel));
+
+            if (mixer->isChannelMono (channel))
+                channelXml->setAttribute ("mono", 1);
+
             writeInserts (*channelXml, mixer->getInserts (channel));
         }
 
         auto* masterXml = mixXml->createNewChildElement ("MasterInserts");
         writeInserts (*masterXml, mixer->getInserts (MixerModel::masterChannel));
 
-        // Phase 18: the master bus's two curves. They live in the mixer model,
+        // Phase 18: the master bus's curves. They live in the mixer model,
         // so they are written here rather than with the layer / slot lanes.
+        // Phase 43: the mute gate joined them; a v18 reader ignores the unknown
+        // target and opens the project with the other two intact.
         auto* masterAutoXml = mixXml->createNewChildElement ("MasterAutomation");
         writeLane (*masterAutoXml, mixer->automationFor (0), "level", false);
         writeLane (*masterAutoXml, mixer->automationFor (1), "pan", false);
+        writeLane (*masterAutoXml, mixer->automationFor (2), "mute", false);
     }
 
     //-- Automation window ---------------------------------------------------
@@ -378,8 +462,19 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                     if (group.getPan() != 0.0f)
                         groupXml->setAttribute ("pan", number (group.getPan()));
 
+                    // Phase 35: only when set, so most groups stay byte-identical
+                    // and a v16 reader sees a group it understands.
+                    if (group.isMuted())
+                        groupXml->setAttribute ("mute", 1);
+
                     if (group.isCollapsed())
                         groupXml->setAttribute ("collapsed", 1);
+
+                    // Phase 24: which plugin parameter the third lane drives.
+                    // Written before the lanes so a reader knows what the
+                    // `<Automation target="plugin">` below is pointed at.
+                    if (group.drivesPluginParam())
+                        groupXml->setAttribute ("pluginparam", group.getPluginParam());
 
                     writeLane (*groupXml, group.getLevelAutomation(), "level", false);
 
@@ -390,6 +485,12 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                     if (group.getPanAutomation().isEnabled()
                           || group.getPanAutomation().getPoints().size() > 2)
                         writeLane (*groupXml, group.getPanAutomation(), "pan", false);
+
+                    // Phase 24: the plugin lane. Same rule: save it when it is
+                    // live or when it has a shape worth keeping.
+                    if (group.getPluginAutomation().isEnabled()
+                          || group.getPluginAutomation().getPoints().size() > 2)
+                        writeLane (*groupXml, group.getPluginAutomation(), "plugin", false);
                 }
             }
 
@@ -413,6 +514,33 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
 
                     if (sample.gainDb != 0.0f)
                         sampleXml->setAttribute ("gainDb", number (sample.gainDb));
+
+                    // Phase 27: only written when set, so a v13 project reads
+                    // back with "follow the layer" and "no group" — which is
+                    // exactly what it meant.
+                    if (sample.outputSlotId >= 0)
+                        sampleXml->setAttribute ("slot", sample.outputSlotId);
+
+                    if (sample.groupId >= 0)
+                        sampleXml->setAttribute ("group", sample.groupId);
+
+                    // Phase 29: the window and its fades. Written only when set,
+                    // so a v14 project comes back with offset 0 and no fades —
+                    // which is exactly what it meant.
+                    if (sample.sourceOffsetSeconds > 0.0)
+                        sampleXml->setAttribute ("offset", number (sample.sourceOffsetSeconds, 8));
+
+                    if (sample.fadeInBeats > 0.0)
+                        sampleXml->setAttribute ("fadein", number (sample.fadeInBeats, 8));
+
+                    if (sample.fadeOutBeats > 0.0)
+                        sampleXml->setAttribute ("fadeout", number (sample.fadeOutBeats, 8));
+
+                    // Phase 31: only written when it is something other than the
+                    // window, so most clips stay unchanged on disk and a v15
+                    // reader sees exactly what it expects.
+                    if (sample.stretchMode != StretchMode::none)
+                        sampleXml->setAttribute ("stretch", (int) sample.stretchMode);
                 }
             }
 
@@ -438,6 +566,11 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                 // if it were v2.
                 if (note.modTarget != NoteModTarget::level)
                     noteXml->setAttribute ("mod", noteModTargetKey (note.modTarget));
+
+                // Phase 24: the note's curve drives a plugin parameter instead
+                // of `mod`. Absent = the built-in target owns the curve.
+                if (note.drivesPluginParam())
+                    noteXml->setAttribute ("pluginparam", note.modPluginParam);
 
                 if (note.groupId >= 0)
                     noteXml->setAttribute ("group", note.groupId);
@@ -490,7 +623,21 @@ bool fromXmlText (const juce::String& xmlText,
     float  parsedMasterDb    = 0.0f;
     float  parsedMasterPan   = 0.0f;
     bool   parsedMasterMuted = false;
-    int    parsedChannelCount = MixerModel::numChannels;
+    bool   parsedMasterMono  = false;
+    int    parsedChannelCount = MixerModel::defaultChannels;
+
+    // Phase 23: strip-to-strip routing, staged like everything else. Starts at
+    // "everyone goes to the master", which is also what a v9 file means.
+    std::array<int, MixerModel::numChannels> parsedOutputs {};
+    parsedOutputs.fill (MixerModel::masterChannel);
+
+    // Phase 25: mono monitoring, staged with the rest of the console.
+    std::array<bool, MixerModel::numChannels> parsedMono {};
+
+    /** v11 and older used 8 as the master sentinel because the ceiling was eight
+        strips; from v12 the sentinel is the ceiling itself. An old `out="8"`
+        therefore means "master" and must not be read as channel 9. */
+    const bool legacyMasterEight = version <= 11;
     std::array<std::vector<AutomationPoint>, MixerModel::numMasterParameters> parsedMasterCurves;
     std::array<bool, MixerModel::numMasterParameters> parsedMasterCurveOn { false, false };
     // readLane() writes into a lane; for the master curves we only want the
@@ -535,8 +682,33 @@ bool fromXmlText (const juce::String& xmlText,
                 }
             }
 
+            // Phase 27: a sampler re-decodes its file here, on the message
+            // thread, exactly like a clip does. A file that has moved leaves
+            // `sampleBuffer` null: the slot still exists, still carries its
+            // name and send, and the card says "采样缺失" — an honest hole
+            // instead of a project that refuses to open.
+            if (child->getStringAttribute ("kind") == "sampler")
+            {
+                slot.sampler    = true;
+                slot.samplePath = child->getStringAttribute ("sample");
+
+                if (slot.samplePath.isNotEmpty())
+                    if (auto loaded = loadSampleFile (juce::File (slot.samplePath)); loaded.ok())
+                        slot.sampleBuffer = loaded.buffer;
+            }
+
+            // Phase 42: absent in a v17 file, which is "no plugin parameter".
+            slot.setPluginParam (child->getIntAttribute ("pluginparam", -1));
+
+            // v18 writes the selected lane explicitly. A v17 file has no such
+            // attribute, so fall back to the old rule — "the lane that says
+            // expanded is the one the header is on" — which is what those files
+            // were written under.
+            slot.automationTarget = slotTargetFromText (child->getStringAttribute ("autotarget", "filter"));
+
             bool         enabled = false, expanded = false;
             juce::String targetText;
+            bool         sawTarget = child->hasAttribute ("autotarget");
 
             for (auto* autoXml = child->getFirstChildElement(); autoXml != nullptr; autoXml = autoXml->getNextElement())
             {
@@ -549,7 +721,7 @@ bool fromXmlText (const juce::String& xmlText,
                 slot.automationFor (target).setEnabled (enabled);
                 slot.automationExpanded = slot.automationExpanded || expanded;
 
-                if (targetText.isNotEmpty())
+                if (! sawTarget && expanded)
                     slot.automationTarget = target;
             }
 
@@ -624,6 +796,8 @@ bool fromXmlText (const juce::String& xmlText,
                     group.setLevelDb ((float) g->getDoubleAttribute ("levelDb", 0.0));
                     group.setPan ((float) g->getDoubleAttribute ("pan", 0.0));
                     group.setCollapsed (g->getBoolAttribute ("collapsed", false));
+                    group.setPluginParam (g->getIntAttribute ("pluginparam", -1));
+                    group.setMuted (g->getBoolAttribute ("mute", false));   // Phase 35
 
                     bool enabled = false, expanded = false;
                     juce::String groupTargetText;
@@ -638,9 +812,14 @@ bool fromXmlText (const juce::String& xmlText,
                         // target attribute decides which one this element is.
                         // v6 files have exactly one, and it never said its
                         // name — "level" is the only thing v6 could have meant.
-                        const bool isPan = autoXml->getStringAttribute ("target") == "pan";
-                        auto& lane = group.automationFor (isPan ? GroupAutomationTarget::pan
-                                                                : GroupAutomationTarget::level);
+                        // Phase 24 adds a third, and anything unrecognised
+                        // still lands on level rather than being dropped.
+                        const auto laneTargetText = autoXml->getStringAttribute ("target");
+                        const auto laneTarget = laneTargetText == "pan"    ? GroupAutomationTarget::pan
+                                              : laneTargetText == "plugin" ? GroupAutomationTarget::plugin
+                                                                           : GroupAutomationTarget::level;
+
+                        auto& lane = group.automationFor (laneTarget);
 
                         readLane (*autoXml, lane, enabled, groupTargetText, expanded);
                         lane.setEnabled (enabled);
@@ -673,6 +852,20 @@ bool fromXmlText (const juce::String& xmlText,
                     sample.pitch       = sm->getIntAttribute ("pitch", 60);
                     sample.laneSpan    = sm->getIntAttribute ("span", 4);
                     sample.gainDb      = (float) sm->getDoubleAttribute ("gainDb", 0.0);
+                    sample.outputSlotId = sm->getIntAttribute ("slot", -1);
+                    sample.groupId      = sm->getIntAttribute ("group", -1);
+                    sample.sourceOffsetSeconds = juce::jmax (0.0, sm->getDoubleAttribute ("offset", 0.0));
+                    sample.fadeInBeats  = juce::jmax (0.0, sm->getDoubleAttribute ("fadein", 0.0));
+                    sample.fadeOutBeats = juce::jmax (0.0, sm->getDoubleAttribute ("fadeout", 0.0));
+
+                    // Phase 31: clamped, not trusted. A stray 9 in the file must
+                    // read back as "the window", not as an enum value nothing
+                    // handles — the audio thread switches on this.
+                    {
+                        const int mode = sm->getIntAttribute ("stretch", 0);
+                        sample.stretchMode = (mode >= 0 && mode <= 3) ? (StretchMode) mode
+                                                                      : StretchMode::none;
+                    }
 
                     if (sample.path.isNotEmpty())
                     {
@@ -707,6 +900,7 @@ bool fromXmlText (const juce::String& xmlText,
                     note.outputSlotOverride = n->getIntAttribute ("output", -1);
                     note.groupId  = n->getIntAttribute ("group", -1);
                     note.modTarget = noteModTargetFromKey (n->getStringAttribute ("mod", "level"));
+                    note.modPluginParam = n->getIntAttribute ("pluginparam", -1);
 
                     if (auto* envXml = n->getChildByName ("Envelope"))
                         readEnvelope (*envXml, note.envelope);
@@ -733,6 +927,7 @@ bool fromXmlText (const juce::String& xmlText,
         parsedMasterDb    = juce::jlimit (-48.0f, 6.0f, (float) mixXml->getDoubleAttribute ("masterLevelDb", 0.0));
         parsedMasterPan   = juce::jlimit (-1.0f, 1.0f, (float) mixXml->getDoubleAttribute ("masterPan", 0.0));
         parsedMasterMuted = mixXml->getBoolAttribute ("masterMuted", false);
+        parsedMasterMono  = mixXml->getBoolAttribute ("masterMono", false);
 
         for (auto* child = mixXml->getFirstChildElement(); child != nullptr; child = child->getNextElement())
         {
@@ -741,6 +936,21 @@ bool fromXmlText (const juce::String& xmlText,
                 const int channel = juce::jlimit (0, MixerModel::numChannels - 1,
                                                   child->getIntAttribute ("index", 0));
                 readInserts (*child, parsedInserts[(size_t) channel], plugins);
+
+                // Missing `out` = master. Anything out of range is read as the
+                // master too: a stale destination must not survive a load just
+                // because it was written by a future/edited file.
+                const int out = child->getIntAttribute ("out", MixerModel::masterChannel);
+                const bool wasMaster = out == MixerModel::masterChannel
+                                        || (legacyMasterEight && out == 8);
+
+                parsedOutputs[(size_t) channel] =
+                    (wasMaster
+                       || (juce::isPositiveAndBelow (out, MixerModel::numChannels) && out != channel))
+                      ? (wasMaster ? MixerModel::masterChannel : out)
+                      : MixerModel::masterChannel;
+
+                parsedMono[(size_t) channel] = child->getIntAttribute ("mono", 0) != 0;
             }
             else if (child->hasTagName ("MasterInserts"))
             {
@@ -750,7 +960,7 @@ bool fromXmlText (const juce::String& xmlText,
 
         parsedChannelCount = juce::jlimit (MixerModel::minChannels, MixerModel::maxChannels,
                                            mixXml->getIntAttribute ("channels",
-                                                                    MixerModel::numChannels));
+                                                                    MixerModel::defaultChannels));
 
         if (auto* masterAutoXml = mixXml->getChildByName ("MasterAutomation"))
         {
@@ -764,7 +974,10 @@ bool fromXmlText (const juce::String& xmlText,
                 if (! child->hasTagName ("Automation"))
                     continue;
 
-                const int index = child->getStringAttribute ("target") == "pan" ? 1 : 0;
+                const auto targetName = child->getStringAttribute ("target");
+                const int index = targetName == "pan"  ? 1
+                                : targetName == "mute" ? 2
+                                                       : 0;
 
                 readLane (*child, scratchLane, enabled, targetText, expanded);
                 parsedMasterCurves[(size_t) index]   = scratchLane.getPoints();
@@ -814,6 +1027,7 @@ bool fromXmlText (const juce::String& xmlText,
         mixer->setMasterLevelDb (parsedMasterDb);
         mixer->setMasterPan (parsedMasterPan);
         mixer->setMasterMuted (parsedMasterMuted);
+        mixer->setMasterMono (parsedMasterMono);
 
         for (int i = 0; i < MixerModel::numMasterParameters; ++i)
         {
@@ -824,6 +1038,21 @@ bool fromXmlText (const juce::String& xmlText,
         }
 
         mixer->setChannelCount (parsedChannelCount);
+
+        // After the count, not before: setChannelOutput() refuses a destination
+        // that is not a live strip, so the console has to be its final size
+        // first. It also re-checks for loops, which is the last line of defence
+        // against a hand-edited .atomic file.
+        for (int channel = 0; channel < MixerModel::numChannels; ++channel)
+            if (parsedOutputs[(size_t) channel] != MixerModel::masterChannel)
+                mixer->setChannelOutput (channel, parsedOutputs[(size_t) channel]);
+
+        // Mono is set both ways, not just when true: a load replaces the
+        // console, and a strip that was listening in mono before must not keep
+        // doing it because the new project says nothing about it.
+        for (int channel = 0; channel < parsedChannelCount; ++channel)
+            mixer->setChannelMono (channel, parsedMono[(size_t) channel]);
+
         mixer->notify();
     }
 

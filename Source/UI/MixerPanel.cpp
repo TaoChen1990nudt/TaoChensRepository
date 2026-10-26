@@ -102,6 +102,7 @@ void MixerPanel::resetStrip (int channel)
         mixer.setMasterLevelDb (0.0f);
         mixer.setMasterPan (0.0f);
         mixer.setMasterMuted (false);
+        mixer.setMasterMono (false);
     }
     else
     {
@@ -119,39 +120,146 @@ void MixerPanel::resetStrip (int channel)
             rack.setMuted (slot->id, false);
             rack.setSoloed (slot->id, false);
         }
+
+        // Phase 26: mono belongs to the strip, so "reset this strip" turns it
+        // off here — otherwise a reset strip would still be folding its signal
+        // and nothing on the panel would explain why.
+        mixer.setChannelMono (channel, false);
     }
 
     mixer.notify();
     repaint();
 }
 
-void MixerPanel::deleteLastStrip()
+bool MixerPanel::deleteStrip (int channel)
 {
     const int count = mixer.getChannelCount();
 
-    if (count <= MixerModel::minChannels)
-        return;
+    if (! mixer.canRemoveChannel() || ! juce::isPositiveAndBelow (channel, count))
+        return false;
 
-    const int lastChannel = count - 1;
-
-    // Unplug first, then shrink. A synth pointing at a channel that no longer
-    // exists would fall through to the direct bus while the UI still claimed it
-    // was on a strip.
+    // 1. Unplug FIRST, renumber second. Every synth whose send points at this
+    //    strip becomes "not sending" (`mixerChannel = -1`): its destination is
+    //    about to stop existing, and leaving the number behind would silently
+    //    re-point the send at whatever slides into that slot.
+    //
+    //    The sends ABOVE the hole move down with the strips they feed. That is
+    //    the whole cost of deleting a middle strip, and it is not optional: once
+    //    the console renumbers, "channel 6" means a different hardware strip, so
+    //    a send left at 6 would quietly land somewhere the user never chose.
+    //    `removeChannelAt` cannot do this — the rack is not its business — which
+    //    is exactly why this loop lives here and not in the model.
     for (int i = 0; i < rack.getNumSlots(); ++i)
-        if (auto* slot = rack.getSlot (i); slot != nullptr && slot->mixerChannel == lastChannel)
+    {
+        auto* slot = rack.getSlot (i);
+
+        if (slot == nullptr)
+            continue;
+
+        if (slot->mixerChannel == channel)
             rack.setMixerChannel (slot->id, -1);
+        else if (slot->mixerChannel > channel)
+            rack.setMixerChannel (slot->id, slot->mixerChannel - 1);
+    }
 
-    mixer.clearChannelInserts (lastChannel);
-    mixer.removeChannel();
+    // 2. The strip itself: inserts, mono flag, routes above it, and the count.
+    //    All of that is the model's job — `removeChannelAt` is the only place
+    //    that knows a hole has to be closed rather than truncated.
+    mixer.clearChannelInserts (channel);
 
-    setSelectedChannel (juce::jmin (selectedChannel, mixer.getChannelCount()));
+    if (! mixer.removeChannelAt (channel))
+        return false;
+
+    // 3. Selection follows the row, not the number: if the strip that vanished
+    //    was the selected one, stay on the same place in the console. The master
+    //    is display slot 0 and is not part of this count, so it always survives.
+    if (selectedChannel != MixerModel::masterChannel)
+        setSelectedChannel (juce::jlimit (0, mixer.getChannelCount() - 1, selectedChannel));
+
+    setStripScrollX (stripScrollX);
     repaint();
+    return true;
+}
+
+void MixerPanel::deleteLastStrip()
+{
+    deleteStrip (mixer.getChannelCount() - 1);
 }
 
 juce::Rectangle<int> MixerPanel::getStripsArea() const
 {
     return getLocalBounds().withTrimmedTop (headerHeight)
                            .withTrimmedRight (rackWidth);
+}
+
+int MixerPanel::getTotalStripWidth() const
+{
+    return stripWidth * getStripCount();
+}
+
+bool MixerPanel::isStripScrollNeeded() const
+{
+    return getTotalStripWidth() > getStripsArea().getWidth();
+}
+
+int MixerPanel::getMaxStripScroll() const
+{
+    return juce::jmax (0, getTotalStripWidth() - getStripsArea().getWidth());
+}
+
+juce::Rectangle<int> MixerPanel::getStripsViewport() const
+{
+    auto area = getStripsArea();
+
+    // The scrollbar lives UNDER the strips, so it takes height from them and
+    // from nothing else: the effect rack on the right keeps its full height.
+    if (isStripScrollNeeded())
+        area = area.withTrimmedBottom (scrollBarHeight);
+
+    return area;
+}
+
+juce::Rectangle<int> MixerPanel::getScrollBarBounds() const
+{
+    if (! isStripScrollNeeded())
+        return {};
+
+    auto area = getStripsArea();
+
+    return area.removeFromBottom (scrollBarHeight).reduced (ui::px (6), ui::px (2));
+}
+
+juce::Rectangle<int> MixerPanel::getScrollThumbBounds() const
+{
+    const auto track = getScrollBarBounds();
+
+    if (track.isEmpty())
+        return {};
+
+    const int total = getTotalStripWidth();
+    const int view  = getStripsArea().getWidth();
+    const int max   = getMaxStripScroll();
+
+    if (max <= 0 || total <= 0)
+        return track;
+
+    const int width = juce::jlimit (ui::px (30), track.getWidth(),
+                                    juce::roundToInt ((float) track.getWidth() * (float) view / (float) total));
+    const int travel = juce::jmax (0, track.getWidth() - width);
+    const int x      = juce::roundToInt ((float) travel * (float) stripScrollX / (float) max);
+
+    return { track.getX() + x, track.getY(), width, track.getHeight() };
+}
+
+void MixerPanel::setStripScrollX (int pixels)
+{
+    const int clamped = juce::jlimit (0, getMaxStripScroll(), pixels);
+
+    if (clamped == stripScrollX)
+        return;
+
+    stripScrollX = clamped;
+    repaint();
 }
 
 juce::Rectangle<int> MixerPanel::getRackArea() const
@@ -162,29 +270,57 @@ juce::Rectangle<int> MixerPanel::getRackArea() const
 
 juce::Rectangle<int> MixerPanel::getStripBounds (int channel) const
 {
-    const auto area = getStripsArea();
-    const float width = (float) area.getWidth() / (float) getStripCount();
+    const auto viewport = getStripsViewport();
 
-    return { area.getX() + juce::roundToInt (width * (float) channel), area.getY(),
-             juce::roundToInt (width) - 2, area.getHeight() };
+    return { viewport.getX() + displaySlotFor (channel) * stripWidth - stripScrollX,
+             viewport.getY(), stripWidth - ui::px (2), viewport.getHeight() };
+}
+
+juce::Rectangle<int> MixerPanel::getFaderRowBounds (int channel) const
+{
+    auto r = getStripBounds (channel).reduced (ui::px (6), ui::px (2));
+    r.removeFromTop (ui::px (16));       // name
+    r.removeFromTop (ui::px (15));       // output
+    r.removeFromTop (ui::px (15));       // pan
+    r.removeFromBottom (ui::px (18));    // mute / solo
+    r.removeFromBottom (ui::px (13));    // dB readout
+
+    return r;
+}
+
+int MixerPanel::faderWidthFor (int rowWidth)
+{
+    // Phase 27: half the row, less the gutter that separates the two controls.
+    // A floor of 16 px keeps the 18 px thumb drawable on a narrow layout — the
+    // thumb overhangs its track by design, so a fader narrower than the thumb
+    // would look like a mistake rather than a narrow fader.
+    return juce::jmax (ui::px (16), rowWidth / 2 - ui::px (2));
 }
 
 juce::Rectangle<int> MixerPanel::getFaderBounds (int channel) const
 {
+    auto r = getFaderRowBounds (channel);
+
+    // Phase 27: the fader no longer owns the whole row. It takes the left half
+    // and the stereo meter takes what is left, which is roughly four times the
+    // width it had before — a two-bar meter squeezed into 9 px could show that
+    // a signal was there, but not how much of it was on each side.
+    return r.removeFromLeft (faderWidthFor (r.getWidth()));
+}
+
+juce::Rectangle<int> MixerPanel::getOutputBounds (int channel) const
+{
     auto r = getStripBounds (channel).reduced (ui::px (6), ui::px (2));
     r.removeFromTop (ui::px (16));       // name
-    r.removeFromTop (ui::px (15));       // pan
-    r.removeFromBottom (ui::px (18));    // mute / solo
-    r.removeFromBottom (ui::px (13));    // dB readout
-    r.removeFromRight (ui::px (10));     // meter
 
-    return r;
+    return r.removeFromTop (ui::px (15));
 }
 
 juce::Rectangle<int> MixerPanel::getPanBounds (int channel) const
 {
     auto r = getStripBounds (channel).reduced (ui::px (8), ui::px (2));
     r.removeFromTop (ui::px (16));
+    r.removeFromTop (ui::px (15));
 
     return r.removeFromTop (ui::px (13));
 }
@@ -205,15 +341,49 @@ juce::Rectangle<int> MixerPanel::getSoloBounds (int channel) const
     return r.removeFromRight (r.getWidth() / 2 - ui::px (2));
 }
 
-juce::Rectangle<int> MixerPanel::getMeterBounds (int channel) const
+juce::Rectangle<int> MixerPanel::getMonoBounds (int channel) const
 {
     auto r = getStripBounds (channel).reduced (ui::px (6), ui::px (2));
-    r.removeFromTop (ui::px (16));
-    r.removeFromTop (ui::px (15));
-    r.removeFromBottom (ui::px (18));
-    r.removeFromBottom (ui::px (13));
+    r.removeFromBottom (ui::px (18));            // mute / solo
+    auto row = r.removeFromBottom (ui::px (13)); // dB readout
 
-    return r.removeFromRight (ui::px (6));
+    // The right end of the readout row: the only slack a 92 px strip has left.
+    return row.removeFromRight (ui::px (26)).reduced (0, ui::px (1));
+}
+
+juce::Rectangle<int> MixerPanel::getMeterBounds (int channel) const
+{
+    auto r = getFaderRowBounds (channel);
+
+    // Phase 27: everything the fader did not take. The two of them are derived
+    // from the SAME row and the same split, so they cannot end up overlapping
+    // or leaving a band of dead pixels between them.
+    r.removeFromLeft (faderWidthFor (r.getWidth()) + ui::px (4));
+
+    return r;
+}
+
+juce::Rectangle<int> MixerPanel::getMeterBarBounds (int channel, int side) const
+{
+    const auto meter = getMeterBounds (channel);
+    const int  bar   = juce::jmax (2, (meter.getWidth() - ui::px (1)) / 2);
+
+    // `withWidth` keeps x, `withX` keeps width — so the right bar needs both, or
+    // it starts at the right place and still runs off the end of the pair.
+    return side == 0 ? meter.withWidth (bar)
+                     : meter.withX (meter.getRight() - bar).withWidth (bar);
+}
+
+juce::Rectangle<int> MixerPanel::getStripCloseBounds (int channel) const
+{
+    // The right end of the name row. Everything else on a strip is a control
+    // with a value; this is the one that removes the thing the value belongs to,
+    // so it sits beside the name — as far from the fader as the strip allows,
+    // because a mis-aimed click there must not be able to delete a strip.
+    auto row = getStripBounds (channel).reduced (ui::px (6), ui::px (2));
+
+    return row.removeFromTop (ui::px (16)).removeFromRight (ui::px (12))
+                                          .reduced (0, ui::px (1));
 }
 
 juce::Rectangle<int> MixerPanel::getInsertRowBounds (int slot) const
@@ -244,9 +414,15 @@ juce::Rectangle<int> MixerPanel::getInsertPowerBounds (int slot) const
 //==============================================================================
 int MixerPanel::channelAt (juce::Point<int> position) const
 {
-    for (int ch = 0; ch < getStripCount(); ++ch)
-        if (getStripBounds (ch).contains (position))
-            return ch;
+    // A strip scrolled half under the effect rack must not answer clicks that
+    // landed on the rack, and one scrolled off the left edge must not answer
+    // anything: the viewport is the only place a strip exists.
+    if (! getStripsViewport().contains (position))
+        return -1;
+
+    for (int slot = 0; slot < getStripCount(); ++slot)
+        if (getStripBounds (channelForDisplaySlot (slot)).contains (position))
+            return channelForDisplaySlot (slot);
 
     return -1;
 }
@@ -344,6 +520,17 @@ juce::Colour MixerPanel::getChannelColour (int channel) const
     return juce::Colour (0xff3a3d47);
 }
 
+juce::String MixerPanel::getOutputName (int channel) const
+{
+    if (isMaster (channel))
+        return utf8 ("音频输出");
+
+    const int destination = mixer.getChannelOutput (channel);
+
+    return destination == MixerModel::masterChannel ? utf8 ("主输出")
+                                                    : getChannelName (destination);
+}
+
 void MixerPanel::setChannelLevelDb (int channel, float db)
 {
     if (isMaster (channel))
@@ -392,6 +579,133 @@ void MixerPanel::toggleSolo (int channel)
         rack.setSoloed (slotId, ! isChannelSoloed (channel));
 }
 
+void MixerPanel::toggleMono (int channel)
+{
+    // Phase 25: unlike mute and solo this is NOT the synth's setting. Mute and
+    // solo decide what is in the mix; mono decides how the strip is listened to,
+    // so it belongs to the channel and survives a change of instrument.
+    //
+    // Phase 26: the master has the same button, and it means the same thing.
+    // The master has no channel number, so its flag lives beside the master
+    // fader in the model rather than in `channelMono`.
+    if (isMaster (channel))
+    {
+        mixer.setMasterMono (! mixer.isMasterMono());
+        return;
+    }
+
+    if (! juce::isPositiveAndBelow (channel, mixer.getChannelCount()))
+        return;
+
+    mixer.setChannelMono (channel, ! mixer.isChannelMono (channel));
+}
+
+bool MixerPanel::isChannelMono (int channel) const
+{
+    return isMaster (channel) ? mixer.isMasterMono()
+                              : mixer.isChannelMono (channel);
+}
+
+bool MixerPanel::monoButtonHasOwnPixels() const
+{
+    const auto box = getMonoBounds (0);
+
+    return ! box.isEmpty()
+             && ! box.intersects (getMuteBounds (0))
+             && ! box.intersects (getSoloBounds (0))
+             && ! box.intersects (getFaderBounds (0))
+             && ! box.intersects (getPanBounds (0))
+             && ! box.intersects (getMeterBounds (0));
+}
+
+bool MixerPanel::stereoMeterHasOwnPixels() const
+{
+    for (const int channel : { 0, MixerModel::masterChannel })
+    {
+        const auto left  = getMeterBarBounds (channel, 0);
+        const auto right = getMeterBarBounds (channel, 1);
+        const auto pair  = getMeterBounds (channel);
+
+        if (left.isEmpty() || right.isEmpty()
+             || left.intersects (right)
+             || ! pair.contains (left) || ! pair.contains (right)
+             || left.intersects (getFaderBounds (channel))
+             || right.intersects (getFaderBounds (channel)))
+            return false;
+    }
+
+    return true;
+}
+
+bool MixerPanel::faderYieldedHalfTheRow() const
+{
+    const auto row = getFaderRowBounds (0);
+
+    if (row.getWidth() < 20)
+        return false;
+
+    for (const int channel : { 0, MixerModel::masterChannel })
+    {
+        const auto fader = getFaderBounds (channel);
+        const auto meter = getMeterBounds (channel);
+
+        if (fader.isEmpty() || meter.isEmpty())
+            return false;
+
+        const int rowWidth = getFaderRowBounds (channel).getWidth();
+
+        // "Half" with a gutter's worth of tolerance: the split is integer
+        // arithmetic, so an odd row width cannot land exactly on 0.5.
+        const double share = (double) fader.getWidth() / (double) rowWidth;
+
+        if (share < 0.40 || share > 0.55)
+            return false;
+
+        // The meter has to have gained the space, not merely moved into it.
+        if (meter.getWidth() <= fader.getWidth())
+            return false;
+
+        if (fader.intersects (meter))
+            return false;
+
+        if (! getFaderRowBounds (channel).contains (fader)
+             || ! getFaderRowBounds (channel).contains (meter))
+            return false;
+    }
+
+    return true;
+}
+
+juce::String MixerPanel::describeControlGeometry() const
+{
+    const auto describe = [this] (int channel)
+    {
+        return "ch" + juce::String (channel)
+                 + " row " + getFaderRowBounds (channel).toString()
+                 + " fader " + getFaderBounds (channel).toString()
+                 + " meter " + getMeterBounds (channel).toString();
+    };
+
+    return describe (0) + " | " + describe (MixerModel::masterChannel);
+}
+
+juce::String MixerPanel::describeMeterGeometry() const
+{
+    const auto describe = [this] (int channel)
+    {
+        const auto box = getMeterBounds (channel);
+
+        return "ch" + juce::String (channel)
+                 + " strip " + getStripBounds (channel).toString()
+                 + " meter " + box.toString()
+                 + " L " + getMeterBarBounds (channel, 0).toString()
+                 + " R " + getMeterBarBounds (channel, 1).toString()
+                 + " fader " + getFaderBounds (channel).toString();
+    };
+
+    return describe (0) + " | " + describe (MixerModel::masterChannel);
+}
+
 void MixerPanel::setSelectedChannel (int channel)
 {
     const int clamped = juce::jlimit (0, MixerModel::masterChannel, channel);
@@ -409,8 +723,16 @@ void MixerPanel::updateMeters()
     if (levelSource == nullptr)
         return;
 
-    for (int ch = 0; ch < getStripCount(); ++ch)
-        repaint (getMeterBounds (ch).expanded (2));
+    for (int slot = 0; slot < getStripCount(); ++slot)
+        repaint (getMeterBounds (channelForDisplaySlot (slot)).expanded (2));
+}
+
+void MixerPanel::resized()
+{
+    // A wider window can leave the row scrolled past its own end; a narrower
+    // one may need a scrollbar that was not there before.
+    stripScrollX = juce::jlimit (0, getMaxStripScroll(), stripScrollX);
+    repaint();
 }
 
 //==============================================================================
@@ -433,7 +755,7 @@ void MixerPanel::paint (juce::Graphics& g)
 
         g.setColour (juce::Colours::white.withAlpha (0.32f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
-        g.drawText (juce::String (mixer.getChannelCount()) + utf8 (" 个通道 + 主输出 · 通道收到的是音源 · 右键通道 → 菜单"),
+        g.drawText (juce::String (mixer.getChannelCount()) + utf8 (" 个通道 + 主输出 · 主输出在最左 · 通道的 → 可选输出到另一个通道"),
                     header.withTrimmedLeft (ui::px (66)).withTrimmedRight (ui::px (58)),
                     juce::Justification::centredLeft, true);
 
@@ -453,8 +775,7 @@ void MixerPanel::paint (juce::Graphics& g)
             g.drawText (glyph, r, juce::Justification::centred, false);
         };
 
-        drawStepButton (getRemoveChannelBounds(), "-",
-                        mixer.getChannelCount() > MixerModel::minChannels);
+        drawStepButton (getRemoveChannelBounds(), "-", mixer.canRemoveChannel());
         drawStepButton (getAddChannelBounds(), "+",
                         mixer.getChannelCount() < MixerModel::maxChannels);
 
@@ -462,8 +783,34 @@ void MixerPanel::paint (juce::Graphics& g)
         g.drawHorizontalLine (header.getBottom() - 1, 0.0f, (float) getWidth());
     }
 
-    for (int ch = 0; ch < getStripCount(); ++ch)
-        drawStrip (g, ch);
+    //-- Strips ---------------------------------------------------------------
+    // Phase 23: clipped to the viewport so a strip scrolled under the effect
+    // rack cannot paint over it.
+    {
+        const auto viewport = getStripsViewport();
+
+        juce::Graphics::ScopedSaveState clip (g);
+        g.reduceClipRegion (viewport);
+
+        for (int slot = 0; slot < getStripCount(); ++slot)
+            drawStrip (g, channelForDisplaySlot (slot));
+    }
+
+    //-- Horizontal scrollbar ------------------------------------------------
+    if (isStripScrollNeeded())
+    {
+        const auto track = getScrollBarBounds().toFloat();
+        const auto thumb = getScrollThumbBounds().toFloat();
+
+        // A groove, not just a floating bar: without it the thumb reads as a
+        // stray highlight sitting under the mute buttons.
+        g.setColour (juce::Colours::white.withAlpha (0.055f));
+        g.fillRoundedRectangle (track, track.getHeight() * 0.5f);
+
+        const bool hot = draggingScroll || hoveredScroll;
+        g.setColour (juce::Colours::white.withAlpha (hot ? 0.46f : 0.28f));
+        g.fillRoundedRectangle (thumb, thumb.getHeight() * 0.5f);
+    }
 
     drawRack (g);
 }
@@ -500,8 +847,60 @@ void MixerPanel::drawStrip (juce::Graphics& g, int channel)
     g.setColour (exists ? juce::Colours::white.withAlpha (0.88f)
                         : juce::Colours::white.withAlpha (0.28f));
     g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.0f))));
-    g.drawText (getChannelName (channel), name.withTrimmedLeft (ui::pf (8)),
+    g.drawText (getChannelName (channel),
+                name.withTrimmedLeft (ui::pf (8))
+                    .withTrimmedRight (master ? 0.0f : ui::pf (12)),
                 juce::Justification::centredLeft, false);
+
+    //-- Delete this strip (Phase 26) -----------------------------------------
+    // Every ordinary strip carries its own "－". The master does not: it is not a
+    // channel, it is where all of them end, and "delete the output" is not a
+    // gesture a console offers. At the floor the button stays visible but dead —
+    // hiding it would read as "this strip is special", and it is not.
+    if (! master)
+    {
+        const auto r     = getStripCloseBounds (channel).toFloat();
+        const bool armed = mixer.canRemoveChannel();
+        const bool hot   = armed && hoveredChannel == channel
+                                   && hoveredPart == Part::stripClose;
+
+        g.setColour (juce::Colours::white.withAlpha (hot ? 0.18f
+                                                         : (armed ? 0.05f : 0.02f)));
+        g.fillRoundedRectangle (r, ui::pf (2.5f));
+
+        g.setColour (juce::Colours::white.withAlpha (armed ? (hot ? 0.85f : 0.42f) : 0.14f));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f)).withStyle ("Bold")));
+        g.drawText ("-", getStripCloseBounds (channel),
+                    juce::Justification::centred, false);
+    }
+
+    //-- Output routing -------------------------------------------------------
+    // Phase 23: one row, click = menu. The master's row is a label, not a
+    // control: it has no destination to choose, it IS the destination.
+    {
+        auto r = getOutputBounds (channel).toFloat();
+        const bool hot = hoveredPart == Part::output && hoveredChannel == channel;
+        auto text = r;
+
+        if (! master)
+        {
+            text.removeFromRight (ui::pf (12));   // the caret's column
+
+            g.setColour (juce::Colours::white.withAlpha (hot ? 0.13f : 0.05f));
+            g.fillRoundedRectangle (r, ui::pf (3));
+            g.setColour (juce::Colours::white.withAlpha (hot ? 0.32f : 0.14f));
+            g.drawRoundedRectangle (r.reduced (0.5f), ui::pf (3), 1.0f);
+
+            const auto caret = r.removeFromRight (ui::pf (12)).reduced (0.0f, ui::pf (4));
+            mixerlook::drawCaret (g, caret, false, juce::Colours::white.withAlpha (hot ? 0.75f : 0.42f));
+        }
+
+        g.setColour (juce::Colours::white.withAlpha (master ? 0.30f : (hot ? 0.90f : 0.62f)));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
+        g.drawText (utf8 ("→ ") + getOutputName (channel),
+                    text.withTrimmedLeft (ui::pf (5)),
+                    juce::Justification::centredLeft, true);
+    }
 
     //-- Pan ------------------------------------------------------------------
     {
@@ -596,6 +995,10 @@ void MixerPanel::drawStrip (juce::Graphics& g, int channel)
         r.removeFromBottom (ui::px (18));
         r = r.removeFromBottom (ui::px (13));
 
+        // Phase 25/26: the mono button takes the right end of this row — on the
+        // master too, now that the master has one.
+        r.removeFromRight (ui::px (26));
+
         // A channel fed by nothing has no level to report: "0.0 dB" would read
         // as a real setting the user could trust.
         const bool fed = live || master;
@@ -607,6 +1010,26 @@ void MixerPanel::drawStrip (juce::Graphics& g, int channel)
                                ? juce::Colours::white.withAlpha (0.35f) : kText);
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
         g.drawText (readout, r, juce::Justification::centred, false);
+    }
+
+    //-- Mono monitoring (Phase 25 / 26) ---------------------------------------
+    // Drawn for the master as well. It is the same listen control, and the one
+    // place a mono check is actually performed is the end of the chain — if the
+    // master had no button the user would have to fold every strip by hand to
+    // hear the same thing.
+    {
+        auto r = getMonoBounds (channel).toFloat();
+        const bool on  = isChannelMono (channel);
+        const bool hot = hoveredChannel == channel && hoveredPart == Part::mono;
+
+        g.setColour (on ? kAccent.withAlpha (0.92f)
+                        : juce::Colours::white.withAlpha (hot ? 0.16f : 0.07f));
+        g.fillRoundedRectangle (r, ui::pf (2.5));
+
+        g.setColour (on ? juce::Colours::black.withAlpha (0.85f)
+                        : juce::Colours::white.withAlpha (hot ? 0.70f : 0.45f));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (8.0f)).withStyle ("Bold")));
+        g.drawText ("MONO", r, juce::Justification::centred, false);
     }
 
     //-- Mute / Solo ----------------------------------------------------------
@@ -627,20 +1050,29 @@ void MixerPanel::drawStrip (juce::Graphics& g, int channel)
         g.drawText (solo ? "S" : "M", r, juce::Justification::centred, false);
     }
 
-    //-- Meter ----------------------------------------------------------------
+    //-- Stereo meter (Phase 26) ----------------------------------------------
     {
-        auto meter = getMeterBounds (channel).toFloat();
-        const float level = levelSource != nullptr ? levelSource (channel) : 0.0f;
+        const auto pair = getMeterBounds (channel).toFloat();
 
         g.setColour (juce::Colours::black.withAlpha (0.45f));
-        g.fillRoundedRectangle (meter, ui::pf (1.5));
+        g.fillRoundedRectangle (pair, ui::pf (1.5));
 
-        const float fill = juce::jlimit (0.0f, 1.0f, level);
-        if (fill > 0.001f)
+        // Two bars, not one averaged bar. Averaging would hide exactly the case
+        // the meter exists for: a strip panned hard left is silent on the right,
+        // and a single bar would report it as "half loud" forever.
+        for (int side = 0; side < 2; ++side)
         {
-            const float h = meter.getHeight() * fill;
+            auto bar = getMeterBarBounds (channel, side).toFloat();
+            const float level = levelSource != nullptr ? levelSource (channel, side) : 0.0f;
+            const float fill  = juce::jlimit (0.0f, 1.0f, level);
+
+            if (fill <= 0.001f)
+                continue;
+
+            const float h = bar.getHeight() * fill;
+
             g.setColour (fill > 0.92f ? juce::Colour (0xffff5f6d) : colour.withAlpha (0.9f));
-            g.fillRoundedRectangle (meter.withHeight (h).withY (meter.getBottom() - h), ui::pf (1.5));
+            g.fillRect (bar.withHeight (h).withY (bar.getBottom() - h));
         }
     }
 }
@@ -679,6 +1111,15 @@ void MixerPanel::drawRack (juce::Graphics& g)
 
         g.setColour (slot % 2 == 0 ? juce::Colour (0xff14161c) : juce::Colour (0xff111318));
         g.fillRoundedRectangle (row.toFloat(), ui::pf (3));
+
+        // Phase 43: the row being dragged says so. Without this the insert under
+        // the pointer is just another row that changed colour, and a drag across
+        // four slots reads as four unrelated repaints.
+        if (insertDragMoved && pressedInsertSlot == slot)
+        {
+            g.setColour (channelColour.withAlpha (0.30f));
+            g.fillRoundedRectangle (row.toFloat(), ui::pf (3));
+        }
 
         g.setColour (juce::Colours::white.withAlpha (0.28f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
@@ -736,7 +1177,7 @@ void MixerPanel::drawRack (juce::Graphics& g)
 
     g.setColour (juce::Colours::white.withAlpha (0.28f));
     g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (8.5f))));
-    g.drawText (utf8 ("单击 / 右键插槽 → 菜单（含打开界面） · 拖动参数条 · 圆点旁通"),
+    g.drawText (utf8 ("单击/右键 → 菜单 · 拖名字换位置 · 拖参数条 · 圆点旁通"),
                 getRackArea().reduced (ui::px (10), 0).removeFromBottom (ui::px (16)),
                 juce::Justification::centredLeft, false);
 }
@@ -753,6 +1194,7 @@ void MixerPanel::mouseDown (const juce::MouseEvent& e)
             if (mixer.addChannel())
                 setSelectedChannel (juce::jmin (mixer.getChannelCount() - 1, selectedChannel));
 
+            setStripScrollX (stripScrollX);
             repaint();
         }
         else if (getRemoveChannelBounds().contains (pos))
@@ -760,6 +1202,31 @@ void MixerPanel::mouseDown (const juce::MouseEvent& e)
             deleteLastStrip();
         }
 
+        return;
+    }
+
+    //-- Phase 23: the horizontal scrollbar comes before every strip ----------
+    if (isStripScrollNeeded() && getScrollBarBounds().expanded (0, ui::px (3)).contains (pos))
+    {
+        const auto thumb = getScrollThumbBounds();
+
+        draggingScroll = true;
+
+        if (thumb.contains (pos))
+        {
+            // Grabbed the thumb: remember where, so it does not jump under the
+            // pointer the moment the drag starts.
+            dragScrollGrab = pos.x - thumb.getX();
+        }
+        else
+        {
+            // Clicked the empty track: centre the thumb there, then keep
+            // dragging — the same gesture a scrollbar is expected to give.
+            dragScrollGrab = thumb.getWidth() / 2;
+            mouseDrag (e);
+        }
+
+        repaint();
         return;
     }
 
@@ -789,42 +1256,34 @@ void MixerPanel::mouseDown (const juce::MouseEvent& e)
         {
             setSelectedChannel (channel);
 
-            // Phase 20: on the fader or the pan, the numeric control's own menu
-            // comes first — 复位 is the verb a right click on a knob is for. The
-            // channel menu is one item away, and the rest of the strip still
-            // opens it directly.
+            // Phase 23: the output button answers a right click with its own
+            // menu. It is a value, and on every other value in this app a right
+            // click means "the menu for this value". The master has no menu of
+            // its own, so there it falls through to the strip's.
+            if (! isMaster (channel) && getOutputBounds (channel).contains (pos))
+            {
+                showOutputMenu (channel, e.getScreenPosition());
+                return;
+            }
+
+            // Phase 43: the four CONTROLS answer with their own menu. It used to
+            // be "复位 + a 通道 submenu" on the fader and pan, and nothing at all
+            // on mute/solo (they fell through to the channel menu, so a
+            // right-click on 静音 offered 删除通道条). One control, one verb:
+            // what this number is for, plus whether you want a curve on it.
             const bool onFader = getFaderBounds (channel).expanded (8, 0).contains (pos);
             const bool onPan   = getPanBounds (channel).expanded (0, 4).contains (pos);
+            const bool onMute  = getMuteBounds (channel).contains (pos);
+            const bool onSolo  = getSoloBounds (channel).contains (pos);
 
-            if (onFader || onPan)
+            if (onFader || onPan || onMute || onSolo)
             {
-                const auto screenPos = e.getScreenPosition();
-                const int  ch        = channel;
-
-                ui::showValueMenu (this, screenPos,
-                                   getChannelName (channel) + (onFader ? utf8 (" · 推子")
-                                                                       : utf8 (" · 声相")),
-                                   onFader ? mixerlook::dbText (getChannelLevelDb (channel)) + " dB"
-                                           : mixerlook::panText (getChannelPan (channel)),
-                                   [this, ch, onFader]
-                                   {
-                                       if (onFader)
-                                           setChannelLevelDb (ch, 0.0f);
-                                       else
-                                           setChannelPan (ch, 0.0f);
-
-                                       repaint();
-                                   },
-                                   [] (juce::PopupMenu& m)
-                                   {
-                                       m.addItem (10, utf8 ("通道菜单…"));
-                                   },
-                                   [this, ch, screenPos] (int result)
-                                   {
-                                       if (result == 10 && onChannelMenuRequested != nullptr)
-                                           onChannelMenuRequested (ch, screenPos);
-                                   });
-
+                showControlMenu (channel,
+                                 onFader ? StripControl::fader
+                               : onPan   ? StripControl::pan
+                               : onMute  ? StripControl::mute
+                                         : StripControl::solo,
+                                 e.getScreenPosition());
                 return;
             }
 
@@ -841,11 +1300,18 @@ void MixerPanel::mouseDown (const juce::MouseEvent& e)
         {
             if (getInsertTypeBounds (slot).contains (pos))
             {
-                // Phase 18: a left click opens the menu too, and the menu has
-                // "打开效果器界面" in it. One gesture, one place to look; opening
-                // straight into an editor meant the slot's other verbs (swap,
-                // remove, VST3…) were only discoverable by right-clicking.
-                showInsertMenu (slot, localPointToGlobal (getInsertRowBounds (slot).getBottomLeft()));
+                // Phase 18: a click opens the menu, and the menu has "打开效果器
+                // 界面" in it. One gesture, one place to look; opening straight
+                // into an editor meant the slot's other verbs (swap, remove,
+                // VST3…) were only discoverable by right-clicking.
+                //
+                // Phase 43: the press is remembered instead of acted on. Drag it
+                // and the insert moves in the chain; release it where it was and
+                // the menu opens, exactly as before. Acting on mouseDown would
+                // have made "grab and move" impossible to distinguish from
+                // "ask for the menu".
+                pressedInsertSlot = slot;
+                insertDragMoved   = false;
                 return;
             }
 
@@ -889,6 +1355,21 @@ void MixerPanel::mouseDown (const juce::MouseEvent& e)
 
     setSelectedChannel (channel);
 
+    // Phase 26: "－" deletes THIS strip. Tested before every value control: it
+    // sits in the name row, where nothing else answers, and a click that lands
+    // on it must never be interpreted as "grab the strip".
+    if (! isMaster (channel) && getStripCloseBounds (channel).contains (pos))
+    {
+        deleteStrip (channel);
+        return;
+    }
+
+    if (! isMaster (channel) && getOutputBounds (channel).contains (pos))
+    {
+        showOutputMenu (channel, e.getScreenPosition());
+        return;
+    }
+
     if (getMuteBounds (channel).contains (pos))
     {
         toggleMute (channel);
@@ -898,6 +1379,14 @@ void MixerPanel::mouseDown (const juce::MouseEvent& e)
     if (getSoloBounds (channel).contains (pos))
     {
         toggleSolo (channel);
+        return;
+    }
+
+    // Phase 25: mono monitoring. Before the fader test, because the button sits
+    // in the readout row and the fader's hit area is expanded sideways.
+    if (getMonoBounds (channel).contains (pos))
+    {
+        toggleMono (channel);
         return;
     }
 
@@ -920,6 +1409,48 @@ void MixerPanel::mouseDown (const juce::MouseEvent& e)
 
 void MixerPanel::mouseDrag (const juce::MouseEvent& e)
 {
+    // Phase 43: an insert being moved. The chain is an ORDER, so dragging a row
+    // onto another row has to mean "put it there", not "swap these two" — the
+    // model rotates, and the row under the pointer becomes the one being
+    // dragged, which is what makes a long drag feel like one gesture instead of
+    // a series of swaps.
+    if (pressedInsertSlot >= 0)
+    {
+        for (int slot = 0; slot < MixerModel::numInserts; ++slot)
+        {
+            if (! getInsertRowBounds (slot).contains (e.getPosition()) || slot == pressedInsertSlot)
+                continue;
+
+            if (mixer.moveInsert (selectedChannel, pressedInsertSlot, slot))
+            {
+                pressedInsertSlot = slot;
+                insertDragMoved   = true;
+                repaint();
+            }
+
+            break;
+        }
+
+        return;
+    }
+
+    if (draggingScroll)
+    {
+        const auto track = getScrollBarBounds();
+        const auto thumb = getScrollThumbBounds();
+        const int  travel = track.getWidth() - thumb.getWidth();
+        const int  maxScroll = getMaxStripScroll();
+
+        if (travel <= 0 || maxScroll <= 0)
+            return;
+
+        const int x = juce::jlimit (0, travel,
+                                    juce::roundToInt (e.position.x) - track.getX() - dragScrollGrab);
+
+        setStripScrollX (juce::roundToInt ((float) maxScroll * (float) x / (float) travel));
+        return;
+    }
+
     if (dragPart == Part::insertParam && dragSlot >= 0)
     {
         const auto param = getInsertParamBounds (dragSlot).toFloat();
@@ -939,11 +1470,30 @@ void MixerPanel::mouseDrag (const juce::MouseEvent& e)
         setChannelPan (dragChannel, panFromX (dragChannel, e.position.x));
 }
 
-void MixerPanel::mouseUp (const juce::MouseEvent&)
+void MixerPanel::mouseUp (const juce::MouseEvent& e)
 {
+    // Phase 43: a press on an insert label that never moved is the click it
+    // always was — the menu opens here instead of on mouseDown, and this is the
+    // only thing that made a drag possible in the same gesture.
+    if (pressedInsertSlot >= 0)
+    {
+        const int  slot  = pressedInsertSlot;
+        const bool moved = insertDragMoved;
+
+        pressedInsertSlot = -1;
+        insertDragMoved   = false;
+
+        if (! moved && getInsertTypeBounds (slot).contains (e.getPosition()))
+            showInsertMenu (slot, localPointToGlobal (getInsertRowBounds (slot).getBottomLeft()));
+
+        repaint();
+        return;
+    }
+
     dragPart = Part::none;
     dragChannel = -1;
     dragSlot = -1;
+    draggingScroll = false;
     repaint();
 }
 
@@ -955,7 +1505,14 @@ void MixerPanel::mouseMove (const juce::MouseEvent& e)
     int channel = -1;
     int slot = -1;
 
-    if (getRackArea().contains (pos))
+    const bool overScroll = isStripScrollNeeded()
+                              && getScrollBarBounds().expanded (0, ui::px (3)).contains (pos);
+
+    if (overScroll)
+    {
+        part = Part::none;                 // the bar is its own thing, not a strip
+    }
+    else if (getRackArea().contains (pos))
     {
         for (int i = 0; i < MixerModel::numInserts; ++i)
         {
@@ -981,8 +1538,13 @@ void MixerPanel::mouseMove (const juce::MouseEvent& e)
 
         if (channel >= 0)
         {
-            if (getMuteBounds (channel).contains (pos))      part = Part::mute;
+            if (getOutputBounds (channel).contains (pos)
+                 && ! isMaster (channel))                     part = Part::output;
+            else if (! isMaster (channel) && getStripCloseBounds (channel).contains (pos))
+                                                                  part = Part::stripClose;
+            else if (getMuteBounds (channel).contains (pos))      part = Part::mute;
             else if (getSoloBounds (channel).contains (pos)) part = Part::solo;
+            else if (getMonoBounds (channel).contains (pos))      part = Part::mono;
             else if (getFaderBounds (channel).expanded (8, 0).contains (pos)) part = Part::fader;
             else if (getPanBounds (channel).expanded (0, 4).contains (pos))   part = Part::pan;
             else                                             part = Part::strip;
@@ -991,27 +1553,188 @@ void MixerPanel::mouseMove (const juce::MouseEvent& e)
 
     setMouseCursor (part == Part::fader || part == Part::pan || part == Part::insertParam
                         ? juce::MouseCursor::DraggingHandCursor
-                        : (part == Part::none ? juce::MouseCursor::NormalCursor
+                        : (part == Part::none ? (overScroll ? juce::MouseCursor::DraggingHandCursor
+                                                            : juce::MouseCursor::NormalCursor)
                                               : juce::MouseCursor::PointingHandCursor));
 
-    if (part != hoveredPart || channel != hoveredChannel || slot != hoveredSlot)
+    if (part != hoveredPart || channel != hoveredChannel || slot != hoveredSlot
+         || overScroll != hoveredScroll)
     {
         hoveredPart = part;
         hoveredChannel = channel;
         hoveredSlot = slot;
+        hoveredScroll = overScroll;
         repaint();
     }
 }
 
 void MixerPanel::mouseExit (const juce::MouseEvent&)
 {
-    if (hoveredPart != Part::none)
+    if (hoveredPart != Part::none || hoveredScroll)
     {
         hoveredPart = Part::none;
         hoveredChannel = -1;
         hoveredSlot = -1;
+        hoveredScroll = false;
         repaint();
     }
+}
+
+//==============================================================================
+void MixerPanel::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+{
+    // Phase 23: a wheel over the strips scrolls them sideways, because there is
+    // nothing else for a wheel to do on a fader (a fader is dragged, not
+    // wheeled — a wheel that moved a fader would be a trap).
+    if (isStripScrollNeeded() && getStripsArea().contains (e.getPosition()))
+    {
+        const float delta = std::abs (wheel.deltaX) > std::abs (wheel.deltaY) ? wheel.deltaX
+                                                                              : wheel.deltaY;
+
+        if (std::abs (delta) > 1.0e-4f)
+        {
+            setStripScrollX (stripScrollX - juce::roundToInt (delta * (float) ui::px (120)));
+            return;
+        }
+    }
+
+    juce::Component::mouseWheelMove (e, wheel);
+}
+
+//==============================================================================
+void MixerPanel::showOutputMenu (int channel, juce::Point<int> screenPos)
+{
+    if (isMaster (channel) || ! juce::isPositiveAndBelow (channel, mixer.getChannelCount()))
+        return;
+
+    const int current = mixer.getChannelOutput (channel);
+
+    juce::PopupMenu menu;
+    menu.addSectionHeader (getChannelName (channel) + utf8 (" · 输出到"));
+
+    // The master first: it is both the default and the most common answer, and
+    // a menu where the usual choice is buried under eight strips is a menu that
+    // gets read every single time.
+    menu.addItem (MixerModel::masterChannel + 1, utf8 ("主输出"), true,
+                  current == MixerModel::masterChannel);
+
+    menu.addSeparator();
+
+    for (int destination = 0; destination < mixer.getChannelCount(); ++destination)
+    {
+        if (destination == channel)
+            continue;
+
+        // A strip that already feeds this one would close a loop, so it is
+        // listed but greyed: "you cannot, and here is why" beats hiding it and
+        // leaving the user wondering where the channel went.
+        menu.addItem (destination + 1, getChannelName (destination),
+                      ! mixer.wouldLoop (channel, destination),
+                      current == destination);
+    }
+
+    juce::Component::SafePointer<MixerPanel> safe (this);
+
+    menu.showMenuAsync (juce::PopupMenu::Options()
+                            .withTargetScreenArea (juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1))
+                            .withMinimumWidth (ui::px (150)),
+                        [safe, channel] (int result)
+                        {
+                            if (safe == nullptr || result <= 0)
+                                return;
+
+                            if (safe->mixer.setChannelOutput (channel, result - 1))
+                                safe->repaint();
+                        });
+}
+
+//==============================================================================
+void MixerPanel::fillControlMenu (juce::PopupMenu& menu, int channel, StripControl control)
+{
+    const juce::String name = getChannelName (channel);
+
+    juce::String title;
+    juce::String value;
+    bool         isSwitch = false;
+
+    switch (control)
+    {
+        case StripControl::fader:
+            title = name + utf8 (" · 推子");
+            value = mixerlook::dbText (getChannelLevelDb (channel)) + " dB";
+            break;
+
+        case StripControl::pan:
+            title = name + utf8 (" · 声相");
+            value = mixerlook::panText (getChannelPan (channel));
+            break;
+
+        case StripControl::mute:
+            isSwitch = true;
+            title    = name + utf8 (" · 静音");
+            value    = isChannelMuted (channel) ? utf8 ("已静音") : utf8 ("开");
+            break;
+
+        case StripControl::solo:
+            isSwitch = true;
+            title    = name + utf8 (" · 独奏");
+            value    = isChannelSoloed (channel) ? utf8 ("已独奏") : utf8 ("关");
+            break;
+    }
+
+    menu.addSectionHeader (title + utf8 (" · ") + value);
+
+    // One verb: 复位 for a number, the on/off it toggles for a switch. A switch
+    // that offered "复位" would be offering "turn it off", which is what the
+    // item below already says in the user's own words.
+    menu.addItem (stripMenuActionId,
+                  isSwitch ? (control == StripControl::mute
+                                ? (isChannelMuted (channel) ? utf8 ("取消静音") : utf8 ("静音"))
+                                : (isChannelSoloed (channel) ? utf8 ("取消独奏") : utf8 ("独奏")))
+                           : utf8 ("复位"));
+
+    menu.addSeparator();
+
+    // The host adds exactly one line here — "创建音量自动化" and friends — and
+    // owns the ids above `stripMenuActionId`.
+    if (buildStripAutomationItems != nullptr)
+        buildStripAutomationItems (menu, channel, control);
+}
+
+void MixerPanel::showControlMenu (int channel, StripControl control, juce::Point<int> screenPos)
+{
+    juce::PopupMenu menu;
+    fillControlMenu (menu, channel, control);
+
+    juce::Component::SafePointer<MixerPanel> safe (this);
+    const int ch = channel;
+
+    menu.showMenuAsync (juce::PopupMenu::Options()
+                            .withTargetScreenArea (juce::Rectangle<int> (screenPos.x, screenPos.y,
+                                                                         1, 1))
+                            .withMinimumWidth (ui::px (170)),
+                        [safe, ch, control] (int result)
+                        {
+                            if (safe == nullptr || result <= 0)
+                                return;
+
+                            if (result == stripMenuActionId)
+                            {
+                                switch (control)
+                                {
+                                    case StripControl::fader: safe->setChannelLevelDb (ch, 0.0f); break;
+                                    case StripControl::pan:   safe->setChannelPan (ch, 0.0f); break;
+                                    case StripControl::mute:  safe->toggleMute (ch); break;
+                                    case StripControl::solo:  safe->toggleSolo (ch); break;
+                                }
+
+                                safe->repaint();
+                                return;
+                            }
+
+                            if (safe->onStripAutomationChosen != nullptr)
+                                safe->onStripAutomationChosen (ch, control, result);
+                        });
 }
 
 //==============================================================================
@@ -1033,6 +1756,15 @@ void MixerPanel::showInsertMenu (int slot, juce::Point<int> screenAnchor)
     menu.addItem (100, utf8 ("VST3 效果器…"), onInsertPluginRequested != nullptr,
                   insert.type == fx::Type::vst);
     menu.addItem (101, utf8 ("插件管理器…"), onOpenPluginManager != nullptr);
+
+    // Phase 43: the same move the drag does, spelled out. A rack you can only
+    // reorder by dragging is a rack where the feature is invisible; and this is
+    // also the only way to move an insert whose neighbours are all empty, since
+    // there is nothing to drag it onto that changes anything.
+    menu.addSeparator();
+    menu.addItem (103, utf8 ("上移一格"), slot > 0 && insert.type != fx::Type::none);
+    menu.addItem (104, utf8 ("下移一格"),
+                  slot + 1 < MixerModel::numInserts && insert.type != fx::Type::none);
 
     const int channel = selectedChannel;
     const auto screenPosition = getScreenBounds().getCentre();
@@ -1071,6 +1803,16 @@ void MixerPanel::showInsertMenu (int slot, juce::Point<int> screenAnchor)
                             {
                                 if (safe->onOpenPluginManager != nullptr)
                                     safe->onOpenPluginManager();
+
+                                return;
+                            }
+
+                            if (result == 103 || result == 104)
+                            {
+                                const int to = slot + (result == 103 ? -1 : 1);
+
+                                if (safe->mixer.moveInsert (channel, slot, to))
+                                    safe->repaint();
 
                                 return;
                             }

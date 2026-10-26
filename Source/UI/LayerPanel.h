@@ -53,6 +53,13 @@ public:
         owns the "add track for this parameter" menu too. */
     std::function<void (int layerIndex, juce::Point<int> screenPos)> onAutomationRequested;
 
+    /** Phase 21: the same menu as a hover sub-menu of the fader's value menu.
+        `build` fills a PopupMenu the panel then hangs off the value menu, and
+        the chosen item id comes back through `onAutomationChosen` — the host
+        dispatches it with the same code the standalone menu uses. */
+    std::function<void (juce::PopupMenu&, int layerIndex)> buildAutomationSubmenu;
+    std::function<void (int layerIndex, int result)> onAutomationChosen;
+
     /** Phase 12: the 音量 / 声相 chips under an open lane also create a track in
         the automation window. Without this the panel could show a curve that
         the window knows nothing about. */
