@@ -37,7 +37,10 @@ namespace
     // Used to verify the UI without a display attached.
     // `bpm` > 0 overrides the default tempo, so the same snapshot can be taken
     // at two tempos and compared.
-    void renderHeadlessReport (const juce::File& pngFile, double bpm = 0.0)
+    // Returns whether the rule check passed: --snapshot is a gate, so a red
+    // run has to be able to fail the process, not just print red text that a
+    // human may never read.
+    bool renderHeadlessReport (const juce::File& pngFile, double bpm = 0.0)
     {
         atomic::MainComponent component;
         component.setSize (atomic::ui::px (1440), atomic::ui::px (820));
@@ -200,6 +203,8 @@ namespace
 
         pngFile.withFileExtension (".log").replaceWithText (report);
         std::cout << report << std::endl;
+
+        return ! report.contains ("CHECK(S) FAILED");
     }
 }
 
@@ -306,8 +311,14 @@ public:
             if (bpmIndex >= 0 && args.size() > bpmIndex + 1)
                 bpm = args[bpmIndex + 1].getDoubleValue();
 
-            renderHeadlessReport (juce::File::getCurrentWorkingDirectory().getChildFile (args[snapshotIndex + 1]),
-                                  bpm);
+            const bool selfTestPassed
+                = renderHeadlessReport (juce::File::getCurrentWorkingDirectory().getChildFile (args[snapshotIndex + 1]),
+                                        bpm);
+
+            // The gate: 421 checks only guarantee anything if a failing run can
+            // fail the command line. The windowed app never touches this, so a
+            // normal launch still exits 0.
+            setApplicationReturnValue (selfTestPassed ? 0 : 1);
             quit();
             return;
         }

@@ -622,6 +622,7 @@ public:
     int    getActiveLayerIndex() const noexcept { return activeIndex; }
     void   setActiveLayerIndex (int newIndex);
     Layer* getActiveLayer() noexcept;
+    const Layer* getActiveLayer() const noexcept;
 
     /** Appends a layer, makes it active, returns its index. */
     int  addLayer (juce::String name, juce::Colour colour);

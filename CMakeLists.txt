@@ -30,6 +30,7 @@ juce_generate_juce_header(AtomicDAW)
 target_sources(AtomicDAW PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
+    Source/SelfTest.cpp
     Source/Audio/AudioEngine.cpp
     Source/Audio/MidiInputHub.cpp
     Source/Audio/PlaybackEngine.cpp

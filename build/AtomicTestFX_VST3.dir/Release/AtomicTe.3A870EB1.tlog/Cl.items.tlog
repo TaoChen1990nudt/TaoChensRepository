@@ -1,8 +1,0 @@
-F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_AAX.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestFX_VST3.dir\Release\juce_audio_plugin_client_AAX.obj
-F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_AAX_utils.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestFX_VST3.dir\Release\juce_audio_plugin_client_AAX_utils.obj
-F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_ARA.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestFX_VST3.dir\Release\juce_audio_plugin_client_ARA.obj
-F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_LV2.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestFX_VST3.dir\Release\juce_audio_plugin_client_LV2.obj
-F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_Standalone.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestFX_VST3.dir\Release\juce_audio_plugin_client_Standalone.obj
-F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_Unity.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestFX_VST3.dir\Release\juce_audio_plugin_client_Unity.obj
-F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_VST2.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestFX_VST3.dir\Release\juce_audio_plugin_client_VST2.obj
-F:\PLSMStudio\Atomic DAW\build\_deps\juce-src\modules\juce_audio_plugin_client\juce_audio_plugin_client_VST3.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicTestFX_VST3.dir\Release\juce_audio_plugin_client_VST3.obj

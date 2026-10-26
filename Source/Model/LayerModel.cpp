@@ -354,6 +354,11 @@ Layer* LayerStack::getActiveLayer() noexcept
     return getLayer (activeIndex);
 }
 
+const Layer* LayerStack::getActiveLayer() const noexcept
+{
+    return getLayer (activeIndex);
+}
+
 Layer* LayerStack::findLayerById (int layerId) noexcept
 {
     if (layerId <= 0)
