@@ -1,6 +1,7 @@
 F:\PLSMStudio\Atomic DAW\Source\Main.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicDAW.dir\Release\Main.obj
 F:\PLSMStudio\Atomic DAW\Source\MainComponent.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicDAW.dir\Release\MainComponent.obj
 F:\PLSMStudio\Atomic DAW\Source\Audio\AudioEngine.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicDAW.dir\Release\AudioEngine.obj
+F:\PLSMStudio\Atomic DAW\Source\Audio\MidiInputHub.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicDAW.dir\Release\MidiInputHub.obj
 F:\PLSMStudio\Atomic DAW\Source\Audio\PlaybackEngine.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicDAW.dir\Release\PlaybackEngine.obj
 F:\PLSMStudio\Atomic DAW\Source\Audio\PluginHost.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicDAW.dir\Release\PluginHost.obj
 F:\PLSMStudio\Atomic DAW\Source\Audio\WavExport.cpp;F:\PLSMStudio\Atomic DAW\build\AtomicDAW.dir\Release\WavExport.obj

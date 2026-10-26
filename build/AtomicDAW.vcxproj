@@ -135,6 +135,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <ImportLibrary>F:/PLSMStudio/Atomic DAW/build/AtomicDAW_artefacts/Debug/AtomicDAW.lib</ImportLibrary>
       <ProgramDataBaseFile>F:/PLSMStudio/Atomic DAW/build/AtomicDAW_artefacts/Debug/AtomicDAW.pdb</ProgramDataBaseFile>
+      <StackReserveSize>67108864</StackReserveSize>
       <SubSystem>Windows</SubSystem>
     </Link>
     <ProjectReference>
@@ -193,6 +194,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <ImportLibrary>F:/PLSMStudio/Atomic DAW/build/AtomicDAW_artefacts/Release/AtomicDAW.lib</ImportLibrary>
       <ProgramDataBaseFile>F:/PLSMStudio/Atomic DAW/build/AtomicDAW_artefacts/Release/AtomicDAW.pdb</ProgramDataBaseFile>
+      <StackReserveSize>67108864</StackReserveSize>
       <SubSystem>Windows</SubSystem>
     </Link>
     <ProjectReference>
@@ -250,6 +252,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <ImportLibrary>F:/PLSMStudio/Atomic DAW/build/AtomicDAW_artefacts/MinSizeRel/AtomicDAW.lib</ImportLibrary>
       <ProgramDataBaseFile>F:/PLSMStudio/Atomic DAW/build/AtomicDAW_artefacts/MinSizeRel/AtomicDAW.pdb</ProgramDataBaseFile>
+      <StackReserveSize>67108864</StackReserveSize>
       <SubSystem>Windows</SubSystem>
     </Link>
     <ProjectReference>
@@ -306,6 +309,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <ImportLibrary>F:/PLSMStudio/Atomic DAW/build/AtomicDAW_artefacts/RelWithDebInfo/AtomicDAW.lib</ImportLibrary>
       <ProgramDataBaseFile>F:/PLSMStudio/Atomic DAW/build/AtomicDAW_artefacts/RelWithDebInfo/AtomicDAW.pdb</ProgramDataBaseFile>
+      <StackReserveSize>67108864</StackReserveSize>
       <SubSystem>Windows</SubSystem>
     </Link>
     <ProjectReference>
@@ -430,6 +434,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Main.cpp" />
     <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\MainComponent.cpp" />
     <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Audio\AudioEngine.cpp" />
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Audio\MidiInputHub.cpp" />
     <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Audio\PlaybackEngine.cpp" />
     <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Audio\PluginHost.cpp" />
     <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Audio\WavExport.cpp" />

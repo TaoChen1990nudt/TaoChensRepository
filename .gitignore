@@ -1,0 +1,9 @@
+# 构建产物：MSVC/JUCE 中间文件与二进制全部不入库（CMake FetchContent 可重建）
+build/
+
+# 临时目录：自检出图与实验脚本
+tmp/
+.tmp/
+
+# 代码片段草稿（下划线开头的 .txt）
+Source/UI/_*.txt

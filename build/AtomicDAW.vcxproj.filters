@@ -10,6 +10,9 @@
     <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Audio\AudioEngine.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Audio\MidiInputHub.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="F:\PLSMStudio\Atomic DAW\Source\Audio\PlaybackEngine.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
