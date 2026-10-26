@@ -240,7 +240,7 @@ int PianoRollComponent::getEditableNoteIdAt (juce::Point<float> position) const
 
 juce::Rectangle<float> PianoRollComponent::getNoteScreenBounds (int layerIndex, int noteId) const
 {
-    auto* layer = const_cast<PianoRollComponent*> (this)->stack.getLayer (layerIndex);
+    const auto* layer = stack.getLayer (layerIndex);
 
     if (layer == nullptr)
         return {};
@@ -253,8 +253,7 @@ juce::Rectangle<float> PianoRollComponent::getNoteScreenBounds (int layerIndex, 
 
 bool PianoRollComponent::isLayerShown (int layerIndex) const
 {
-    auto& self = *const_cast<PianoRollComponent*> (this);
-    auto* layer = self.stack.getLayer (layerIndex);
+    const auto* layer = stack.getLayer (layerIndex);
 
     if (layer == nullptr)
         return false;
@@ -401,11 +400,10 @@ void PianoRollComponent::collectSoundingNotes (double beat, std::vector<juce::in
     if (beat < 0.0)
         return;
 
-    auto* self = const_cast<PianoRollComponent*> (this);
 
-    for (int i = 0; i < self->stack.getNumLayers(); ++i)
+    for (int i = 0; i < stack.getNumLayers(); ++i)
     {
-        auto* layer = self->stack.getLayer (i);
+        const auto* layer = stack.getLayer (i);
 
         if (! isLayerShown (i))
             continue;
@@ -428,7 +426,7 @@ double PianoRollComponent::getPlayheadProgress (int layerIndex, int noteId) cons
     if (! transportActive || playheadBeat < 0.0)
         return -1.0;
 
-    auto* layer = stack.getLayer (layerIndex);
+    const auto* layer = stack.getLayer (layerIndex);
 
     if (layer == nullptr)
         return -1.0;
@@ -901,10 +899,9 @@ double PianoRollComponent::getContentEndBeat() const
 {
     double end = 0.0;
 
-    auto* self = const_cast<PianoRollComponent*> (this);
 
-    for (int i = 0; i < self->stack.getNumLayers(); ++i)
-        if (auto* layer = self->stack.getLayer (i))
+    for (int i = 0; i < stack.getNumLayers(); ++i)
+        if (const auto* layer = stack.getLayer (i))
             end = juce::jmax (end, layer->getEndBeat());
 
     return end;
@@ -1022,7 +1019,7 @@ void PianoRollComponent::notifySelectionChanged()
 
 int PianoRollComponent::getSelectedRoutingSlotId() const
 {
-    auto* layer = const_cast<PianoRollComponent*> (this)->stack.getActiveLayer();
+    const auto* layer = stack.getActiveLayer();
 
     if (layer == nullptr || selection.empty())
         return -1;
@@ -1058,7 +1055,7 @@ int PianoRollComponent::getSelectedRoutingSlotId() const
 
 bool PianoRollComponent::selectionUsesOverride() const
 {
-    auto* layer = const_cast<PianoRollComponent*> (this)->stack.getActiveLayer();
+    const auto* layer = stack.getActiveLayer();
 
     if (layer == nullptr)
         return false;
@@ -1160,8 +1157,7 @@ bool PianoRollComponent::mountSelectionTo (int slotId)
 //==============================================================================
 int PianoRollComponent::resolvedSlotForNote (const NoteEvent& note) const
 {
-    auto& self = *const_cast<PianoRollComponent*> (this);
-    auto* layer = self.stack.getActiveLayer();
+    const auto* layer = stack.getActiveLayer();
 
     if (layer == nullptr)
         return -1;
@@ -1171,8 +1167,7 @@ int PianoRollComponent::resolvedSlotForNote (const NoteEvent& note) const
 
 int PianoRollComponent::resolvedSlotForGroup (int layerIndex, int groupId) const
 {
-    auto& self = *const_cast<PianoRollComponent*> (this);
-    const auto* layer = self.stack.getLayer (layerIndex);
+    const auto* layer = stack.getLayer (layerIndex);
 
     if (layer == nullptr)
         return -1;
@@ -1323,7 +1318,7 @@ int PianoRollComponent::groupSelection()
 
 int PianoRollComponent::getSelectedGroupId() const
 {
-    auto* layer = const_cast<PianoRollComponent*> (this)->stack.getActiveLayer();
+    const auto* layer = stack.getActiveLayer();
 
     if (layer == nullptr)
         return -1;
@@ -1368,7 +1363,7 @@ int PianoRollComponent::getSelectedGroupId() const
 
 bool PianoRollComponent::isWholeGroupSelected (int groupId) const
 {
-    auto* layer = const_cast<PianoRollComponent*> (this)->stack.getActiveLayer();
+    const auto* layer = stack.getActiveLayer();
 
     if (layer == nullptr || groupId < 0 || selection.empty())
         return false;
@@ -1510,7 +1505,7 @@ int PianoRollComponent::getGroupLabelAt (juce::Point<float> position) const
 {
     for (int i = 0; i < stack.getNumLayers(); ++i)
     {
-        const auto* layer = const_cast<PianoRollComponent*> (this)->stack.getLayer (i);
+        const auto* layer = stack.getLayer (i);
 
         if (! isLayerShown (i))
             continue;
@@ -1536,7 +1531,7 @@ int PianoRollComponent::getGroupFrameAt (juce::Point<float> position) const
 {
     // Only the active layer: a ghost group is not editable, and a click on one
     // that picked the group up would drag notes the user cannot even select.
-    auto* layer = const_cast<PianoRollComponent*> (this)->stack.getActiveLayer();
+    const auto* layer = stack.getActiveLayer();
 
     if (layer == nullptr)
         return -1;
@@ -1562,7 +1557,7 @@ bool PianoRollComponent::isGroupFocused (int layerIndex, int groupId) const
     if (focusSlotId < 0)
         return false;
 
-    const auto* layer = const_cast<PianoRollComponent*> (this)->stack.getLayer (layerIndex);
+    const auto* layer = stack.getLayer (layerIndex);
 
     if (layer == nullptr)
         return false;
@@ -1628,7 +1623,7 @@ int PianoRollComponent::layerIndexOf (const Layer* layer) const
 
 juce::Rectangle<float> PianoRollComponent::getGroupLabelBounds (int layerIndex, int groupId) const
 {
-    const auto* layer = const_cast<PianoRollComponent*> (this)->stack.getLayer (layerIndex);
+    const auto* layer = stack.getLayer (layerIndex);
 
     if (layer == nullptr)
         return {};
@@ -1696,18 +1691,17 @@ int PianoRollComponent::getFocusedNoteCount() const
     if (focusSlotId < 0)
         return 0;
 
-    auto& self = *const_cast<PianoRollComponent*> (this);
     int count = 0;
 
-    for (int i = 0; i < self.stack.getNumLayers(); ++i)
+    for (int i = 0; i < stack.getNumLayers(); ++i)
     {
-        const auto* layer = self.stack.getLayer (i);
+        const auto* layer = stack.getLayer (i);
 
         if (! isLayerShown (i))
             continue;
 
         for (const auto& note : layer->getNotes())
-            if (routing::resolve (*layer, note, self.rack).slotId == focusSlotId)
+            if (routing::resolve (*layer, note, rack).slotId == focusSlotId)
                 ++count;
     }
 
@@ -1741,7 +1735,7 @@ bool PianoRollComponent::dismissSpotlight()
 int PianoRollComponent::layerIndexOfGroup (int groupId) const
 {
     for (int i = 0; i < stack.getNumLayers(); ++i)
-        if (const auto* layer = const_cast<PianoRollComponent*> (this)->stack.getLayer (i);
+        if (const auto* layer = stack.getLayer (i);
             layer != nullptr && layer->findGroup (groupId) != nullptr)
             return i;
 
@@ -1917,14 +1911,31 @@ void PianoRollComponent::showCanvasMenu (juce::Point<int> screenPos)
                         });
 }
 
-NoteEvent* PianoRollComponent::hitTestActiveLayer (juce::Point<float> position) const
+NoteEvent* PianoRollComponent::hitTestActiveLayer (juce::Point<float> position)
 {
-    auto* active = const_cast<PianoRollComponent*> (this)->stack.getActiveLayer();
+    auto* active = stack.getActiveLayer();
 
     if (active == nullptr)
         return nullptr;
 
     auto& notes = active->getNotes();
+
+    // Reverse: the topmost drawn note wins, matching what the user sees.
+    for (auto it = notes.rbegin(); it != notes.rend(); ++it)
+        if (getNoteBounds (*it).contains (position))
+            return &(*it);
+
+    return nullptr;
+}
+
+const NoteEvent* PianoRollComponent::hitTestActiveLayer (juce::Point<float> position) const
+{
+    const auto* active = stack.getActiveLayer();
+
+    if (active == nullptr)
+        return nullptr;
+
+    const auto& notes = active->getNotes();
 
     // Reverse: the topmost drawn note wins, matching what the user sees.
     for (auto it = notes.rbegin(); it != notes.rend(); ++it)
@@ -2694,8 +2705,7 @@ bool PianoRollComponent::simulateGroupMove (int layerIndex, int groupId,
 
 juce::Rectangle<float> PianoRollComponent::groupFrameOf (int layerIndex, int groupId) const
 {
-    auto& self = *const_cast<PianoRollComponent*> (this);
-    const auto* layer = self.stack.getLayer (layerIndex);
+    const auto* layer = stack.getLayer (layerIndex);
 
     if (layer == nullptr)
         return {};
@@ -4776,11 +4786,17 @@ void PianoRollComponent::closeNoteAutomation()
     repaint();
 }
 
-NoteEvent* PianoRollComponent::getExpandedNote() const
+NoteEvent* PianoRollComponent::getExpandedNote()
 {
-    auto* self = const_cast<PianoRollComponent*> (this);
+    if (auto* layer = stack.getLayer (expandedLayerIndex))
+        return layer->findNote (expandedNoteId);
 
-    if (auto* layer = self->stack.getLayer (expandedLayerIndex))
+    return nullptr;
+}
+
+const NoteEvent* PianoRollComponent::getExpandedNote() const
+{
+    if (const auto* layer = stack.getLayer (expandedLayerIndex))
         return layer->findNote (expandedNoteId);
 
     return nullptr;
@@ -5280,14 +5296,23 @@ void PianoRollComponent::drawCurveInBox (juce::Graphics& g, const NoteEvent& not
 //==============================================================================
 //  Phase 21: the inline group automation box
 //==============================================================================
-NoteGroup* PianoRollComponent::getExpandedGroup() const
+NoteGroup* PianoRollComponent::getExpandedGroup()
 {
     if (expandedGroupId < 0)
         return nullptr;
 
-    auto& self = *const_cast<PianoRollComponent*> (this);
+    if (auto* layer = stack.getLayer (expandedGroupLayerIndex))
+        return layer->findGroup (expandedGroupId);
 
-    if (auto* layer = self.stack.getLayer (expandedGroupLayerIndex))
+    return nullptr;
+}
+
+const NoteGroup* PianoRollComponent::getExpandedGroup() const
+{
+    if (expandedGroupId < 0)
+        return nullptr;
+
+    if (const auto* layer = stack.getLayer (expandedGroupLayerIndex))
         return layer->findGroup (expandedGroupId);
 
     return nullptr;
@@ -5380,7 +5405,13 @@ juce::Range<double> PianoRollComponent::getGroupBeatSpan (const Layer& layer,
     return { lo, hi };
 }
 
-AutomationLane& PianoRollComponent::groupLaneFor (NoteGroup& group, int target) const
+AutomationLane& PianoRollComponent::groupLaneFor (NoteGroup& group, int target)
+{
+    return group.automationFor ((GroupAutomationTarget) juce::jlimit (0, numGroupAutomationTargets - 1,
+                                                                    target));
+}
+
+const AutomationLane& PianoRollComponent::groupLaneFor (const NoteGroup& group, int target) const
 {
     return group.automationFor ((GroupAutomationTarget) juce::jlimit (0, numGroupAutomationTargets - 1,
                                                                     target));
@@ -5389,8 +5420,7 @@ AutomationLane& PianoRollComponent::groupLaneFor (NoteGroup& group, int target) 
 juce::Rectangle<float> PianoRollComponent::getGroupAutomationBoxBounds (int layerIndex,
                                                                       int groupId) const
 {
-    auto& self = *const_cast<PianoRollComponent*> (this);
-    const auto* layer = self.stack.getLayer (layerIndex);
+    const auto* layer = stack.getLayer (layerIndex);
 
     if (layer == nullptr)
         return {};
@@ -5566,7 +5596,7 @@ int PianoRollComponent::findGroupCurvePointAt (juce::Point<float> position) cons
     // Beats, not 0..1: a group lane is absolute project time (see
     // AutomationLane), and this box only shows the slice the group covers.
     const auto box  = getGroupAutomationBoxBounds (expandedGroupLayerIndex, expandedGroupId);
-    const auto* layer = const_cast<PianoRollComponent*> (this)->stack.getLayer (expandedGroupLayerIndex);
+    const auto* layer = stack.getLayer (expandedGroupLayerIndex);
 
     if (layer == nullptr)
         return -1;
@@ -6127,7 +6157,7 @@ juce::String PianoRollComponent::describeCurvePaste() const
     else if (curveSelection == CurveSelection::groupLane)
     {
         if (auto* group = getExpandedGroup())
-            if (auto* layer = stack.getLayer (expandedGroupLayerIndex))
+            if (const auto* layer = stack.getLayer (expandedGroupLayerIndex))
                 targetLength = getGroupBeatSpan (*layer, *group).getLength();
     }
 
@@ -6492,8 +6522,7 @@ bool PianoRollComponent::pasteNotesFromClipboard()
 //==============================================================================
 juce::Rectangle<float> PianoRollComponent::getSampleScreenBounds (int layerIndex, int sampleId) const
 {
-    auto& self = *const_cast<PianoRollComponent*> (this);
-    const auto* layer = self.stack.getLayer (layerIndex);
+    const auto* layer = stack.getLayer (layerIndex);
 
     if (layer == nullptr)
         return {};
@@ -6629,8 +6658,7 @@ bool PianoRollComponent::applySampleFade (int sampleId, bool atTail, double beat
 
 float PianoRollComponent::getSampleFadeHandleX (int layerIndex, int sampleId, bool atTail) const
 {
-    auto& self = *const_cast<PianoRollComponent*> (this);
-    const auto* layer = self.stack.getLayer (layerIndex);
+    const auto* layer = stack.getLayer (layerIndex);
 
     if (layer == nullptr)
         return 0.0f;
@@ -6649,13 +6677,12 @@ float PianoRollComponent::getSampleFadeHandleX (int layerIndex, int sampleId, bo
 
 int PianoRollComponent::hitTestSampleFadeHandle (juce::Point<float> position) const
 {
-    auto& self = *const_cast<PianoRollComponent*> (this);
-    auto* layer = self.stack.getActiveLayer();
+    const auto* layer = stack.getActiveLayer();
 
     if (layer == nullptr)
         return -1;
 
-    const int index = self.stack.getActiveLayerIndex();
+    const int index = stack.getActiveLayerIndex();
 
     for (const auto& sample : layer->getSamples())
     {
@@ -6727,8 +6754,7 @@ int PianoRollComponent::sampleWaveColumns (const Layer& layer, const SampleEvent
 
 int PianoRollComponent::sampleWaveColumnCount (int sampleId) const
 {
-    auto& self = *const_cast<PianoRollComponent*> (this);
-    auto* layer = self.stack.getActiveLayer();
+    const auto* layer = stack.getActiveLayer();
 
     if (layer == nullptr)
         return 0;
@@ -6905,16 +6931,32 @@ bool PianoRollComponent::simulateSampleFade (int sampleId, bool atTail, double b
     return true;
 }
 
-SampleEvent* PianoRollComponent::hitTestSample (juce::Point<float> position) const
+SampleEvent* PianoRollComponent::hitTestSample (juce::Point<float> position)
 {
-    auto& self = *const_cast<PianoRollComponent*> (this);
-    auto* layer = self.stack.getActiveLayer();
+    auto* layer = stack.getActiveLayer();
 
     // Same rule as notes: only the active, visible sheet answers the mouse.
     if (layer == nullptr)
         return nullptr;
 
-    const int index = self.stack.getActiveLayerIndex();
+    const int index = stack.getActiveLayerIndex();
+
+    for (const auto& sample : layer->getSamples())
+        if (getSampleScreenBounds (index, sample.id).contains (position))
+            return layer->findSample (sample.id);
+
+    return nullptr;
+}
+
+const SampleEvent* PianoRollComponent::hitTestSample (juce::Point<float> position) const
+{
+    const auto* layer = stack.getActiveLayer();
+
+    // Same rule as notes: only the active, visible sheet answers the mouse.
+    if (layer == nullptr)
+        return nullptr;
+
+    const int index = stack.getActiveLayerIndex();
 
     for (const auto& sample : layer->getSamples())
         if (getSampleScreenBounds (index, sample.id).contains (position))
@@ -6933,8 +6975,7 @@ int PianoRollComponent::getEditableSampleIdAt (juce::Point<float> position) cons
 
 int PianoRollComponent::getActiveLayerSampleCount() const
 {
-    auto& self = *const_cast<PianoRollComponent*> (this);
-    auto* layer = self.stack.getActiveLayer();
+    const auto* layer = stack.getActiveLayer();
 
     return layer != nullptr ? layer->getSampleCount() : 0;
 }
@@ -7173,7 +7214,7 @@ bool PianoRollComponent::mountSelectedSamplesToSlot (int slotId)
 
 int PianoRollComponent::selectedSamplerSlotId() const
 {
-    auto* layer = const_cast<PianoRollComponent*> (this)->stack.getActiveLayer();
+    const auto* layer = stack.getActiveLayer();
 
     if (layer == nullptr)
         return -1;
@@ -7294,8 +7335,7 @@ PianoRollComponent::hitsInMarquee (juce::Rectangle<float> marquee) const
 {
     std::pair<std::vector<int>, std::vector<int>> hits;
 
-    auto& self = *const_cast<PianoRollComponent*> (this);
-    auto* active = self.stack.getActiveLayer();
+    auto* active = stack.getActiveLayer();
 
     if (active == nullptr)
         return hits;
@@ -7303,7 +7343,7 @@ PianoRollComponent::hitsInMarquee (juce::Rectangle<float> marquee) const
     // Phase 29: the band grabs BOTH kinds. "Everything in this rectangle" is
     // what a marquee means, and making the user sweep twice — once for notes,
     // once for blocks — was the marquee answering a question nobody asked.
-    const int index = self.stack.getActiveLayerIndex();
+    const int index = stack.getActiveLayerIndex();
 
     for (const auto& note : active->getNotes())
         if (getNoteBounds (note).intersects (marquee))

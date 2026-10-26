@@ -224,6 +224,15 @@ NoteEvent* Layer::findNote (int noteId) noexcept
 
     return nullptr;
 }
+const NoteEvent* Layer::findNote (int noteId) const noexcept
+{
+    for (const auto& n : notes)
+        if (n.id == noteId)
+            return &n;
+
+    return nullptr;
+}
+
 
 int Layer::addNote (NoteEvent noteToAdd)
 {

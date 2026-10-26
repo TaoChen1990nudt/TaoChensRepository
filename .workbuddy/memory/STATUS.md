@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-27 · 对应 **Phase 44**（工程化，不是功能）
+> 最后更新：2026-10-27 · 对应 **Phase 45**（const 设计债还清）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**。
 > 规则查 `MEMORY.md`，制度细节查 `REFERENCE.md`，踩过的坑查 `PITFALLS.md`。
 
@@ -18,7 +18,7 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 44**（自检退出码门禁 / runSelfTest 搬进 SelfTest.cpp / SharedRules.h 共享规则头）；P43 见日志 |
+| 已完成阶段 | **Phase 45**（const 设计债还清：PianoRoll 30 处 const_cast 归零）；P44 见日志 |
 | 自检 | **421 ALL PASSED / 0 FAIL，且失败时退出码为 1**（已咬断言实测） |
 | 编译 | 零 error 零 warning |
 | `formatVersion` | **19**（P44 不动格式） |
@@ -28,11 +28,10 @@
 
 ## 下一步
 
-**未定。** 功能排期等你给。工程侧有一笔明确的债（P44 实测发现）：
-
-- **PianoRollComponent 的 30 处 const_cast 是设计债**：那些 const 成员函数真的在改模型
-  （addGroup / setOutputSlotId / removeNote / 直接写 SampleEvent 字段）。机械替换产生 70+ 错误，
-  已回退。还债要逐函数决定去 const（部分是 JUCE override，不能改）。
+**未定。** 功能排期等你给。工程侧（P45 收尾后）没有未还的已知债：
+- ~~const 设计债~~ 已还清（P45）：`Layer::findNote` 补 const 版；hitTestActiveLayer /
+  hitTestSample / getExpandedNote / getExpandedGroup / groupLaneFor 全部双版本；
+  28 个 const 查询函数成为真 const；const_cast 在 PianoRollComponent.cpp 归零。
 - `runSelfTest` 搬走后 `MainComponent.cpp` 6092 行（原 13909），产品/检查不再共用一个编译单元。
 
 ## 已知边界（用户提过、还没做）
@@ -66,6 +65,7 @@
 | P13–P21 | 右键菜单 / 走带图标 / 编组与聚光灯 / 采样四栏 / 吸附标尺 / 双向拉伸 / 光标中线 | `memory/2026-10-25.md` |
 | P22–P43 | 刚体拖动 / 127 通道 / 分栏跟手 / 文件树 / 采样窗口与淡变 / 高亮不压暗 / 伸缩三模式 / 走带落点 / 清扫不变量 / 删除闸门 / 组管采样 / 三层叠加 / 粘贴吸附 / 按键发声 / 默认最大化 / VST 松手 / 插件窗按键与音源参数自动化 / 混音台按键与文件栏抬高 / 琴键音源统一 / 效果器换位置 / 通道条四控件自动化 | `memory/2026-10-26.md` |
 | P44 | 自检退出码门禁 / runSelfTest 搬家 / SharedRules.h / const_cast 设计债的发现 | `memory/2026-10-27.md` |
+| P45 | const 设计债还清：findNote const / 五个双版本方法 / 30 处 const_cast 归零 | `memory/2026-10-27.md` |
 | P26–P43 | 各阶段踩坑与不变量 | `PITFALLS.md` |
 
 **最近的三个阶段**（新会话最需要的前情）：

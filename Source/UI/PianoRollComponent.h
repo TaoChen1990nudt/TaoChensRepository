@@ -903,7 +903,8 @@ private:
 
     /** Only ever looks at the active, visible layer. Ghost notes are invisible
         to the mouse by construction, not by an if-check at the call site. */
-    NoteEvent* hitTestActiveLayer (juce::Point<float> position) const;
+    NoteEvent*       hitTestActiveLayer (juce::Point<float> position);
+    const NoteEvent* hitTestActiveLayer (juce::Point<float> position) const;
 
     static double snapBeat (double beats) noexcept;
     static bool   isBlackKey (int pitch) noexcept;
@@ -973,7 +974,8 @@ private:
     int sampleWaveColumns (const Layer&, const SampleEvent&, float blockWidth) const;
 
     /** The clip the mouse is over, on the active layer. */
-    SampleEvent* hitTestSample (juce::Point<float> position) const;
+    SampleEvent*       hitTestSample (juce::Point<float> position);
+    const SampleEvent* hitTestSample (juce::Point<float> position) const;
 
     /** Right-click on a clip: delete, duplicate, fit to source, trim. */
     void showSampleMenu (int sampleId, juce::Point<int> screenPos);
@@ -1079,7 +1081,8 @@ private:
     juce::Rectangle<float> getAutomationCloseArea (const NoteEvent&) const;
 
     /** The note the inline box is currently pointed at, or null. Never cached. */
-    NoteEvent* getExpandedNote() const;
+    NoteEvent*       getExpandedNote();
+    const NoteEvent* getExpandedNote() const;
 
     void showModTargetMenu (const NoteEvent&, juce::Point<int> screenPosition);
     bool handleAutomationMouseDown (const juce::MouseEvent&, NoteEvent&);
@@ -1100,13 +1103,15 @@ private:
     juce::Rectangle<float> getGroupCloseArea() const;
 
     /** The group the inline box is pointed at, or null. Never cached. */
-    NoteGroup* getExpandedGroup() const;
+    NoteGroup*       getExpandedGroup();
+    const NoteGroup* getExpandedGroup() const;
 
     /** First and last beat covered by the group's members. Empty range when the
         group has no notes in this layer. */
     juce::Range<double> getGroupBeatSpan (const Layer&, const NoteGroup&) const;
 
-    AutomationLane& groupLaneFor (NoteGroup&, int target) const;
+    AutomationLane&       groupLaneFor (NoteGroup&, int target);
+    const AutomationLane& groupLaneFor (const NoteGroup&, int target) const;
 
     void showGroupTargetMenu (juce::Point<int> screenPosition);
     bool handleGroupAutomationMouseDown (const juce::MouseEvent&);

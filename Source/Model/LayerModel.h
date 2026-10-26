@@ -481,6 +481,7 @@ public:
     const std::vector<NoteEvent>& getNotes() const noexcept { return notes; }
 
     NoteEvent* findNote (int noteId) noexcept;
+    const NoteEvent* findNote (int noteId) const noexcept;
 
     /** Adds the note, assigns it a fresh layer-unique id, returns that id. */
     int  addNote (NoteEvent noteToAdd);
