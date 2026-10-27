@@ -7701,10 +7701,6 @@ juce::String MainComponent::runSelfTest()
         }
     } ();
 
-
-    report << "\n  " << (failures == 0 ? "ALL CHECKS PASSED"
-                                        : juce::String (failures) + " CHECK(S) FAILED") << "\n";
-
     // Put the fixture back before leaving: the checks edit the live session
     // (they scroll the roll, send synths around, add layers), so without this
     // the snapshot would photograph the leftovers of the last check instead of
@@ -7754,11 +7750,206 @@ juce::String MainComponent::runSelfTest()
     } ();
 
 
+    //-- Phase 46: 混音链三件套 — EQ / 压缩 / 混响 --------------------------
+    {
+        constexpr double sr = 44100.0;
+        constexpr int    n  = (int) (sr * 0.5);
+
+        auto rmsRange = [] (const juce::AudioBuffer<float>& b, int from, int to)
+        {
+            double acc = 0.0;
+            const int count = juce::jmax (1, to - from);
+            for (int i = from; i < to; ++i)
+                acc += (double) b.getSample (0, i) * (double) b.getSample (0, i);
+            return (float) std::sqrt (acc / (double) count);
+        };
+
+        //-- EQ：倾斜改变的是高频/低频的比重，不是总音量 --------------------
+        {
+            // 80 Hz + 6 kHz, equal amplitude. A tilt EQ must move the ratio of
+            // the two bands in opposite directions; a mere gain change cannot.
+            auto tilted = [sr, n] (float p1)
+            {
+                juce::AudioBuffer<float> b (2, n);
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < n; ++i)
+                        b.setSample (ch, i,
+                            (float) (0.4 * std::sin (2.0 * juce::MathConstants<double>::pi * 80.0
+                                                       * (double) i / sr)
+                                   + 0.4 * std::sin (2.0 * juce::MathConstants<double>::pi * 6000.0
+                                                       * (double) i / sr)));
+
+                fx::ChainState st;
+                st.prepare (sr);
+                fx::Settings s;
+                s.type = fx::Type::eq;
+                s.p1   = p1;
+                st.processSlot (0, s, b, n, sr);
+                return b;
+            };
+
+            auto bandRatio = [n] (const juce::AudioBuffer<float>& b)
+            {
+                constexpr double sr = 44100.0;
+                const float a = 1.0f - std::exp (-2.0f * juce::MathConstants<float>::pi
+                                                    * 1000.0f / (float) sr);
+                double lo = 0.0, hi = 0.0;
+                float lp = 0.0f;
+                for (int i = 0; i < n; ++i)
+                {
+                    const float x = b.getSample (0, i);
+                    lp += a * (x - lp);
+                    lo += (double) lp * lp;
+                    hi += (double) (x - lp) * (x - lp);
+                }
+                return (float) std::sqrt (hi / juce::jmax (1.0e-12, lo));
+            };
+
+            const float ratioDown = bandRatio (tilted (0.0f));   // 偏低
+            const float ratioUp   = bandRatio (tilted (1.0f));   // 偏高
+
+            check (utf8 ("EQ 拉高倾斜后，高频对低频的比重真的变了（不是只改音量）"),
+                   ratioDown > 1.0e-4f && ratioUp > ratioDown * 2.0f,
+                   utf8 ("倾斜低 ") + juce::String (ratioDown, 3)
+                     + utf8(" / 倾斜高 ") + juce::String (ratioUp, 3)
+                     + utf8(" / 比 ") + juce::String (ratioUp / juce::jmax (1.0e-9f, ratioDown), 2));
+        }
+
+        //-- 压缩：电平依赖，不是音量钮 -------------------------------------
+        {
+            fx::Settings s;
+            s.type = fx::Type::comp;
+            s.p1   = 0.7f;
+
+            auto render = [sr, n, &s] (float amp)
+            {
+                juce::AudioBuffer<float> in (2, n), out (2, n);
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < n; ++i)
+                        in.setSample (ch, i,
+                            (float) (amp * std::sin (2.0 * juce::MathConstants<double>::pi * 440.0
+                                                       * (double) i / sr)));
+                out = in;
+                fx::ChainState st;
+                st.prepare (sr);
+                st.processSlot (0, s, out, n, sr);
+                return std::pair (in, out);
+            };
+
+            auto inOutGain = [rmsRange, n] (const std::pair<juce::AudioBuffer<float>,
+                                                            juce::AudioBuffer<float>>& io)
+            {
+                return rmsRange (io.second, n / 2, n)
+                     / juce::jmax (1.0e-9f, rmsRange (io.first, n / 2, n));
+            };
+
+            const float gainQuiet = inOutGain (render (0.05f));
+            const float gainLoud  = inOutGain (render (0.90f));
+
+            check (utf8 ("压缩对大声更狠、对小声几乎不动（电平依赖，不是音量钮）"),
+                   gainQuiet > 0.9f && gainLoud < 0.75f && gainLoud < gainQuiet * 0.7f,
+                   utf8 ("小声增益 ") + juce::String (gainQuiet, 3)
+                     + utf8(" / 大声增益 ") + juce::String (gainLoud, 3));
+        }
+
+        //-- 混响：冲激之后有衰减的尾巴 -------------------------------------
+        {
+            fx::ChainState st;
+            st.prepare (sr);
+            fx::Settings s;
+            s.type = fx::Type::reverb;
+            s.p1   = 0.8f;
+
+            juce::AudioBuffer<float> impulse (2, n);
+            impulse.clear();   // AudioBuffer's (channels, samples) ctor mallocs
+                               // WITHOUT zeroing — measured, not assumed.
+            impulse.setSample (0, 0, 0.8f);
+            impulse.setSample (1, 0, 0.8f);
+            st.processSlot (0, s, impulse, n, sr);
+
+            const float direct = impulse.getSample (0, 0);
+            const float early  = rmsRange (impulse, (int) (0.10 * sr), (int) (0.30 * sr));
+            const float late   = rmsRange (impulse, (int) (0.35 * sr), (int) (0.49 * sr));
+
+            check (utf8 ("混响：冲激直通之后还有可闻的尾巴"),
+                   direct > 0.4f && direct < 0.75f && early > 5.0e-4f,
+                   utf8 ("直通 ") + juce::String (direct, 3)
+                     + utf8(" / 早尾 ") + juce::String (early, 5));
+
+            check (utf8 ("混响尾巴在衰减，不是嗡嗡不停"),
+                   late < early * 0.8f,
+                   utf8 ("早尾 ") + juce::String (early, 5)
+                     + utf8(" / 晚尾 ") + juce::String (late, 5));
+        }
+
+        //-- 枚举追加不串位：vst=5 被老工程冻结，新三件只能排后面 ------------
+        check (utf8 ("九个效果器枚举值经 typeFromInt 往返不串位"),
+               fx::numTypes() == 9
+                 && fx::typeFromInt (5) == fx::Type::vst
+                 && fx::typeFromInt (6) == fx::Type::eq
+                 && fx::typeFromInt (7) == fx::Type::comp
+                 && fx::typeFromInt (8) == fx::Type::reverb,
+               utf8 ("numTypes ") + juce::String (fx::numTypes()));
+
+        //-- 真实通道集成：引擎真的把三件 DSP 接进了处理链 -------------------
+        {
+            MixerModel mm;
+            LayerStack t;
+            RackModel  r;
+
+            const int sid = r.getFirstSlotId();
+
+            t.addLayer (utf8 ("混响尾巴"), palette::layer1);
+            t.setLayerOutputSlot (0, sid);
+            t.getLayer (0)->addNote ({ 0, 60, 0.0, 1.0, 0.9f });   // 一拍 @120bpm = 0.5 s
+            r.setMixerChannel (sid, 0);
+
+            PlaybackEngine e;
+            e.setSampleRate (44100.0);
+            e.prepareToPlay (44100.0, 512);
+
+            const int total = (int) (sr * 3.0);
+
+            auto tailRms = [&]
+            {
+                e.publishSchedule (t, r, 120.0, 0.0, &mm);
+                e.resetMixState();
+
+                juce::AudioBuffer<float> buffer (2, total);
+                buffer.clear();
+                e.renderWindow (0.0, total, buffer, nullptr);
+
+                // 音符在 0.5 s 结束；0.7 s 之后只剩效果器的尾巴。
+                return rmsRange (buffer, (int) (sr * 0.7), (int) (sr * 2.5));
+            };
+
+            mm.setInsertType (0, 0, fx::Type::reverb);
+            mm.setInsertParam (0, 0, 0.8f, 0.0f);
+            const float withVerb = tailRms();
+
+            mm.setInsertEnabled (0, 0, false);
+            const float bypassed = tailRms();
+
+            check (utf8 ("挂在真实通道上的混响，音符结束之后尾巴还在响（引擎接上了 DSP）"),
+                   withVerb > 5.0e-4f && withVerb > bypassed * 5.0f,
+                   utf8 ("混响开 ") + juce::String (withVerb, 5)
+                     + utf8(" / 旁通 ") + juce::String (bypassed, 6));
+        }
+    }
+
     // Phase 34: hand the real dialog and the message-queue deferral back. A
     // scripted answer left in place would make the running app delete samplers
     // without ever asking — the exact thing this phase exists to stop.
     deferSamplerPrompt = true;
     installSamplerCascadePrompt();
+
+    // The summary MUST come after the last check. It used to sit mid-function
+    // (before the fixture restore), and Phase 46's reverb block landed after
+    // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the
+    // P44 exit-code gate read the stale verdict and exited 0. A summary that
+    // does not cover every check is worse than no summary.
+    report << "\n  " << (failures == 0 ? "ALL CHECKS PASSED"
+                                        : juce::String (failures) + " CHECK(S) FAILED") << "\n";
 
     return report;
 }

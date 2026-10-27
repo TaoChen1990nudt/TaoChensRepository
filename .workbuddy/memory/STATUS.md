@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-27 · 对应 **Phase 45**（const 设计债还清）
+> 最后更新：2026-10-27 · 对应 **Phase 46**（混音链三件套：EQ / 压缩 / 混响）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**。
 > 规则查 `MEMORY.md`，制度细节查 `REFERENCE.md`，踩过的坑查 `PITFALLS.md`。
 
@@ -18,8 +18,8 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 45**（const 设计债还清：PianoRoll 30 处 const_cast 归零）；P44 见日志 |
-| 自检 | **421 ALL PASSED / 0 FAIL，且失败时退出码为 1**（已咬断言实测） |
+| 已完成阶段 | **Phase 46**（混音链三件套 EQ/COMP/REVERB + 汇总行挪位修门禁）；P44–45 见日志 |
+| 自检 | **427 ALL PASSED / 0 FAIL，失败时退出码 1**（P46 又咬出两处真问题：AudioBuffer 不清零、汇总行打在中段） |
 | 编译 | 零 error 零 warning |
 | `formatVersion` | **19**（P44 不动格式） |
 | 可执行 | `build/AtomicDAW_artefacts/Release/AtomicDAW.exe` |
@@ -66,6 +66,7 @@
 | P22–P43 | 刚体拖动 / 127 通道 / 分栏跟手 / 文件树 / 采样窗口与淡变 / 高亮不压暗 / 伸缩三模式 / 走带落点 / 清扫不变量 / 删除闸门 / 组管采样 / 三层叠加 / 粘贴吸附 / 按键发声 / 默认最大化 / VST 松手 / 插件窗按键与音源参数自动化 / 混音台按键与文件栏抬高 / 琴键音源统一 / 效果器换位置 / 通道条四控件自动化 | `memory/2026-10-26.md` |
 | P44 | 自检退出码门禁 / runSelfTest 搬家 / SharedRules.h / const_cast 设计债的发现 | `memory/2026-10-27.md` |
 | P45 | const 设计债还清：findNote const / 五个双版本方法 / 30 处 const_cast 归零 | `memory/2026-10-27.md` |
+| P46 | 混音链三件套（EQ/COMP/REVERB）+ AudioBuffer 不清零 + 汇总行挪到函数末尾 | `memory/2026-10-27.md` |
 | P26–P43 | 各阶段踩坑与不变量 | `PITFALLS.md` |
 
 **最近的三个阶段**（新会话最需要的前情）：

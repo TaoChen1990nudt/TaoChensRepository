@@ -510,3 +510,24 @@
   `mouseUp` 若一次都没移动过才弹菜单。
 - 拖动时的视觉反馈不能省：给被拖的那一行上色（`insertDragMoved && pressedInsertSlot == slot`），
   否则连续滑过四行看起来像四次互不相关的重绘。
+
+## P46-A：JUCE `AudioBuffer(channels, samples)` 构造函数不清零（实测）
+
+**现象**：混响冲激测试每次运行结果不同——有时正确衰减，有时尾巴爆到 1e14，同一 exe 三次三样。
+**根因**：`juce_AudioSampleBuffer.h` 的 `allocateData()` 用 `malloc`（不是 `calloc`），
+`AudioBuffer (int, int)` 构造后 `isClear = false`，内容是堆上旧数据。
+`pre-max` 诊断在处理**之前**就量到 12468 ~ 1e20 的垃圾，坐实与 DSP 无关。
+**规矩**：新建 AudioBuffer 后要么立刻 `clear()`，要么逐样本填满全部采样。
+"构造即清零"是错的——别凭记忆信 API，实测。
+**顺带**：梳状反馈环会把输入里的任何垃圾放大 `1/(1-fb)` 倍（fb=0.9 时 ≈11 倍），
+所以混响测试是全工程最灵敏的"脏内存探测器"。
+
+## P46-B：自检汇总行必须打在最后一个 check 之后
+
+**现象**：咬门禁时 3 条 `[FAIL]` 打印出来，退出码却是 0。
+**根因**：汇总行（`ALL CHECKS PASSED` / `N CHECK(S) FAILED`）原本打在 runSelfTest **中段**
+（fixture 恢复之前），后面还有 Phase 34+ 的检查块。P46 的混响块插在汇总之后——
+FAIL 计入了 `failures`，但汇总早已定稿，P44 的退出码门禁读到的是过期裁决。
+P44/P45 的咬测能 EXIT=1 纯属缺陷位置恰好在中段之前。
+**修法**：汇总挪到 `return report;` 之前。**规矩**：任何"总结"必须覆盖全部条目；
+给测试追加代码时先看总结在哪里。

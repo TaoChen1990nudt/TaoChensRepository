@@ -1747,9 +1747,18 @@ void MixerPanel::showInsertMenu (int slot, juce::Point<int> screenAnchor)
                              + getChannelName (selectedChannel));
     menu.addItem (1, utf8 ("空（移除）"), true, insert.type == fx::Type::none);
 
-    for (int type = 1; type < fx::numBuiltInTypes(); ++type)
+    // Phase 46: walk the whole enum but SKIP vst — it sits in the middle
+    // (value 5, frozen by old project files) and is chosen from the plugin
+    // submenu below. The old `type < numBuiltInTypes()` loop would have
+    // served eq/comp/reverb as vst the moment the enum grew.
+    for (int type = 1; type < fx::numTypes(); ++type)
+    {
+        if ((fx::Type) type == fx::Type::vst)
+            continue;
+
         menu.addItem (type + 1, fx::typeName ((fx::Type) type), true,
                       (int) insert.type == type);
+    }
 
     menu.addSeparator();
     menu.addItem (102, utf8 ("打开效果器界面"), insert.type != fx::Type::none);
