@@ -179,10 +179,15 @@ namespace
         // Phase 54: the selection mark, next to the spotlight's absence. The
         // grid is at full brightness and the cards still carry a ring, which is
         // the one difference a screenshot can settle. Two frames: the rack on
-        // its own (where the 1.4 px ring is legible) and the shell (where the
-        // undimmed grid is).
+        // its own (where the ring is legible) and the shell (where the undimmed
+        // grid is).
+        //
+        // Phase 55 put the SAME ring on both states, so the pair
+        // {-selectmark, -selectmark-focus} is the evidence: one card, lit by the
+        // selection and then by hand, has to look identical apart from the veil.
         writePng ("-selectmark", component.createSelectionMarkSnapshot (false));
         writePng ("-selectmark-shell", component.createSelectionMarkSnapshot (true));
+        writePng ("-selectmark-focus", component.createSelectionMarkSnapshot (false, true));
 
         // Phase 35: a group whose members are two kinds of thing. The pill says
         // 静音 and the block under it is lit by the same selection that lights

@@ -124,8 +124,14 @@ public:
         DIMMS the rest of the sheet, which is why Phase 30 took it off the
         selection: clicking a note used to grey the whole grid out. This mark
         answers the smaller question the same click raises — "where does what I
-        just selected come out?" — and costs nothing visually: a dashed ring on
-        the card(s) involved, no veil anywhere.
+        just selected come out?" — and costs nothing visually: a ring on the
+        card(s) involved, no veil anywhere.
+
+        Phase 55: the ring is now the SAME ring the spotlight draws. The two
+        used to differ (dashed, inside the border) so they could not be confused;
+        what actually distinguishes them is the veil, which this mark never
+        turns on, and the dashed version read as "a lesser highlight" rather
+        than "a different one". Same shape, no veil.
 
         A set, because one selection can straddle synths: an override on one
         note, a group mount on another, and both are honest answers. Empty means
@@ -193,9 +199,19 @@ private:
         that gets copied into the next panel too. */
     bool isSelectionRouted (int slotId) const;
 
-    /** Phase 54: the dashed ring, drawn from the same place as the spotlight's
-        solid one so the two cannot end up in different corners of the card. */
+    /** Phase 54/55: both kinds of "this card matters" mark, drawn from the same
+        place so the two cannot end up in different corners of the card. */
     void drawRoutingMarks (juce::Graphics&, int index, juce::Rectangle<float> card);
+
+    /** Phase 55: the ring itself — one implementation, one set of numbers.
+
+        The spotlight and the selection mark answer two different questions but
+        they both answer "which card", so they are the same ring. Two shapes
+        meant the same card looked like a different object depending on how you
+        got to it. `strength` only dims a selection ring when a hand-lit
+        spotlight is on screen at the same time, so the two rings cannot read as
+        equals when only one of them is the mode. */
+    void drawCardRing (juce::Graphics&, juce::Rectangle<float> card, float strength);
     juce::Rectangle<int> getViewArea() const;
     juce::Rectangle<int> getCollapseBounds (int index) const;
 

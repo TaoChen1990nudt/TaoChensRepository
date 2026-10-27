@@ -321,10 +321,10 @@ void RackPanel::paint (juce::Graphics& g)
     }
     else if (! selectionRouteSlots.empty())
     {
-        // Phase 54: the header names what the selection plays on, so the dashed
-        // ring does not have to be guessed at. One card gets its name; several
-        // get the first and a count, because a header that lists four synths is
-        // a header nobody reads.
+        // Phase 54: the header names what the selection plays on, so the ring
+        // does not have to be guessed at. One card gets its name; several get
+        // the first and a count, because a header that lists four synths is a
+        // header nobody reads.
         juce::String where = rack.getSlotName (selectionRouteSlots.front());
 
         if (selectionRouteSlots.size() > 1)
@@ -413,6 +413,24 @@ void RackPanel::paint (juce::Graphics& g)
 }
 
 //==============================================================================
+void RackPanel::drawCardRing (juce::Graphics& g, juce::Rectangle<float> card, float strength)
+{
+    // One implementation, one set of numbers. Before Phase 55 the spotlight drew
+    // a solid double ring outside the border and the selection mark drew a
+    // dashed one inside it, so the same card was two different objects
+    // depending on how you got there — and the dashed version read as "a weaker
+    // highlight", which is exactly what it looked like.
+    //
+    // Alpha is the only thing `strength` touches: a selection ring has to give
+    // way when a hand-lit spotlight is on screen, or the two rings look equally
+    // load-bearing and neither is.
+    g.setColour (theme::accent.withAlpha (0.22f * strength));
+    g.drawRoundedRectangle (card.expanded (ui::pf (3)), ui::pf (6), ui::pf (3));
+
+    g.setColour (theme::accent.withAlpha (0.95f * strength));
+    g.drawRoundedRectangle (card.reduced (ui::pf (0.5)), ui::pf (7.5), ui::pf (1.8));
+}
+
 void RackPanel::drawRoutingMarks (juce::Graphics& g, int index, juce::Rectangle<float> card)
 {
     const auto* slot = rack.getSlot (index);
@@ -420,34 +438,22 @@ void RackPanel::drawRoutingMarks (juce::Graphics& g, int index, juce::Rectangle<
     if (slot == nullptr)
         return;
 
+    // The spotlight wins the card it is on: one ring, drawn once, so a card that
+    // is both spotlit and routed does not get two overlapping outlines.
     if (focusActive && focusSlotId == slot->id)
     {
-        // A second outline, outside the normal border: the card the spotlight
-        // is on. Loud on purpose — the rest of the screen is dimmed around it,
-        // so the card has to look like the reason.
-        g.setColour (theme::accent.withAlpha (0.22f));
-        g.drawRoundedRectangle (card.expanded (ui::pf (3)), ui::pf (6), ui::pf (3));
-        g.setColour (theme::accent.withAlpha (0.95f));
-        g.drawRoundedRectangle (card.reduced (ui::pf (0.5)), ui::pf (7.5), ui::pf (1.8));
+        drawCardRing (g, card, 1.0f);
         return;
     }
 
     if (! isSelectionRouted (slot->id))
         return;
 
-    // Phase 54: dashed, and INSIDE the border. Solid-plus-outside already means
-    // "spotlit, everything else is dimmed"; this one is a mark on a card in a
-    // view where nothing is dimmed, and if the two looked alike the user would
-    // keep hunting for a veil that is not there.
-    juce::Path ring;
-    ring.addRoundedRectangle (card.reduced (ui::pf (2.0)), ui::pf (5));
-
-    juce::Path dashed;
-    const float dashes[] = { ui::pf (4.0), ui::pf (3.0) };
-    juce::PathStrokeType (ui::pf (1.4)).createDashedStroke (dashed, ring, dashes, 2);
-
-    g.setColour (theme::accent.withAlpha (focusActive ? 0.34f : 0.72f));
-    g.fillPath (dashed);
+    // Phase 54/55: the selection's card, same ring. Nothing is dimmed — that is
+    // the whole difference from the spotlight (P30 took the veil off the
+    // selection), so the ring has to stand on its own shape rather than on a
+    // different outline that only made it look like a lesser mark.
+    drawCardRing (g, card, focusActive ? 0.55f : 1.0f);
 }
 
 void RackPanel::drawCard (juce::Graphics& g, int index)

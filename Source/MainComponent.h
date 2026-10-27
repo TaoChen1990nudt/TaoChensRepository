@@ -268,7 +268,7 @@ public:
         prose. Selects one note per distinct routed slot so the multi-card case
         is what gets photographed, then puts the selection and the spotlight
         back. */
-    juce::Image createSelectionMarkSnapshot (bool wholeShell = false);
+    juce::Image createSelectionMarkSnapshot (bool wholeShell = false, bool spotlit = false);
 
     /** Phase 35: the demo group, muted, with its mixed members selected — the
         pill reads 静音 and the block inside the bracket is lit at the same time.

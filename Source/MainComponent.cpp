@@ -1455,7 +1455,7 @@ juce::Image MainComponent::createCardDropSnapshot (bool instrumentCard, int widt
     return image;
 }
 
-juce::Image MainComponent::createSelectionMarkSnapshot (bool wholeShell)
+juce::Image MainComponent::createSelectionMarkSnapshot (bool wholeShell, bool spotlit)
 {
     auto* layer = stack.getActiveLayer();
 
@@ -1489,8 +1489,10 @@ juce::Image MainComponent::createSelectionMarkSnapshot (bool wholeShell)
     }
 
     // The spotlight would dim the whole grid and turn this frame into the very
-    // picture this feature exists to NOT be.
-    focusSynth (-1);
+    // picture this feature exists to NOT be. `spotlit` is the comparison frame:
+    // the same card, lit by hand, so the two rings can be put side by side and
+    // be seen to be one ring.
+    focusSynth (spotlit && ! seen.empty() ? seen.front() : -1);
 
     pianoRoll.setSelection (picked);
     updateRackRoutingFocus();
@@ -1501,11 +1503,11 @@ juce::Image MainComponent::createSelectionMarkSnapshot (bool wholeShell)
     const int previousScroll = rackPanel.getScrollY();
     rackPanel.setScrollY (0);
 
-    // The RACK, not the whole window: the mark is a 1.4 px dashed ring inside a
-    // card's border, and the shell's own frame is 1800 px wide with the rack
-    // squeezed into 300 of them — a mark that has to be hunted for documents
-    // nothing. `wholeShell` is the other half of the claim: the grid around it
-    // is at full brightness, which is exactly what the spotlight does NOT do.
+    // The RACK, not the whole window: the mark is a ring around a card's border,
+    // and the shell's own frame is 1800 px wide with the rack squeezed into 300
+    // of them — a mark that has to be hunted for documents nothing.
+    // `wholeShell` is the other half of the claim: the grid around it is at full
+    // brightness, which is exactly what the spotlight does NOT do.
     auto image = wholeShell ? createComponentSnapshot (getLocalBounds(), true)
                             : rackPanel.createComponentSnapshot (rackPanel.getLocalBounds(), true);
 
