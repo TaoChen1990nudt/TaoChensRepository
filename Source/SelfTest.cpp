@@ -6156,7 +6156,7 @@ juce::String MainComponent::runSelfTest()
         }
     } ();
 
-    //-- Phase 29: a block is a window — trim both ends, fade both ends ------
+    //-- Phase 29: a block is a window — trim both ends, curve both ends -----
     [&]
     {
         auto* layer = stack.getActiveLayer();
@@ -6226,38 +6226,95 @@ juce::String MainComponent::runSelfTest()
                "offset " + juce::String (clip->sourceOffsetSeconds, 4) + utf8 (", 起点 ")
                  + juce::String (clip->startBeat, 3));
 
-        //-- 4: two independent fades ----------------------------------------
-        pianoRoll.simulateSampleFade (a, false, 0.5);
-        pianoRoll.simulateSampleFade (a, true, 1.0);
+        //-- 4: the block's own volume curve (P49: fades became a curve) -----
+        // The idle curve is flat 1.0 and OFF: a fresh block is "the file,
+        // untouched", and the first edit is what switches it on — the same
+        // path a click in the box runs.
+        check ("A fresh block's curve is idle: disabled and flat at unity",
+               ! clip->volumeCurve.isEnabled()
+                 && clip->volumeCurve.getPoints().size() == 2
+                 && std::abs (clip->volumeCurve.valueAt (0.25f) - 1.0f) < 1.0e-6,
+               juce::String (clip->volumeCurve.isEnabled() ? 1 : 0) + ", n="
+                 + juce::String ((int) clip->volumeCurve.getPoints().size()));
 
-        check ("Both fades can be set independently",
-               std::abs (clip->fadeInBeats - 0.5) < 1.0e-9
-                 && std::abs (clip->fadeOutBeats - 1.0) < 1.0e-9,
-               utf8 ("淡入 ") + juce::String (clip->fadeInBeats, 3)
-                 + utf8 (", 淡出 ") + juce::String (clip->fadeOutBeats, 3));
+        // Down-ramp then back to unity: two points MOVED onto new values, the
+        // gesture path the box's drags take.
+        //
+        // The edits run as their own statement, not inside the check's
+        // condition: argument evaluation order is unspecified, and on the
+        // first run the message was built BEFORE the edits ran — it printed
+        // the flat curve while the assertion read the edited one. A test that
+        // reports numbers from a different moment than the one it judged is
+        // worse than no numbers.
+        const bool curveEdited = pianoRoll.simulateSampleCurveEdit (a, 0.0f, 0.0f)
+                                  && pianoRoll.simulateSampleCurveEdit (a, 1.0f, 0.0f)
+                                  && pianoRoll.simulateSampleCurveEdit (a, 0.5f, 1.0f)
+                                  && pianoRoll.simulateSampleCurveEdit (a, 0.5f, 0.75f);
 
-        pianoRoll.simulateSampleFade (a, false, 99.0);
-        const double clampedFade = clip->fadeInBeats;
-        pianoRoll.simulateSampleFade (a, false, 0.5);
+        check ("The curve edits like the note envelope: move, not rebuild",
+               curveEdited
+                 && clip->volumeCurve.isEnabled()
+                 && std::abs (clip->volumeCurve.valueAt (0.0f)) < 1.0e-6
+                 && std::abs (clip->volumeCurve.valueAt (0.5f) - 0.75f) < 1.0e-6
+                 && std::abs (clip->volumeCurve.valueAt (1.0f)) < 1.0e-6,
+               "f(0)=" + juce::String (clip->volumeCurve.valueAt (0.0f), 3)
+                 + " f(0.5)=" + juce::String (clip->volumeCurve.valueAt (0.5f), 3)
+                 + " f(1)=" + juce::String (clip->volumeCurve.valueAt (1.0f), 3));
 
-        check ("A fade cannot be longer than the block it lives in",
-               std::abs (clampedFade - clip->lengthBeats) < 1.0e-9,
-               juce::String (clampedFade, 3) + utf8 (" vs 块长 ")
-                 + juce::String (clip->lengthBeats, 3));
+        // The box is the whole point of P49: exactly as wide as the block, at
+        // the zoom the assertion runs at. If these drift, the curve you edit
+        // no longer lines up with the block you hear.
+        // The block sits at beat 80, well right of a fresh view: bring it into
+        // the grid before opening the box, so the assertion tests the real
+        // alignment and not the off-screen clamp. The scroll goes back after,
+        // because the marquee fixtures below measure unclamped rectangles.
+        // `start` is the beat the block sits at; `a` is its id — scrolling to
+        // an id clamps to zero and quietly leaves the block off-screen, which
+        // is exactly the clamp this assertion is trying to rule out.
+        const double scrollBefore = pianoRoll.getScrollBeats();
+        pianoRoll.setScrollBeats (clip->startBeat - 2.0);
 
-        // The handle is a pixel position derived from the fade: if these two
-        // disagree, the thing you grab is not the thing you set.
-        const auto rect    = pianoRoll.getSampleScreenBounds (index, a);
-        const float beatW  = (float) (rect.getWidth() / juce::jmax (1.0e-9, clip->lengthBeats));
-        const float xIn    = pianoRoll.getSampleFadeHandleX (index, a, false);
-        const float xOut   = pianoRoll.getSampleFadeHandleX (index, a, true);
+        pianoRoll.openSampleAutomation (index, a);
+        const auto blockRect = pianoRoll.getSampleScreenBounds (index, a);
+        const auto autoBox   = pianoRoll.getSampleAutomationBoxForTest (index, a);
 
-        check ("Each fade handle sits on the fade it sets",
-               std::abs (xIn  - (rect.getX() + 0.5f * beatW)) < 0.75f
-                 && std::abs (xOut - (rect.getRight() - 1.0f * beatW)) < 0.75f
-                 && xIn < xOut,
-               "in " + juce::String (xIn, 1) + "/" + juce::String (rect.getX() + 0.5f * beatW, 1)
-                 + ", out " + juce::String (xOut, 1) + "/" + juce::String (rect.getRight() - beatW, 1));
+        // Below the block, or flipped above when the view has no room — the
+        // note box's own escape hatch. Either way: same width, same left edge,
+        // never overlapping the block it edits.
+        check ("The clip's automation box is exactly as wide as the block",
+               ! autoBox.isEmpty()
+                 && std::abs (autoBox.getWidth() - blockRect.getWidth()) < 0.75f
+                 && std::abs (autoBox.getX() - blockRect.getX()) < 0.75f
+                 && (autoBox.getY() >= blockRect.getBottom() - 1.0f
+                       || autoBox.getBottom() <= blockRect.getY() + 1.0f),
+               juce::String (autoBox.getWidth(), 1) + " vs "
+                 + juce::String (blockRect.getWidth(), 1)
+                 + ", box x/y " + juce::String (autoBox.getX(), 1) + "/"
+                 + juce::String (autoBox.getY(), 1)
+                 + ", block x " + juce::String (blockRect.getX(), 1)
+                 + " top/bottom " + juce::String (blockRect.getY(), 1) + "/"
+                 + juce::String (blockRect.getBottom(), 1));
+
+        // One floating editor at a time: opening the clip box must have
+        // closed whatever the note box was showing, and the second toggle
+        // closes it again.
+        pianoRoll.openSampleAutomation (index, b);
+        check ("Opening a second clip's box closes the first, toggling closes both",
+               pianoRoll.isSampleAutomationOpen()
+                 && pianoRoll.getExpandedSampleId() == b,
+               "expanded=" + juce::String (pianoRoll.getExpandedSampleId()));
+        pianoRoll.closeSampleAutomation();
+        check ("...and closeSampleAutomation leaves nothing open",
+               ! pianoRoll.isSampleAutomationOpen(), "id still set");
+        pianoRoll.setScrollBeats (scrollBefore);
+
+        // The end values survive a whole-struct copy: the curve travels with
+        // the clip like the envelope travels with a note.
+        {
+            const SampleEvent copy = *clip;
+            check ("Copying the clip carries the curve",
+                   copy.volumeCurve.hasSameShapeAs (clip->volumeCurve), "shape mismatch");
+        }
 
         //-- 2: one sweep, both kinds ----------------------------------------
         const int noteId = pianoRoll.addNoteAt (86.0, 62);
@@ -6327,48 +6384,195 @@ juce::String MainComponent::runSelfTest()
                  + juce::String (focusedSlotId));
     } ();
 
-    //-- Phase 29: v15 keeps the window offset and the fades ------------------
+    //-- Phase 49: a v20 file's fades migrate onto the volume curve -----------
     [&]
     {
         LayerStack s1;
         RackModel  r1;
 
-        s1.addLayer (utf8 ("窗口"), palette::layer1);
+        s1.addLayer (utf8 ("迁移"), palette::layer1);
 
         SampleEvent clip;
-        clip.name        = "window";
+        clip.name        = "legacy";
         clip.startBeat   = 2.0;
-        clip.lengthBeats = 1.5;
+        clip.lengthBeats = 2.0;
         clip.pitch       = 60;
         clip.laneSpan    = 2;
-        clip.sourceOffsetSeconds = 0.375;
-        clip.fadeInBeats  = 0.25;
-        clip.fadeOutBeats = 0.5;
 
         s1.getLayer (0)->addSample (clip);
 
-        const auto xml = project::toXmlText (s1, r1, 120.0);
+        // Save as v21, then surgically turn the file back into what v20 wrote:
+        // no <Envelope> child, and the two fade attributes on the <Sample> tag
+        // instead. The reader has to meet the file it used to meet.
+        juce::String xml = project::toXmlText (s1, r1, 120.0);
+
+        const int sampleTag = xml.indexOf ("<Sample ");
+        const int tagEnd    = xml.indexOfChar (sampleTag, '>');
+        const int envStart  = xml.indexOf ("<Envelope");
+        const juce::String envClose = "</Envelope>";
+        const int envEnd    = xml.indexOf (envStart, envClose) + envClose.length();
+
+        check ("The v21 writer emits an envelope where v20 wrote fades",
+               sampleTag >= 0 && tagEnd > sampleTag
+                 && envStart > tagEnd && envEnd > envStart,
+               "sample " + juce::String (sampleTag) + ", envelope " + juce::String (envStart));
+
+        if (sampleTag < 0 || tagEnd <= sampleTag || envStart <= tagEnd || envEnd <= envStart)
+            return;
+
+        juce::String legacy = xml.substring (0, tagEnd)
+                                + " fadein=\"0.25\" fadeout=\"0.5\""
+                                + xml.substring (tagEnd, envStart)
+                                + xml.substring (envEnd);
 
         LayerStack s2;
         RackModel  r2;
         double bpm2 = 0.0;
         juce::String error;
 
-        const bool ok = project::fromXmlText (xml, s2, r2, bpm2, error, nullptr, nullptr, nullptr);
+        const bool ok = project::fromXmlText (legacy, s2, r2, bpm2, error, nullptr, nullptr, nullptr);
 
         const auto* back = (s2.getLayer (0) != nullptr && s2.getLayer (0)->getSampleCount() == 1)
                              ? &s2.getLayer (0)->getSamples().front() : nullptr;
 
-        check ("A v15 project keeps the clip window and its fades",
+        // fadein 0.25 of a 2.0-beat block = ramp to full at t=0.125; fadeout
+        // 0.5 = fade begins at t=0.75. The migration has to reproduce exactly
+        // the shape the old audio multiplied, or an old project changes sound.
+        check ("A v20 project's fades open as the same ramp on the curve",
                ok && back != nullptr
-                 && std::abs (back->sourceOffsetSeconds - 0.375) < 1.0e-9
-                 && std::abs (back->fadeInBeats - 0.25) < 1.0e-9
-                 && std::abs (back->fadeOutBeats - 0.5) < 1.0e-9,
+                 && back->volumeCurve.isEnabled()
+                 && back->volumeCurve.getPoints().size() == 4
+                 && std::abs (back->volumeCurve.valueAt (0.0f)) < 1.0e-6
+                 && std::abs (back->volumeCurve.valueAt (0.5f) - 1.0f) < 1.0e-6
+                 && std::abs (back->volumeCurve.valueAt (1.0f)) < 1.0e-6
+                 && std::abs (back->volumeCurve.getPoints()[(size_t) 1].time - 0.125f) < 1.0e-5
+                 && std::abs (back->volumeCurve.getPoints()[(size_t) 2].time - 0.75f)  < 1.0e-5,
                ok && back != nullptr
-                 ? "offset " + juce::String (back->sourceOffsetSeconds, 4)
-                     + ", fade " + juce::String (back->fadeInBeats, 3) + "/"
-                     + juce::String (back->fadeOutBeats, 3)
+                 ? "n=" + juce::String ((int) back->volumeCurve.getPoints().size())
+                     + " t1=" + juce::String (back->volumeCurve.getPoints()[(size_t) 1].time, 4)
+                     + " t2=" + juce::String (back->volumeCurve.getPoints()[(size_t) 2].time, 4)
                  : error);
+    } ();
+
+    //-- Phase 49: the clip's curve is audible — ramp, and full-down silence --
+    [&]
+    {
+        LayerStack     t;
+        RackModel      r;
+        PlaybackEngine e;
+
+        e.setSampleRate (48000.0);
+        t.addLayer (utf8 ("P49 曲线"), palette::layer1);
+        t.setLayerLevelDb (0, 0.0f);
+        t.setLayerPan (0, 0.0f);
+
+        const auto loaded  = loadSampleFile (phase27B);
+        const int  sampler = r.addSampler (loaded.buffer, phase27B.getFullPathName(), "P49 bus");
+
+        auto* layer = t.getLayer (0);
+
+        SampleEvent clip;
+        clip.name         = "P49";
+        clip.path         = phase27B.getFullPathName();
+        clip.audio        = loaded.buffer;
+        clip.startBeat    = 0.0;
+        clip.lengthBeats  = 8.0;               // 0.0 - 4.0 s at 120 bpm
+        clip.pitch        = 60;
+        clip.laneSpan     = 2;
+        clip.outputSlotId = sampler;
+
+        const int clipId = layer->addSample (clip);
+
+        // The test file decays as it plays, so the honest measurement is the
+        // SAME window rendered twice — curve off vs curve on — and the ratio
+        // read against the curve's own value at that window. Any shape error
+        // in the seconds conversion lands in these ratios.
+        auto renderTo = [&] (juce::AudioBuffer<float>& b)
+        {
+            b.clear();
+            e.resetMixState();
+            e.publishSchedule (t, r, 120.0);
+            e.renderWindow (0.0, b.getNumSamples(), b, nullptr);
+        };
+
+        const double sr = 48000.0;
+
+        auto windowMagnitude = [&] (const juce::AudioBuffer<float>& b, double from, double span)
+        {
+            const int first = (int) std::llround (from * sr);
+            const int count = juce::jmax (1, (int) std::llround (span * sr));
+            return b.getMagnitude (0, first, count);
+        };
+
+        juce::AudioBuffer<float> withOff (2, (int) (2.0 * sr));
+        renderTo (withOff);
+
+        check ("A clip with an idle curve sounds untouched",
+               windowMagnitude (withOff, 0.10, 0.2) > 0.01f,
+               "peak " + juce::String (windowMagnitude (withOff, 0.10, 0.2), 4));
+
+        // The 0 -> 1 ramp the migration also produces, over a FOUR second block.
+        // That length is the whole point: the curve is normalised, the renderer
+        // measures seconds, and only a block that is not exactly one second
+        // long lets the two disagree. A 1 s block makes the conversion a no-op
+        // — which is how a 2x unit error walked straight through the first
+        // version of this test.
+        if (auto* c = layer->findSample (clipId))
+        {
+            c->volumeCurve.loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 1.0f } });
+            c->volumeCurve.setEnabled (true);
+        }
+
+        juce::AudioBuffer<float> withRamp (2, (int) (2.0 * sr));
+        renderTo (withRamp);
+
+        // Same window, curve on vs curve off: the file's own decay cancels, so
+        // the ratio IS the curve's value there. A linear 0..1 ramp over 4 s
+        // reads 0.25 at 1.0 s and 0.40 at 1.6 s; a normalised x would read 1.0
+        // at both, and even a plain "quieter early than late" test would pass.
+        auto curveAt = [&] (double centre)
+        {
+            return (double) windowMagnitude (withRamp, centre - 0.05, 0.10)
+                     / juce::jmax (1.0e-9f, windowMagnitude (withOff, centre - 0.05, 0.10));
+        };
+
+        const double atOne = curveAt (1.0);
+        const double atLate = curveAt (1.6);
+
+        check ("The clip's curve is read in seconds, not in normalised time",
+               std::abs (atOne - 0.25) < 0.06 && std::abs (atLate - 0.40) < 0.06,
+               "1.0 s x" + juce::String (atOne, 3) + utf8 (" (应为 0.250) / 1.6 s x")
+                 + juce::String (atLate, 3) + utf8 (" (应为 0.400)"));
+
+        // Full-down: a curve pinned at zero is a mute. The de-click ramp stays,
+        // so the block is silent rather than producing a discontinuity spike.
+        if (auto* c = layer->findSample (clipId))
+        {
+            c->volumeCurve.loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 0.0f } });
+            c->volumeCurve.setEnabled (true);
+        }
+
+        juce::AudioBuffer<float> withMute (2, (int) (2.0 * sr));
+        renderTo (withMute);
+
+        const double muteRatio = windowMagnitude (withMute, 0.10, 0.2)
+                                   / juce::jmax (1.0e-9f, windowMagnitude (withOff, 0.10, 0.2));
+
+        check ("A curve pinned at zero silences the block",
+               muteRatio < 1.0e-3f, "x" + juce::String (muteRatio, 6));
+
+        // Switching the curve off puts the file back, shape kept.
+        if (auto* c = layer->findSample (clipId))
+            c->volumeCurve.setEnabled (false);
+
+        juce::AudioBuffer<float> restored (2, (int) (2.0 * sr));
+        renderTo (restored);
+
+        check ("Bypassing the curve restores the untouched file",
+               windowMagnitude (restored, 0.10, 0.2)
+                 > windowMagnitude (withOff, 0.10, 0.2) * 0.95f,
+               "peak " + juce::String (windowMagnitude (restored, 0.10, 0.2), 4)
+                 + " vs " + juce::String (windowMagnitude (withOff, 0.10, 0.2), 4));
     } ();
 
     //-- Phase 30: the waveform is CUT by a trim, never rescaled ---------------

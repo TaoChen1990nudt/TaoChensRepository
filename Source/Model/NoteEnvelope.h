@@ -79,6 +79,14 @@ public:
     static NoteEnvelope makeFadeOut();
     static NoteEnvelope makeFlat();
 
+    /** Phase 49: a flat, DISABLED curve — the default for a fresh sample clip.
+
+        A note's default is an ADSR because a synth note without a shape sounds
+        wrong; a clip's default must be "the file, untouched", which here is a
+        flat 1.0 line that is switched off. Same class, different factory, so
+        the editor and the renderer cannot invent two different idle states. */
+    static NoteEnvelope makeIdle();
+
     bool isEnabled() const noexcept  { return enabled; }
     void setEnabled (bool e) noexcept { enabled = e; }
 

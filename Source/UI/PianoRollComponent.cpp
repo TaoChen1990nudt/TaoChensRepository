@@ -60,19 +60,6 @@ namespace
         and group ranges above it. */
     constexpr int kClipStretchBase = 5000;
 
-    //-- Phase 29: the two fade handles on a clip -----------------------------
-    /** How far down from the block's top edge a fade handle answers. The strip
-        stops at half the block's height, so a 1-lane block still keeps a strip
-        of body between its fade handle and its trim edge. */
-    constexpr float kFadeStripHeight = 13.0f;
-
-    /** Half-width of the grab zone around a fade handle. Design pixels: 5 each
-        side of a 4.5 px mark, i.e. a target that is reachable without aiming. */
-    constexpr float kFadeGrabRadius = 5.0f;
-
-    /** The mark itself, and the smallest block that has room to draw it. */
-    constexpr float kFadeHandleSize = 5.0f;
-
     juce::Font boldFont (float height)
     {
         return juce::Font (juce::FontOptions{}.withHeight (atomic::ui::sp (height)).withStyle ("Bold"));
@@ -2149,6 +2136,24 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         }
     }
 
+    // ---- Phase 49: the clip's own curve box ---------------------------------
+    if (expandedSampleId >= 0)
+    {
+        if (getExpandedSample() != nullptr)
+        {
+            if (getSampleAutomationBoxBounds (expandedSampleLayerIndex, expandedSampleId)
+                  .contains (e.position))
+            {
+                handleSampleAutomationMouseDown (e, expandedSampleLayerIndex, expandedSampleId);
+                return;
+            }
+        }
+        else
+        {
+            closeSampleAutomation();     // the block it pointed at is gone
+        }
+    }
+
     // Phase 22: anything else on the canvas deselects the curve. The boxes stay
     // OPEN — comparing two curves is a real workflow, and closing one on every
     // stray click would make it impossible.
@@ -2233,18 +2238,18 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
 
         const auto bounds = getSampleScreenBounds (stack.getActiveLayerIndex(), clipId);
 
-        // Phase 29: three kinds of handle on one block — the two fade points
-        // along the top strip, and the two ends. The fades win inside the strip
-        // because when both are zero their handles sit exactly on the corners,
-        // which is also where the trim bands are; the trim band keeps the rest
-        // of the block's height, so both gestures stay reachable.
-        if (const int fade = hitTestSampleFadeHandle (e.position); fade >= 0)
+        // Phase 49: the chevron on the block opens its curve box. Checked
+        // before the trim bands because it sits between them — the same order
+        // the note's tail button answers in.
+        const auto handle = getSampleAutomationHandleBounds (*clip);
+
+        if (! handle.isEmpty() && handle.contains (e.position))
         {
-            dragSampleId       = clipId;
-            dragSampleOriginal = *clip;
-            dragAnchorBeat     = beatAtScreenX (e.position.x);
-            dragMode           = fade == 0 ? DragMode::fadeSampleIn : DragMode::fadeSampleOut;
-            repaint();
+            if (expandedSampleId == clipId && expandedSampleLayerIndex == stack.getActiveLayerIndex())
+                closeSampleAutomation();
+            else
+                openSampleAutomation (stack.getActiveLayerIndex(), clipId);
+
             return;
         }
 
@@ -2303,6 +2308,9 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
 
     if (expandedGroupId >= 0)
         closeGroupAutomation();
+
+    if (expandedSampleId >= 0)
+        closeSampleAutomation();
 
     // ---- Hand tool: drag to pan --------------------------------------------
     if (tool == Tool::hand)
@@ -2985,25 +2993,11 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
             break;
         }
 
-        case DragMode::fadeSampleIn:
-        case DragMode::fadeSampleOut:
-        {
-            if (auto* clip = active->findSample (dragSampleId))
-            {
-                const bool   atTail = dragMode == DragMode::fadeSampleOut;
-                const double x      = beatAtScreenX (e.position.x);
-
-                // Measured inwards from the edge the handle belongs to, so the
-                // fade keeps meaning "this much of the block" while the block
-                // itself is being dragged around.
-                applySampleFade (dragSampleId, atTail,
-                                 atTail ? clip->endBeat() - x : x - clip->startBeat);
-
-                stack.notifyNotesChanged();
-            }
-
+        case DragMode::sampleCurvePoint:
+            // The point lives in the box that opened it; the drag writes
+            // through the same path a click on the curve does.
+            dragSampleCurvePoint (expandedSampleLayerIndex, expandedSampleId, e.position);
             break;
-        }
 
         case DragMode::marquee:
             marqueeCurrent = e.position;
@@ -3033,6 +3027,7 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent&)
     // Phase 21: one undo step per gesture, not per mouse-move — the point drag
     // itself only republishes (see dragGroupCurvePoint).
     const bool wasGroupCurveDrag = dragMode == DragMode::groupAutomationPoint;
+    const bool wasSampleCurveDrag = dragMode == DragMode::sampleCurvePoint;
 
     if (dragMode == DragMode::marquee)
     {
@@ -3050,8 +3045,9 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent&)
     dragEnvelopePoint = -1;
     dragSampleId = -1;
     dragGroupPoint = -1;        // Phase 21: the group box's handle, if any
+    dragSampleCurveIndex = -1;  // Phase 49: the clip box's handle, if any
 
-    if (wasGroupCurveDrag)
+    if (wasGroupCurveDrag || wasSampleCurveDrag)
         stack.notifyNotesChanged();     // the whole drag, as one history step
 
     // The ruler borrows the vertical-resize pointer while it is being dragged;
@@ -3161,6 +3157,46 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
         repaint();
     }
 
+    //-- Phase 49: the clip's own box ----------------------------------------
+    if (expandedSampleId >= 0)
+    {
+        if (getExpandedSample() != nullptr)
+        {
+            const auto box = getSampleAutomationBoxBounds (expandedSampleLayerIndex,
+                                                           expandedSampleId);
+
+            if (box.contains (e.position))
+            {
+                const bool  overMenu  = getSampleMenuArea (expandedSampleLayerIndex,
+                                                           expandedSampleId).contains (e.position);
+                const int   overPoint = getSampleCurveArea (expandedSampleLayerIndex,
+                                                            expandedSampleId).contains (e.position)
+                                          ? findSampleCurvePointAt (expandedSampleLayerIndex,
+                                                                    expandedSampleId, e.position)
+                                          : -1;
+
+                if (overMenu != hoveredSampleCurveMenu || overPoint != hoveredSampleCurvePoint)
+                {
+                    hoveredSampleCurveMenu  = overMenu;
+                    hoveredSampleCurvePoint = overPoint;
+                    repaint (box.expanded (6.0f).getSmallestIntegerContainer());
+                }
+
+                setMouseCursor (overMenu ? juce::MouseCursor::PointingHandCursor
+                                         : (overPoint >= 0 ? juce::MouseCursor::DraggingHandCursor
+                                                           : juce::MouseCursor::CrosshairCursor));
+                return;
+            }
+        }
+    }
+
+    if (hoveredSampleCurveMenu || hoveredSampleCurvePoint != -1)
+    {
+        hoveredSampleCurveMenu  = false;
+        hoveredSampleCurvePoint = -1;
+        repaint();
+    }
+
     //-- Phase 21: the curve handle on a group's pill ------------------------
     {
         bool overHandle = false;
@@ -3237,9 +3273,20 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
 
     if (auto* clip = hitTestSample (e.position); clip != nullptr)
     {
-        if (hitTestSampleFadeHandle (e.position) >= 0)
+        const auto  handle = getSampleAutomationHandleBounds (*clip);
+        const bool  overHandle = ! handle.isEmpty() && handle.contains (e.position);
+
+        if (overHandle != hoveredSampleHandle
+             || (overHandle && hoveredSampleHandleId != clip->id))
         {
-            setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
+            hoveredSampleHandle   = overHandle;
+            hoveredSampleHandleId = overHandle ? clip->id : -1;
+            repaint();
+        }
+
+        if (overHandle)
+        {
+            setMouseCursor (juce::MouseCursor::PointingHandCursor);
             return;
         }
 
@@ -3290,7 +3337,9 @@ void PianoRollComponent::mouseExit (const juce::MouseEvent&)
 {
     if (hoveredNoteId != -1 || hoveredTool != -1
          || hoveredAutomationMenu || hoveredEnvelopePoint != -1
-         || hoveredGroupId != -1 || hoveredGroupHandle || hoveredGroupMenu)
+         || hoveredGroupId != -1 || hoveredGroupHandle || hoveredGroupMenu
+         || hoveredSampleHandle || hoveredSampleCurveMenu
+         || hoveredSampleCurvePoint != -1)
     {
         hoveredNoteId = -1;
         hoveredTool = -1;
@@ -3300,6 +3349,10 @@ void PianoRollComponent::mouseExit (const juce::MouseEvent&)
         hoveredGroupLayer     = -1;
         hoveredGroupHandle    = false;
         hoveredGroupMenu      = false;
+        hoveredSampleHandle     = false;
+        hoveredSampleHandleId   = -1;
+        hoveredSampleCurveMenu  = false;
+        hoveredSampleCurvePoint = -1;
         repaint();
     }
 }
@@ -3399,6 +3452,12 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& key)
         if (expandedGroupId >= 0)
         {
             closeGroupAutomation();
+            didSomething = true;
+        }
+
+        if (expandedSampleId >= 0)
+        {
+            closeSampleAutomation();
             didSomething = true;
         }
 
@@ -3502,6 +3561,7 @@ void PianoRollComponent::paint (juce::Graphics& g)
         g.reduceClipRegion (area.toNearestInt());
         drawNoteAutomationBox (g);
         drawGroupAutomationBox (g);   // Phase 21: the same, for a group
+        drawSampleAutomationBox (g);  // Phase 49: and for a clip's own curve
     }
 
     // Seams between the panes.
@@ -4807,7 +4867,9 @@ void PianoRollComponent::openNoteAutomation (int layerIndex, int noteId)
 {
     // Phase 21: the group box and the note box both float over the staff, so
     // only one may be open — otherwise whichever is drawn last hides the other.
+    // Phase 49: the clip box is the third tenant of the same airspace.
     closeGroupAutomation();
+    closeSampleAutomation();
 
     expandedLayerIndex = layerIndex;
     expandedNoteId     = noteId;
@@ -5323,6 +5385,7 @@ void PianoRollComponent::openGroupAutomation (int layerIndex, int groupId, int t
 {
     // One floating editor at a time, same rule as the note box.
     closeNoteAutomation();
+    closeSampleAutomation();
 
     expandedGroupLayerIndex = layerIndex;
     expandedGroupId         = groupId;
@@ -6627,15 +6690,529 @@ bool PianoRollComponent::applySampleTrim (const SampleEvent& origin, double want
                                                        + deltaBeats * 60.0 / juce::jmax (1.0, bpm));
     }
 
-    // A fade is a length inside the block, so it cannot outlive it.
-    clip->fadeInBeats  = juce::jlimit (0.0, clip->lengthBeats, clip->fadeInBeats);
-    clip->fadeOutBeats = juce::jlimit (0.0, clip->lengthBeats, clip->fadeOutBeats);
-
     ensureTimelineExtendsTo (clip->endBeat());
     return true;
 }
 
-bool PianoRollComponent::applySampleFade (int sampleId, bool atTail, double beats)
+//==============================================================================
+//-- Phase 49: the clip's own automation box ---------------------------------
+//
+// A clip's volume curve, edited in a floating box exactly as wide as the
+// block — the note box's pattern (Phase 8) with the group box's floating
+// placement (Phase 21). The old fade pair was a two-point special case of
+// this curve; the box replaces the handles, and the model no longer keeps
+// both ways to shape a block.
+
+void PianoRollComponent::openSampleAutomation (int layerIndex, int sampleId)
+{
+    // One floating editor at a time — the rule the note box and the group box
+    // already obey between themselves, extended to the third tenant.
+    closeNoteAutomation();
+    closeGroupAutomation();
+
+    expandedSampleLayerIndex = layerIndex;
+    expandedSampleId         = sampleId;
+    dragSampleCurveIndex     = -1;
+    hoveredSampleCurvePoint  = -1;
+    hoveredSampleCurveMenu   = false;
+
+    repaint();
+}
+
+void PianoRollComponent::closeSampleAutomation()
+{
+    if (expandedSampleId < 0)
+        return;
+
+    expandedSampleId         = -1;
+    expandedSampleLayerIndex = -1;
+    dragSampleCurveIndex     = -1;
+    hoveredSampleCurvePoint  = -1;
+    hoveredSampleCurveMenu   = false;
+
+    repaint();
+}
+
+SampleEvent* PianoRollComponent::getExpandedSample()
+{
+    if (auto* layer = stack.getLayer (expandedSampleLayerIndex))
+        return layer->findSample (expandedSampleId);
+
+    return nullptr;
+}
+
+const SampleEvent* PianoRollComponent::getExpandedSample() const
+{
+    if (const auto* layer = stack.getLayer (expandedSampleLayerIndex))
+        return layer->findSample (expandedSampleId);
+
+    return nullptr;
+}
+
+juce::Rectangle<float> PianoRollComponent::getSampleAutomationHandleBounds (const SampleEvent& sample) const
+{
+    // The note handle's own geometry, transplanted onto the block: the resize
+    // band first, a hairline of air, then the button — and hidden when the
+    // block is too short to carry one without covering a trim edge. Only the
+    // ACTIVE layer's blocks draw or answer it, which is why the lookup goes
+    // through the active index and no layerIndex is passed.
+    const auto bounds = getSampleScreenBounds (stack.getActiveLayerIndex(), sample.id);
+
+    const float band  = ui::pf (kResizeHandleWidth);
+    const float air   = ui::pf (kNoteHandleTailAir);
+    const float width = ui::pf (kNoteHandleWidth);
+
+    const float inset = band + air + width;
+    const float minimumWidth = inset + band + ui::pf (kNoteHandleMinBody);
+
+    if (bounds.isEmpty() || bounds.getWidth() < minimumWidth)
+        return {};
+
+    // A block can be far taller than a note: the button takes a fixed strip
+    // and centres itself on the body instead of stretching full height.
+    const float height = juce::jmin (ui::pf (14),
+                                     juce::jmax (ui::pf (8), bounds.getHeight() - ui::pf (2)));
+
+    return { bounds.getRight() - inset,
+             bounds.getY() + (bounds.getHeight() - height) * 0.5f,
+             width, height };
+}
+
+juce::Rectangle<float> PianoRollComponent::getSampleAutomationBoxBounds (int layerIndex,
+                                                                         int sampleId) const
+{
+    const auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr)
+        return {};
+
+    const auto* sample = layer->findSample (sampleId);
+
+    if (sample == nullptr)
+        return {};
+
+    const auto rect = getSampleScreenBounds (layerIndex, sampleId);
+    const auto grid = getGridArea();
+
+    if (rect.isEmpty())
+        return {};
+
+    // Exactly as wide as the block. The alignment IS the feature: the curve's
+    // first pixel is the block's first pixel, at every zoom, the same rule
+    // the note box states and the group box had to be corrected into (P22).
+    // 22 px stays the floor a note box also keeps — a narrower block cannot
+    // show anything, and the floor moves the frame only, never the curve,
+    // which is still mapped onto the block's own width below.
+    const float width  = juce::jmax (rect.getWidth(), 22.0f);
+    const float height = ui::pf (92);
+
+    const float x = juce::jlimit (grid.getX(),
+                                  juce::jmax (grid.getX(), grid.getRight() - width),
+                                  rect.getX());
+
+    float y = rect.getBottom() + ui::pf (3);
+
+    // No room underneath (block near the bottom of the view): flip above it.
+    if (y + height > grid.getBottom() - ui::pf (2))
+        y = rect.getY() - ui::pf (3) - height;
+
+    y = juce::jlimit (grid.getY(), juce::jmax (grid.getY(), grid.getBottom() - height), y);
+
+    return { x, y, width, height };
+}
+
+juce::Rectangle<float> PianoRollComponent::getSampleCurveArea (int layerIndex, int sampleId) const
+{
+    // Padding shrinks with the box, or a narrow box would have no curve left.
+    const auto  box  = getSampleAutomationBoxBounds (layerIndex, sampleId);
+    const float padX = juce::jlimit (ui::pf (2), ui::pf (7), box.getWidth() * 0.10f);
+
+    auto inner = box.reduced (padX, ui::pf (6));
+    inner.removeFromBottom (ui::pf (30));
+    return inner;
+}
+
+juce::Rectangle<float> PianoRollComponent::getSampleMenuArea (int layerIndex, int sampleId) const
+{
+    const auto  box  = getSampleAutomationBoxBounds (layerIndex, sampleId);
+    const float padX = juce::jlimit (ui::pf (2), ui::pf (7), box.getWidth() * 0.10f);
+
+    auto inner = box.reduced (padX, ui::pf (6));
+    return inner.removeFromBottom (ui::pf (26));
+}
+
+juce::Rectangle<float> PianoRollComponent::getSampleCloseArea (int layerIndex, int sampleId) const
+{
+    const auto  box  = getSampleAutomationBoxBounds (layerIndex, sampleId);
+    const float size = juce::jlimit (ui::pf (9), ui::pf (17), box.getWidth() - ui::pf (7));
+
+    return { box.getRight() - size - ui::pf (3), box.getY() + ui::pf (3), size, size };
+}
+
+int PianoRollComponent::findSampleCurvePointAt (int layerIndex, int sampleId,
+                                                juce::Point<float> position) const
+{
+    const auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr)
+        return -1;
+
+    const auto* sample = layer->findSample (sampleId);
+
+    if (sample == nullptr)
+        return -1;
+
+    const auto inner = getSampleCurveArea (layerIndex, sampleId);
+    const auto& points = sample->volumeCurve.getPoints();
+
+    for (int i = 0; i < (int) points.size(); ++i)
+    {
+        const juce::Point<float> p { inner.getX() + points[(size_t) i].time * inner.getWidth(),
+                                     inner.getBottom() - points[(size_t) i].value * inner.getHeight() };
+
+        if (p.getDistanceFrom (position) <= 7.0f)
+            return i;
+    }
+
+    return -1;
+}
+
+void PianoRollComponent::dragSampleCurvePoint (int layerIndex, int sampleId,
+                                               juce::Point<float> position)
+{
+    if (dragSampleCurveIndex < 0)
+        return;
+
+    auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr)
+        return;
+
+    auto* sample = layer->findSample (sampleId);
+
+    if (sample == nullptr)
+        return;
+
+    const auto inner = getSampleCurveArea (layerIndex, sampleId);
+
+    if (inner.isEmpty())
+        return;
+
+    // Normalised across the block, exactly like a note's envelope: the drag
+    // never needs to know the block's length, so a resize during the drag
+    // cannot throw the point off the pointer.
+    const float t = juce::jlimit (0.0f, 1.0f,
+                                  (position.x - inner.getX()) / juce::jmax (1.0f, inner.getWidth()));
+    const float v = juce::jlimit (0.0f, 1.0f,
+                                  (inner.getBottom() - position.y) / juce::jmax (1.0f, inner.getHeight()));
+
+    sample->volumeCurve.movePoint (dragSampleCurveIndex, t, v);
+
+    // Live sound, no undo: onNoteEdited republishes the schedule only; the
+    // history step is written once, in mouseUp, like the group box's drag.
+    if (onNoteEdited != nullptr)
+        onNoteEdited();
+
+    repaint();
+}
+
+bool PianoRollComponent::handleSampleAutomationMouseDown (const juce::MouseEvent& e,
+                                                          int layerIndex, int sampleId)
+{
+    auto* layer = stack.getLayer (layerIndex);
+    auto* sample = layer != nullptr ? layer->findSample (sampleId) : nullptr;
+
+    if (sample == nullptr)
+        return false;
+
+    const auto pos = e.position;
+
+    if (getSampleCloseArea (layerIndex, sampleId).contains (pos))
+    {
+        closeSampleAutomation();
+        return true;
+    }
+
+    if (getSampleMenuArea (layerIndex, sampleId).contains (pos))
+    {
+        showSampleCurveMenu (layerIndex, sampleId, e.getScreenPosition());
+        return true;
+    }
+
+    const auto inner = getSampleCurveArea (layerIndex, sampleId);
+
+    if (! inner.contains (pos))
+        return true;        // inside the box but between the parts: swallow it
+
+    const int hit = findSampleCurvePointAt (layerIndex, sampleId, pos);
+
+    if (e.mods.isPopupMenu())
+    {
+        // Right-click removes a point; the curve always keeps two.
+        if (hit >= 0)
+        {
+            sample->volumeCurve.removePoint (hit);
+
+            if (onNoteEdited != nullptr)
+                onNoteEdited();
+
+            repaint();
+        }
+
+        return true;
+    }
+
+    if (hit >= 0)
+    {
+        dragSampleCurveIndex = hit;
+    }
+    else
+    {
+        const float t = juce::jlimit (0.0f, 1.0f,
+                                      (pos.x - inner.getX()) / juce::jmax (1.0f, inner.getWidth()));
+        const float v = juce::jlimit (0.0f, 1.0f,
+                                      (inner.getBottom() - pos.y) / juce::jmax (1.0f, inner.getHeight()));
+
+        const int added = sample->volumeCurve.addPoint (t, v);
+
+        if (added < 0)
+            return true;    // curve is full
+
+        dragSampleCurveIndex = added;
+    }
+
+    // A curve you can see and cannot hear is how automation gets taught wrong:
+    // the first edit switches the curve on, the toggle in the menu is how it
+    // is switched back off without losing the shape.
+    sample->volumeCurve.setEnabled (true);
+
+    if (onNoteEdited != nullptr)
+        onNoteEdited();
+
+    dragMode = DragMode::sampleCurvePoint;
+    repaint();
+    return true;
+}
+
+void PianoRollComponent::showSampleCurveMenu (int layerIndex, int sampleId,
+                                              juce::Point<int> screenPosition)
+{
+    auto* layer = stack.getLayer (layerIndex);
+    auto* sample = layer != nullptr ? layer->findSample (sampleId) : nullptr;
+
+    if (sample == nullptr)
+        return;
+
+    const bool enabled = sample->volumeCurve.isEnabled();
+
+    juce::PopupMenu menu;
+    menu.addSectionHeader (utf8 ("音量曲线"));
+    menu.addItem (1, utf8 ("启用音量曲线"), true, enabled);
+    menu.addItem (2, utf8 ("重置为平线"), true, false);
+    menu.addItem (3, utf8 ("淡入形状"), true, false);
+    menu.addItem (4, utf8 ("淡出形状"), true, false);
+
+    juce::Component::SafePointer<PianoRollComponent> safe (this);
+    const int layerCapture = layerIndex;
+    const int idCapture    = sampleId;
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (
+                            juce::Rectangle<int> (screenPosition.x, screenPosition.y, 1, 1)),
+                        [safe, layerCapture, idCapture] (int result)
+    {
+        if (safe == nullptr || result <= 0)
+            return;
+
+        auto* l = safe->stack.getLayer (layerCapture);
+        auto* s = l != nullptr ? l->findSample (idCapture) : nullptr;
+
+        if (s == nullptr)
+            return;
+
+        switch (result)
+        {
+            case 1:
+                s->volumeCurve.setEnabled (! s->volumeCurve.isEnabled());
+                break;
+
+            case 2:
+                s->volumeCurve.loadPoints ({ { 0.0f, 1.0f }, { 1.0f, 1.0f } });
+                break;
+
+            // The two shapes the old fade handles drew, kept as one-click
+            // presets: the ramps that used to be the ONLY way to shape a block
+            // are now two menu items, and a third point is free.
+            case 3:
+                s->volumeCurve.loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 1.0f } });
+                break;
+
+            case 4:
+                s->volumeCurve.loadPoints ({ { 0.0f, 1.0f }, { 1.0f, 0.0f } });
+                break;
+
+            default:
+                return;
+        }
+
+        if (result != 1)
+            s->volumeCurve.setEnabled (true);
+
+        if (safe->onNoteEdited != nullptr)
+            safe->onNoteEdited();
+
+        safe->repaint();
+    });
+}
+
+void PianoRollComponent::drawSampleAutomationBox (juce::Graphics& g)
+{
+    auto* sample = getExpandedSample();
+    auto* layer  = stack.getLayer (expandedSampleLayerIndex);
+
+    if (sample == nullptr || layer == nullptr)
+        return;
+
+    const int   layerIndex = expandedSampleLayerIndex;
+    const auto  colour     = layer->getColour();
+    const auto  box        = getSampleAutomationBoxBounds (layerIndex, sample->id);
+
+    if (box.isEmpty())
+        return;
+
+    //-- Panel ---------------------------------------------------------------
+    g.setColour (theme::bgApp.withAlpha (0.97f));
+    g.fillRoundedRectangle (box, 5.0f);
+    g.setColour (colour.withAlpha (0.8f));
+    g.drawRoundedRectangle (box, 5.0f, 1.2f);
+
+    //-- Curve ---------------------------------------------------------------
+    const auto inner = getSampleCurveArea (layerIndex, sample->id);
+
+    if (! inner.isEmpty())
+    {
+        drawGridInside (g, inner);
+
+        const auto& points = sample->volumeCurve.getPoints();
+        const bool  live   = sample->volumeCurve.isEnabled();
+
+        // The curve, filled like the note box's: the shape is the block's
+        // loudness over its own length, so the fill grows from the bottom.
+        if (points.size() >= 2)
+        {
+            juce::Path fill;
+            juce::Path line;
+
+            fill.startNewSubPath (inner.getX(), inner.getBottom());
+
+            bool first = true;
+
+            for (const auto& p : points)
+            {
+                const juce::Point<float> at { inner.getX() + p.time * inner.getWidth(),
+                                              inner.getBottom() - p.value * inner.getHeight() };
+
+                if (first)
+                {
+                    fill.lineTo (at.getX(), inner.getBottom());
+                    fill.lineTo (at);
+                    line.startNewSubPath (at);
+                    first = false;
+                }
+                else
+                {
+                    fill.lineTo (at);
+                    line.lineTo (at);
+                }
+            }
+
+            fill.lineTo (inner.getRight(), inner.getBottom());
+            fill.closeSubPath();
+
+            g.setColour (colour.withAlpha (live ? 0.30f : 0.14f));
+            g.fillPath (fill);
+
+            g.setColour (colour.brighter (0.4f).withAlpha (live ? 0.95f : 0.4f));
+            g.strokePath (line, juce::PathStrokeType (ui::pf (1.4f), juce::PathStrokeType::curved,
+                                                      juce::PathStrokeType::rounded));
+
+            for (int i = 0; i < (int) points.size(); ++i)
+            {
+                const auto& p = points[(size_t) i];
+                const juce::Point<float> at { inner.getX() + p.time * inner.getWidth(),
+                                              inner.getBottom() - p.value * inner.getHeight() };
+
+                const bool hot = i == hoveredSampleCurvePoint || i == dragSampleCurveIndex;
+
+                g.setColour (juce::Colours::white.withAlpha (hot ? 1.0f : 0.9f));
+                g.fillEllipse (at.x - ui::pf (3), at.y - ui::pf (3),
+                               ui::pf (6), ui::pf (6));
+
+                g.setColour (juce::Colours::black.withAlpha (0.5f));
+                g.drawEllipse (at.x - ui::pf (3), at.y - ui::pf (3),
+                               ui::pf (6), ui::pf (6), 1.0f);
+            }
+        }
+    }
+
+    //-- Menu row ------------------------------------------------------------
+    auto menuArea = getSampleMenuArea (layerIndex, sample->id);
+
+    if (! menuArea.isEmpty())
+    {
+        const bool hot = hoveredSampleCurveMenu;
+
+        // The switch comes off the row first, so the label can never run under
+        // it. 22 x 12 design px and centred vertically: sized on its own terms,
+        // not stretched to the row. Stretched, the knob became a 26 px ball
+        // that spilled out of both ends of the track — the first P49 frame
+        // showed it plainly.
+        const float switchW = ui::pf (22);
+        const float switchH = ui::pf (12);
+
+        const juce::Rectangle<float> toggle (menuArea.getRight() - switchW,
+                                             menuArea.getCentreY() - switchH * 0.5f,
+                                             switchW, switchH);
+
+        juce::File::getCurrentWorkingDirectory().getChildFile ("p49dbg.txt")
+            .appendText ("menu=" + menuArea.toString() + " toggle=" + toggle.toString()
+                          + " switchH=" + juce::String (switchH) + "\n");
+
+        g.setColour ((hot ? juce::Colours::white : colour).withAlpha (0.85f));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
+        g.drawText (utf8 ("音量"),
+                    menuArea.withTrimmedRight (switchW + ui::pf (6)),
+                    juce::Justification::centredLeft, true);
+
+        // Lit when the curve is audible, dim when it is bypassed: the switch is
+        // the only place the difference is visible, so it has to read from the
+        // knob's side as well as its colour.
+        const bool on = sample->volumeCurve.isEnabled();
+
+        g.setColour (on ? colour.withAlpha (0.9f) : theme::surface3);
+        g.fillRoundedRectangle (toggle, switchH * 0.5f);
+
+        const float knob = switchH - ui::pf (2);
+
+        g.setColour (juce::Colours::white.withAlpha (on ? 0.95f : 0.55f));
+        g.fillEllipse (on ? toggle.getRight() - knob - ui::pf (1) : toggle.getX() + ui::pf (1),
+                       toggle.getY() + ui::pf (1), knob, knob);
+    }
+
+    //-- Close ---------------------------------------------------------------
+    const auto close = getSampleCloseArea (layerIndex, sample->id);
+    juce::Path x;
+
+    x.startNewSubPath (close.getX() + ui::pf (2.5f), close.getY() + ui::pf (2.5f));
+    x.lineTo (close.getRight() - ui::pf (2.5f), close.getBottom() - ui::pf (2.5f));
+    x.startNewSubPath (close.getRight() - ui::pf (2.5f), close.getY() + ui::pf (2.5f));
+    x.lineTo (close.getX() + ui::pf (2.5f), close.getBottom() - ui::pf (2.5f));
+
+    g.setColour (juce::Colours::white.withAlpha (0.55f));
+    g.strokePath (x, juce::PathStrokeType (ui::pf (1.3f), juce::PathStrokeType::mitered,
+                                           juce::PathStrokeType::butt));
+}
+
+bool PianoRollComponent::simulateSampleCurveEdit (int sampleId, float t, float v)
 {
     auto* active = stack.getActiveLayer();
 
@@ -6647,76 +7224,35 @@ bool PianoRollComponent::applySampleFade (int sampleId, bool atTail, double beat
     if (clip == nullptr)
         return false;
 
-    const double value = juce::jlimit (0.0, clip->lengthBeats, beats);
+    // The gesture path the box uses: add when the time is new, move when it
+    // lands on an existing point, and the first edit always switches the
+    // curve on — the same three lines handleSampleAutomationMouseDown runs.
+    const auto& points = clip->volumeCurve.getPoints();
+    int index = -1;
 
-    if (atTail)
-        clip->fadeOutBeats = value;
+    for (int i = 0; i < (int) points.size(); ++i)
+        if (std::abs (points[(size_t) i].time - juce::jlimit (0.0f, 1.0f, t)) < 0.02f)
+        {
+            index = i;
+            break;
+        }
+
+    if (index >= 0)
+        clip->volumeCurve.movePoint (index, t, v);
     else
-        clip->fadeInBeats = value;
+        index = clip->volumeCurve.addPoint (t, v);
 
-    return true;
+    clip->volumeCurve.setEnabled (true);
+
+    return index >= 0;
 }
 
-float PianoRollComponent::getSampleFadeHandleX (int layerIndex, int sampleId, bool atTail) const
+juce::Rectangle<float> PianoRollComponent::getSampleAutomationBoxForTest (int layerIndex,
+                                                                          int sampleId) const
 {
-    const auto* layer = stack.getLayer (layerIndex);
-
-    if (layer == nullptr)
-        return 0.0f;
-
-    const auto* sample = layer->findSample (sampleId);
-
-    if (sample == nullptr)
-        return 0.0f;
-
-    const auto rect = getSampleScreenBounds (layerIndex, sampleId);
-    const double beats = juce::jmax (0.0, atTail ? sample->fadeOutBeats : sample->fadeInBeats);
-    const float  dx    = (float) juce::jmin ((double) rect.getWidth(), beats * beatWidth);
-
-    return atTail ? rect.getRight() - dx : rect.getX() + dx;
+    return getSampleAutomationBoxBounds (layerIndex, sampleId);
 }
 
-int PianoRollComponent::hitTestSampleFadeHandle (juce::Point<float> position) const
-{
-    const auto* layer = stack.getActiveLayer();
-
-    if (layer == nullptr)
-        return -1;
-
-    const int index = stack.getActiveLayerIndex();
-
-    for (const auto& sample : layer->getSamples())
-    {
-        const auto rect = getSampleScreenBounds (index, sample.id);
-
-        if (! rect.contains (position))
-            continue;
-
-        // Only the top strip answers. The rest of the height is the trim band,
-        // which is what keeps "make it shorter" reachable on a block whose
-        // fades are both zero and whose handles therefore sit on the corners.
-        const float strip = juce::jmin (ui::pf (kFadeStripHeight), rect.getHeight() * 0.5f);
-
-        if (position.y > rect.getY() + strip)
-            continue;
-
-        const float near = ui::pf (kFadeGrabRadius);
-        const float xIn  = getSampleFadeHandleX (index, sample.id, false);
-        const float xOut = getSampleFadeHandleX (index, sample.id, true);
-
-        const float dIn  = std::abs (position.x - xIn);
-        const float dOut = std::abs (position.x - xOut);
-
-        if (dIn > near && dOut > near)
-            continue;
-
-        // Whichever is closer wins, so two handles that overlap in a very short
-        // block still give a predictable answer.
-        return dIn <= dOut ? 0 : 1;
-    }
-
-    return -1;
-}
 
 int PianoRollComponent::sampleWaveColumns (const Layer& layer, const SampleEvent& sample,
                                            float blockWidth) const
@@ -6802,10 +7338,6 @@ bool PianoRollComponent::restoreSampleLength (int sampleId)
     // gesture in the clip's life whose result no other setting can perturb.
     sample->lengthBeats = SampleEvent::beatsForSeconds (buffer->lengthSeconds(), bpm);
     sample->sourceOffsetSeconds = 0.0;
-
-    // A fade is a length inside the block, so it cannot outlive it.
-    sample->fadeInBeats  = juce::jlimit (0.0, sample->lengthBeats, sample->fadeInBeats);
-    sample->fadeOutBeats = juce::jlimit (0.0, sample->lengthBeats, sample->fadeOutBeats);
 
     ensureTimelineExtendsTo (sample->endBeat());
     return true;
@@ -6917,15 +7449,6 @@ bool PianoRollComponent::simulateSampleTrim (int sampleId, double wantedBeat, bo
     const SampleEvent origin = *clip;        // the drag works from a snapshot too
 
     if (! applySampleTrim (origin, wantedBeat, fromTail))
-        return false;
-
-    stack.notifyNotesChanged();
-    return true;
-}
-
-bool PianoRollComponent::simulateSampleFade (int sampleId, bool atTail, double beats)
-{
-    if (! applySampleFade (sampleId, atTail, beats))
         return false;
 
     stack.notifyNotesChanged();
@@ -7190,10 +7713,6 @@ bool PianoRollComponent::mountSelectedSamplesToSlot (int slotId)
         sample->lengthBeats = juce::jmax (gridDivision,
                                           SampleEvent::beatsForSeconds (
                                               slot->sampleBuffer->lengthSeconds(), bpm));
-
-        // A fade is a length INSIDE the block, so it cannot outlive it.
-        sample->fadeInBeats  = juce::jlimit (0.0, sample->lengthBeats, sample->fadeInBeats);
-        sample->fadeOutBeats = juce::jlimit (0.0, sample->lengthBeats, sample->fadeOutBeats);
 
         ensureTimelineExtendsTo (sample->endBeat());
         changed = true;
@@ -7960,10 +8479,39 @@ void PianoRollComponent::drawSampleBlock (juce::Graphics& g, int layerIndex,
                     juce::Justification::centredLeft, true);
     }
 
-    //-- Phase 29: the fade shapes, drawn over the body but under the selection
-    // ring. After the name strip on purpose: the handles belong to the corners,
-    // and a strip filled afterwards would paint over them.
-    drawSampleFades (g, rect, sample, colour, alpha);
+    //-- Phase 49: the chevron that opens the block's curve box ---------------
+    // Only the active layer's blocks answer the mouse, so only they advertise
+    // the handle — a ghost block with a button would promise an edit the
+    // active-layer rule would refuse. Same glyph as the note's tail button and
+    // the group's pill handle: "the thing at the right end opens a curve" is
+    // learned once across all three.
+    if (layerIndex == stack.getActiveLayerIndex())
+    {
+        const auto handle = getSampleAutomationHandleBounds (sample);
+        const bool open   = (expandedSampleId == sample.id
+                               && expandedSampleLayerIndex == layerIndex);
+        const bool hot    = (hoveredSampleHandleId == sample.id && hoveredSampleHandle);
+
+        if (! handle.isEmpty())
+        {
+            g.setColour (open ? colour.brighter (0.8f).withAlpha (alpha * 0.55f)
+                              : juce::Colours::black.withAlpha (alpha * 0.30f));
+            g.fillRoundedRectangle (handle, ui::pf (2.5f));
+
+            juce::Path chevron;
+            const float cx = handle.getCentreX();
+            const float cy = handle.getCentreY() + (open ? ui::pf (1.2f) : 0.0f);
+
+            chevron.startNewSubPath (cx - ui::pf (2.8f), cy - ui::pf (1.4f));
+            chevron.lineTo (cx, cy + ui::pf (1.8f));
+            chevron.lineTo (cx + ui::pf (2.8f), cy - ui::pf (1.4f));
+
+            g.setColour (juce::Colours::white.withAlpha (open || hot ? 0.95f : 0.7f * alpha));
+            g.strokePath (chevron, juce::PathStrokeType (ui::pf (1.2f),
+                                                         juce::PathStrokeType::curved,
+                                                         juce::PathStrokeType::rounded));
+        }
+    }
 
     //-- Phase 28: the block can be the selection -----------------------------
     // Same three signals a selected note uses (brighter body above, a white
@@ -7999,85 +8547,6 @@ void PianoRollComponent::drawSampleBlock (juce::Graphics& g, int layerIndex,
             g.setColour (juce::Colours::white.withAlpha (0.82f));
             g.strokePath (brackets, juce::PathStrokeType (ui::pf (1.4f), juce::PathStrokeType::mitered,
                                                           juce::PathStrokeType::butt));
-        }
-    }
-}
-
-void PianoRollComponent::drawSampleFades (juce::Graphics& g, juce::Rectangle<float> block,
-                                          const SampleEvent& sample, juce::Colour colour,
-                                          float alpha)
-{
-    if (block.getWidth() < ui::pf (3.0f) || block.getHeight() < ui::pf (4.0f))
-        return;
-
-    const double inBeats  = juce::jlimit (0.0, sample.lengthBeats, sample.fadeInBeats);
-    const double outBeats = juce::jlimit (0.0, sample.lengthBeats, sample.fadeOutBeats);
-
-    const float inWidth  = (float) juce::jmin ((double) block.getWidth(), inBeats  * beatWidth);
-    const float outWidth = (float) juce::jmin ((double) block.getWidth(), outBeats * beatWidth);
-
-    const float top    = block.getY();
-    const float bottom = block.getBottom();
-    const float xIn    = block.getX() + inWidth;
-    const float xOut   = block.getRight() - outWidth;
-
-    // Shade what the fade takes away. The area ABOVE the gain line is the part
-    // that is turned down, so it is darkened rather than redrawn — a second
-    // waveform would suggest a second sound.
-    g.setColour (juce::Colours::black.withAlpha (0.36f * alpha));
-
-    if (inWidth > 0.5f)
-    {
-        juce::Path shade;
-        shade.startNewSubPath (block.getX(), top);
-        shade.lineTo (xIn, top);
-        shade.lineTo (block.getX(), bottom);
-        shade.closeSubPath();
-        g.fillPath (shade);
-    }
-
-    if (outWidth > 0.5f)
-    {
-        juce::Path shade;
-        shade.startNewSubPath (xOut, top);
-        shade.lineTo (block.getRight(), top);
-        shade.lineTo (block.getRight(), bottom);
-        shade.closeSubPath();
-        g.fillPath (shade);
-    }
-
-    // The gain line. Two legs when the fades overlap, so a block that is all
-    // fade reads as a triangle instead of a crossed-over scribble.
-    juce::Path line;
-    line.startNewSubPath (block.getX(), bottom);
-    line.lineTo (xIn, top);
-
-    if (xIn < xOut)
-        line.lineTo (xOut, top);
-    else
-        line.startNewSubPath (xOut, top);
-
-    line.lineTo (block.getRight(), bottom);
-
-    g.setColour (colour.brighter (0.9f).withAlpha (0.90f * alpha));
-    g.strokePath (line, juce::PathStrokeType (ui::pf (1.0f), juce::PathStrokeType::mitered,
-                                              juce::PathStrokeType::butt));
-
-    // The two handles. Small on purpose: they sit on the corners the trim bands
-    // also use, and a big square there would make the trim look unavailable.
-    const float size = ui::pf (kFadeHandleSize);
-
-    if (block.getWidth() > size * 2.0f)
-    {
-        for (const float x : { xIn, xOut })
-        {
-            const auto mark = juce::Rectangle<float> (x - size * 0.5f, top, size, size);
-
-            g.setColour (juce::Colours::white.withAlpha (0.92f * alpha));
-            g.fillRoundedRectangle (mark, ui::pf (1.0f));
-
-            g.setColour (juce::Colours::black.withAlpha (0.55f * alpha));
-            g.drawRoundedRectangle (mark.reduced (0.5f), ui::pf (1.0f), 1.0f);
         }
     }
 }

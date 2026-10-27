@@ -705,15 +705,26 @@ public:
         draggable). */
     double maxSampleLengthBeats (const Layer&, const SampleEvent&) const;
 
-    /** Phase 29: test hooks — one trim / fade step as the mouse would do it.
-        Both go through the same code the drag uses, so the assertions cannot
-        pass while the gesture is broken. */
+    /** Phase 29: test hook — one trim step as the mouse would do it. Goes
+        through the same code the drag uses, so the assertions cannot pass
+        while the gesture is broken. */
     bool simulateSampleTrim (int sampleId, double wantedBeat, bool fromTail);
-    bool simulateSampleFade (int sampleId, bool atTail, double beats);
 
-    /** Phase 29: where the fade handle sits, in local pixels. Public so the
-        self-test can assert it follows the fade and the block together. */
-    float getSampleFadeHandleX (int layerIndex, int sampleId, bool atTail) const;
+    //-- Phase 49: the clip's own automation box ------------------------------
+    bool isSampleAutomationOpen() const noexcept { return expandedSampleId >= 0; }
+    int  getExpandedSampleId() const noexcept    { return expandedSampleId; }
+    void openSampleAutomation (int layerIndex, int sampleId);
+    void closeSampleAutomation();
+
+    /** Phase 49: test hook — adds (or drags onto) one point of the named
+        clip's volume curve, normalised 0..1 across the block, through the
+        same model path the box's gestures use. */
+    bool simulateSampleCurveEdit (int sampleId, float t, float v);
+
+    /** Phase 49: test hook — the box's local bounds, so the self-test can
+        assert "as wide as the block" without re-deriving the layout. */
+    juce::Rectangle<float> getSampleAutomationBoxForTest (int layerIndex,
+                                                          int sampleId) const;
 
     /** Phase 30: pixels of a block that actually carry audio — the waveform's
         own width at the current zoom. Zero when the file is missing.
@@ -758,10 +769,6 @@ public:
     /** Phase 31: applies a mode to the whole clip selection (or to one block
         when nothing is selected) and returns how many it changed. */
     int setSelectedSampleStretchMode (StretchMode mode);
-
-    /** Anti-clockwise from the top strip: 0 = fade in, 1 = fade out, -1 = none.
-        Only the top strip answers, so the full-height edges stay trim handles. */
-    int hitTestSampleFadeHandle (juce::Point<float> position) const;
 
     /** Phase 28: test hook — one rigid move step of the selected clips, through
         clampMove() + applyMove(), the same pair the drag uses. */
@@ -882,8 +889,7 @@ public:
 private:
     enum class DragMode { none, moveNote, resizeNote, resizeNoteLeft, marquee, panView,
                           scrollThumb, automationPoint, resizeSample, resizeSampleLeft,
-                          fadeSampleIn, fadeSampleOut,
-                          rulerScrub, rulerZoom, groupAutomationPoint };
+                          rulerScrub, rulerZoom, groupAutomationPoint, sampleCurvePoint };
 
     //-- Geometry helpers -----------------------------------------------------
     juce::Rectangle<float> getGridArea() const;
@@ -957,13 +963,30 @@ private:
                           juce::Colour, float alpha, bool selected);
     void drawDropPreview (juce::Graphics&);
 
-    /** Phase 29: the two fade shapes and their handles, drawn inside a block.
+    //-- Phase 49: the clip's own automation box ------------------------------
+    /** The chevron on the block's body that opens the box. Same glyph, same
+        "thing at the right end opens a curve" rule as the note's tail button
+        and the group's pill handle. Empty when the block is too small to fit
+        one, which is the note handle's own rule. */
+    juce::Rectangle<float> getSampleAutomationHandleBounds (const SampleEvent&) const;
 
-        Separate from drawSampleBlock because it needs no layer: given the
-        rectangle and the fade lengths it can draw, which is exactly what the
-        self-test's geometry assertions are about. */
-    void drawSampleFades (juce::Graphics&, juce::Rectangle<float> block,
-                          const SampleEvent&, juce::Colour, float alpha);
+    /** The floating box: exactly as wide as the block, under it, flipped above
+        when the block sits near the bottom of the view. */
+    juce::Rectangle<float> getSampleAutomationBoxBounds (int layerIndex, int sampleId) const;
+    juce::Rectangle<float> getSampleCurveArea (int layerIndex, int sampleId) const;
+    juce::Rectangle<float> getSampleMenuArea (int layerIndex, int sampleId) const;
+    juce::Rectangle<float> getSampleCloseArea (int layerIndex, int sampleId) const;
+
+    SampleEvent*       getExpandedSample();
+    const SampleEvent* getExpandedSample() const;
+
+    int  findSampleCurvePointAt (int layerIndex, int sampleId,
+                                 juce::Point<float> position) const;
+    void dragSampleCurvePoint (int layerIndex, int sampleId, juce::Point<float> position);
+    bool handleSampleAutomationMouseDown (const juce::MouseEvent& e,
+                                          int layerIndex, int sampleId);
+    void showSampleCurveMenu (int layerIndex, int sampleId, juce::Point<int> screenPosition);
+    void drawSampleAutomationBox (juce::Graphics&);
 
     /** Phase 30: the maths behind the waveform, in one place.
 
@@ -985,10 +1008,6 @@ private:
         the end and moves the head, which is the only way "trim the front" does
         not also mean "make it end later". */
     bool applySampleTrim (const SampleEvent& origin, double wantedBeat, bool fromTail);
-
-    /** Phase 29: sets one fade length from a beat position, clamped to the
-        block. `atTail` measures from the right edge inwards. */
-    bool applySampleFade (int sampleId, bool atTail, double beats);
 
     /** Phase 28: arms a rigid move of the selected clips. Same clampMove() /
         applyMove() pair the group drag uses — a second "startBeat + delta"
@@ -1282,6 +1301,17 @@ private:
     SampleEvent dragSampleOriginal;
     juce::Point<float> sampleDropPoint;
     bool       sampleDropActive = false;
+
+    //-- Phase 49: the clip's own automation box ------------------------------
+    /** Mirrors the note box (Phase 8) and the group box (Phase 21): one
+        floating editor at a time, opened by a chevron on the block. */
+    int  expandedSampleId         = -1;
+    int  expandedSampleLayerIndex = -1;
+    int  dragSampleCurveIndex     = -1;
+    int  hoveredSampleCurvePoint  = -1;
+    bool hoveredSampleHandle      = false;
+    int  hoveredSampleHandleId    = -1;
+    bool hoveredSampleCurveMenu   = false;
 
     //-- Phase 22 -------------------------------------------------------------
     /** The key held down on the piano column, or -1 — both a paint state and

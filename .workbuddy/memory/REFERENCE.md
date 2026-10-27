@@ -327,7 +327,7 @@
 - 进度用**逐层 BFS**；收尾设 **1.0**（不是 0）。`waitForPendingScans()` 自己泵 AsyncUpdater，
   所以 `handleAsyncUpdate()` 必须幂等。**析构必须 `stopThread(-1)` 兜底**。
 
-## 采样块：选择 / 窗口 / 淡变（P28–P29）
+## 采样块：选择 / 窗口 / 音量曲线（P28–P29 / P49）
 - **单击替换整个选择，框选可以同时选中两类**。`setSelection`/`setSampleSelection` 清对方
   （单击语义）；`setMixedSelection(notes, clips)` 一次性替换两者（marquee 与粘贴用）。
   Delete / Ctrl+C / Ctrl+D 一律"两类一起"，不留"你指哪个"的暗选择。
@@ -337,10 +337,16 @@
   offset（同样的秒数），音频留在原时间位置；右端拉伸只改 `lengthBeats`。
 - **两端上界都来自文件**：右 ≤ 文件剩余长度，左 ≥ offset 允许的距离（offset 不会 < 0）。
   这就是"满长拖不长、但拖得短"；`maxSampleLengthBeats()` 是唯一判据，音频缺失时返回 0 = 不设限。
-- **三个命中区**：顶部条 = 两个淡变手柄，整高的左右边 = 拉伸，其余 = 拖动。淡变为 0 时手柄
-  落在角上，所以淡变优先。
-- 淡变长度是**拍**、从各自那条边往里量，`applySampleFade()` 夹到 `lengthBeats`；拉伸后两条
-  fade 要一起夹。波形只画窗口内的 peaks：裁过前后的块**画面必须不同**。
+- **三个命中区（P49 起是两个 + 一个按钮）**：整高的左右边 = 拉伸，其余 = 拖动，块尾 chevron =
+  展开曲线箱。**淡入淡出手柄已删除**（P29 的三个 `kFade*` 常量、`applySampleFade`、
+  `hitTestSampleFadeHandle`、`drawSampleFades` 全套退场）。
+- **块自己的音量曲线**（P49）：`SampleEvent::volumeCurve`（`NoteEnvelope`，x 归一化 0..1）。
+  新建/粘贴的块是 `makeIdle()`——平线 1.0 且**禁用**，第一次编辑才点亮。
+  `publishSchedule` 把 x 乘 `blockSeconds` 换成秒，渲染循环只求值；咔哒 ramp 保留。
+  改动要走 `notifyNotesChanged()`（撤销与采样槽清扫都挂在通知上）。
+- **箱几何**：宽 = 块宽（与音符箱同一条规矩），块下方 3 px，没空间就翻到块上方；
+  菜单行 26 设计像素，开关固定 22×12（**不要**拿行高当直径）。
+- 波形只画窗口内的 peaks：裁过前后的块**画面必须不同**。
 - 复制/粘贴（Ctrl+C/X/V、Ctrl+D）：粘贴的块 **`groupId = -1`**，锚点与音符一致
   （playhead > 剪贴板起点 > 右移一个块长）。`copySelectionToClipboards()` **清空另一类**。
 - **P37 贴落点三条规则**（只对采样，音符仍是老行为）：① 连按 Ctrl+V 要接着排——

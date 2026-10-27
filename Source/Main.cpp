@@ -136,10 +136,15 @@ namespace
         // Phase 28: the browser tree, taller than the shell's split can give it.
         writePng ("-browser", component.createFileBrowserSnapshot());
 
-        // Phase 29: the demo block zoomed in — the fade ramps and their handles
-        // are the point, and at the opening scale a half-beat fade is twelve
+        // Phase 29: the demo block zoomed in — the trim bands and the block's
+        // own edges are the point, and at the opening scale they are a few
         // pixels. Restores the view itself, so the frames below are unaffected.
         writePng ("-clip", component.createClipCloseupSnapshot());
+
+        // Phase 49: the same block with its volume curve unfolded underneath.
+        // Its own frame because only one floating editor may be open at a time
+        // and the hero image already carries the note box.
+        writePng ("-clipauto", component.createClipAutomationSnapshot());
 
         // Phase 30: "highlight a synth" with no veil. The grid keeps its normal
         // brightness and the notes that reach the synth are marked in its

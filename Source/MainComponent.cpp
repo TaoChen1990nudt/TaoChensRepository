@@ -1073,8 +1073,8 @@ juce::Image MainComponent::createFileBrowserSnapshot (int width, int height)
 juce::Image MainComponent::createClipCloseupSnapshot (int width, int height)
 {
     // Same trick as the browser: grown for the shot, put back afterwards. Then
-    // zoomed onto the demo block, because the fades and their handles are the
-    // point and they are tiny at the opening scale.
+    // zoomed onto the demo block, because its trim bands and edges are the
+    // point of this frame and they are tiny at the opening scale.
     const auto previousBounds     = pianoRoll.getBounds();
     const float previousBeatWidth = pianoRoll.getBeatWidth();
     const double previousScroll   = pianoRoll.getScrollBeats();
@@ -1097,6 +1097,66 @@ juce::Image MainComponent::createClipCloseupSnapshot (int width, int height)
         pianoRoll.setScrollBeats (juce::jmax (0.0, clip->startBeat - 0.6));
 
     auto image = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
+
+    pianoRoll.setBounds (previousBounds);
+    pianoRoll.setBeatWidth (previousBeatWidth);
+    pianoRoll.setScrollBeats (previousScroll);
+    focusSynth (previousFocus);
+
+    return image;
+}
+
+juce::Image MainComponent::createClipAutomationSnapshot (int width, int height)
+{
+    // Phase 49: the block's own curve, unfolded. Same staging trick as the
+    // closeup — grown for the frame, zoomed onto the demo block, everything put
+    // back afterwards — plus two things that are the point of the picture: the
+    // box is OPEN, and its curve has a shape to look at.
+    const auto previousBounds     = pianoRoll.getBounds();
+    const float previousBeatWidth = pianoRoll.getBeatWidth();
+    const double previousScroll   = pianoRoll.getScrollBeats();
+    const int previousFocus       = focusedSlotId;
+
+    focusSynth (-1);
+
+    auto* layer = stack.getActiveLayer();
+    const auto* clip = (layer != nullptr && ! layer->getSamples().empty())
+                         ? &layer->getSamples().front() : nullptr;
+
+    pianoRoll.setSize (width, height);
+    pianoRoll.setBeatWidth (juce::jmax (pianoRoll.getBeatWidth(), 150.0f));
+
+    // The curve the frame shows, and the one it must leave behind: the demo's
+    // own curve goes back on the way out, because a screenshot's staging is not
+    // the user's project. `getSamples()` hands out const views, so the edit
+    // goes through findSample — the same door every gesture uses.
+    NoteEnvelope previousCurve;
+
+    if (clip != nullptr)
+    {
+        const int clipId = clip->id;
+        auto*     block  = layer->findSample (clipId);
+
+        if (block != nullptr)
+        {
+            previousCurve = block->volumeCurve;
+
+            block->volumeCurve.loadPoints ({ { 0.0f, 0.0f }, { 0.30f, 1.0f },
+                                             { 0.62f, 0.55f }, { 1.0f, 0.85f } });
+            block->volumeCurve.setEnabled (true);
+        }
+
+        pianoRoll.setScrollBeats (juce::jmax (0.0, clip->startBeat - 0.6));
+        pianoRoll.openSampleAutomation (stack.getActiveLayerIndex(), clipId);
+    }
+
+    auto image = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
+
+    pianoRoll.closeSampleAutomation();
+
+    if (clip != nullptr)
+        if (auto* block = layer->findSample (clip->id))
+            block->volumeCurve = previousCurve;
 
     pianoRoll.setBounds (previousBounds);
     pianoRoll.setBeatWidth (previousBeatWidth);
@@ -1175,8 +1235,6 @@ juce::Image MainComponent::createStretchSnapshot (int width, int height)
         clip.lengthBeats = sourceClip.lengthBeats * f.scale;
         clip.gainDb      = 0.0f;
         clip.stretchMode = f.mode;
-        clip.fadeInBeats  = 0.0;      // the fades are Phase 29's story, not this one
-        clip.fadeOutBeats = 0.0;
         clip.groupId      = -1;
 
         added.push_back (layer->addSample (std::move (clip)));
@@ -3423,12 +3481,15 @@ void MainComponent::buildDemoContent()
             // rack in the snapshot would show two instruments and no sampler.
             clip.outputSlotId = rack.addSampler (loaded.buffer, clip.path, clip.name);
 
-            // Phase 29: the demo block wears its fades, because a feature with
-            // no example in the demo is a feature nobody discovers. A short
-            // fade in and a longer fade out: the two different lengths are the
-            // point — the handles are independent.
-            clip.fadeInBeats  = 0.5;
-            clip.fadeOutBeats = 1.5;
+            // Phase 49: the demo block wears its volume curve, because a
+            // feature with no example in the demo is a feature nobody
+            // discovers. A ramp up and a longer ramp down — the same shape the
+            // old fades drew, so the demo sounds like it always did.
+            clip.volumeCurve.loadPoints ({ { 0.00f, 0.0f },
+                                           { 0.12f, 1.0f },
+                                           { 0.70f, 1.0f },
+                                           { 1.00f, 0.0f } });
+            clip.volumeCurve.setEnabled (true);
 
             const int clipId = layer->addSample (std::move (clip));
 

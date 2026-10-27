@@ -159,8 +159,16 @@ namespace project
         reader still accepts them, so v19 files open with their two knobs
         intact and everything else at its default.
 
+    v21 (Phase 49): a clip's fades became a volume curve.
+
+      * `<Sample>` gains an `<Envelope>` child — the same element a `<Note>`
+        has always carried, normalised over the block. The two `fadein` /
+        `fadeout` attributes are no longer written; a reader that meets them
+        (v14-v20) converts the ramps onto the curve, so an old project opens
+        sounding exactly as it saved.
+
       Nothing else changed: no attribute was renamed, no meaning was redefined. */
-inline constexpr int formatVersion = 20;
+inline constexpr int formatVersion = 21;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";

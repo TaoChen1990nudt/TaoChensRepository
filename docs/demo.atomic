@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<AtomicDAW version="19" tempo="120.0000" timelineBeats="64.00">
+<AtomicDAW version="21" tempo="120.0000" timelineBeats="64.00">
   <Rack>
     <Synth id="1" name="Synth A" colour="ff7c96f5" waveform="sine" levelDb="-4.000000" pan="-0.080000" muted="0" soloed="0" mixer="0" autotarget="filter">
       <Automation enabled="1" target="filter" expanded="0">
@@ -88,11 +88,11 @@
   </Rack>
   <Mixer masterLevelDb="0.000000" masterPan="0.000000" masterMuted="0" channels="8">
     <Channel index="0" out="127">
-      <Insert slot="0" type="2" p1="0.280000" p2="0.400000" enabled="1"/>
+      <Insert slot="0" type="2" p1="0.280000" p2="0.400000" enabled="1" params="0.280000,0.400000,0.500000,0.500000,0.500000,0.500000,0.500000,0.500000,0.500000"/>
     </Channel>
     <Channel index="1" out="127">
-      <Insert slot="0" type="1" p1="0.720000" p2="0.400000" enabled="1"/>
-      <Insert slot="1" type="3" p1="0.340000" p2="0.300000" enabled="1"/>
+      <Insert slot="0" type="1" p1="0.720000" p2="0.400000" enabled="1" params="0.720000,0.400000,0.500000,0.500000,0.500000,0.500000,0.500000,0.500000,0.500000"/>
+      <Insert slot="1" type="3" p1="0.340000" p2="0.300000" enabled="1" params="0.340000,0.300000,0.500000,0.500000,0.500000,0.500000,0.500000,0.500000,0.500000"/>
     </Channel>
     <Channel index="2" out="127"/>
     <Channel index="3" out="127"/>
@@ -119,15 +119,15 @@
     </MasterAutomation>
   </Mixer>
   <AutomationWindow>
-    <Track id="22" owner="layer" ownerId="102" target="0"/>
-    <Track id="23" owner="layer" ownerId="103" target="1"/>
-    <Track id="24" owner="layer" ownerId="104" target="0"/>
+    <Track id="22" owner="layer" ownerId="103" target="0"/>
+    <Track id="23" owner="layer" ownerId="104" target="1"/>
+    <Track id="24" owner="layer" ownerId="105" target="0"/>
     <Track id="25" owner="slot" ownerId="1" target="0"/>
     <Track id="26" owner="group" ownerId="28" target="0"/>
     <Track id="27" owner="master" ownerId="0" target="0"/>
   </AutomationWindow>
   <Layers active="2">
-    <Layer id="102" name="Layer 1" colour="ff4fd1c5" visible="0" output="1" levelDb="-4.000000" pan="-0.120000" muted="0" soloed="0">
+    <Layer id="103" name="Layer 1" colour="ff4fd1c5" visible="0" output="1" levelDb="-4.000000" pan="-0.120000" muted="0" soloed="0">
       <Automation enabled="1" target="volume" expanded="0">
         <Point beat="0.00000000" value="0.620000"/>
         <Point beat="8.00000000" value="0.950000"/>
@@ -142,7 +142,7 @@
         <Point beat="64.00000000" value="1.000000"/>
       </Automation>
       <Groups>
-        <Group id="28" name="&#32452; B" colour="ff8ce99a" levelDb="-3.500000">
+        <Group id="28" name="&#32452; B" colour="ff7bcb88" levelDb="-3.500000">
           <Automation enabled="0" target="level" expanded="0">
             <Point beat="0.00000000" value="1.000000"/>
             <Point beat="64.00000000" value="1.000000"/>
@@ -224,7 +224,7 @@
         </Note>
       </Notes>
     </Layer>
-    <Layer id="103" name="Layer 2" colour="fff6ad55" visible="0" output="2" levelDb="-6.000000" pan="0.000000" muted="0" soloed="0">
+    <Layer id="104" name="Layer 2" colour="ffd99a4d" visible="0" output="2" levelDb="-6.000000" pan="0.000000" muted="0" soloed="0">
       <Automation enabled="0" target="volume" expanded="0">
         <Point beat="0.00000000" value="1.000000"/>
         <Point beat="64.00000000" value="1.000000"/>
@@ -455,7 +455,7 @@
         </Note>
       </Notes>
     </Layer>
-    <Layer id="104" name="Layer 3" colour="ff9f7aea" visible="0" output="1" levelDb="-2.500000" pan="0.120000" muted="0" soloed="0">
+    <Layer id="105" name="Layer 3" colour="ff8a6ccb" visible="0" output="1" levelDb="-2.500000" pan="0.120000" muted="0" soloed="0">
       <Automation enabled="0" target="volume" expanded="0">
         <Point beat="0.00000000" value="1.000000"/>
         <Point beat="64.00000000" value="1.000000"/>
@@ -465,7 +465,7 @@
         <Point beat="64.00000000" value="1.000000"/>
       </Automation>
       <Groups>
-        <Group id="27" name="&#32452; A" colour="ffffd166" output="2">
+        <Group id="27" name="&#32452; A" colour="ffdfb95d" output="2">
           <Automation enabled="1" target="level" expanded="0">
             <Point beat="8.00000000" value="1.000000"/>
             <Point beat="15.00000000" value="0.350000"/>
@@ -475,7 +475,14 @@
       </Groups>
       <Samples>
         <Sample id="1" name="demo-clip.wav" path="C:\Users\&#38472;&#20426;&#40857;\AppData\Roaming\AtomicDAW\Samples\demo-clip.wav" start="12.00000000" length="5.00000000" pitch="81" span="4" gainDb="-1.500000" slot="3"
-                group="27" fadein="0.50000000" fadeout="1.50000000"/>
+                group="27">
+          <Envelope enabled="1">
+            <Point time="0.000000" value="0.000000"/>
+            <Point time="0.120000" value="1.000000"/>
+            <Point time="0.700000" value="1.000000"/>
+            <Point time="1.000000" value="0.000000"/>
+          </Envelope>
+        </Sample>
       </Samples>
       <Notes>
         <Note id="1" pitch="72" start="0.00000000" length="0.50000000" velocity="0.900000">

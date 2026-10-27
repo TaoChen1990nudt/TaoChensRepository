@@ -267,6 +267,57 @@ namespace
         envelope.loadPoints (std::move (points));
         envelope.setEnabled (xml.getBoolAttribute ("enabled", true));
     }
+
+    /** Phase 49: the v14-v20 fade pair, rebuilt as the curve that replaced it.
+
+        The old audio multiplied two linear ramps measured in beats inwards
+        from each end; on a normalised curve that is exactly the shape below.
+        Migration, not preservation: the model no longer has the fields, and
+        the user's next save writes the curve. No fades at all leaves the idle
+        curve alone — disabled, flat, unity — which is what "no fade" meant. */
+    void migrateFadesToCurve (const juce::XmlElement& sampleXml, NoteEnvelope& curve)
+    {
+        const double fadeIn  = juce::jmax (0.0, sampleXml.getDoubleAttribute ("fadein", 0.0));
+        const double fadeOut = juce::jmax (0.0, sampleXml.getDoubleAttribute ("fadeout", 0.0));
+
+        if (fadeIn <= 0.0 && fadeOut <= 0.0)
+            return;
+
+        std::vector<EnvelopePoint> points;
+
+        if (fadeIn > 0.0)
+        {
+            points.push_back ({ 0.0f, 0.0f });
+            points.push_back ({ 1.0f, 1.0f });   // time clamped below to in/len
+        }
+
+        if (fadeOut > 0.0)
+        {
+            points.push_back ({ 0.0f, 1.0f });   // time clamped below to 1-out/len
+            points.push_back ({ 1.0f, 0.0f });
+        }
+
+        // The ramp lengths are normalised against the block as saved; putting
+        // them through loadPoints means the pinning and sorting rules are the
+        // editor's own, so a migrated curve is indistinguishable from a drawn
+        // one.
+        const double lengthBeats = juce::jmax (1.0e-6, sampleXml.getDoubleAttribute ("length", 4.0));
+
+        if (fadeIn > 0.0)
+        {
+            points[(size_t) 1].time = (float) juce::jmin (1.0, fadeIn / lengthBeats);
+
+            if (fadeOut > 0.0)
+                points[(size_t) 2].time = (float) juce::jmax (0.0, 1.0 - fadeOut / lengthBeats);
+        }
+        else
+        {
+            points[(size_t) 0].time = (float) juce::jmax (0.0, 1.0 - fadeOut / lengthBeats);
+        }
+
+        curve.loadPoints (std::move (points));
+        curve.setEnabled (true);
+    }
 }
 
 //==============================================================================
@@ -555,17 +606,16 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                     if (sample.groupId >= 0)
                         sampleXml->setAttribute ("group", sample.groupId);
 
-                    // Phase 29: the window and its fades. Written only when set,
-                    // so a v14 project comes back with offset 0 and no fades —
-                    // which is exactly what it meant.
+                    // Phase 29: the window. Written only when set, so a v14
+                    // project comes back with offset 0 — which is exactly
+                    // what it meant.
                     if (sample.sourceOffsetSeconds > 0.0)
                         sampleXml->setAttribute ("offset", number (sample.sourceOffsetSeconds, 8));
 
-                    if (sample.fadeInBeats > 0.0)
-                        sampleXml->setAttribute ("fadein", number (sample.fadeInBeats, 8));
-
-                    if (sample.fadeOutBeats > 0.0)
-                        sampleXml->setAttribute ("fadeout", number (sample.fadeOutBeats, 8));
+                    // Phase 49 (v21): the volume curve, same element a note
+                    // carries. Always written when the block has one, so
+                    // toggling the curve off keeps its shape on disk.
+                    writeEnvelope (*sampleXml, sample.volumeCurve);
 
                     // Phase 31: only written when it is something other than the
                     // window, so most clips stay unchanged on disk and a v15
@@ -886,8 +936,15 @@ bool fromXmlText (const juce::String& xmlText,
                     sample.outputSlotId = sm->getIntAttribute ("slot", -1);
                     sample.groupId      = sm->getIntAttribute ("group", -1);
                     sample.sourceOffsetSeconds = juce::jmax (0.0, sm->getDoubleAttribute ("offset", 0.0));
-                    sample.fadeInBeats  = juce::jmax (0.0, sm->getDoubleAttribute ("fadein", 0.0));
-                    sample.fadeOutBeats = juce::jmax (0.0, sm->getDoubleAttribute ("fadeout", 0.0));
+
+                    // Phase 49 (v21): the volume curve. v21 files carry it as
+                    // an <Envelope> child; older files carried the two fade
+                    // attributes, which migrate onto the same curve here so
+                    // the ramps they saved still sound when played.
+                    if (auto* envXml = sm->getChildByName ("Envelope"))
+                        readEnvelope (*envXml, sample.volumeCurve);
+                    else
+                        migrateFadesToCurve (*sm, sample.volumeCurve);
 
                     // Phase 31: clamped, not trusted. A stray 9 in the file must
                     // read back as "the window", not as an enum value nothing

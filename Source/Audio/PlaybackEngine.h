@@ -355,16 +355,22 @@ struct ScheduledClip
         plays this", and it was resolved without looking at the group. */
     int    groupId      = -1;
 
-    //-- Phase 29: where in the file, and how it fades ------------------------
+    //-- Phase 29: where in the file ------------------------------------------
     /** Seconds into the source at `startSeconds`. The block is a window: after
         a head trim the audio must pick up where it left off, not restart. */
     double sourceOffsetSeconds = 0.0;
 
-    /** Fade lengths in seconds, converted from the clip's beats at publish time.
-        The audio thread gets seconds because that is what it measures; doing the
-        conversion here keeps tempo out of the render loop. */
-    double fadeInSeconds  = 0.0;
-    double fadeOutSeconds = 0.0;
+    //-- Phase 49: the block's own volume curve -------------------------------
+    /** The clip's normalised curve, converted to SECONDS at publish time.
+
+        The render loop measures `elapsed` in seconds, so the curve arrives in
+        seconds too — x counts from the block's start, y is the 0..1 gain
+        multiplier. Same trade as the fades this replaces (and the pitch
+        integral): pay the conversion once on the message thread, keep the
+        audio thread to multiply-add only. Disabled means unity, which the
+        flag says in one branch instead of a curve lookup. */
+    bool                        gainAutomated = false;
+    std::vector<AutomationPoint> gainCurve;    // x = seconds since clip start
 
     //-- Phase 31: what a length change does to the sound --------------------
     /** Two ratios, frozen. The audio thread must not compute a log, a division

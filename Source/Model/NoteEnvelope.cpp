@@ -49,6 +49,14 @@ NoteEnvelope NoteEnvelope::makeFlat()
     return env;
 }
 
+NoteEnvelope NoteEnvelope::makeIdle()
+{
+    NoteEnvelope env (EmptyTag{});
+    env.points  = { { 0.0f, 1.0f }, { 1.0f, 1.0f } };
+    env.enabled = false;
+    return env;
+}
+
 void NoteEnvelope::resetToDefault()
 {
     *this = makeADSR();

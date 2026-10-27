@@ -726,13 +726,27 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             scheduled.gain         = gain::fromDb (clip.gainDb);
             scheduled.audio        = res.audio;
 
-            // Phase 29: the window and the fades, in seconds. A clip whose
-            // offset points past the end of its file is left alone — the render
-            // loop stops at the last frame anyway, and clamping here would
-            // silently move the audio the user is about to trim.
+            // Phase 29: the window, in seconds. A clip whose offset points
+            // past the end of its file is left alone — the render loop stops
+            // at the last frame anyway, and clamping here would silently move
+            // the audio the user is about to trim.
             scheduled.sourceOffsetSeconds = juce::jmax (0.0, clip.sourceOffsetSeconds);
-            scheduled.fadeInSeconds       = juce::jmax (0.0, clip.fadeInBeats)  * secondsPerBeat;
-            scheduled.fadeOutSeconds      = juce::jmax (0.0, clip.fadeOutBeats) * secondsPerBeat;
+
+            // Phase 49: the block's volume curve, normalised over the block
+            // like a note's envelope. The x-axis becomes seconds here, once —
+            // the render loop measures elapsed time in seconds and must not
+            // know what a beat is. A curve with fewer than two points cannot
+            // interpolate and is left as unity rather than half-published.
+            if (clip.volumeCurve.isEnabled())
+            {
+                const double blockSeconds = juce::jmax (1.0e-6,
+                                                        clip.lengthBeats * secondsPerBeat);
+
+                for (const auto& p : clip.volumeCurve.getPoints())
+                    scheduled.gainCurve.push_back ({ (double) p.time * blockSeconds, p.value });
+
+                scheduled.gainAutomated = scheduled.gainCurve.size() >= 2;
+            }
 
             // Phase 31: the stretch ratio is "what the file would take" over
             // "what the block gives it". Computed from the SAME resolver the
@@ -1336,19 +1350,15 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
 
                 const float t = (float) i * invNumSamples;
 
-                // Phase 29: the block's own fades, multiplied on top of the
-                // de-click ramp below rather than replacing it. Two ramps that
-                // both start at zero are the smaller of the two, and picking one
-                // would mean a deliberately short fade quietly loses its
-                // anti-click edge.
+                // Phase 49: the block's own volume curve, x in seconds since
+                // the block's start. Multiplied on top of the de-click ramp
+                // below rather than replacing it: a curve that starts at zero
+                // and the anti-click ramp both end at silence, and keeping the
+                // ramp means an "all the way down" curve is still click-free.
                 float fadeGain = 1.0f;
 
-                if (clip.fadeInSeconds > 0.0)
-                    fadeGain = (float) juce::jmin (1.0, elapsed / clip.fadeInSeconds);
-
-                if (clip.fadeOutSeconds > 0.0)
-                    fadeGain = juce::jmin (fadeGain,
-                                           (float) juce::jmin (1.0, remaining / clip.fadeOutSeconds));
+                if (clip.gainAutomated)
+                    fadeGain = automationValueAt (clip.gainCurve, juce::jmax (0.0, elapsed));
 
                 // Phase 36: the three layers through the one law. A block has no
                 // note envelope, so its note term is the identity — which is not

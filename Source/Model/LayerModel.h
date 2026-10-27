@@ -179,7 +179,7 @@ struct SampleEvent
         statement about notes, and a clip keeps its own sampler regardless. */
     int          groupId      = -1;
 
-    //-- Phase 29: the window onto the file, and its fades --------------------
+    //-- Phase 29: the window onto the file -----------------------------------
     /** Seconds into the source where this block starts.
 
         The block is a WINDOW onto the file, not a copy of it: trimming the head
@@ -189,14 +189,18 @@ struct SampleEvent
         is the one thing a trim must not sound like. */
     double sourceOffsetSeconds = 0.0;
 
-    /** Fade lengths, measured in BEATS inwards from each end (0 = no fade).
+    //-- Phase 49: the block's own volume curve -------------------------------
+    /** Normalised 0..1 across the block, by value, exactly like a note's
+        envelope: move the block and the curve moves with it, copy the block and
+        the curve is duplicated, and no map<clipId, curve> can ever detach.
 
-        Beats, not seconds or a normalised 0..1: a fade is a shape drawn inside
-        the rectangle the user sees, so stretching the block has to stretch the
-        fade with it. A normalised fade would survive a tempo change but would
-        move the diagonal out from under the handle that set it. */
-    double fadeInBeats  = 0.0;
-    double fadeOutBeats = 0.0;
+        The value multiplies the clip's gain, so 1.0 is "the file, untouched" —
+        which is also what the disabled idle curve evaluates to. The old
+        fade-in/fade-out ramps (Phase 29) were a two-point special case of this
+        and are gone; a reader meets them in ProjectIO and migrates them onto
+        this curve, so an old project sounds the same without keeping two ways
+        to shape a block alive in the model. */
+    NoteEnvelope volumeCurve = NoteEnvelope::makeIdle();
 
     //-- Phase 31: what a length change does to the audio --------------------
     /** How this block answers "make me longer". `none` keeps Phase 30's window

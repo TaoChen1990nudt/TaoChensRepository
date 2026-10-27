@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-27 · 对应 **Phase 48**（视觉规范落地：色值收敛 + 身份色降饱和 + 色值门禁）
+> 最后更新：2026-10-27 · 对应 **Phase 49**（采样块向下展开音量曲线箱；淡入淡出退场）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**。
 > 规则查 `MEMORY.md`，制度细节查 `REFERENCE.md`，踩过的坑查 `PITFALLS.md`。
 
@@ -18,17 +18,18 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 48**（DESIGN.md 二三步：31+ 色值归位 / 静音独奏统一 / 降饱和收圆角 / check_colours.py 门禁）；P44–47 见日志 |
-| 自检 | **434 ALL PASSED / 0 FAIL，失败时退出码 1**（P47 咬测：EQ 旁通破坏 + 双窗转发器摘除 → 4 FAIL + EXIT=1） |
+| 已完成阶段 | **Phase 49**（采样块的音量曲线：箱宽=块宽、曲线点拖/加/删、淡入淡出删除、v21 迁移）；P44–48 见日志 |
+| 自检 | **442 ALL PASSED / 0 FAIL，失败时退出码 1**（P49 咬测：摘掉「拍→秒」换算 → 曲线音频断言 FAIL + EXIT=1） |
 | 编译 | 零 error 零 warning |
-| `formatVersion` | **20**（insert 写 `params` 逗号串全参数，读回落 p1/p2） |
+| `formatVersion` | **21**（采样音量曲线写 `<Envelope>`；老文件的 `fadein`/`fadeout` 读成等价斜坡） |
 | 可执行 | `build/AtomicDAW_artefacts/Release/AtomicDAW.exe` |
 | 技术栈 | JUCE 8.0.4（FetchContent）+ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + C++17 |
 | 源码规模 | `Source/` 下 67 个 .cpp/.h，分 Model / Audio / UI / Util / Media |
 
 ## 下一步
 
-**未定。** 功能排期等你给。工程侧（P45 收尾后）没有未还的已知债：
+**未定。** 功能排期等你给。工程侧唯一挂着的老账是 DESIGN.md 第 5 节（排版层：等宽数字、字距层级），
+P48 只落了色值与圆角，没动字号与字距。工程侧（P45 收尾后）没有未还的已知债：
 - ~~const 设计债~~ 已还清（P45）：`Layer::findNote` 补 const 版；hitTestActiveLayer /
   hitTestSample / getExpandedNote / getExpandedGroup / groupLaneFor 全部双版本；
   28 个 const 查询函数成为真 const；const_cast 在 PianoRollComponent.cpp 归零。
@@ -69,6 +70,7 @@
 | P46 | 混音链三件套（EQ/COMP/REVERB）+ AudioBuffer 不清零 + 汇总行挪到函数末尾 | `memory/2026-10-27.md` |
 | P47 | 效果器多参数化：EQ 九参三段 / COMP 六参 / REVERB 五参，编辑窗口标题+按键转发，v20 | `memory/2026-10-27.md` |
 | P48 | 视觉规范落地：色值预算 + 静音/独奏统一 + 降饱和 + 圆角 + 色值门禁 | `memory/2026-10-27.md` |
+| P49 | 采样块的音量曲线：向下展开箱 / 箱宽=块宽 / 曲线点手势 / 淡入淡出删除 / v21 迁移 | `memory/2026-10-27.md` |
 | P26–P43 | 各阶段踩坑与不变量 | `PITFALLS.md` |
 
 **最近的三个阶段**（新会话最需要的前情）：
@@ -107,7 +109,7 @@ build/AtomicDAW_artefacts/Release/AtomicDAW.exe --snapshot docs/phaseNN.png > do
 tail -3 docs/phaseNN.log   # 要看到 "ALL CHECKS PASSED"
 ```
 
-断言总数只增不减。**新增功能要加断言并报出新的总数**（当前基准 421），退回去说明有东西坏了。
+断言总数只增不减。**新增功能要加断言并报出新的总数**（当前基准 442），退回去说明有东西坏了。
 
 其他 dev 参数：`--cursor-preview <png>`（光标 8x 放大核对）、`--pluginscan`、`--audiotest`、`--transporttest`、`--load` / `--save` / `--export`。
 

@@ -204,10 +204,18 @@ public:
         is the state a marquee can now produce. Snapshot only. */
     void showDemoMixedSelection();
 
-    /** Phase 29: the roll zoomed onto the demo clip. A 0.5-beat fade is twelve
-        pixels wide at the default scale, so the fade handles need their own
-        frame to be visible at all. Restores the view before returning. */
+    /** Phase 29: the roll zoomed onto the demo clip. The trim bands and the
+        block's own edges are a few pixels wide at the default scale, so the
+        block needs its own frame to be visible at all. Restores the view. */
     juce::Image createClipCloseupSnapshot (int width = ui::px (900), int height = ui::px (420));
+
+    /** Phase 49: the same zoom, with the clip's volume curve unfolded under it.
+
+        Its own frame because only one floating editor may be open at a time and
+        the hero image already carries the note box. The curve is given a shape
+        for the shot and put back afterwards: a flat line would leave the reader
+        wondering whether the box works, and a demo curve is not the user's. */
+    juce::Image createClipAutomationSnapshot (int width = ui::px (900), int height = ui::px (520));
 
     /** Phase 30: the roll with one synth highlighted, at normal brightness.
 
