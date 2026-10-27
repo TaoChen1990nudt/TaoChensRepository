@@ -594,6 +594,34 @@ public:
         slot is not a loaded sampler. */
     int addSampleFromSlot (double beat, int pitch, int slotId);
 
+    /** Phase 53: a sampler card dropped ON a block instead of on empty grid.
+        The block takes that sampler's file — the same rule 挂载 runs
+        (mountSelectedSamplesToSlot), so the two paths cannot disagree about
+        what "this block now holds that sample" means: name, path, length and
+        the start offset follow the new file; `startBeat` does not, because
+        replacing a sample is not a request to move the music.
+
+        When the block under the pointer is already part of the clip
+        selection, the whole selection follows — selecting several blocks is a
+        statement about all of them.
+
+        Returns true when anything changed; false when the slot is not a loaded
+        sampler, or when the block already holds exactly that file (that case is
+        a deliberate no-op — see mountSelectedSamplesToSlot: re-mounting must not
+        silently undo a trim). */
+    bool replaceSamplesWithSlot (int sampleId, int slotId);
+
+    /** Phase 53: a synth card dropped ON a note. The note plays on that synth,
+        as the note-level override that routing::resolve() prefers over both
+        its group and its layer. A sampler is refused: it has no oscillator, so
+        "play this pitch on it" would be a silent mute.
+
+        Same selection rule as the block version: the note under the pointer is
+        the target, unless it is already selected, in which case the selection
+        is. Returns false when the note is gone or the slot is not an
+        instrument. */
+    bool routeNoteToSlot (int noteId, int slotId);
+
     /** Local-space bounds of a clip block. Empty when it does not exist. */
     juce::Rectangle<float> getSampleScreenBounds (int layerIndex, int sampleId) const;
 
@@ -765,6 +793,22 @@ public:
 
     /** Phase 50: test hook — the same reverse the menu item runs. */
     int simulateSampleReverse() { return toggleSelectedSampleReverse(); }
+
+    /** Phase 53: test hook — the DROP itself, at a local point.
+
+        Builds the same SourceDetails the window delivers and calls the same
+        itemDropped, so "a synth card lands on a note / a sampler card lands on
+        a block" is asserted on the real dispatch switch and not on a copy of
+        it. A headless run cannot press a mouse, but it can hand over a point. */
+    void simulateCardDrop (const juce::String& description, juce::Point<float> at);
+
+    /** Phase 53: test hook — puts the drop preview on screen without a drag in
+        flight (an empty description clears it).
+
+        The preview is the only place the two gestures explain themselves before
+        the button comes up, and a headless build can never carry a real drag —
+        so the frame that documents it has to be able to set it. */
+    void simulateDropPreview (const juce::String& description, juce::Point<float> at);
 
     /** Phase 51: the knife's one cut, in the open. `ids` are cut at `at`
         (no snapping — the caller decides), strictly-inside only, and the two
@@ -1038,6 +1082,12 @@ private:
     void drawSampleBlock (juce::Graphics&, int layerIndex, const SampleEvent&,
                           juce::Colour, float alpha, bool selected);
     void drawDropPreview (juce::Graphics&);
+
+    /** Phase 53: reads the payload and the pointer ONCE per drag event, so the
+        preview and the drop cannot disagree about what is being carried or
+        what is under the cursor. */
+    void updateCardDrop (juce::Point<float> point, const juce::String& description);
+    void clearCardDrop();
 
     //-- Phase 49: the clip's own automation box ------------------------------
     /** The chevron on the block's body that opens the box. Same glyph, same
@@ -1412,6 +1462,24 @@ private:
     SampleEvent dragSampleOriginal;
     juce::Point<float> sampleDropPoint;
     bool       sampleDropActive = false;
+
+    /** Phase 53: WHAT the drag in flight carries, and what it is over.
+
+        Kept as state rather than re-parsed in the paint routine: a preview that
+        decodes the payload a second time is a preview that can disagree with
+        the drop about the only thing the user is looking at — where it lands. */
+    enum class CardDropKind
+    {
+        none,           // no drag, or a file from the browser
+        file,
+        sampleCard,     // a sampler card: hands over a file
+        instrumentCard  // a synth card: hands over a mount
+    };
+
+    CardDropKind dropKind         = CardDropKind::none;
+    int          dropSlotId       = -1;   // the card's slot, for the label
+    int          dropTargetNote   = -1;   // instrument card over this note
+    int          dropTargetSample = -1;   // sampler card over this block
 
     //-- Phase 49: the clip's own automation box ------------------------------
     /** Mirrors the note box (Phase 8) and the group box (Phase 21): one

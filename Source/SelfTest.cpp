@@ -9390,6 +9390,281 @@ juce::String MainComponent::runSelfTest()
         pianoRoll.setSnapEnabled (oldSnap);
     } ();
 
+    //-- Phase 53: a synth card on a note / a sampler card on a block -----------
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("Phase 53 needs a layer", false, "no active layer");
+            return;
+        }
+
+        const bool oldSnap = pianoRoll.isSnapEnabled();
+        pianoRoll.setSnapEnabled (false);
+
+        //-- 1. the two payloads are two different questions -------------------
+        check ("A synth payload round-trips and never reads as a sampler",
+               instrumentDragSlotId (instrumentDragDescription (9)) == 9
+                 && instrumentDragSlotId (samplerDragDescription (9)) == -1
+                 && samplerDragSlotId (instrumentDragDescription (9)) == -1
+                 && instrumentDragSlotId ("atomic-instrument:") == -1,
+               "inst " + juce::String (instrumentDragSlotId (instrumentDragDescription (9)))
+                 + " / cross " + juce::String (instrumentDragSlotId (samplerDragDescription (9))));
+
+        //-- 2. fixtures: two samplers (1 s and 2 s), two synths, two notes ----
+        const auto loadA = loadSampleFile (phase27A);
+        const auto loadB = loadSampleFile (phase27B);
+
+        if (! loadA.ok() || ! loadB.ok())
+        {
+            check ("Phase 53 needs the two sample files", false, "decode failed");
+            pianoRoll.setSnapEnabled (oldSnap);
+            return;
+        }
+
+        const int samplerA = rack.addSampler (loadA.buffer, phase27A.getFullPathName(), "P53 A");
+        const int samplerB = rack.addSampler (loadB.buffer, phase27B.getFullPathName(), "P53 B");
+        const int synthOne = rack.addSynth();
+        const int synthTwo = rack.addSynth();
+
+        const auto makeNote = [layer] (int pitch, double beat)
+        {
+            NoteEvent note;
+            note.pitch       = pitch;
+            note.startBeat   = beat;
+            note.lengthBeats = 1.0;
+            return layer->addNote (note);
+        };
+
+        const int noteA = makeNote (60, 400.0);
+        const int noteB = makeNote (64, 401.0);
+
+        //-- 3. a sampler card carries a file, not a mount ---------------------
+        const bool refusedMount = pianoRoll.routeNoteToSlot (noteA, samplerA);
+
+        check ("A sampler card is refused on a note, and the note is untouched",
+               ! refusedMount && layer->findNote (noteA) != nullptr
+                 && layer->findNote (noteA)->outputSlotOverride < 0,
+               "override " + juce::String (layer->findNote (noteA) != nullptr
+                                             ? layer->findNote (noteA)->outputSlotOverride
+                                             : -999));
+
+        //-- 4. a synth card on a note is that note's OWN mount ----------------
+        const bool mounted = pianoRoll.routeNoteToSlot (noteA, synthOne);
+
+        const auto* dropNote = layer->findNote (noteA);
+        const auto  resolved = dropNote != nullptr ? routing::resolve (*layer, *dropNote, rack)
+                                                   : routing::Resolution();
+
+        check ("A synth dropped on a note becomes that note's own mount",
+               mounted && dropNote != nullptr && dropNote->outputSlotOverride == synthOne
+                 && resolved.slotId == synthOne && resolved.overridden,
+               "slot " + juce::String (resolved.slotId) + " / override "
+                 + juce::String (dropNote != nullptr ? dropNote->outputSlotOverride : -999));
+
+        //-- 5. the selection rule: a selected note takes the selection with it,
+        //      an unselected one becomes the selection -------------------------
+        pianoRoll.setSelection ({ noteA, noteB });
+        pianoRoll.routeNoteToSlot (noteB, synthTwo);
+
+        check ("Dropping on a selected note moves the whole selection",
+               layer->findNote (noteA) != nullptr && layer->findNote (noteB) != nullptr
+                 && layer->findNote (noteA)->outputSlotOverride == synthTwo
+                 && layer->findNote (noteB)->outputSlotOverride == synthTwo,
+               "A " + juce::String (layer->findNote (noteA)->outputSlotOverride)
+                 + " / B " + juce::String (layer->findNote (noteB)->outputSlotOverride));
+
+        pianoRoll.setSelection ({ noteB });
+        pianoRoll.routeNoteToSlot (noteA, synthOne);
+
+        check ("...and an unselected note becomes the whole selection",
+               pianoRoll.getSelection().size() == 1
+                 && pianoRoll.getSelection().front() == noteA
+                 && layer->findNote (noteA)->outputSlotOverride == synthOne
+                 && layer->findNote (noteB)->outputSlotOverride == synthTwo,
+               "selection " + juce::String ((int) pianoRoll.getSelection().size())
+                 + " / B " + juce::String (layer->findNote (noteB)->outputSlotOverride));
+
+        //-- 6. a sampler card on a block replaces that block's sample ---------
+        const int clipId = pianoRoll.addSampleAt (410.0, 50, phase27A);
+
+        if (auto* clip = layer->findSample (clipId))
+        {
+            clip->outputSlotId       = samplerA;
+            clip->lengthBeats        = 0.75;   // a trim the drop must NOT keep
+            clip->sourceOffsetSeconds = 0.25;
+        }
+
+        const int  slotsBefore = rack.getNumSlots();
+        const bool replaced    = pianoRoll.replaceSamplesWithSlot (clipId, samplerB);
+
+        const auto*  swapped   = layer->findSample (clipId);
+        const double wantBeats = SampleEvent::beatsForSeconds (loadB.buffer->lengthSeconds(),
+                                                               audio.getBpm());
+
+        check ("A sampler dropped on a block hands over its file",
+               replaced && swapped != nullptr
+                 && swapped->outputSlotId == samplerB
+                 && swapped->audio == rack.findSlot (samplerB)->sampleBuffer
+                 && swapped->path == phase27B.getFullPathName()
+                 && std::abs (swapped->startBeat - 410.0) < 1.0e-9
+                 && swapped->sourceOffsetSeconds == 0.0
+                 && std::abs (swapped->lengthBeats - wantBeats) < 1.0e-6,
+               swapped == nullptr ? juce::String ("block gone")
+                                  : "slot " + juce::String (swapped->outputSlotId)
+                                      + " / len " + juce::String (swapped->lengthBeats, 3)
+                                      + " vs " + juce::String (wantBeats, 3));
+
+        check ("...and it selects that block without growing a twin sampler",
+               pianoRoll.getSampleSelection().size() == 1
+                 && pianoRoll.getSampleSelection().front() == clipId
+                 && rack.getNumSlots() == slotsBefore,
+               "slots " + juce::String (rack.getNumSlots()) + " vs "
+                 + juce::String (slotsBefore));
+
+        //-- 6b. the target is the block under the pointer, not the old selection
+        // A block arrives selected when it is created (P33), so the check above
+        // cannot tell "the drop selected its target" from "the target happened
+        // to be selected already". Two blocks and a stale selection can.
+        const int otherClip = pianoRoll.addSampleAt (420.0, 50, phase27B);
+
+        pianoRoll.setSampleSelection ({ clipId });
+
+        const bool replacedOther = pianoRoll.replaceSamplesWithSlot (otherClip, samplerA);
+
+        check ("...and the block under the pointer is the one that changes",
+               replacedOther && layer->findSample (otherClip) != nullptr
+                 && layer->findSample (otherClip)->outputSlotId == samplerA
+                 && pianoRoll.getSampleSelection().size() == 1
+                 && pianoRoll.getSampleSelection().front() == otherClip,
+               "slot " + juce::String (layer->findSample (otherClip) != nullptr
+                                         ? layer->findSample (otherClip)->outputSlotId : -999)
+                 + " / sel " + juce::String ((int) pianoRoll.getSampleSelection().size()));
+
+        //-- 7. an instrument has no file to hand over -------------------------
+        const bool refusedSwap = pianoRoll.replaceSamplesWithSlot (clipId, synthOne);
+
+        check ("An instrument cannot hand a block a sample",
+               ! refusedSwap && layer->findSample (clipId) != nullptr
+                 && layer->findSample (clipId)->outputSlotId == samplerB,
+               "slot " + juce::String (layer->findSample (clipId) != nullptr
+                                         ? layer->findSample (clipId)->outputSlotId : -999));
+
+        //-- 8. the no-op rule the menu already has, inherited by the gesture --
+        if (auto* clip = layer->findSample (clipId))
+            clip->lengthBeats = 1.5;
+
+        const bool again = pianoRoll.replaceSamplesWithSlot (clipId, samplerB);
+
+        check ("Dropping the same card again leaves a trimmed block alone",
+               ! again && layer->findSample (clipId) != nullptr
+                 && std::abs (layer->findSample (clipId)->lengthBeats - 1.5) < 1.0e-9,
+               "len " + juce::String (layer->findSample (clipId) != nullptr
+                                        ? layer->findSample (clipId)->lengthBeats : -1.0, 3));
+
+        //-- 9. the gesture itself: a real drop event at a real point ----------
+        // The checks above drive the two rules; these two drive the DISPATCH —
+        // which payload means what — through itemDropped, at a point on a note
+        // and a block that are genuinely on screen. A probe sheet is used so
+        // the hit test cannot land on the demo's own content: hitTestSample
+        // answers with the first block whose rectangle contains the point, and
+        // "first" over a demo arrangement is not something this test controls.
+        const double scrollBefore = pianoRoll.getScrollBeats();
+        const int    activeBefore = stack.getActiveLayerIndex();
+
+        const int probeIndex = stack.addLayer (utf8 ("P53 探针"), juce::Colour (0xff556677));
+
+        pianoRoll.setScrollBeats (0.0);
+
+        auto* probe = stack.getLayer (probeIndex);
+        const auto grid = pianoRoll.getGridBounds();
+
+        // The pitch is SEARCHED, not assumed: the roll is 128 lanes tall and
+        // only some of them are on screen — a fixture the pointer cannot reach
+        // would make this pass for the wrong reason.
+        int probeNote = -1;
+
+        for (const int pitch : { 60, 48, 72, 36, 84, 24, 96 })
+        {
+            NoteEvent candidate;
+            candidate.pitch       = pitch;
+            candidate.startBeat   = 2.0;
+            candidate.lengthBeats = 1.0;
+
+            const int id = probe->addNote (candidate);
+            const auto bounds = pianoRoll.getNoteScreenBounds (probeIndex, id);
+
+            if (! bounds.isEmpty() && bounds.getWidth() > 4.0f
+                 && grid.contains (bounds.getCentre()))
+            {
+                probeNote = id;
+                break;
+            }
+
+            probe->removeNote (id);
+        }
+
+        if (probeNote < 0)
+        {
+            check ("Phase 53 needs one visible note to drop on", false, "no pitch was on screen");
+        }
+        else
+        {
+            const auto noteRect = pianoRoll.getNoteScreenBounds (probeIndex, probeNote);
+
+            pianoRoll.simulateCardDrop (instrumentDragDescription (synthOne),
+                                        noteRect.getCentre());
+
+            check ("A drop event on a note routes that note to the card's synth",
+                   probe->findNote (probeNote) != nullptr
+                     && probe->findNote (probeNote)->outputSlotOverride == synthOne,
+                   "override " + juce::String (probe->findNote (probeNote) != nullptr
+                                                 ? probe->findNote (probeNote)->outputSlotOverride
+                                                 : -999));
+
+            // The same event shape, the other meaning: a sampler card lands on
+            // a block and swaps its file in.
+            const int probePitch = probe->findNote (probeNote)->pitch;
+            const int probeBlock = pianoRoll.addSampleAt (2.0, probePitch, phase27A);
+
+            const auto blockRect = pianoRoll.getSampleScreenBounds (probeIndex, probeBlock);
+            const juce::Point<float> blockPoint (blockRect.getX() + ui::pf (3.0),
+                                                 blockRect.getBottom() - ui::pf (2.0));
+
+            pianoRoll.simulateCardDrop (samplerDragDescription (samplerB), blockPoint);
+
+            check ("A drop event on a block swaps in the card's file",
+                   probe->findSample (probeBlock) != nullptr
+                     && probe->findSample (probeBlock)->outputSlotId == samplerB,
+                   "slot " + juce::String (probe->findSample (probeBlock) != nullptr
+                                             ? probe->findSample (probeBlock)->outputSlotId
+                                             : -999));
+        }
+
+        stack.removeLayer (probeIndex);
+        stack.setActiveLayerIndex (juce::jlimit (0, stack.getNumLayers() - 1, activeBefore));
+        pianoRoll.setScrollBeats (scrollBefore);
+
+        //-- cleanup -----------------------------------------------------------
+        pianoRoll.setSelection ({});
+        layer->removeSample (clipId);
+        layer->removeSample (otherClip);
+        layer->removeNote (noteA);
+        layer->removeNote (noteB);
+
+        rack.removeSlot (samplerA);
+        rack.removeSlot (samplerB);
+        rack.removeSlot (synthOne);
+        rack.removeSlot (synthTwo);
+
+        stack.notifyNotesChanged();
+        pruneOrphanSamplerSlots();
+
+        pianoRoll.setSnapEnabled (oldSnap);
+    } ();
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

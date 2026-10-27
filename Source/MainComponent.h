@@ -248,6 +248,18 @@ public:
         session it photographed. */
     juce::Image createStretchSnapshot (int width = ui::px (900), int height = ui::px (420));
 
+    /** Phase 53: the two card drops, mid-gesture.
+
+        A drag preview exists for the half second before the button comes up,
+        and it is the only place the interface says what a drop will do — so it
+        cannot be photographed by a live run at all and has to be staged here.
+        `instrumentCard` picks which gesture: a synth hovering a note (挂载) or a
+        sampler hovering a block (替换采样). The preview is cleared before
+        returning; the session is not changed by either frame. */
+    juce::Image createCardDropSnapshot (bool instrumentCard,
+                                        int width = ui::px (900),
+                                        int height = ui::px (420));
+
     /** Phase 35: the demo group, muted, with its mixed members selected — the
         pill reads 静音 and the block inside the bracket is lit at the same time.
         The mute is put back before returning: it exists for the frame. */

@@ -677,3 +677,27 @@ Windows 8+ 的 Media Foundation sink writer（`MFCreateSinkWriterFromURL` + `MFA
 位深/比特率两行永远都在，一行灰一行活。灰行的选中项如果还用全亮 accent 画，
 看起来就像"这一行其实能用"。改法：选中色在 disabled 时降到 0.35 alpha、文字用 inkSubtle——
 位置保留（切回格式时选择还在），亮度收敛（不再假装可点）。
+
+## P53-A：落块即选中（P33）会掩盖"替换目标"的断言
+
+`addSampleAt` 造出来的块自带选中，所以"替换后选中该块"这条断言在单块夹具上**恒真**——
+不管替换的是命中块还是旧选区。要看清"目标是命中块还是选区"，必须两块 + 一个陈旧选区：
+选中 A，把卡丢到 B 上，断言 B 变了、选区变成 {B}。P53 咬测 3（去掉目标选中）就是这样漏网的，
+补了 6b 才抓到。
+
+## P53-B：hitTestSample 返回第一个命中的块，不是最上层
+
+分派测试（simulateCardDrop）如果落在 demo 排布上，命中哪个块由 getSamples() 顺序决定，
+测试控制不了。做法：临时 `stack.addLayer` 开一张探针层（空层，鬼层本就点击穿透），
+在层上摆夹具，测完 removeLayer 并恢复 activeIndex 与 scrollBeats。
+
+## P53-C：`ui::px` 返回 int，几何别拿它喂 `Rectangle<float>`
+
+`Rectangle<float>::reduced (ui::px (6))` 走 int→float 窄化，MSVC C4244。几何一律 `ui::pf`，
+字号才用 `ui::sp`。（`drawText` 的矩形参数尤其容易顺手写错。）
+
+## P53-D：选中态下点卡片 = 挂载选区，不起拖
+
+RackPanel::mouseDown 的 `selectionActive && onSlotChosen` 分支直接 return，拖卡手势在那里
+根本不会 arm。这是刻意的：P23 的"点卡片 = 把选区挂上去"和 P53 的"拖卡片 = 单点挂载"
+共享同一个卡片正文，鼠标按下那一刻就分道——点击立即生效（无法撤），拖拽松手才生效。

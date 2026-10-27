@@ -62,28 +62,64 @@ inline bool spaceStartsPlayback (bool engaged) noexcept { return ! engaged; }
 
 //-- Drag payloads --------------------------------------------------------------
 
-/** Phase 52: "this drag is a sampler card, and here is which one".
+/** Phase 52 / 53: "this drag is a card from the rack, and here is which one".
 
     The rack starts the drag and the roll accepts it, so the spelling lives in
     one place both can read: a string built in one file and parsed in another
     is exactly how the two ends drift apart. A file drag is a plain absolute
-    path, which is why the sampler payload needs a prefix at all — without one,
+    path, which is why the card payload needs a prefix at all — without one,
     `C:\\loops\\kick.wav` and a slot id would arrive through the same channel
-    and only the receiver could tell them apart, by guessing. */
+    and only the receiver could tell them apart, by guessing.
+
+    TWO prefixes, not one id, because the same card means different things on
+    the other end: a sampler hands over the FILE it holds (drop on empty grid =
+    a new block, drop on a block = that block now plays this file), while an
+    instrument hands over its MOUNT (drop on a note = that note plays on it).
+    The receiver must know which question it is being asked, and asking the
+    rack afterwards would be a second lookup that can fail wildly (the slot may
+    have been removed mid-drag). */
+namespace dragpayload
+{
+    inline juce::String describe (const char* prefix, int slotId)
+    {
+        return juce::String (prefix) + juce::String (slotId);
+    }
+
+    /** -1 when `text` does not start with `prefix` or carries no usable id. */
+    inline int idOf (const juce::String& text, const char* prefix)
+    {
+        if (! text.startsWith (prefix))
+            return -1;
+
+        const int id = text.fromFirstOccurrenceOf (":", false, false).getIntValue();
+
+        return id > 0 ? id : -1;
+    }
+}
+
+constexpr const char* kSamplerDragPrefix    = "atomic-sampler:";
+constexpr const char* kInstrumentDragPrefix = "atomic-instrument:";
+
 inline juce::String samplerDragDescription (int slotId)
 {
-    return "atomic-sampler:" + juce::String (slotId);
+    return dragpayload::describe (kSamplerDragPrefix, slotId);
 }
 
 /** -1 when `text` is not a sampler drag at all (a file path, say). */
 inline int samplerDragSlotId (const juce::String& text)
 {
-    if (! text.startsWith ("atomic-sampler:"))
-        return -1;
+    return dragpayload::idOf (text, kSamplerDragPrefix);
+}
 
-    const int id = text.fromFirstOccurrenceOf (":", false, false).getIntValue();
+/** Phase 53: a card carrying an instrument rather than a file. */
+inline juce::String instrumentDragDescription (int slotId)
+{
+    return dragpayload::describe (kInstrumentDragPrefix, slotId);
+}
 
-    return id > 0 ? id : -1;
+inline int instrumentDragSlotId (const juce::String& text)
+{
+    return dragpayload::idOf (text, kInstrumentDragPrefix);
 }
 
 //-- Transport glyph geometry ---------------------------------------------------

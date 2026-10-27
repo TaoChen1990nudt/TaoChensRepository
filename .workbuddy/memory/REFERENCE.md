@@ -244,6 +244,26 @@
   面板自己看不见层，别给它加 LayerStack。
 - 菜单含全部四个模式（含 原速，那是"改回去"的路）；选哪个就写到该槽位的**所有块**。
 
+## 机架卡片拖拽（P52 采样卡 / P53 双卡）
+- **两种卡是两个问题，两个前缀**（`SharedRules.h`）：`atomic-sampler:<id>`（交出文件）与
+  `atomic-instrument:<id>`（交出挂载）。拼与解都在 `dragpayload::describe / idOf` 一处；
+  接收端**不许**回头查槽位身份来分辨——拖拽途中槽位可能被删。
+- **所有卡都能拖**（P53）：`RackPanel::mouseDown` 卡片正文 arm（`dragMayStart`），
+  mouseDrag 超过 4 px 才 `startDragging`；拖影 `makeCardDragImage` 一份代码，tag 行区分
+  SAMPLE / VST3 / SYNTH。**注意**：有选区时点卡片是 P23 的"挂载选区"，那个分支直接 return，
+  不起拖——拖卡是"无选中"时的手势。
+- 钢琴窗分派（`itemDropped`，**先重新跑 `updateCardDrop` 再分派**，预览与落点不可能各测各的）：
+  - 音源卡 → 只认音符：`routeNoteToSlot` → `routeSelectionTo`（音符级 override）。落空 = 什么都不做。
+  - 采样卡 → 块上 = `replaceSamplesWithSlot`（P32 `mountSelectedSamplesToSlot` 同一规则：
+    name/path/length/offset 跟新文件，`startBeat` 不动；已在该槽的块是刻意 no-op，不重 trim）；
+    空格 = `addSampleFromSlot` 新块（P52 行为不变）。
+- **选中规则**（两个方向一致）：命中目标已在选区内 → 整个选区跟着变；否则只选目标。
+  落在单个音符上永远走音符级 override，不走 `mountSelectionTo` 的整组挂载（P24 教训）。
+- 预览 `drawDropPreview` 按 `dropKind` 分派：instrumentCard 高亮音符 + 指针旁 tag「挂到 X」，
+  空处画「拖到音符上以挂载」；sampleCard 命中块 = 虚线高亮 + 「替换为 X」，空格 = 落块脚印。
+- 测试钩子：`simulateCardDrop`（真 `itemDropped`，SourceDetails 只差真鼠标）、
+  `simulateDropPreview`（摆预览，空串清除）；截图 `-dropnote` / `-dropsample`。
+
 ## 刻刀（P51：工具条第五个工具）
 - `Tool::knife`，按钮 index 4，图标是**美工刀**（橡皮同款旋转圆角矩形 + 刀尖三角 + 折断槽；
   第一版"细三角+虚线"16 px 下就是一道斜杠，见 PITFALLS P51-C）。光标 = 十字线：切口发生在

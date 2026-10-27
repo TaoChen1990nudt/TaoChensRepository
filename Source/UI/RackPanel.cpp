@@ -48,14 +48,20 @@ namespace
         }
     }
 
-    /** Phase 52: the thumbnail a dragged sampler card carries.
+    /** Phase 52 / 53: the thumbnail a dragged card carries.
 
         It is NOT a snapshot of the card — the card is 300 px tall and a drag
         image that covers the drop target is a drag image that hides where you
-        are dropping. A compact ticket with the file's name says "this file",
-        which is the only thing the pointer has to say. */
-    juce::Image makeSamplerDragImage (const SynthSlot& slot)
+        are dropping. A compact ticket with the file's name (or the synth's)
+        says "this one", which is the only thing the pointer has to say.
+
+        One image for both kinds: the tag line is the whole difference, and a
+        second near-identical drawing routine would be a second place for the
+        ticket to drift out of date. */
+    juce::Image makeCardDragImage (const SynthSlot& slot)
     {
+        const bool sampler = slot.isSampler();
+
         const int w = (int) std::round (atomic::ui::px (150));
         const int h = (int) std::round (atomic::ui::px (34));
 
@@ -72,13 +78,17 @@ namespace
 
         g.setColour (theme::accent.withAlpha (0.95f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (8.5f))));
-        g.drawText ("SAMPLE", image.getBounds().reduced ((int) atomic::ui::px (8), 0)
-                                                .removeFromTop ((int) atomic::ui::px (14)),
+        g.drawText (sampler ? juce::String ("SAMPLE")
+                            : (slot.isPlugin() ? juce::String ("VST3")
+                                               : juce::String ("SYNTH")),
+                    image.getBounds().reduced ((int) atomic::ui::px (8), 0)
+                                     .removeFromTop ((int) atomic::ui::px (14)),
                     juce::Justification::centredLeft, false);
 
         g.setColour (theme::inkSubtle);
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
-        g.drawText (juce::File (slot.samplePath).getFileName(),
+        g.drawText (sampler ? juce::File (slot.samplePath).getFileName()
+                            : slot.getDisplayName(),
                     image.getBounds().reduced ((int) atomic::ui::px (8), 0)
                                      .withTrimmedTop ((int) atomic::ui::px (14)),
                     juce::Justification::centredLeft, true);
@@ -1187,16 +1197,16 @@ void RackPanel::mouseDown (const juce::MouseEvent& e)
             if (onCardFocused != nullptr)
                 onCardFocused (slot->id);
 
-            // Phase 52: a sampler card is also the handle of its file. The
-            // press arms a drag; whether it becomes one is decided in
-            // mouseDrag by how far the pointer travels, so a plain click keeps
-            // doing exactly what it did above.
-            if (slot->isSampler())
-            {
-                dragMayStart = true;
-                dragOrigin   = pos;
-                dragCard     = i;
-            }
+            // Phase 52 / 53: a card is also the handle of what it carries — a
+            // sampled file, or a synth. The press arms a drag; whether it
+            // becomes one is decided in mouseDrag by how far the pointer
+            // travels, so a plain click keeps doing exactly what it did above.
+            //
+            // Every card arms, not just samplers (Phase 53): dropping a synth
+            // on a note is the note-level 越级 in gesture form.
+            dragMayStart = true;
+            dragOrigin   = pos;
+            dragCard     = i;
 
             return;
         }
@@ -1230,19 +1240,25 @@ void RackPanel::mouseDown (const juce::MouseEvent& e)
 
 void RackPanel::mouseDrag (const juce::MouseEvent& e)
 {
-    // Phase 52: dragging a sampler card out of the rack. Checked before the
+    // Phase 52 / 53: dragging a card out of the rack. Checked before the
     // slider guard because this drag never set dragPart — it is a different
     // gesture, not a value being dragged.
     if (dragMayStart && dragCard >= 0 && e.getDistanceFromDragStart() > ui::px (4))
     {
         dragMayStart = false;
 
-        if (auto* slot = rack.getSlot (dragCard); slot != nullptr && slot->isSampler())
+        if (auto* slot = rack.getSlot (dragCard); slot != nullptr)
         {
+            // Phase 53: the prefix is the whole message. A sampler drag hands
+            // over a FILE; an instrument drag hands over a MOUNT. Both start
+            // here, and the roll decides what the drop means.
+            const auto description = slot->isSampler() ? samplerDragDescription (slot->id)
+                                                       : instrumentDragDescription (slot->id);
+
             if (auto* container = juce::DragAndDropContainer::findParentDragContainerFor (this))
                 if (! container->isDragAndDropActive())
-                    container->startDragging (samplerDragDescription (slot->id), this,
-                                              juce::ScaledImage (makeSamplerDragImage (*slot)),
+                    container->startDragging (description, this,
+                                              juce::ScaledImage (makeCardDragImage (*slot)),
                                               false, nullptr, &e.source);
         }
 

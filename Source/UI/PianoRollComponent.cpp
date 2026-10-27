@@ -8235,6 +8235,57 @@ bool PianoRollComponent::mountSelectedSamplesToSlot (int slotId)
     return true;
 }
 
+bool PianoRollComponent::replaceSamplesWithSlot (int sampleId, int slotId)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || layer->findSample (sampleId) == nullptr)
+        return false;
+
+    // Only a sampler holds a file to hand over (Phase 27's rule, restated
+    // here for the gesture): an oscillator has nothing to give, so "replace
+    // the sample" has no meaning on one.
+    const auto* slot = rack.findSlot (slotId);
+
+    if (slot == nullptr || ! slot->isSampler() || slot->sampleBuffer == nullptr)
+        return false;
+
+    // Already part of a multi-block selection? Then the selection is the
+    // target — the user said "these" before reaching for the card. Otherwise
+    // the block under the pointer is, and it becomes the selection so the
+    // result is visible as "the one I just changed".
+    if (! isSampleSelected (sampleId))
+        setSampleSelection ({ sampleId });
+
+    // Phase 32's rule is the whole implementation: name, path, length and
+    // offset follow the new file, startBeat does not, and re-mounting a block
+    // that already holds this file is a no-op rather than a silent re-trim.
+    return mountSelectedSamplesToSlot (slotId);
+}
+
+bool PianoRollComponent::routeNoteToSlot (int noteId, int slotId)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || layer->findNote (noteId) == nullptr)
+        return false;
+
+    const auto* slot = rack.findSlot (slotId);
+
+    if (slot == nullptr || slot->isSampler())
+        return false;
+
+    if (! isSelected (noteId))
+        setSelection ({ noteId });
+
+    // routeSelectionTo writes the note-level override — the tier that means
+    // "just this note". Deliberately NOT mountSelectionTo: that one mounts the
+    // whole GROUP when the selection happens to be one, and a card dropped on a
+    // single note is the most local statement there is (P24's lesson).
+    routeSelectionTo (slotId);
+    return true;
+}
+
 int PianoRollComponent::selectedSamplerSlotId() const
 {
     const auto* layer = stack.getActiveLayer();
@@ -9115,6 +9166,98 @@ void PianoRollComponent::drawDropPreview (juce::Graphics& g)
     if (! grid.contains (sampleDropPoint))
         return;
 
+    const auto colour = theme::accent;
+
+    // What the card carries, in its own words. A preview that says "replace
+    // with THIS" can be checked at a glance; "replace with something" cannot.
+    const auto* card = dropSlotId >= 0 ? rack.findSlot (dropSlotId) : nullptr;
+
+    const auto cardTitle = card == nullptr
+                             ? juce::String()
+                             : (card->isSampler()
+                                  ? juce::File (card->samplePath).getFileName()
+                                  : card->getDisplayName());
+
+    const auto labelFont = juce::Font (juce::FontOptions (ui::sp (9.0f)));
+
+    // A tag that follows the pointer: the target may be 12 px wide (a note) and
+    // a label drawn inside it would be a smear. Clamped to the grid so it
+    // cannot be lost off the edge it was dragged towards.
+    const auto drawTag = [&] (const juce::String& text, const juce::Colour& tagColour)
+    {
+        const float w = juce::GlyphArrangement::getStringWidth (labelFont, text) + ui::px (12);
+        const float h = ui::sp (17);
+
+        juce::Rectangle<float> box (sampleDropPoint.x + ui::px (12),
+                                    sampleDropPoint.y - h - ui::px (8), w, h);
+
+        box.setPosition (juce::jlimit (grid.getX(), juce::jmax (grid.getX(), grid.getRight() - w),
+                                       box.getX()),
+                         juce::jlimit (grid.getY(), juce::jmax (grid.getY(), grid.getBottom() - h),
+                                       box.getY()));
+
+        g.setColour (theme::surface3.withAlpha (0.96f));
+        g.fillRoundedRectangle (box, ui::pf (3));
+
+        g.setColour (tagColour.withAlpha (0.9f));
+        g.drawRoundedRectangle (box.reduced (0.5f), ui::pf (3), 1.0f);
+
+        g.setColour (theme::ink);
+        g.setFont (labelFont);
+        g.drawText (text, box.reduced (ui::pf (6.0)), juce::Justification::centredLeft, true);
+    };
+
+    //-- 1. a synth card: only a note is a target ---------------------------
+    // Phase 53. Nothing else can be said with a mount — dropping it on empty
+    // grid would have to invent a note, which is not what the gesture means.
+    if (dropKind == CardDropKind::instrumentCard)
+    {
+        if (dropTargetNote < 0)
+        {
+            drawTag (utf8 ("拖到音符上以挂载"), theme::inkSubtle);
+            return;
+        }
+
+        const auto bounds = getNoteScreenBounds (stack.getActiveLayerIndex(), dropTargetNote);
+
+        if (bounds.isEmpty())
+            return;
+
+        g.setColour (colour.withAlpha (0.22f));
+        g.fillRoundedRectangle (bounds, ui::pf (2));
+
+        g.setColour (colour.withAlpha (0.95f));
+        g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (2), ui::pf (1.6f));
+
+        drawTag (utf8 ("挂到 ") + cardTitle, colour);
+        return;
+    }
+
+    //-- 2. a sampler card over a block: that block is the target -----------
+    if (dropKind == CardDropKind::sampleCard && dropTargetSample >= 0)
+    {
+        const auto bounds = getSampleScreenBounds (stack.getActiveLayerIndex(), dropTargetSample);
+
+        if (bounds.isEmpty())
+            return;
+
+        g.setColour (colour.withAlpha (0.20f));
+        g.fillRoundedRectangle (bounds, ui::pf (3));
+
+        juce::Path outline, dashed;
+        outline.addRoundedRectangle (bounds.reduced (0.5f), ui::pf (3));
+
+        const float dashes[] = { ui::pf (5), ui::pf (4) };
+        juce::PathStrokeType (ui::pf (1.8f)).createDashedStroke (dashed, outline, dashes, 2);
+
+        g.setColour (colour.withAlpha (0.95f));
+        g.fillPath (dashed);
+
+        drawTag (utf8 ("替换为 ") + cardTitle, colour);
+        return;
+    }
+
+    //-- 3. a file (or a card) on empty grid: the block it would create -----
     // A preview has to answer "where and how big" before the drop, so it is
     // built from the same numbers addSampleAt() will use: bottom lane + span
     // for height, the snapped duration for width. Anything else would jump.
@@ -9135,8 +9278,6 @@ void PianoRollComponent::drawDropPreview (juce::Graphics& g)
 
     juce::Rectangle<float> rect (x0, top, juce::jmax (2.0f, x1 - x0),
                                  juce::jmax (keyHeight, bottom - top));
-
-    const auto colour = theme::accent;
 
     g.setColour (colour.withAlpha (0.16f));
     g.fillRoundedRectangle (rect, ui::pf (3));
@@ -9418,15 +9559,17 @@ void PianoRollComponent::showSampleMenu (int sampleId, juce::Point<int> screenPo
 }
 
 //==============================================================================
-//  DragAndDropTarget — the file browser hands us absolute .wav paths
+//  DragAndDropTarget — the file browser hands us absolute .wav paths, the rack
+//  hands us cards
 //==============================================================================
 bool PianoRollComponent::isInterestedInDragSource (const SourceDetails& details)
 {
     const auto text = details.description.toString();
 
-    // Phase 52: a card dragged out of the rack — the file is already decoded
-    // and already has a slot, so this drop is "that source, here".
-    if (samplerDragSlotId (text) > 0)
+    // Phase 52 / 53: a card dragged out of the rack — the file is already
+    // decoded and already has a slot, so this drop is "that source, here".
+    // An instrument card has no file at all; it carries a mount.
+    if (samplerDragSlotId (text) > 0 || instrumentDragSlotId (text) > 0)
         return true;
 
     const juce::File file (text);
@@ -9434,17 +9577,57 @@ bool PianoRollComponent::isInterestedInDragSource (const SourceDetails& details)
     return file.hasFileExtension ("wav;wave");
 }
 
-void PianoRollComponent::itemDragEnter (const SourceDetails& details)
+void PianoRollComponent::updateCardDrop (juce::Point<float> point,
+                                        const juce::String& description)
 {
     sampleDropActive = true;
-    sampleDropPoint  = details.localPosition.toFloat();
+    sampleDropPoint  = point;
+
+    dropSlotId       = -1;
+    dropTargetNote   = -1;
+    dropTargetSample = -1;
+
+    if (const int slotId = samplerDragSlotId (description); slotId > 0)
+    {
+        dropKind   = CardDropKind::sampleCard;
+        dropSlotId = slotId;
+
+        // A card over a block replaces that block's sample; over empty grid it
+        // makes a new one (Phase 52). The hit test is the ACTIVE layer's, which
+        // is where both the new block and the replacement would land.
+        dropTargetSample = getEditableSampleIdAt (point);
+        return;
+    }
+
+    if (const int slotId = instrumentDragSlotId (description); slotId > 0)
+    {
+        dropKind     = CardDropKind::instrumentCard;
+        dropSlotId   = slotId;
+        dropTargetNote = getEditableNoteIdAt (point);
+        return;
+    }
+
+    dropKind = CardDropKind::file;
+}
+
+void PianoRollComponent::clearCardDrop()
+{
+    sampleDropActive = false;
+    dropKind         = CardDropKind::none;
+    dropSlotId       = -1;
+    dropTargetNote   = -1;
+    dropTargetSample = -1;
+}
+
+void PianoRollComponent::itemDragEnter (const SourceDetails& details)
+{
+    updateCardDrop (details.localPosition.toFloat(), details.description.toString());
     repaint();
 }
 
 void PianoRollComponent::itemDragMove (const SourceDetails& details)
 {
-    sampleDropActive = true;
-    sampleDropPoint  = details.localPosition.toFloat();
+    updateCardDrop (details.localPosition.toFloat(), details.description.toString());
     repaint();
 }
 
@@ -9452,15 +9635,24 @@ void PianoRollComponent::itemDragExit (const SourceDetails& details)
 {
     juce::ignoreUnused (details);
 
-    sampleDropActive = false;
+    clearCardDrop();
     repaint();
 }
 
 void PianoRollComponent::itemDropped (const SourceDetails& details)
 {
-    sampleDropActive = false;
-
     const auto point = details.localPosition.toFloat();
+    const auto text  = details.description.toString();
+
+    // Re-run the drag state at the DROP point rather than trusting the last
+    // move: updateCardDrop is the one place the hit test happens, so the
+    // preview and the drop cannot pick different targets for the same pointer.
+    updateCardDrop (point, text);
+
+    const int targetNote   = dropTargetNote;
+    const int targetSample = dropTargetSample;
+
+    clearCardDrop();
 
     if (! getGridArea().contains (point))
     {
@@ -9468,17 +9660,34 @@ void PianoRollComponent::itemDropped (const SourceDetails& details)
         return;
     }
 
-    // Phase 52: a card from the rack. The same anchor rules as a file drop —
-    // beat under the pointer, pitch under the pointer — because to the user it
-    // is the same gesture; only the bookkeeping differs.
-    if (const int slotId = samplerDragSlotId (details.description.toString()); slotId > 0)
+    // Phase 53: an instrument card. The only thing it can mean is "this note
+    // plays on that synth"; anywhere else the gesture has no target and doing
+    // nothing is the honest answer (the preview says so while you hover).
+    if (const int slotId = instrumentDragSlotId (text); slotId > 0)
     {
-        addSampleFromSlot (beatAtScreenX (point.x), pitchAtScreenY (point.y), slotId);
+        if (targetNote >= 0)
+            routeNoteToSlot (targetNote, slotId);
+
         repaint();
         return;
     }
 
-    const juce::File file (details.description.toString());
+    // Phase 52 / 53: a sampler card. Over a block it REPLACES that block's
+    // sample; over empty grid it is still "that source, here" and makes a new
+    // block — the same anchor rules as a file drop, because to the user it is
+    // the same gesture; only the bookkeeping differs.
+    if (const int slotId = samplerDragSlotId (text); slotId > 0)
+    {
+        if (targetSample >= 0)
+            replaceSamplesWithSlot (targetSample, slotId);
+        else
+            addSampleFromSlot (beatAtScreenX (point.x), pitchAtScreenY (point.y), slotId);
+
+        repaint();
+        return;
+    }
+
+    const juce::File file (text);
 
     if (! file.existsAsFile())
     {
@@ -9493,6 +9702,23 @@ void PianoRollComponent::itemDropped (const SourceDetails& details)
     // are read here rather than inside addSampleAt so the preview and the drop
     // cannot disagree about the anchor.
     addSampleAt (beatAtScreenX (point.x), pitchAtScreenY (point.y), file);
+    repaint();
+}
+
+void PianoRollComponent::simulateCardDrop (const juce::String& description, juce::Point<float> at)
+{
+    const juce::DragAndDropTarget::SourceDetails details (description, nullptr, at.toInt());
+
+    itemDropped (details);
+}
+
+void PianoRollComponent::simulateDropPreview (const juce::String& description, juce::Point<float> at)
+{
+    if (description.isEmpty())
+        clearCardDrop();
+    else
+        updateCardDrop (at, description);
+
     repaint();
 }
 

@@ -1374,6 +1374,87 @@ juce::Image MainComponent::createStretchSnapshot (int width, int height)
     return image;
 }
 
+juce::Image MainComponent::createCardDropSnapshot (bool instrumentCard, int width, int height)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr)
+        return {};
+
+    const auto   previousBounds    = pianoRoll.getBounds();
+    const float  previousBeatWidth = pianoRoll.getBeatWidth();
+    const double previousScroll    = pianoRoll.getScrollBeats();
+
+    pianoRoll.setSize (width, height);
+    pianoRoll.setBeatWidth (juce::jmax (pianoRoll.getBeatWidth(), 90.0f));
+
+    const auto grid = pianoRoll.getGridBounds();
+    const int  index = stack.getActiveLayerIndex();
+
+    if (instrumentCard)
+    {
+        const int slotId = rack.getFirstInstrumentSlotId();
+
+        if (slotId < 0)
+            return {};
+
+        // Walk the notes until one is actually ON SCREEN: the preview is drawn
+        // at a point, and a point outside the grid draws nothing, which would
+        // photograph an empty frame and call it documentation.
+        for (const auto& note : layer->getNotes())
+        {
+            pianoRoll.setScrollBeats (juce::jmax (0.0, note.startBeat - 1.5));
+
+            const auto bounds = pianoRoll.getNoteScreenBounds (index, note.id);
+
+            if (! bounds.isEmpty() && grid.contains (bounds.getCentre()))
+            {
+                pianoRoll.simulateDropPreview (instrumentDragDescription (slotId),
+                                               bounds.getCentre());
+                break;
+            }
+        }
+    }
+    else
+    {
+        const auto samplers = rack.getSamplerSlotIds();
+
+        if (samplers.empty())
+            return {};
+
+        for (const auto& sample : layer->getSamples())
+        {
+            pianoRoll.setScrollBeats (juce::jmax (0.0, sample.startBeat - 1.5));
+
+            const auto bounds = pianoRoll.getSampleScreenBounds (index, sample.id);
+
+            if (bounds.isEmpty() || ! grid.contains (bounds.getCentre()))
+                continue;
+
+            // A block that names a sampler uses THAT card for the label; one
+            // that follows its layer falls back to the first sampler, which is
+            // what "replace this with a file from the rack" would hand over.
+            const int slotId = sample.outputSlotId >= 0 ? sample.outputSlotId
+                                                        : samplers.front();
+
+            pianoRoll.simulateDropPreview (samplerDragDescription (slotId),
+                                           juce::Point<float> (bounds.getX() + juce::jmin (bounds.getWidth() * 0.4f,
+                                                                                           ui::pf (40.0)),
+                                                               bounds.getBottom() - ui::pf (4.0)));
+            break;
+        }
+    }
+
+    auto image = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
+
+    pianoRoll.simulateDropPreview ({}, {});
+    pianoRoll.setBounds (previousBounds);
+    pianoRoll.setBeatWidth (previousBeatWidth);
+    pianoRoll.setScrollBeats (previousScroll);
+
+    return image;
+}
+
 juce::Image MainComponent::createGroupMuteSnapshot (int width, int height)
 {
     auto* layer = stack.getActiveLayer();

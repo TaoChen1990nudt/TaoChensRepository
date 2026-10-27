@@ -169,6 +169,13 @@ namespace
         // badges — the only place the mode is written down on screen.
         writePng ("-stretch", component.createStretchSnapshot());
 
+        // Phase 53: the two card drops, caught mid-gesture. A drag preview only
+        // exists while a real drag is in flight — no live screenshot can catch
+        // it — so the frame that documents "a synth lands on a note / a sampler
+        // lands on a block" has to stage the preview.
+        writePng ("-dropnote", component.createCardDropSnapshot (true));
+        writePng ("-dropsample", component.createCardDropSnapshot (false));
+
         // Phase 35: a group whose members are two kinds of thing. The pill says
         // 静音 and the block under it is lit by the same selection that lights
         // the notes — a muted group is still an editable group.
