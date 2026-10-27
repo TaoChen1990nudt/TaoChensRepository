@@ -4,13 +4,14 @@
 
 #include "MixerPanel.h"
 #include "Util/Text.h"
+#include "Util/Theme.h"
 
 namespace atomic
 {
 
 namespace
 {
-    const juce::Colour kWindowBackground { 0xff14151a };
+    const juce::Colour& kWindowBackground = theme::surface1;
 }
 
 MixerWindow::MixerWindow (MixerPanel& panelToShow)

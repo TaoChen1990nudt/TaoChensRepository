@@ -5,6 +5,7 @@
 #include "Model/Routing.h"
 #include "UI/MixerLook.h"
 #include "Util/Text.h"
+#include "Util/Theme.h"
 #include "Util/ValueMenu.h"
 
 namespace atomic
@@ -12,11 +13,11 @@ namespace atomic
 
 namespace
 {
-    const juce::Colour kPanelBackground { 0xff14151a };
-    const juce::Colour kDivider         { 0xff262832 };
-    const juce::Colour kLaneHeader      { 0xff171922 };
+    const juce::Colour& kPanelBackground = theme::surface1;
+    const juce::Colour& kDivider        = theme::hairline;
+    const juce::Colour& kLaneHeader     = theme::surface2;
 
-    const juce::Colour kSoloColour      { 0xffe0b13c };
+    const juce::Colour& kSoloColour     = theme::warn;
     const juce::Colour kMuteColour      { 0xffff6b6b };
 
     juce::Font boldFont (float height)

@@ -4,23 +4,24 @@
 
 #include "Model/Routing.h"
 #include "Util/Text.h"
+#include "Util/Theme.h"
 
 namespace atomic
 {
 
 namespace
 {
-    const juce::Colour kPanelBody   { 0xff1b1d24 };
-    const juce::Colour kPanelBorder { 0xff343743 };
+    const juce::Colour& kPanelBody  = theme::surface3;
+    const juce::Colour& kPanelBorder = theme::hairlineStrong;
     const juce::Colour kEditorBg    { 0xff101116 };
-    const juce::Colour kMuted       { 0xff8b91a0 };
+    const juce::Colour& kMuted      = theme::inkSubtle;
 
     //-- Phase 36: the three layers, three colours ---------------------------
     // Chosen to be tellable apart at 1 px against a near-black box AND from the
     // note's own curve, which wears the layer's accent — a sheet's colour can be
     // violet, so the references must not be. Teal for the mix (layer + synth),
     // orange for the group, amber for the result.
-    const juce::Colour kMacroColour { 0xff4fd1c5 };
+    const juce::Colour& kMacroColour = theme::accent;
     const juce::Colour kGroupColour { 0xffffa06b };
     const juce::Colour kStackColour { 0xffffd479 };
 

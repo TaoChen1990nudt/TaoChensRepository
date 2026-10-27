@@ -3,6 +3,8 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include "../Util/Text.h"
+
 #include <array>
 #include <cmath>
 #include <memory>
@@ -23,7 +25,7 @@ enum class Type
     delay,
     air,
     vst,        // a hosted VST3; the DSP lives in PluginHost, not here
-    eq,         // Phase 46: tilt EQ — appended AFTER vst, never before it:
+    eq,         // Phase 46: appended AFTER vst, never before it:
                 // the project file stores the raw int, and old sessions carry
                 // 5 = vst. Reordering would turn every saved VST3 into an EQ.
     comp,       // Phase 46: level-dependent gain rider
@@ -61,7 +63,79 @@ inline Type typeFromInt (int value) noexcept
     return (value >= 0 && value < numTypes()) ? (Type) value : Type::none;
 }
 
-/** Label for the two knobs, so the rack does not show "P1 / P2". */
+//==============================================================================
+//  Phase 47 — the parameter contract. ONE table, used by the DSP, the editor
+//  window, the rack mini-bar and the self-test. Values are stored normalised
+//  0..1 in the model (the drag bars stay simple, old files keep loading); the
+//  mapping to real units lives HERE, so what the editor prints is what the
+//  DSP uses — the P43 lesson (one rule, one place) applied to parameters.
+
+inline constexpr int maxParams = 9;
+
+/** How many knobs this effect has. The editor window sizes itself from this;
+    the rack mini-bar shows only params[0]. */
+inline int numParams (Type type) noexcept
+{
+    switch (type)
+    {
+        case Type::lowPass:
+        case Type::drive:
+        case Type::air:     return 1;
+        case Type::delay:   return 2;
+        case Type::eq:      return 9;   // 3 bands x (freq, gain, Q)
+        case Type::comp:    return 6;   // thr, ratio, makeup, attack, release, knee
+        case Type::reverb:  return 5;   // decay, size, low cut, high cut, diffusion
+        case Type::vst:
+        case Type::none:
+        default:            return 0;
+    }
+}
+
+/** The value a knob starts at when the effect is mounted. 0.5 is neutral for
+    every gain-style knob by construction of the maps below; delay's feedback
+    keeps its historic 0.45 so a re-mounted delay sounds like it always did. */
+inline float defaultParam (Type type, int index) noexcept
+{
+    if (type == Type::delay && index == 1)
+        return 0.45f;
+
+    return 0.5f;
+}
+
+//==============================================================================
+//  Parameter maps. Each returns real units; the DSP and paramText() both call
+//  these, so a display can never drift away from the sound.
+
+// --- EQ (band 0 low shelf / 1 peaking / 2 high shelf) -----------------------
+inline float eqFreq   (int band, float v) noexcept
+{
+    static constexpr float loFreqs[3] = { 20.0f, 200.0f, 1500.0f };
+    static constexpr float hiFreqs[3] = { 600.0f, 5000.0f, 16000.0f };
+
+    return loFreqs[(size_t) juce::jlimit (0, 2, band)]
+         * std::pow (hiFreqs[(size_t) juce::jlimit (0, 2, band)]
+                       / loFreqs[(size_t) juce::jlimit (0, 2, band)],
+                     juce::jlimit (0.0f, 1.0f, v));
+}
+
+inline float eqGainDb (float v) noexcept { return -12.0f + 24.0f * juce::jlimit (0.0f, 1.0f, v); }
+inline float eqQ      (float v) noexcept { return 0.3f * std::pow (8.0f / 0.3f, juce::jlimit (0.0f, 1.0f, v)); }
+
+// --- COMP --------------------------------------------------------------------
+inline float compThresholdDb (float v) noexcept { return -40.0f + 40.0f * juce::jlimit (0.0f, 1.0f, v); }
+inline float compRatio       (float v) noexcept { return std::pow (20.0f, juce::jlimit (0.0f, 1.0f, v)); }
+inline float compMakeupDb    (float v) noexcept { return 18.0f * juce::jlimit (0.0f, 1.0f, v); }
+inline float compAttackSecs  (float v) noexcept { return 0.001f * std::pow (200.0f, juce::jlimit (0.0f, 1.0f, v)); }
+inline float compReleaseSecs (float v) noexcept { return 0.020f * std::pow (100.0f, juce::jlimit (0.0f, 1.0f, v)); }
+inline float compKneeDb      (float v) noexcept { return 24.0f * juce::jlimit (0.0f, 1.0f, v); }
+
+// --- REVERB ------------------------------------------------------------------
+inline float reverbDecaySecs (float v) noexcept { return 0.2f * std::pow (50.0f, juce::jlimit (0.0f, 1.0f, v)); }
+inline float reverbSizeX     (float v) noexcept { return 0.2f + 1.6f * juce::jlimit (0.0f, 1.0f, v); }
+inline float reverbLowcutHz  (float v) noexcept { return 20.0f * std::pow (40.0f, juce::jlimit (0.0f, 1.0f, v)); }
+inline float reverbHighcutHz (float v) noexcept { return 2000.0f * std::pow (9.0f, juce::jlimit (0.0f, 1.0f, v)); }
+
+/** Label for the rack mini-bar, which only ever shows params[0]. */
 inline const char* paramName (Type type) noexcept
 {
     switch (type)
@@ -71,11 +145,116 @@ inline const char* paramName (Type type) noexcept
         case Type::delay:   return "TIME";
         case Type::air:     return "AIR";
         case Type::vst:     return "VST";
-        case Type::eq:      return "TILT";   // 0.5 = 平, 拉向两端 = 偏低 / 偏高
-        case Type::comp:    return "AMT";    // 越大阈值越低、比率越硬
-        case Type::reverb:  return "SIZE";   // 房间大小, 湿量固定
+        case Type::eq:      return "EQ";
+        case Type::comp:    return "THR";
+        case Type::reverb:  return "LEN";
         case Type::none:
         default:            return "—";
+    }
+}
+
+/** Full name of knob `index` — what the editor window prints. The names are
+    the user's own words for them, not ours. */
+inline juce::String paramName (Type type, int index)
+{
+    switch (type)
+    {
+        case Type::lowPass:  return utf8 ("截止");
+        case Type::drive:    return utf8 ("驱动");
+        case Type::delay:    return index == 0 ? utf8 ("时间") : utf8 ("反馈");
+        case Type::air:      return utf8 ("强度");
+
+        case Type::eq:
+        {
+            static const char* names[9] =
+            {
+                "低频频率", "中频频率", "高频频率",
+                "低频增益", "中频增益", "高频增益",
+                "低频Q值", "中频Q值", "高频Q值"
+            };
+            return utf8 (names[(size_t) juce::jlimit (0, 8, index)]);
+        }
+
+        case Type::comp:
+        {
+            static const char* names[6] =
+            {
+                "阈值", "压缩比", "增益", "启动时间", "释放时间", "拐点软硬度"
+            };
+            return utf8 (names[(size_t) juce::jlimit (0, 5, index)]);
+        }
+
+        case Type::reverb:
+        {
+            static const char* names[5] =
+            {
+                "混响长度", "空间大小", "低切频率", "高切频率", "散射度"
+            };
+            return utf8 (names[(size_t) juce::jlimit (0, 4, index)]);
+        }
+
+        case Type::vst:
+        case Type::none:
+        default:             return "P" + juce::String (index + 1);
+    }
+}
+
+/** The number the knob actually means — "0.73" says nothing about how bright
+    a filter is. Uses the SAME maps the DSP uses, so the printed value and the
+    sound can never drift apart. */
+inline juce::String paramText (Type type, int index, float v)
+{
+    const float x = juce::jlimit (0.0f, 1.0f, v);
+
+    auto hz = [] (float f)
+    {
+        return f >= 1000.0f ? juce::String (f / 1000.0f, 1) + " kHz"
+                            : juce::String (juce::roundToInt (f)) + " Hz";
+    };
+
+    auto db = [] (float d)
+    {
+        return (d >= 0.0f ? "+" : "") + juce::String (d, 1) + " dB";
+    };
+
+    switch (type)
+    {
+        case Type::lowPass:  return hz (120.0f * std::pow (2.0f, x * 7.2f));
+        case Type::drive:    return juce::String (1.0f + x * 11.0f, 1) + "x";
+        case Type::delay:
+            return index == 0 ? juce::String (juce::roundToInt (35.0f + x * 180.0f)) + " ms"
+                              : juce::String (juce::roundToInt (x * 100.0f)) + "%";
+        case Type::air:      return juce::String (0.6f + x * 2.4f, 1) + "x";
+
+        case Type::eq:
+            if (index < 3)  return hz (eqFreq (index, x));
+            if (index < 6)  return db (eqGainDb (x));
+            return juce::String (eqQ (x), 2);
+
+        case Type::comp:
+            switch (index)
+            {
+                case 0:  return db (compThresholdDb (x));
+                case 1:  return juce::String (compRatio (x), 1) + " : 1";
+                case 2:  return db (compMakeupDb (x));
+                case 3:  return juce::String (compAttackSecs (x) * 1000.0f, 1) + " ms";
+                case 4:  return juce::String (compReleaseSecs (x) * 1000.0f, 0) + " ms";
+                default: return juce::String (juce::roundToInt (x * 100.0f)) + "%";
+            }
+
+        case Type::reverb:
+            switch (index)
+            {
+                case 0:  return juce::String (reverbDecaySecs (x), 1) + " s";
+                case 1:  return juce::String (reverbSizeX (x), 2) + "x";
+                case 2:  return hz (reverbLowcutHz (x));
+                case 3:  return hz (reverbHighcutHz (x));
+                default: return juce::String (juce::roundToInt (x * 100.0f)) + "%";
+            }
+
+        case Type::vst:
+        case Type::none:
+        default:             return juce::String (juce::roundToInt (x * 100.0f)) + "%";
     }
 }
 
@@ -91,9 +270,18 @@ inline const char* paramName (Type type) noexcept
 struct Settings
 {
     Type  type    = Type::none;
-    float p1      = 0.5f;      // 0..1, meaning depends on the type
-    float p2      = 0.45f;     // 0..1, feedback for delay / unused elsewhere
     bool  enabled = true;
+
+    /** Phase 47: normalised 0..1 knob values, indexed by the tables above.
+        Replaces the old p1/p2 pair — a tilt EQ with one value could not become
+        the three-band EQ the users asked for. Old project files carried p1/p2;
+        the reader maps them to params[0]/params[1]. */
+    std::array<float, maxParams> params = []
+    {
+        std::array<float, maxParams> a {};
+        a.fill (0.5f);
+        return a;
+    }();
 
     int    pluginId   = 0;                                    // PluginHost instance
     juce::String pluginName;                                  // for the rack label
@@ -133,12 +321,23 @@ struct SlotState
     /** Phase 46 reverb: 12 delay lines — per channel 4 combs + 2 allpasses.
         Lengths live in verbLen (computed in prepare from the sample rate), the
         audio thread only walks positions. R channel lines are detuned ~1.3%
-        against L so the stereo image opens. */
+        against L so the stereo image opens. Phase 47: the SIZE knob multiplies
+        a line's effective length, so the buffer is allocated for the largest
+        size the map can produce (see prepare). */
     static constexpr int verbLinesPerChannel = 6;
     juce::AudioBuffer<float> verbBuffer;
     std::array<int,  verbLinesPerChannel * 2> verbLen {};
     std::array<int,  verbLinesPerChannel * 2> verbPos {};
     std::array<float, verbLinesPerChannel * 2> verbDamp {};
+
+    /** Phase 47 reverb: one-pole states for the wet-path low/high cut. */
+    float verbCutLpL = 0.0f, verbCutLpR = 0.0f;    // lowpass, for the HIGH cut
+    float verbCutHpL = 0.0f, verbCutHpR = 0.0f;    // lowpass behind the LOW cut
+
+    /** Phase 47 EQ: three RBJ biquads (low shelf / peaking / high shelf),
+        z1/z2 per band per channel. Coefficients are recomputed per block. */
+    std::array<std::array<float, 2>, 3> eqZ1 {};
+    std::array<std::array<float, 2>, 3> eqZ2 {};
 
     /** Phase 46 compressor: one linked-stereo envelope, one smoothed gain. */
     float compEnv  = 0.0f;
@@ -156,8 +355,9 @@ struct ChainState
     void prepare (double sampleRate)
     {
         const int maxDelaySamples = juce::jmax (1, (int) std::ceil (sampleRate * 0.22));
-        // Reverb's longest comb, 30.75 ms, detuned 1.3% on the right channel.
-        const int maxVerbSamples  = juce::jmax (1, (int) std::ceil (sampleRate * 0.032));
+        // Reverb's longest comb, 30.75 ms, detuned 1.3% on the right channel,
+        // stretched by the largest SIZE the map can produce (1.8x), plus margin.
+        const int maxVerbSamples  = juce::jmax (1, (int) std::ceil (sampleRate * 0.032 * 1.85));
 
         // Left channel lines, then the same set 1.3% longer for the right.
         constexpr double lineSecs[SlotState::verbLinesPerChannel * 2] =
@@ -185,6 +385,15 @@ struct ChainState
                 slot.verbDamp[(size_t) i] = 0.0f;
             }
 
+            slot.verbCutLpL = slot.verbCutLpR = 0.0f;
+            slot.verbCutHpL = slot.verbCutHpR = 0.0f;
+
+            for (int b = 0; b < 3; ++b)
+            {
+                slot.eqZ1[(size_t) b].fill (0.0f);
+                slot.eqZ2[(size_t) b].fill (0.0f);
+            }
+
             slot.compEnv  = 0.0f;
             slot.compGain = 1.0f;
         }
@@ -203,6 +412,15 @@ struct ChainState
             slot.verbBuffer.clear();
             slot.verbPos.fill (0);
             slot.verbDamp.fill (0.0f);
+            slot.verbCutLpL = slot.verbCutLpR = 0.0f;
+            slot.verbCutHpL = slot.verbCutHpR = 0.0f;
+
+            for (int b = 0; b < 3; ++b)
+            {
+                slot.eqZ1[(size_t) b].fill (0.0f);
+                slot.eqZ2[(size_t) b].fill (0.0f);
+            }
+
             slot.compEnv  = 0.0f;
             slot.compGain = 1.0f;
         }
@@ -244,7 +462,7 @@ struct ChainState
             case Type::air:      applyAir      (state, setting, buffer, numSamples, sampleRate); break;
             case Type::eq:       applyEq       (state, setting, buffer, numSamples, sampleRate); break;
             case Type::comp:     applyComp     (state, setting, buffer, numSamples, sampleRate); break;
-            case Type::reverb:   applyReverb   (state, setting, buffer, numSamples);             break;
+            case Type::reverb:   applyReverb   (state, setting, buffer, numSamples, sampleRate); break;
             case Type::vst:
             case Type::none:
             default:             break;
@@ -256,7 +474,7 @@ private:
                               juce::AudioBuffer<float>& buffer, int numSamples, double sampleRate)
     {
         // 120 Hz .. ~18 kHz, exponential so the knob feels musical at both ends.
-        const float cutoff = 120.0f * std::pow (2.0f, juce::jlimit (0.0f, 1.0f, s.p1) * 7.2f);
+        const float cutoff = 120.0f * std::pow (2.0f, juce::jlimit (0.0f, 1.0f, s.params[(size_t) 0]) * 7.2f);
         const float a = 1.0f - std::exp (-2.0f * juce::MathConstants<float>::pi
                                             * juce::jmin (cutoff, (float) sampleRate * 0.45f)
                                             / (float) sampleRate);
@@ -282,7 +500,7 @@ private:
     {
         juce::ignoreUnused (state);
 
-        const float drive = 1.0f + juce::jlimit (0.0f, 1.0f, s.p1) * 11.0f;
+        const float drive = 1.0f + juce::jlimit (0.0f, 1.0f, s.params[(size_t) 0]) * 11.0f;
         const float norm  = 1.0f / std::tanh (drive);
 
         for (int ch = 0; ch < juce::jmin (2, buffer.getNumChannels()); ++ch)
@@ -299,9 +517,9 @@ private:
     {
         const int maxDelay = juce::jmax (1, state.delayBuffer.getNumSamples() - 1);
         const int delay    = juce::jlimit (1, maxDelay,
-                                           (int) ((0.035 + juce::jlimit (0.0f, 1.0f, s.p1) * 0.18)
+                                           (int) ((0.035 + juce::jlimit (0.0f, 1.0f, s.params[(size_t) 0]) * 0.18)
                                                     * sampleRate));
-        const float feedback = juce::jlimit (0.0f, 0.75f, s.p2 * 0.75f);
+        const float feedback = juce::jlimit (0.0f, 0.75f, s.params[(size_t) 1] * 0.75f);
         const float mix      = 0.32f;
 
         const int channels = juce::jmin (2, buffer.getNumChannels(),
@@ -330,7 +548,7 @@ private:
     {
         const float a = 1.0f - std::exp (-2.0f * juce::MathConstants<float>::pi * 2600.0f
                                             / (float) sampleRate);
-        const float amount = 0.6f + juce::jlimit (0.0f, 1.0f, s.p1) * 2.4f;
+        const float amount = 0.6f + juce::jlimit (0.0f, 1.0f, s.params[(size_t) 0]) * 2.4f;
 
         auto* l = buffer.getWritePointer (0);
         auto* r = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
@@ -349,52 +567,149 @@ private:
     }
 
     //==========================================================================
-    //  Phase 46 — the mixing-chain trio: EQ, compressor, reverb.
+    //  Phase 46/47 — the mixing chain. EQ grew from a one-knob tilt into the
+    //  three-band the users asked for; comp and reverb grew real knobs too.
+    //  Every knob maps through the functions at the top of this file — the
+    //  editor's printed number and the DSP's number are the same number.
 
-    /** Tilt EQ. One knob, both ends: pulling p1 down leans the balance toward
-        the lows, pushing it up leans toward the highs, centre is bit-flat. The
-        pivot sits at 800 Hz; the one-pole split is cheap and the shape is
-        musical, which matters more here than a 4-band state-variable notch. */
+    struct Coeffs
+    {
+        float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f;
+        float a1 = 0.0f, a2 = 0.0f;
+    };
+
+    /** RBJ biquad coefficients. `band`: 0 = low shelf, 1 = peaking, 2 = high
+        shelf. A 0 dB shelf would still be an allpass, so the caller skips
+        bands whose gain is flat — transparency where nothing was asked. */
+    static Coeffs rbjCoeffs (int band, float freq, float q, float gainDb, double sampleRate)
+    {
+        const float A     = std::pow (10.0f, gainDb / 40.0f);
+        const float w0    = 2.0f * juce::MathConstants<float>::pi
+                              * juce::jlimit (10.0f, (float) sampleRate * 0.45f, freq)
+                              / (float) sampleRate;
+        const float cw    = std::cos (w0);
+        const float sw    = std::sin (w0);
+        const float alpha = sw / (2.0f * juce::jmax (0.05f, q));
+        const float sqA   = 2.0f * std::sqrt (A) * alpha;   // the shelf term
+
+        Coeffs c;
+
+        if (band == 1)          // peaking
+        {
+            c.b0 = 1.0f + alpha * A;
+            c.b1 = -2.0f * cw;
+            c.b2 = 1.0f - alpha * A;
+            c.a1 = -2.0f * cw;
+            c.a2 = 1.0f - alpha / A;
+        }
+        else if (band == 0)     // low shelf
+        {
+            c.b0 =        A * ((A + 1.0f) - (A - 1.0f) * cw + sqA);
+            c.b1 =  2.0f * A * ((A - 1.0f) - (A + 1.0f) * cw);
+            c.b2 =        A * ((A + 1.0f) - (A - 1.0f) * cw - sqA);
+            c.a1 =   -2.0f * ((A - 1.0f) + (A + 1.0f) * cw);
+            c.a2 =        ((A + 1.0f) + (A - 1.0f) * cw - sqA);
+        }
+        else                    // high shelf
+        {
+            c.b0 =        A * ((A + 1.0f) + (A - 1.0f) * cw + sqA);
+            c.b1 = -2.0f * A * ((A - 1.0f) + (A + 1.0f) * cw);
+            c.b2 =        A * ((A + 1.0f) + (A - 1.0f) * cw - sqA);
+            c.a1 =    2.0f * ((A - 1.0f) - (A + 1.0f) * cw);
+            c.a2 =        ((A + 1.0f) - (A - 1.0f) * cw - sqA);
+        }
+
+        // Normalise. Each shelf's a0 differs, so each is computed explicitly —
+        // one shared "a0" expression across the three topologies was how a
+        // wrong shelf used to hide.
+        if (band == 0)
+        {
+            const float a0L = (A + 1.0f) + (A - 1.0f) * cw + sqA;
+            c.b0 /= a0L; c.b1 /= a0L; c.b2 /= a0L; c.a1 /= a0L; c.a2 /= a0L;
+        }
+        else if (band == 1)
+        {
+            const float a0P = 1.0f + alpha / A;
+            c.b0 /= a0P; c.b1 /= a0P; c.b2 /= a0P; c.a1 /= a0P; c.a2 /= a0P;
+        }
+        else
+        {
+            const float a0H = (A + 1.0f) - (A - 1.0f) * cw + sqA;
+            c.b0 /= a0H; c.b1 /= a0H; c.b2 /= a0H; c.a1 /= a0H; c.a2 /= a0H;
+        }
+
+        return c;
+    }
+
+    /** Three-band EQ: low shelf, peaking, high shelf, in series. Params:
+        0/1/2 = band frequencies, 3/4/5 = band gains, 6/7/8 = band Qs. A band
+        whose gain sits at 0 dB is bypassed entirely — untouched bands must be
+        bit-transparent, or "just a low shelf" would still smear the highs. */
     static void applyEq (SlotState& state, const Settings& s,
                          juce::AudioBuffer<float>& buffer, int numSamples, double sampleRate)
     {
-        const float k = (juce::jlimit (0.0f, 1.0f, s.p1) - 0.5f);   // -0.5 .. +0.5
-        const float a = 1.0f - std::exp (-2.0f * juce::MathConstants<float>::pi * 800.0f
-                                            / (float) sampleRate);
+        Coeffs coeffs[3];
+        bool   used[3] = { false, false, false };
+
+        for (int band = 0; band < 3; ++band)
+        {
+            const float gainDb = eqGainDb (s.params[(size_t) (3 + band)]);
+
+            if (std::abs (gainDb) > 0.01f)
+            {
+                coeffs[band] = rbjCoeffs (band,
+                                          eqFreq (band, s.params[(size_t) band]),
+                                          eqQ (s.params[(size_t) (6 + band)]),
+                                          gainDb, sampleRate);
+                used[band] = true;
+            }
+        }
 
         auto* l = buffer.getWritePointer (0);
         auto* r = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
 
         for (int n = 0; n < numSamples; ++n)
         {
-            const float x = l[n];
-            state.lpL += a * (x - state.lpL);
-            l[n] = x + k * ((x - state.lpL) - state.lpL);   // + highs, - lows
+            float x[2] = { l[n], r != nullptr ? r[n] : 0.0f };
 
-            if (r != nullptr)
+            for (int band = 0; band < 3; ++band)
             {
-                const float xr = r[n];
-                state.lpR += a * (xr - state.lpR);
-                r[n] = xr + k * ((xr - state.lpR) - state.lpR);
+                if (! used[band])
+                    continue;
+
+                const auto& c = coeffs[band];
+
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    auto& z1 = state.eqZ1[(size_t) band][(size_t) ch];
+                    auto& z2 = state.eqZ2[(size_t) band][(size_t) ch];
+
+                    const float y = c.b0 * x[ch] + z1;
+                    z1 = c.b1 * x[ch] - c.a1 * y + z2;
+                    z2 = c.b2 * x[ch] - c.a2 * y;
+                    x[ch] = y;
+                }
             }
+
+            l[n] = x[0];
+            if (r != nullptr) r[n] = x[1];
         }
     }
 
-    /** Compressor. p1 is one loudness knob: it lowers the threshold (-6 .. -26 dB)
-        AND hardens the ratio (2:1 .. 8:1), because that is how a producer reaches
-        for it. Linked-stereo envelope (max of both channels — never shift the
-        image), peak envelope with 5 ms attack / 150 ms release, and a fixed
-        gentle makeup so louder settings do not also end up quieter. */
+    /** Compressor. Params: 0 threshold (-40..0 dB), 1 ratio (1..20), 2 makeup
+        (0..+18 dB), 3 attack (1..200 ms), 4 release (20..2000 ms), 5 knee
+        width (0..24 dB, the soft-knee quadratic from Reiss & McPherson).
+        Linked-stereo envelope (max of both channels — never shift the image). */
     static void applyComp (SlotState& state, const Settings& s,
                            juce::AudioBuffer<float>& buffer, int numSamples, double sampleRate)
     {
-        const float p         = juce::jlimit (0.0f, 1.0f, s.p1);
-        const float threshold = 0.5f * std::pow (0.1f, p);
-        const float ratio     = 2.0f + p * 6.0f;
-        const float makeup    = 1.0f + 0.35f * p;
+        const float thresholdDb = compThresholdDb (s.params[(size_t) 0]);
+        const float ratio       = compRatio (s.params[(size_t) 1]);
+        const float makeup      = std::pow (10.0f, compMakeupDb (s.params[(size_t) 2]) / 20.0f);
+        const float kneeDb      = compKneeDb (s.params[(size_t) 5]);
 
-        const float att = 1.0f - std::exp (-1.0f / (0.005f * (float) sampleRate));
-        const float rel = 1.0f - std::exp (-1.0f / (0.150f * (float) sampleRate));
+        const float att = 1.0f - std::exp (-1.0f / (compAttackSecs (s.params[(size_t) 3]) * (float) sampleRate));
+        const float rel = 1.0f - std::exp (-1.0f / (compReleaseSecs (s.params[(size_t) 4]) * (float) sampleRate));
 
         auto* l = buffer.getWritePointer (0);
         auto* r = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
@@ -406,8 +721,24 @@ private:
             state.compEnv += (level - state.compEnv) * (level > state.compEnv ? att : rel);
 
             float target = 1.0f;
-            if (state.compEnv > threshold && state.compEnv > 1.0e-6f)
-                target = (threshold + (state.compEnv - threshold) / ratio) / state.compEnv;
+
+            if (state.compEnv > 1.0e-6f)
+            {
+                const float envDb   = 20.0f * std::log10 (state.compEnv);
+                const float over    = envDb - thresholdDb;
+                const float halfW   = kneeDb * 0.5f;
+                float       outDb   = envDb;
+
+                if (2.0f * over < -kneeDb)
+                    outDb = envDb;                                   // below the knee: untouched
+                else if (kneeDb > 0.01f && 2.0f * std::abs (over) <= kneeDb)   // inside the knee
+                    outDb = envDb + (1.0f / ratio - 1.0f)
+                                  * (over + halfW) * (over + halfW) / (2.0f * kneeDb);
+                else if (over > 0.0f)
+                    outDb = thresholdDb + over / ratio;              // above: full compression
+
+                target = std::pow (10.0f, (outDb - envDb) / 20.0f);
+            }
 
             state.compGain += (target - state.compGain) * (target < state.compGain ? att : rel);
 
@@ -417,19 +748,34 @@ private:
         }
     }
 
-    /** Reverb. Schroeder topology, four combs into two allpasses per channel:
-        cheap, decays like a room, and never rings. p1 is room size — it maps
-        to comb feedback, which is what the ear reads as "bigger". Wet level is
-        fixed at a usable 30% blend; the allpass diffusion hides the comb
-        periodicity that a bare comb bank would flutter with. */
+    /** Reverb. Schroeder topology, four combs into two allpasses per channel.
+        Params: 0 decay (0.2..10 s, drives comb feedback RT60-style), 1 size
+        (0.2..1.8x, multiplies each line's effective length), 2 low cut
+        (20..800 Hz), 3 high cut (2..18 kHz), 4 diffusion (allpass coefficient).
+        Wet level is fixed at a usable 30% blend; the R channel's lines stay
+        1.3% detuned so the image opens. */
     static void applyReverb (SlotState& state, const Settings& s,
-                             juce::AudioBuffer<float>& buffer, int numSamples)
+                             juce::AudioBuffer<float>& buffer, int numSamples, double sampleRate)
     {
         constexpr int lines = SlotState::verbLinesPerChannel;
-        const float fb   = 0.70f + juce::jlimit (0.0f, 1.0f, s.p1) * 0.26f;   // 0.70 .. 0.96
-        const float damp = 0.30f;
-        const float dry  = 0.70f;
-        const float wet  = 0.30f * 0.6f;   // four summed combs run hot; scale the bed
+
+        const float decaySecs = reverbDecaySecs (s.params[(size_t) 0]);
+        const float sizeX     = reverbSizeX (s.params[(size_t) 1]);
+        const float lowcutHz  = reverbLowcutHz (s.params[(size_t) 2]);
+        const float highcutHz = reverbHighcutHz (s.params[(size_t) 3]);
+        const float diffusion = juce::jlimit (0.0f, 1.0f, s.params[(size_t) 4]);
+
+        const float apG   = 0.25f + 0.45f * diffusion;   // allpass coefficient
+        const float damp  = 0.30f;
+        const float dry   = 0.70f;
+        const float wet   = 0.30f * 0.6f;   // four summed combs run hot; scale the bed
+        const float sr    = (float) sampleRate;
+
+        // Wet-path cut filters, one-pole, recomputed per block.
+        const float aLp = 1.0f - std::exp (-2.0f * juce::MathConstants<float>::pi
+                                              * juce::jmin (highcutHz, sr * 0.45f) / sr);
+        const float aLc = 1.0f - std::exp (-2.0f * juce::MathConstants<float>::pi
+                                              * juce::jmin (lowcutHz, sr * 0.45f) / sr);
 
         const int channels = juce::jmin (2, buffer.getNumChannels(),
                                          state.verbBuffer.getNumChannels() / lines);
@@ -444,12 +790,18 @@ private:
                 const float in = data[n];
                 float acc = 0.0f;
 
-                for (int i = 0; i < 4; ++i)     // combs, damped feedback
+                for (int i = 0; i < 4; ++i)     // combs, damped feedback, size-scaled
                 {
-                    const int   len  = state.verbLen[(size_t) (base + i)];
+                    const int   len = juce::jlimit (1, state.verbBuffer.getNumSamples(),
+                                                    (int) (state.verbLen[(size_t) (base + i)] * sizeX));
                     auto*       line = state.verbBuffer.getWritePointer (base + i);
                     const int   pos  = state.verbPos[(size_t) (base + i)];
                     const float out  = line[pos];
+
+                    // RT60-style feedback: a line of `len` samples repeats
+                    // len/sr times per second, so g = 10^(-3 len / (T sr)).
+                    const float fb = juce::jlimit (0.0f, 0.98f,
+                        std::pow (10.0f, -3.0f * (float) len / (juce::jmax (0.05f, decaySecs) * sr)));
 
                     auto& damped = state.verbDamp[(size_t) (base + i)];
                     damped = out * (1.0f - damp) + damped * damp;
@@ -460,17 +812,28 @@ private:
 
                 acc *= 0.25f;
 
-                for (int i = 4; i < 6; ++i)     // allpasses, diffusion
+                for (int i = 4; i < 6; ++i)     // allpasses, diffusion-controlled
                 {
-                    const int   len    = state.verbLen[(size_t) (base + i)];
+                    const int   len    = juce::jlimit (1, state.verbBuffer.getNumSamples(),
+                                                       (int) (state.verbLen[(size_t) (base + i)] * sizeX));
                     auto*       line   = state.verbBuffer.getWritePointer (base + i);
                     const int   pos    = state.verbPos[(size_t) (base + i)];
                     const float bufout = line[pos];
 
-                    line[pos] = acc + 0.5f * bufout;
-                    acc = bufout - 0.5f * acc;
+                    line[pos] = acc + apG * bufout;
+                    acc = bufout - apG * acc;
                     state.verbPos[(size_t) (base + i)] = (pos + 1) % len;
                 }
+
+                // Low cut (highpass) then high cut (lowpass) on the wet bed.
+                auto& hpl  = (ch == 0) ? state.verbCutHpL : state.verbCutHpR;
+                auto& lpHi = (ch == 0) ? state.verbCutLpL : state.verbCutLpR;
+
+                hpl  += aLc * (acc  - hpl);
+                acc   = acc - hpl;              // remove what the lowpass holds
+
+                lpHi += aLp * (acc  - lpHi);
+                acc   = lpHi;                   // keep only what the lowpass holds
 
                 data[n] = in * dry + acc * wet;
             }

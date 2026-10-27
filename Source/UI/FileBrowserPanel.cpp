@@ -2,6 +2,7 @@
 
 #include "Media/SampleLibrary.h"
 #include "Util/Text.h"
+#include "Util/Theme.h"
 
 #include <algorithm>
 
@@ -10,12 +11,12 @@ namespace atomic
 
 namespace
 {
-    const juce::Colour kPanelBackground { 0xff14151a };
-    const juce::Colour kDivider         { 0xff262832 };
+    const juce::Colour& kPanelBackground = theme::surface1;
+    const juce::Colour& kDivider        = theme::hairline;
     const juce::Colour kRowHover        { 0x0dffffff };
     const juce::Colour kFileText        { 0xffb9bfcc };
     const juce::Colour kFolderText      { 0xffd6dae2 };
-    const juce::Colour kAccent          { 0xff4fd1c5 };
+    const juce::Colour& kAccent         = theme::accent;
     /** Phase 20: the audition line. Green, because it is "playing", and green
         is the one colour in this palette nothing else uses. */
     const juce::Colour kPreviewAccent   { 0xff7bd88f };

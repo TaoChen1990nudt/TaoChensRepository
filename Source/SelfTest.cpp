@@ -1307,7 +1307,7 @@ juce::String MainComponent::runSelfTest()
         check ("Mixer inserts survive the file",
                parsed8
                  && mxb.getInsert (2, 3).type == fx::Type::delay
-                 && std::abs (mxb.getInsert (2, 3).p2 - 0.6f) < 1.0e-4f
+                 && std::abs (mxb.getInsert (2, 3).params[(size_t) 1] - 0.6f) < 1.0e-4f
                  && mxb.getInsert (MixerModel::masterChannel, 0).type == fx::Type::air
                  && mxb.getInsert (0, 3).type == fx::Type::none,
                juce::String (loadedInsertName8 (mxb)));
@@ -7764,13 +7764,15 @@ juce::String MainComponent::runSelfTest()
             return (float) std::sqrt (acc / (double) count);
         };
 
-        //-- EQ：倾斜改变的是高频/低频的比重，不是总音量 --------------------
+        //-- EQ：三段互相独立，没动的频段必须透明 --------------------------
         {
-            // 80 Hz + 6 kHz, equal amplitude. A tilt EQ must move the ratio of
-            // the two bands in opposite directions; a mere gain change cannot.
-            auto tilted = [sr, n] (float p1)
+            // 80 Hz + 6 kHz, equal amplitude. Boosting ONE band must move only
+            // that band's share; a band left at 0 dB must be bit-transparent,
+            // not "about the same" — the shelf bypass exists for exactly that.
+            auto eqRender = [sr, n] (const std::array<float, fx::maxParams>& params)
             {
                 juce::AudioBuffer<float> b (2, n);
+                b.clear();   // AudioBuffer's (ch, samples) ctor mallocs WITHOUT zeroing
                 for (int ch = 0; ch < 2; ++ch)
                     for (int i = 0; i < n; ++i)
                         b.setSample (ch, i,
@@ -7782,8 +7784,8 @@ juce::String MainComponent::runSelfTest()
                 fx::ChainState st;
                 st.prepare (sr);
                 fx::Settings s;
-                s.type = fx::Type::eq;
-                s.p1   = p1;
+                s.type   = fx::Type::eq;
+                s.params = params;
                 st.processSlot (0, s, b, n, sr);
                 return b;
             };
@@ -7805,23 +7807,73 @@ juce::String MainComponent::runSelfTest()
                 return (float) std::sqrt (hi / juce::jmax (1.0e-12, lo));
             };
 
-            const float ratioDown = bandRatio (tilted (0.0f));   // 偏低
-            const float ratioUp   = bandRatio (tilted (1.0f));   // 偏高
+            const auto flatParams = []
+            { std::array<float, fx::maxParams> a; a.fill (0.5f); return a; }();
 
-            check (utf8 ("EQ 拉高倾斜后，高频对低频的比重真的变了（不是只改音量）"),
-                   ratioDown > 1.0e-4f && ratioUp > ratioDown * 2.0f,
-                   utf8 ("倾斜低 ") + juce::String (ratioDown, 3)
-                     + utf8(" / 倾斜高 ") + juce::String (ratioUp, 3)
-                     + utf8(" / 比 ") + juce::String (ratioUp / juce::jmax (1.0e-9f, ratioDown), 2));
+            const float ratioFlat = bandRatio (eqRender (flatParams));
+
+            // 透明基准：同一段信号不过任何效果器
+            juce::AudioBuffer<float> untouched (2, n);
+            untouched.clear();
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < n; ++i)
+                    untouched.setSample (ch, i,
+                        (float) (0.4 * std::sin (2.0 * juce::MathConstants<double>::pi * 80.0
+                                                   * (double) i / sr)
+                               + 0.4 * std::sin (2.0 * juce::MathConstants<double>::pi * 6000.0
+                                                   * (double) i / sr)));
+            const float ratioRaw = bandRatio (untouched);
+
+            auto lowUp  = flatParams;  lowUp[(size_t) 3]  = 1.0f;   // 低频增益 +12 dB
+            auto highUp = flatParams;  highUp[(size_t) 5] = 1.0f;   // 高频增益 +12 dB
+
+            const float ratioLowBoost  = bandRatio (eqRender (lowUp));
+            const float ratioHighBoost = bandRatio (eqRender (highUp));
+
+            check (utf8 ("三段 EQ：全平时透明，只提低频/只提高频各动各的频段"),
+                   std::abs (ratioFlat - ratioRaw) < 0.02f * juce::jmax (0.01f, ratioRaw)
+                     && ratioLowBoost  < ratioFlat * 0.45f
+                     && ratioHighBoost > ratioFlat * 2.0f,
+                   utf8 ("全平 ") + juce::String (ratioFlat, 3)
+                     + utf8(" / 原始 ") + juce::String (ratioRaw, 3)
+                     + utf8(" / 提低 ") + juce::String (ratioLowBoost, 3)
+                     + utf8(" / 提高 ") + juce::String (ratioHighBoost, 3));
+
+            // Q 值：中频同样 +12 dB，窄 Q 只动峰边一小圈，宽 Q 连 3 kHz 一起抬
+            auto midBoost = [] (float q)
+            {
+                std::array<float, fx::maxParams> a;
+                a.fill (0.5f);
+                a[(size_t) 1] = 0.5f;   // 中频频率 0.5 = 1000 Hz
+                a[(size_t) 4] = 1.0f;   // 中频增益 +12 dB
+                a[(size_t) 7] = q;
+                return a;
+            };
+
+            const float rmsNarrowQ = rmsRange (eqRender (midBoost (1.0f)), n / 4, n);
+            const float rmsWideQ   = rmsRange (eqRender (midBoost (0.0f)), n / 4, n);
+
+            check (utf8 ("中频 Q 值真的到达 DSP：宽 Q 把 3 kHz 也抬了起来，窄 Q 没有"),
+                   rmsWideQ > rmsNarrowQ * 1.04f,
+                   utf8 ("窄 Q ") + juce::String (rmsNarrowQ, 4)
+                     + utf8(" / 宽 Q ") + juce::String (rmsWideQ, 4));
         }
 
-        //-- 压缩：电平依赖，不是音量钮 -------------------------------------
+        //-- 压缩：阈值/比率/拐点，各是各的旋钮 -----------------------------
         {
-            fx::Settings s;
-            s.type = fx::Type::comp;
-            s.p1   = 0.7f;
+            auto compSettings = [] (float threshold, float ratio, float makeup, float knee)
+            {
+                fx::Settings s;
+                s.type = fx::Type::comp;
+                s.params.fill (0.5f);
+                s.params[(size_t) 0] = threshold;   // -40 .. 0 dB
+                s.params[(size_t) 1] = ratio;       // 1 .. 20
+                s.params[(size_t) 2] = makeup;      // 0 .. +18 dB
+                s.params[(size_t) 5] = knee;        // 0 .. 24 dB
+                return s;
+            };
 
-            auto render = [sr, n, &s] (float amp)
+            auto render = [sr, n] (const fx::Settings& s, float amp)
             {
                 juce::AudioBuffer<float> in (2, n), out (2, n);
                 for (int ch = 0; ch < 2; ++ch)
@@ -7843,43 +7895,106 @@ juce::String MainComponent::runSelfTest()
                      / juce::jmax (1.0e-9f, rmsRange (io.first, n / 2, n));
             };
 
-            const float gainQuiet = inOutGain (render (0.05f));
-            const float gainLoud  = inOutGain (render (0.90f));
+            const auto thrasher = compSettings (0.0f, 1.0f, 0.0f, 0.5f);
+                                                                  // 阈值 -40 dB，20:1，无补偿
+            const float gainTiny = inOutGain (render (thrasher, 0.004f));   // -48 dB：阈值之下
+            const float gainLoud = inOutGain (render (thrasher, 0.90f));
 
-            check (utf8 ("压缩对大声更狠、对小声几乎不动（电平依赖，不是音量钮）"),
-                   gainQuiet > 0.9f && gainLoud < 0.75f && gainLoud < gainQuiet * 0.7f,
-                   utf8 ("小声增益 ") + juce::String (gainQuiet, 3)
+            check (utf8 ("压缩：阈值之下的不动，阈值之上的狠压（阈值与比率是真的）"),
+                   gainTiny > 0.9f && gainLoud < 0.75f && gainLoud < gainTiny * 0.7f,
+                   utf8 ("小声增益 ") + juce::String (gainTiny, 3)
                      + utf8(" / 大声增益 ") + juce::String (gainLoud, 3));
+
+            // 拐点：比阈值略低的电平上，硬拐点完全不压，软拐点已经开始压
+            const float gainHard = inOutGain (render (compSettings (0.0f, 1.0f, 0.0f, 0.0f), 0.0095f));
+            const float gainSoft = inOutGain (render (compSettings (0.0f, 1.0f, 0.0f, 1.0f), 0.0095f));
+
+            check (utf8 ("拐点软硬度是真的：同一电平，硬拐点没压，软拐点已开始压"),
+                   gainHard > 0.95f && gainSoft < gainHard * 0.9f,
+                   utf8 ("硬 ") + juce::String (gainHard, 3)
+                     + utf8(" / 软 ") + juce::String (gainSoft, 3));
         }
 
-        //-- 混响：冲激之后有衰减的尾巴 -------------------------------------
+        //-- 混响：尾巴、长度、低切，各归各 ---------------------------------
         {
-            fx::ChainState st;
-            st.prepare (sr);
-            fx::Settings s;
-            s.type = fx::Type::reverb;
-            s.p1   = 0.8f;
+            auto flatReverb = []
+            { std::array<float, fx::maxParams> a; a.fill (0.5f); return a; }();
 
-            juce::AudioBuffer<float> impulse (2, n);
-            impulse.clear();   // AudioBuffer's (channels, samples) ctor mallocs
-                               // WITHOUT zeroing — measured, not assumed.
-            impulse.setSample (0, 0, 0.8f);
-            impulse.setSample (1, 0, 0.8f);
-            st.processSlot (0, s, impulse, n, sr);
+            auto impulseTail = [sr, n] (const std::array<float, fx::maxParams>& params)
+            {
+                juce::AudioBuffer<float> impulse (2, n);
+                impulse.clear();   // AudioBuffer's (channels, samples) ctor mallocs
+                                   // WITHOUT zeroing — measured, not assumed.
+                impulse.setSample (0, 0, 0.8f);
+                impulse.setSample (1, 0, 0.8f);
 
-            const float direct = impulse.getSample (0, 0);
-            const float early  = rmsRange (impulse, (int) (0.10 * sr), (int) (0.30 * sr));
-            const float late   = rmsRange (impulse, (int) (0.35 * sr), (int) (0.49 * sr));
+                fx::ChainState st;
+                st.prepare (sr);
+                fx::Settings s;
+                s.type   = fx::Type::reverb;
+                s.params = params;
+                st.processSlot (0, s, impulse, n, sr);
+                return impulse;
+            };
 
-            check (utf8 ("混响：冲激直通之后还有可闻的尾巴"),
-                   direct > 0.4f && direct < 0.75f && early > 5.0e-4f,
-                   utf8 ("直通 ") + juce::String (direct, 3)
-                     + utf8(" / 早尾 ") + juce::String (early, 5));
+            {
+                const auto impulse = impulseTail (flatReverb);
 
-            check (utf8 ("混响尾巴在衰减，不是嗡嗡不停"),
-                   late < early * 0.8f,
-                   utf8 ("早尾 ") + juce::String (early, 5)
-                     + utf8(" / 晚尾 ") + juce::String (late, 5));
+                const float direct = impulse.getSample (0, 0);
+                const float early  = rmsRange (impulse, (int) (0.10 * sr), (int) (0.30 * sr));
+                const float late   = rmsRange (impulse, (int) (0.35 * sr), (int) (0.49 * sr));
+
+                check (utf8 ("混响：冲激直通之后还有可闻的尾巴"),
+                       direct > 0.4f && direct < 0.75f && early > 5.0e-4f,
+                       utf8 ("直通 ") + juce::String (direct, 3)
+                         + utf8(" / 早尾 ") + juce::String (early, 5));
+
+                check (utf8 ("混响尾巴在衰减，不是嗡嗡不停"),
+                       late < early * 0.8f,
+                       utf8 ("早尾 ") + juce::String (early, 5)
+                         + utf8(" / 晚尾 ") + juce::String (late, 5));
+
+                // 长度旋钮：短混响（0.2 s）的晚尾要比长混响（10 s）小得多
+                auto shortDecay = flatReverb; shortDecay[(size_t) 0] = 0.0f;
+                auto longDecay  = flatReverb; longDecay[(size_t) 0]  = 1.0f;
+
+                const float lateShort = rmsRange (impulseTail (shortDecay),
+                                                  (int) (0.35 * sr), (int) (0.49 * sr));
+                const float lateLong  = rmsRange (impulseTail (longDecay),
+                                                  (int) (0.35 * sr), (int) (0.49 * sr));
+
+                check (utf8 ("混响长度旋钮是真的：短混响的晚尾远小于长混响"),
+                       lateLong > lateShort * 3.0f,
+                       utf8 ("短 ") + juce::String (lateShort, 5)
+                         + utf8(" / 长 ") + juce::String (lateLong, 5));
+
+                // 低切：800 Hz 低切把尾巴里的低频段切掉一大截
+                auto cutOff = flatReverb; cutOff[(size_t) 2] = 0.0f;   // 20 Hz ≈ 不切
+                auto cutOn  = flatReverb; cutOn[(size_t) 2]  = 1.0f;   // 800 Hz
+
+                auto lowBand = [sr] (const juce::AudioBuffer<float>& b)
+                {
+                    constexpr double srD = 44100.0;
+                    const float a = 1.0f - std::exp (-2.0f * juce::MathConstants<float>::pi
+                                                        * 200.0f / (float) srD);
+                    double acc = 0.0;
+                    float lp = 0.0f;
+                    for (int i = (int) (0.05 * sr); i < (int) (0.49 * sr); ++i)
+                    {
+                        lp += a * (b.getSample (0, i) - lp);
+                        acc += (double) lp * lp;
+                    }
+                    return (float) std::sqrt (acc / juce::jmax (1, (int) (0.44 * sr)));
+                };
+
+                const float lowNoCut = lowBand (impulseTail (cutOff));
+                const float lowCut   = lowBand (impulseTail (cutOn));
+
+                check (utf8 ("低切频率是真的：800 Hz 低切把尾巴的低频段切掉"),
+                       lowCut < lowNoCut * 0.6f && lowNoCut > 1.0e-5f,
+                       utf8 ("不切 ") + juce::String (lowNoCut, 6)
+                         + utf8(" / 切 ") + juce::String (lowCut, 6));
+            }
         }
 
         //-- 枚举追加不串位：vst=5 被老工程冻结，新三件只能排后面 ------------
@@ -7924,7 +8039,7 @@ juce::String MainComponent::runSelfTest()
             };
 
             mm.setInsertType (0, 0, fx::Type::reverb);
-            mm.setInsertParam (0, 0, 0.8f, 0.0f);
+            mm.setInsertParam (0, 0, 0, 0.8f);   // 混响长度 0.8 ≈ 5.3 s decay
             const float withVerb = tailRms();
 
             mm.setInsertEnabled (0, 0, false);
@@ -7934,6 +8049,52 @@ juce::String MainComponent::runSelfTest()
                    withVerb > 5.0e-4f && withVerb > bypassed * 5.0f,
                    utf8 ("混响开 ") + juce::String (withVerb, 5)
                      + utf8(" / 旁通 ") + juce::String (bypassed, 6));
+        }
+        //-- Phase 47: 效果器编辑窗口——标题有名字、窗口随参数长高、按键有转发 --
+        {
+            // 参数表是 DSP / 编辑窗口 / 机架三方共用的表，先把表本身验了
+            check (utf8 ("三个新效果器的参数表：数量与名字对得上"),
+                   fx::numParams (fx::Type::eq) == 9
+                     && fx::numParams (fx::Type::comp) == 6
+                     && fx::numParams (fx::Type::reverb) == 5
+                     && fx::paramName (fx::Type::eq, 0) == utf8 ("低频频率")
+                     && fx::paramName (fx::Type::eq, 8) == utf8 ("高频Q值")
+                     && fx::paramName (fx::Type::comp, 5) == utf8 ("拐点软硬度")
+                     && fx::paramName (fx::Type::reverb, 4) == utf8 ("散射度"),
+                   utf8 ("EQ 9 / COMP 6 / REVERB 5"));
+
+            // 编辑窗口：EQ 的窗口要比混响的高，标题不再是空白的“效果器”
+            const bool titleNamed = ! InsertEditorContent::effectName (fx::Type::eq).isEmpty()
+                                      && InsertEditorContent::effectName (fx::Type::comp)
+                                           == utf8 ("压缩");
+
+            check (utf8 ("内置效果器编辑窗口：标题有名字，窗口高度跟着参数数量走"),
+                   titleNamed
+                     && InsertEditorContent::preferredHeightFor (9)
+                          > InsertEditorContent::preferredHeightFor (5),
+                   utf8 ("9 行高 ") + juce::String (InsertEditorContent::preferredHeightFor (9))
+                     + utf8(" / 5 行高 ") + juce::String (InsertEditorContent::preferredHeightFor (5)));
+
+            // 按键转发：窗口是独立的顶层组件，不装转发器空格和键盘就断
+            mixer.setInsertType (0, 1, fx::Type::eq);
+            openInsertEditor (0, 1);
+
+            const bool opened = ! insertWindows.empty()
+                                  && insertWindows.back() != nullptr
+                                  && insertWindows.back()->getChannel() == 0
+                                  && insertWindows.back()->getSlot() == 1;
+
+            const bool forwards = opened && insertWindows.back()->hasKeyForwarder();
+
+            check (utf8 ("效果器编辑窗口开着时，按键也被接管（空格走带 / 键盘弹音）"),
+                   opened && forwards,
+                   opened ? (forwards ? utf8 ("窗口已接管按键") : utf8 ("窗口没有按键转发"))
+                          : utf8 ("窗口没打开"));
+
+            if (opened)
+                closeInsertEditor (insertWindows.back().get());
+
+            mixer.setInsertType (0, 1, fx::Type::none);   // 把 fixture 还回去
         }
     }
 

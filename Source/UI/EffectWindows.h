@@ -78,13 +78,19 @@ class InsertEditorContent final : public juce::Component,
 public:
     InsertEditorContent (MixerModel& mixerModel, int channel, int slot);
 
+    /** The window title's middle part, e.g. "均衡" / "混响". Public so the
+        window shell can name itself the same thing the content paints. */
+    static juce::String effectName (fx::Type type);
+
+    /** Window height for `numParams` knob rows: header band + rows + footer. */
+    static int preferredHeightFor (int numParams);
+
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
 
-    static constexpr int preferredWidth  = ui::px (420);
-    static constexpr int preferredHeight = ui::px (168);
+    static constexpr int preferredWidth = ui::px (420);
 
 private:
     void timerCallback() override;
@@ -93,7 +99,7 @@ private:
     juce::Rectangle<int> getBarBounds (int index) const;
     juce::Rectangle<int> getPowerBounds() const;
 
-    /** How many parameters this effect has (delay is the only one with two). */
+    /** How many knobs this effect has (EQ nine, comp six, reverb five). */
     int getNumParams() const;
     float getParam (int index) const;
     void  setParam (int index, float value);
@@ -120,11 +126,19 @@ public:
     int getChannel() const noexcept { return channel; }
     int getSlot() const noexcept    { return slot; }
 
+    /** Phase 47: same contract as PluginEditorWindow. This window is its own
+        top-level component, so a key pressed here never reaches MainComponent:
+        空格 stopped starting the transport and the computer keyboard stopped
+        playing notes the moment the user clicked an effect's editor. */
+    void setKeyForwarder (juce::KeyListener* listener);
+    bool hasKeyForwarder() const noexcept { return keyForwarder != nullptr; }
+
     void closeButtonPressed() override;
 
 private:
     int channel = 0;
     int slot    = 0;
+    juce::KeyListener* keyForwarder = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (InsertEditorWindow)
 };

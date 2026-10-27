@@ -3,78 +3,40 @@
 #include "Util/Metrics.h"
 
 #include "Util/Text.h"
+#include "Util/Theme.h"
 
 namespace atomic
 {
 
 namespace
 {
-    const juce::Colour kBackground { 0xff14151a };
-    const juce::Colour kPanel      { 0xff1b1d24 };
-    const juce::Colour kText       { 0xff9aa0ad };
-    const juce::Colour kAccent     { 0xff4fd1c5 };
+    const juce::Colour& kBackground = theme::surface1;
+    const juce::Colour& kPanel     = theme::surface3;
+    const juce::Colour& kText      = theme::inkMuted;
+    const juce::Colour& kAccent    = theme::accent;
+}
 
-    juce::String builtInName (fx::Type type)
+juce::String InsertEditorContent::effectName (fx::Type type)
+{
+    switch (type)
     {
-        switch (type)
-        {
-            case fx::Type::lowPass: return utf8 ("低通滤波");
-            case fx::Type::drive:   return utf8 ("驱动");
-            case fx::Type::delay:   return utf8 ("延迟");
-            case fx::Type::air:     return utf8 ("空气感");
-            case fx::Type::vst:     return "VST3";
-            case fx::Type::none:
-            default:                return utf8 ("空");
-        }
+        case fx::Type::lowPass: return utf8 ("低通滤波");
+        case fx::Type::drive:   return utf8 ("驱动");
+        case fx::Type::delay:   return utf8 ("延迟");
+        case fx::Type::air:     return utf8 ("空气感");
+        case fx::Type::eq:      return utf8 ("均衡");
+        case fx::Type::comp:    return utf8 ("压缩");
+        case fx::Type::reverb:  return utf8 ("混响");
+        case fx::Type::vst:     return "VST3";
+        case fx::Type::none:
+        default:                return utf8 ("空");
     }
+}
 
-    juce::String paramLabel (fx::Type type, int index)
-    {
-        if (index == 1)
-            return utf8 ("反馈");
-
-        switch (type)
-        {
-            case fx::Type::lowPass: return utf8 ("截止");
-            case fx::Type::drive:   return utf8 ("驱动");
-            case fx::Type::delay:   return utf8 ("时间");
-            case fx::Type::air:     return utf8 ("强度");
-            default:                return "P" + juce::String (index + 1);
-        }
-    }
-
-    /** The number the DSP actually uses, not a 0..1 bar. A control that says
-        "0.73" tells the user nothing about how bright the filter is. */
-    juce::String paramValueText (fx::Type type, int index, float v)
-    {
-        const float clamped = juce::jlimit (0.0f, 1.0f, v);
-
-        if (index == 1)
-            return juce::String (juce::roundToInt (clamped * 100.0f)) + "%";
-
-        switch (type)
-        {
-            case fx::Type::lowPass:
-            {
-                const float hz = 120.0f * std::pow (2.0f, clamped * 7.2f);
-
-                return hz >= 1000.0f ? juce::String (hz / 1000.0f, 1) + " kHz"
-                                     : juce::String (juce::roundToInt (hz)) + " Hz";
-            }
-
-            case fx::Type::drive:
-                return juce::String (1.0f + clamped * 11.0f, 1) + "x";
-
-            case fx::Type::delay:
-                return juce::String (juce::roundToInt (35.0f + clamped * 180.0f)) + " ms";
-
-            case fx::Type::air:
-                return juce::String (0.6f + clamped * 2.4f, 1) + "x";
-
-            default:
-                return juce::String (juce::roundToInt (clamped * 100.0f)) + "%";
-        }
-    }
+int InsertEditorContent::preferredHeightFor (int numParams)
+{
+    // Header band ends at 54; each knob row takes 46; the footer needs ~30.
+    return atomic::ui::px (62) + numParams * atomic::ui::px (46) + atomic::ui::px (34);
 }
 
 //==============================================================================
@@ -152,30 +114,22 @@ InsertEditorContent::InsertEditorContent (MixerModel& mixerModel, int channelToU
 
 int InsertEditorContent::getNumParams() const
 {
-    return mixer.getInsert (channel, slot).type == fx::Type::delay ? 2 : 1;
+    return fx::numParams (mixer.getInsert (channel, slot).type);
 }
 
 float InsertEditorContent::getParam (int index) const
 {
-    const auto& insert = mixer.getInsert (channel, slot);
-
-    return index == 1 ? insert.p2 : insert.p1;
+    return mixer.getInsert (channel, slot).params[(size_t) juce::jlimit (0, fx::maxParams - 1, index)];
 }
 
 void InsertEditorContent::setParam (int index, float value)
 {
-    const auto& insert = mixer.getInsert (channel, slot);
-    const float v = juce::jlimit (0.0f, 1.0f, value);
-
-    if (index == 1)
-        mixer.setInsertParam (channel, slot, insert.p1, v);
-    else
-        mixer.setInsertParam (channel, slot, v, insert.p2);
+    mixer.setInsertParam (channel, slot, index, value);
 }
 
 juce::String InsertEditorContent::getParamName (int index) const
 {
-    return paramLabel (mixer.getInsert (channel, slot).type, index);
+    return fx::paramName (mixer.getInsert (channel, slot).type, index);
 }
 
 juce::Rectangle<int> InsertEditorContent::getParamRowBounds (int index) const
@@ -208,7 +162,7 @@ void InsertEditorContent::paint (juce::Graphics& g)
     //-- Header ---------------------------------------------------------------
     g.setColour (juce::Colours::white.withAlpha (0.92f));
     g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (15.0f)).withStyle ("Bold")));
-    g.drawText (builtInName (insert.type),
+    g.drawText (effectName (insert.type),
                 juce::Rectangle<int> (atomic::ui::px (20), atomic::ui::px (12),
                                       atomic::ui::px (240), atomic::ui::px (24)),
                 juce::Justification::centredLeft, false);
@@ -272,7 +226,7 @@ void InsertEditorContent::paint (juce::Graphics& g)
 
         g.setColour (juce::Colours::white.withAlpha (0.82f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (11.0f))));
-        g.drawText (paramValueText (insert.type, i, value),
+        g.drawText (fx::paramText (insert.type, i, value),
                     row.withTrimmedLeft (row.getWidth() - atomic::ui::px (100))
                        .withWidth (atomic::ui::px (100)),
                     juce::Justification::centredRight, false);
@@ -339,16 +293,34 @@ void InsertEditorContent::timerCallback()
 
 //==============================================================================
 InsertEditorWindow::InsertEditorWindow (MixerModel& mixerModel, int channelToUse, int slotToUse)
-    : juce::DocumentWindow (utf8 ("AtomicDAW · 效果器"), kBackground,
+    : juce::DocumentWindow (utf8 ("AtomicDAW · ")
+                              + InsertEditorContent::effectName (mixerModel.getInsert (channelToUse, slotToUse).type),
+                            kBackground,
                             juce::DocumentWindow::closeButton),
       channel (channelToUse), slot (slotToUse)
 {
     setUsingNativeTitleBar (true);
     setContentOwned (new InsertEditorContent (mixerModel, channel, slot), false);
     setResizable (true, false);
-    setResizeLimits (360, 150, 900, 360);
-    centreWithSize (InsertEditorContent::preferredWidth, InsertEditorContent::preferredHeight);
+    // EQ carries nine knobs; the window has to grow with the effect, not clip it.
+    setResizeLimits (360, 150, 900, InsertEditorContent::preferredHeightFor (fx::maxParams) + 200);
+    centreWithSize (InsertEditorContent::preferredWidth,
+                    InsertEditorContent::preferredHeightFor (
+                        fx::numParams (mixerModel.getInsert (channel, slot).type)));
     setVisible (true);
+}
+
+void InsertEditorWindow::setKeyForwarder (juce::KeyListener* listener)
+{
+    keyForwarder = listener;
+
+    if (listener == nullptr)
+        return;
+
+    addKeyListener (listener);
+
+    if (auto* content = getContentComponent())
+        content->addKeyListener (listener);
 }
 
 void InsertEditorWindow::closeButtonPressed()

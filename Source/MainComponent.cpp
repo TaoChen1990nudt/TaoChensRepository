@@ -2,6 +2,7 @@
 
 #include "Util/Metrics.h"
 #include "Util/SharedRules.h"
+#include "Util/Theme.h"
 
 #include "Model/AutomationStack.h"
 #include "Model/Routing.h"
@@ -26,11 +27,14 @@ namespace
                  + fx::typeName (m.getInsert (MixerModel::masterChannel, 0).type);
     }
 
-    const juce::Colour kAppBackground { 0xff0d0e11 };
-    const juce::Colour kTopBar        { 0xff16171c };
-    const juce::Colour kDivider       { 0xff262832 };
-    const juce::Colour kAccent        { 0xff4fd1c5 };
-    const juce::Colour kPlayhead      { 0xffff5f6d };
+    // Step 1 of the palette convergence: these four were the only values in the
+    // file, and every one of them already matched a `theme` role. Aliased
+    // rather than renamed so the 20-odd use sites below read unchanged.
+    const juce::Colour& kAppBackground = theme::bgApp;
+    const juce::Colour& kTopBar        = theme::topBar;
+    const juce::Colour& kDivider       = theme::hairline;
+    const juce::Colour& kAccent        = theme::accent;
+    const juce::Colour& kPlayhead      = theme::record;
 
     juce::Font boldFont (float height)
     {
@@ -2272,6 +2276,13 @@ void MainComponent::openInsertEditor (int channel, int slot)
     InsertEditorWindow* raw = window.get();
 
     window->onCloseRequest = [this, raw] { closeInsertEditor (raw); };
+
+    // Phase 47: the built-in effect's window is its own top-level component —
+    // without the forwarder, space stopped starting the transport and the
+    // keyboard stopped playing notes the moment the user opened an effect.
+    // Same instance as the mixer and plugin windows: two instances would be
+    // two key tables, and a note held in one would never release in another.
+    window->setKeyForwarder (&pluginForwarder);
 
     insertWindows.push_back (std::move (window));
 }

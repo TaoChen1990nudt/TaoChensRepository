@@ -156,6 +156,13 @@ void MixerModel::setInsertType (int channel, int slot, fx::Type type)
 
     insert.type = type;
     insert.enabled = (type != fx::Type::none);
+
+    // Phase 47: every knob starts at its type's default, not at whatever the
+    // PREVIOUS effect left there — reusing a slot for an EQ must not inherit
+    // the delay's feedback value.
+    for (int i = 0; i < fx::maxParams; ++i)
+        insert.params[(size_t) i] = fx::defaultParam (type, i);
+
     notify();
 }
 
@@ -163,8 +170,21 @@ void MixerModel::setInsertParam (int channel, int slot, float p1, float p2)
 {
     auto& insert = inserts[(size_t) clampChannel (channel)][(size_t) clampSlot (slot)];
 
-    insert.p1 = juce::jlimit (0.0f, 1.0f, p1);
-    insert.p2 = juce::jlimit (0.0f, 1.0f, p2);
+    insert.params[(size_t) 0] = juce::jlimit (0.0f, 1.0f, p1);
+    insert.params[(size_t) 1] = juce::jlimit (0.0f, 1.0f, p2);
+    notify();
+}
+
+void MixerModel::setInsertParam (int channel, int slot, int index, float value)
+{
+    auto& insert = inserts[(size_t) clampChannel (channel)][(size_t) clampSlot (slot)];
+
+    // Clamped against the TYPE's count: an EQ has nine knobs, a drive one —
+    // a stray index 4 on a drive must not write past the knobs that exist.
+    if (index < 0 || index >= fx::numParams (insert.type))
+        return;
+
+    insert.params[(size_t) index] = juce::jlimit (0.0f, 1.0f, value);
     notify();
 }
 

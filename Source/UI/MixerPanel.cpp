@@ -4,6 +4,7 @@
 
 #include "UI/MixerLook.h"
 #include "Util/Text.h"
+#include "Util/Theme.h"
 #include "Util/ValueMenu.h"
 
 namespace atomic
@@ -11,14 +12,14 @@ namespace atomic
 
 namespace
 {
-    const juce::Colour kBackground { 0xff101114 };
+    const juce::Colour& kBackground = theme::surface0;
     const juce::Colour kPanel      { 0xff15161b };
     const juce::Colour kStrip      { 0xff191b21 };
-    const juce::Colour kOutline    { 0xff2c2e37 };
-    const juce::Colour kText       { 0xff9aa0ad };
-    const juce::Colour kAccent     { 0xff4fd1c5 };
+    const juce::Colour& kOutline   = theme::surface4;
+    const juce::Colour& kText      = theme::inkMuted;
+    const juce::Colour& kAccent    = theme::accent;
     const juce::Colour kMute       { 0xffffb020 };
-    const juce::Colour kSolo       { 0xff5ecf9a };
+    const juce::Colour& kSolo      = theme::live;
     const juce::Colour kMaster     { 0xffe2e8f0 };
 
     juce::String dbText (float db)
@@ -1158,7 +1159,7 @@ void MixerPanel::drawRack (juce::Graphics& g)
         {
             g.setColour (channelColour.withAlpha (on ? 0.85f : 0.35f));
             g.fillRoundedRectangle (param.withHeight (ui::pf (5)).withY (param.getCentreY() - ui::pf (2.5))
-                                        .withWidth (param.getWidth() * juce::jlimit (0.0f, 1.0f, insert.p1)),
+                                        .withWidth (param.getWidth() * juce::jlimit (0.0f, 1.0f, insert.params[(size_t) 0])),
                                     ui::pf (2.5));
 
             g.setColour (juce::Colours::white.withAlpha (0.35f));
@@ -1330,7 +1331,7 @@ void MixerPanel::mouseDown (const juce::MouseEvent& e)
                 const auto param = getInsertParamBounds (slot).toFloat();
                 const float p1 = juce::jlimit (0.0f, 1.0f,
                                                (pos.x - param.getX()) / juce::jmax (1.0f, param.getWidth()));
-                mixer.setInsertParam (selectedChannel, slot, p1, insert.p2);
+                mixer.setInsertParam (selectedChannel, slot, p1, insert.params[(size_t) 1]);
                 return;
             }
 
@@ -1457,7 +1458,7 @@ void MixerPanel::mouseDrag (const juce::MouseEvent& e)
         const auto& insert = mixer.getInsert (selectedChannel, dragSlot);
         const float p1 = juce::jlimit (0.0f, 1.0f,
                                        (e.position.x - param.getX()) / juce::jmax (1.0f, param.getWidth()));
-        mixer.setInsertParam (selectedChannel, dragSlot, p1, insert.p2);
+        mixer.setInsertParam (selectedChannel, dragSlot, p1, insert.params[(size_t) 1]);
         return;
     }
 

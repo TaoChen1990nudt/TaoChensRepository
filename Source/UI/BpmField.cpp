@@ -3,6 +3,7 @@
 #include "Util/Metrics.h"
 
 #include "Util/Text.h"
+#include "Util/Theme.h"
 #include "Util/ValueMenu.h"
 
 namespace atomic
@@ -13,9 +14,9 @@ namespace
     const juce::Colour kFieldBg    { 0xff1e2027 };
     const juce::Colour kFieldHover { 0xff262932 };
     const juce::Colour kFieldEdge   { 0xff333744 };
-    const juce::Colour kLabel       { 0xff7d8492 };
-    const juce::Colour kValue       { 0xffeef1f6 };
-    const juce::Colour kAccent      { 0xff4fd1c5 };
+    const juce::Colour& kLabel      = theme::inkFaint;
+    const juce::Colour& kValue      = theme::ink;
+    const juce::Colour& kAccent     = theme::accent;
 
     constexpr int kArrowColumnWidth = atomic::ui::px (18);
 }

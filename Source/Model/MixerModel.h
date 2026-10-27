@@ -152,6 +152,9 @@ public:
     void setInsertPlugin (int channel, int slot, const juce::PluginDescription& description,
                           int instanceId);
     void setInsertParam (int channel, int slot, float p1, float p2);
+    /** Phase 47: one knob of the multi-parameter effects (EQ has nine).
+        `index` is clamped against the type's own count, not maxParams. */
+    void setInsertParam (int channel, int slot, int index, float value);
     void setInsertEnabled (int channel, int slot, bool shouldBeEnabled);
 
     /** Phase 43: moves an insert to another slot, sliding the ones in between.

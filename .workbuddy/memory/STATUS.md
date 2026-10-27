@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-27 · 对应 **Phase 46**（混音链三件套：EQ / 压缩 / 混响）
+> 最后更新：2026-10-27 · 对应 **Phase 47**（效果器多参数化 + 编辑窗口按键）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**。
 > 规则查 `MEMORY.md`，制度细节查 `REFERENCE.md`，踩过的坑查 `PITFALLS.md`。
 
@@ -18,10 +18,10 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 46**（混音链三件套 EQ/COMP/REVERB + 汇总行挪位修门禁）；P44–45 见日志 |
-| 自检 | **427 ALL PASSED / 0 FAIL，失败时退出码 1**（P46 又咬出两处真问题：AudioBuffer 不清零、汇总行打在中段） |
+| 已完成阶段 | **Phase 47**（EQ 三段九参 / COMP 六参 / REVERB 五参 / 编辑窗口标题与按键转发）；P44–46 见日志 |
+| 自检 | **434 ALL PASSED / 0 FAIL，失败时退出码 1**（P47 咬测：EQ 旁通破坏 + 双窗转发器摘除 → 4 FAIL + EXIT=1） |
 | 编译 | 零 error 零 warning |
-| `formatVersion` | **19**（P44 不动格式） |
+| `formatVersion` | **20**（insert 写 `params` 逗号串全参数，读回落 p1/p2） |
 | 可执行 | `build/AtomicDAW_artefacts/Release/AtomicDAW.exe` |
 | 技术栈 | JUCE 8.0.4（FetchContent）+ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + C++17 |
 | 源码规模 | `Source/` 下 67 个 .cpp/.h，分 Model / Audio / UI / Util / Media |
@@ -67,6 +67,7 @@
 | P44 | 自检退出码门禁 / runSelfTest 搬家 / SharedRules.h / const_cast 设计债的发现 | `memory/2026-10-27.md` |
 | P45 | const 设计债还清：findNote const / 五个双版本方法 / 30 处 const_cast 归零 | `memory/2026-10-27.md` |
 | P46 | 混音链三件套（EQ/COMP/REVERB）+ AudioBuffer 不清零 + 汇总行挪到函数末尾 | `memory/2026-10-27.md` |
+| P47 | 效果器多参数化：EQ 九参三段 / COMP 六参 / REVERB 五参，编辑窗口标题+按键转发，v20 | `memory/2026-10-27.md` |
 | P26–P43 | 各阶段踩坑与不变量 | `PITFALLS.md` |
 
 **最近的三个阶段**（新会话最需要的前情）：

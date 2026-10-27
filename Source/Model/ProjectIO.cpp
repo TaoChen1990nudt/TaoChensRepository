@@ -152,9 +152,20 @@ namespace
             auto* xml = parent.createNewChildElement ("Insert");
             xml->setAttribute ("slot", slot);
             xml->setAttribute ("type", (int) insert.type);
-            xml->setAttribute ("p1", number (insert.p1));
-            xml->setAttribute ("p2", number (insert.p2));
+            xml->setAttribute ("p1", number (insert.params[(size_t) 0]));
+            xml->setAttribute ("p2", number (insert.params[(size_t) 1]));
             xml->setAttribute ("enabled", (int) insert.enabled);
+
+            // Phase 47 (v20): all knobs, comma-separated. p1/p2 stay written
+            // for one-version tolerance; the full string is authoritative.
+            {
+                juce::String params;
+
+                for (int i = 0; i < fx::maxParams; ++i)
+                    params << (i == 0 ? "" : ",") << number (insert.params[(size_t) i]);
+
+                xml->setAttribute ("params", params);
+            }
 
             if (insert.plugin != nullptr)
                 if (auto descriptionXml = insert.plugin->createXml())
@@ -176,9 +187,29 @@ namespace
 
             auto& insert = inserts[(size_t) slot];
             insert.type    = fx::typeFromInt (child->getIntAttribute ("type", 0));
-            insert.p1      = juce::jlimit (0.0f, 1.0f, (float) child->getDoubleAttribute ("p1", 0.5));
-            insert.p2      = juce::jlimit (0.0f, 1.0f, (float) child->getDoubleAttribute ("p2", 0.45));
             insert.enabled = child->getBoolAttribute ("enabled", true);
+
+            // v20 writes every knob as a comma string; v19 and older carried
+            // only the first two, which keep their historic meanings.
+            insert.params.fill (0.5f);
+            insert.params[(size_t) 1] = 0.45f;   // delay feedback's historic default
+
+            if (child->hasAttribute ("params"))
+            {
+                const auto tokens = juce::StringArray::fromTokens (
+                                        child->getStringAttribute ("params"), ",", "");
+
+                for (int i = 0; i < juce::jmin ((int) tokens.size(), fx::maxParams); ++i)
+                    insert.params[(size_t) i] = juce::jlimit (0.0f, 1.0f,
+                                                              (float) tokens[(size_t) i].getDoubleValue());
+            }
+            else
+            {
+                insert.params[(size_t) 0] = juce::jlimit (0.0f, 1.0f,
+                                                          (float) child->getDoubleAttribute ("p1", 0.5));
+                insert.params[(size_t) 1] = juce::jlimit (0.0f, 1.0f,
+                                                          (float) child->getDoubleAttribute ("p2", 0.45));
+            }
 
             if (auto* pluginXml = findPluginElement (*child))
             {

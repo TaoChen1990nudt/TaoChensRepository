@@ -9,18 +9,19 @@
 #include <vector>
 
 #include "Util/Text.h"
+#include "Util/Theme.h"
 
 namespace atomic
 {
 
 namespace
 {
-    const juce::Colour kBackground { 0xff101114 };
+    const juce::Colour& kBackground = theme::surface0;
     const juce::Colour kPanel      { 0xff15161b };
     const juce::Colour kRow        { 0xff191b21 };
-    const juce::Colour kOutline    { 0xff2c2e37 };
-    const juce::Colour kText       { 0xff9aa0ad };
-    const juce::Colour kAccent     { 0xff4fd1c5 };
+    const juce::Colour& kOutline   = theme::surface4;
+    const juce::Colour& kText      = theme::inkMuted;
+    const juce::Colour& kAccent    = theme::accent;
 
     juce::Font boldFont (float height)
     {

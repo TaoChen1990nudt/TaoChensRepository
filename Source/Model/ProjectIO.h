@@ -151,8 +151,16 @@ namespace project
         opens the project with its two/three curves intact and the strip at its
         fader value, which is what those files meant.
 
+    v20 (Phase 47): inserts carry every knob.
+
+      * `params="..."` — all fx::maxParams knob values, comma-separated, 0..1
+        each. The EQ grew from one tilt knob to nine (3 bands x freq/gain/Q),
+        the compressor to six, the reverb to five. p1/p2 stay written, and the
+        reader still accepts them, so v19 files open with their two knobs
+        intact and everything else at its default.
+
       Nothing else changed: no attribute was renamed, no meaning was redefined. */
-inline constexpr int formatVersion = 19;
+inline constexpr int formatVersion = 20;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";

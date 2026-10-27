@@ -4,6 +4,7 @@
 
 #include "UI/MixerLook.h"
 #include "Util/Text.h"
+#include "Util/Theme.h"
 #include "Util/ValueMenu.h"
 
 namespace atomic
@@ -11,18 +12,18 @@ namespace atomic
 
 namespace
 {
-    const juce::Colour kPanelBackground { 0xff14151a };
-    const juce::Colour kCardBackground  { 0xff1b1d24 };
+    const juce::Colour& kPanelBackground = theme::surface1;
+    const juce::Colour& kCardBackground = theme::surface3;
     const juce::Colour kCardHover       { 0xff212430 };
     const juce::Colour kCardBorder      { 0xff2b2e39 };
-    const juce::Colour kDivider         { 0xff262832 };
-    const juce::Colour kMutedText       { 0xff8b91a0 };
-    const juce::Colour kLaneHeader      { 0xff171922 };
-    const juce::Colour kSoloColour      { 0xffe0b13c };
+    const juce::Colour& kDivider        = theme::hairline;
+    const juce::Colour& kMutedText      = theme::inkSubtle;
+    const juce::Colour& kLaneHeader     = theme::surface2;
+    const juce::Colour& kSoloColour     = theme::warn;
     const juce::Colour kMuteColour      { 0xffff6b6b };
     /** The routing highlight. Same teal as the app's accent, so "this is the
         thing you are pointing at" reads the same everywhere. */
-    const juce::Colour kFocusAccent     { 0xff4fd1c5 };
+    const juce::Colour& kFocusAccent    = theme::accent;
 
     juce::Font boldFont (float height)
     {

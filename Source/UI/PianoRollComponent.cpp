@@ -4,6 +4,7 @@
 
 #include "Media/SampleLibrary.h"
 #include "Util/Text.h"
+#include "Util/Theme.h"
 
 #include <limits>
 
@@ -12,15 +13,15 @@ namespace atomic
 
 namespace
 {
-    const juce::Colour kRollBackground  { 0xff101114 };
+    const juce::Colour& kRollBackground = theme::surface0;
     const juce::Colour kGridBackground  { 0xff17181f };
     const juce::Colour kBlackRowColour  { 0xff0e0f14 };
     const juce::Colour kRulerBackground { 0xff1a1b21 };
     const juce::Colour kKeyWhite        { 0xffd7dae2 };
     const juce::Colour kKeyBlack        { 0xff26282f };
-    const juce::Colour kOutline         { 0xff2c2e37 };
-    const juce::Colour kText            { 0xff9aa0ad };
-    const juce::Colour kPlayheadColour  { 0xffff5f6d };
+    const juce::Colour& kOutline        = theme::surface4;
+    const juce::Colour& kText           = theme::inkMuted;
+    const juce::Colour& kPlayheadColour = theme::record;
 
     /** DESIGN pixels: a note has one of these bands at each end, and dragging
         inside it changes the note's length instead of moving it. Both ends,
