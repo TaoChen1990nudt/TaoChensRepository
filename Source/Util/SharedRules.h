@@ -30,23 +30,28 @@ namespace atomic
     `stop` says whether the press does anything at all, `beat` where the
     playhead lands when it does. Two cases, both of them the user's:
 
-      * something is running  -> end it and rewind to zero;
+      * something is running  -> end it and return to where THIS RUN started
+        (Phase 51: the caller passes the beat playTransport() recorded);
       * nothing is running    -> do NOTHING. The playhead is also how you
         choose where playback starts, so a stop press while stopped must not
         throw away the bar you just clicked.
 
-    It used to be "back to where this run started", which made the stop
-    button a second play-from-here and left the keyboard with no way to
-    start playback — see the space key below. */
+    P32 removed "back to where this run started" because with a hardcoded
+    zero it made the stop button a second play-from-here. Phase 51 brings
+    the run's own start back at the user's request: stop is now "put it back
+    where I started it", and rewind-to-top stays with Return and the ruler.
+    The default of 0.0 keeps every caller that has no run to remember
+    honest — a stop with no previous start behaves like the old rule. */
 struct StopDecision
 {
     bool   stop = false;
     double beat = 0.0;
 };
 
-inline StopDecision stopDecision (bool engaged) noexcept
+inline StopDecision stopDecision (bool engaged, double playStartBeat = 0.0) noexcept
 {
-    return engaged ? StopDecision { true, 0.0 } : StopDecision { false, 0.0 };
+    return engaged ? StopDecision { true, juce::jmax (0.0, playStartBeat) }
+                   : StopDecision { false, 0.0 };
 }
 
 /** Phase 33: the space bar is a PLAY/STOP toggle again. Pressed while idle

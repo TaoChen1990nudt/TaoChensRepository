@@ -614,6 +614,19 @@ MainComponent::MainComponent()
         requestRemoveSlotAndItsClips (slotId);
     };
 
+    //-- Phase 51: the sampler card's 拉伸 control ----------------------------
+    // The panel cannot see blocks (they live in layers), so the card asks the
+    // host what its blocks are in, and the host writes the choice back.
+    rackPanel.samplerStretchState = [this] (int slotId)
+    {
+        return samplerStretchStateFor (slotId);
+    };
+
+    rackPanel.onSamplerStretchChosen = [this] (int slotId, int stretchMode)
+    {
+        applySamplerStretchToSlot (slotId, (StretchMode) stretchMode);
+    };
+
     //-- Phase 32: a block left a sampler with nothing to play ----------------
     pianoRoll.onSampleReferencesChanged = [this]
     {
@@ -2962,6 +2975,66 @@ void MainComponent::removeSamplerSlots (const std::vector<int>& slotIds)
     repaint();
 }
 
+//==============================================================================
+//  Phase 51: the sampler card's stretch control
+//
+//  Stretch mode is a BLOCK property (LayerModel), but the control lives on the
+//  rack card — the panel cannot see layers, so both halves of the control are
+//  host code. State = what the slot's blocks agree on; apply = write the mode
+//  onto every block that plays the slot and let the notification (undo,
+//  badges, schedule) happen through the one channel every model edit uses.
+//==============================================================================
+int MainComponent::samplerStretchStateFor (int slotId) const
+{
+    // -2: no block plays this slot — the card says 拉伸 and offers everything
+    // with nothing ticked. -1: the blocks disagree — 混合, and no check mark
+    // pretends otherwise.
+    int state = -2;
+
+    for (int i = 0; i < stack.getNumLayers(); ++i)
+        if (const auto* layer = stack.getLayer (i))
+            for (const auto& clip : layer->getSamples())
+                if (clip.outputSlotId == slotId)
+                {
+                    const int mode = (int) clip.stretchMode;
+
+                    if (state == -2)
+                        state = mode;
+                    else if (state != mode)
+                        return -1;
+                }
+
+    return state;
+}
+
+void MainComponent::applySamplerStretchToSlot (int slotId, StretchMode mode)
+{
+    bool changed = false;
+
+    // getSamples() is deliberately const-only (the P45 const audit); mutation
+    // goes through findSample, the same door every other clip edit uses.
+    for (int i = 0; i < stack.getNumLayers(); ++i)
+        if (auto* layer = stack.getLayer (i))
+            for (const auto& probe : layer->getSamples())
+                if (auto* clip = layer->findSample (probe.id);
+                    clip != nullptr && clip->outputSlotId == slotId
+                      && clip->stretchMode != mode)
+                {
+                    clip->stretchMode = mode;
+                    changed = true;
+                }
+
+    if (! changed)
+        return;
+
+    // One notification for the whole edit: undo captures it as one step, the
+    // roll repaints its badges, and the schedule republishes with the new
+    // ratios. This is the same channel every model edit uses — no callback
+    // chains of "who remembers to tell whom".
+    stack.notifyNotesChanged();
+    rackPanel.repaint();
+}
+
 void MainComponent::pruneOrphanSamplerSlots()
 {
     // Three reasons to keep out: we are already inside a sweep (removeSlot
@@ -3273,10 +3346,18 @@ bool MainComponent::startAudio()
 
 void MainComponent::playTransport()
 {
-    // Phase 33: no anchor to remember any more. Stop rewinds to zero, and the
-    // position playback starts from is simply wherever the playhead already is
-    // — see stopDecision().
-    audio.play();
+    playTransport (true);
+}
+
+void MainComponent::playTransport (bool openDevice)
+{
+    // Phase 51: the run's own start is remembered, because stop returns there
+    // now (see stopTransport). Read BEFORE play(): the engine's play() starts
+    // moving the position, and the beat the user chose is the one on the
+    // playhead at this instant.
+    playStartBeat = audio.getPositionBeats();
+
+    audio.play (openDevice);
     pianoRoll.setTransportActive (audio.isTransportEngaged());
 
     rackPanel.repaint();
@@ -3305,13 +3386,16 @@ void MainComponent::locatePlayhead (double beats)
 
 void MainComponent::stopTransport()
 {
-    // Phase 33: a stop press only acts while something is running.
+    // Phase 51: a stop press returns the playhead to where THIS run started —
+    // "play from bar 20, stop" parks the head at bar 20, ready for the same
+    // run again. P32 removed that with a hardcoded zero because it made stop a
+    // second play-from-here; with the run's own beat it is what a stop key
+    // means, and rewind-to-top stays with Return and the ruler.
     //
-    // Pressed while stopped it does NOT rewind, because the playhead is also the
-    // "start playback here" control: click bar 20, then hit stop by reflex, and
-    // being thrown back to the top would be the transport undoing a positioning
-    // gesture. Return (and the ruler) are how you rewind deliberately — see
-    // rewindTransport().
+    // Pressed while stopped it does NOT move, because the playhead is also the
+    // "start playback here" control: click bar 20, then hit stop by reflex,
+    // and being thrown anywhere would be the transport undoing a positioning
+    // gesture.
     //
     // The engine's stopTransport() always rewinds (that is what its own name
     // promises, and what the offline renderer relies on), so the park position
@@ -3320,7 +3404,7 @@ void MainComponent::stopTransport()
     if (! stopDecision (audio.isTransportEngaged()).stop)
         return;
 
-    parkTransportAt (stopDecision (true).beat);
+    parkTransportAt (stopDecision (true, playStartBeat).beat);
 }
 
 void MainComponent::rewindTransport()

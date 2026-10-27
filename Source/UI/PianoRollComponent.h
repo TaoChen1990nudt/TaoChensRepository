@@ -97,7 +97,7 @@ public:
         hours at 120 BPM — "unlimited" in any practical sense. */
     static constexpr double maxTimelineBeats = 10000.0;
 
-    static constexpr int    numToolButtons = 8;      // 4 tools + copy-state + group + ungroup + snap
+    static constexpr int    numToolButtons = 9;      // 5 tools + copy-state + group + ungroup + snap
 
     //-- Phase 7: tools -------------------------------------------------------
     enum class Tool
@@ -105,7 +105,8 @@ public:
         select,     // drag notes, marquee
         pencil,     // click empty grid to create a note
         eraser,     // click a note to delete it
-        hand        // drag anywhere to pan the view
+        hand,       // drag anywhere to pan the view
+        knife       // Phase 51: click a note or a block to cut it in two
     };
 
     //-- Opacity --------------------------------------------------------------
@@ -720,12 +721,6 @@ public:
         own length — each kind keeps the offset its own rule has always used. */
     void duplicateEditSelection();
 
-    /** Phase 29: the longest this block may be — the source's remaining length
-        after its start offset, in beats. Returns 0 when the audio is missing, in
-        which case nothing is clamped (a block whose file is gone must still be
-        draggable). */
-    double maxSampleLengthBeats (const Layer&, const SampleEvent&) const;
-
     /** Phase 29: test hook — one trim step as the mouse would do it. Goes
         through the same code the drag uses, so the assertions cannot pass
         while the gesture is broken. */
@@ -760,6 +755,24 @@ public:
 
     /** Phase 50: test hook — the same reverse the menu item runs. */
     int simulateSampleReverse() { return toggleSelectedSampleReverse(); }
+
+    /** Phase 51: the knife's one cut, in the open. `ids` are cut at `at`
+        (no snapping — the caller decides), strictly-inside only, and the two
+        halves become the selection. Public because the self-test drives the
+        knife through exactly this function — the same one the mouse uses. */
+    int splitSamplesAt (const std::vector<int>& ids, double at);
+    int splitNotesAt (const std::vector<int>& ids, double at);
+
+    /** Phase 51: test hook — where the block's curve chevron sits, so "top
+        edge, same inset as the note's" is asserted instead of eyeballed. */
+    juce::Rectangle<float> getSampleAutomationHandleForTest (int sampleId) const
+    {
+        if (auto* layer = stack.getActiveLayer())
+            if (const auto* s = layer->findSample (sampleId))
+                return getSampleAutomationHandleBounds (*s);
+
+        return {};
+    }
 
     /** Phase 30: pixels of a block that actually carry audio — the waveform's
         own width at the current zoom. Zero when the file is missing.

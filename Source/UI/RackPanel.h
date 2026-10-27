@@ -76,6 +76,16 @@ public:
         panel falls back to removing the slot on its own. */
     std::function<void (int slotId)> onSlotRemoveRequested;
 
+    /** Phase 51: the sampler card's 拉伸 control. Stretch mode is a BLOCK
+        property, and the panel cannot see blocks — the host reads and writes
+        them. `samplerStretchState` returns the state across all blocks that
+        play the slot: the StretchMode value when they all agree, -1 when they
+        disagree (labelled 混合), -2 when no block uses the slot. The menu
+        offers the three modes and reports the chosen StretchMode through
+        `onSamplerStretchChosen`, which the host applies to those blocks. */
+    std::function<int (int slotId)>  samplerStretchState;
+    std::function<void (int slotId, int stretchMode)> onSamplerStretchChosen;
+
     /** Phase 23: "there is a note/group selection right now". With a selection
         on screen, a plain card click mounts it on that synth — the gesture the
         user is already making when they look at a selection and then reach for
@@ -93,6 +103,16 @@ public:
         selection resolves to no synth" must not look the same. */
     void setRoutingFocus (int slotId, bool hasSelection);
     bool hasRoutingFocus() const noexcept { return focusActive; }
+
+    /** Phase 51: the sampler card's 拉伸 button. Public because the self-test
+        asserts it sits inside the card and clear of the readout text — a
+        control that overlaps the text it sits beside is invisible in a
+        screenshot and obvious only when the click does the wrong thing. */
+    juce::Rectangle<int> getStretchBounds (int index) const;
+
+    /** Phase 51: test hook — the card rectangle, so "the chip is inside the
+        card" is a comparison, not an impression. */
+    juce::Rectangle<int> getCardBoundsForTest (int index) const { return getCardBounds (index); }
 
     /** Which card is highlighted, or -1. The self-test asserts the highlight
         follows the selection, so the id has to be readable. */
@@ -123,7 +143,8 @@ public:
     void rackChanged() override;
 
 private:
-    enum class Part { none, body, solo, mute, close, waveform, volume, pan, send, collapse };
+    enum class Part { none, body, solo, mute, close, waveform, volume, pan, send, collapse,
+                      stretch };
 
     int  cardTop (int index) const;
     bool isExpanded (int index) const;

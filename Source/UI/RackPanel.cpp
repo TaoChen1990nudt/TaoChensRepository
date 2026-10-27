@@ -1,5 +1,6 @@
 #include "RackPanel.h"
 
+#include "Model/LayerModel.h"     // Phase 51: StretchMode for the sampler card
 #include "Util/Metrics.h"
 
 #include "UI/MixerLook.h"
@@ -149,6 +150,15 @@ juce::Rectangle<int> RackPanel::getWaveformBounds (int index) const
 {
     auto card = getCardBounds (index);
     return { card.getX() + ui::px (12), card.getY() + ui::px (40), ui::px (84), ui::px (18) };
+}
+
+juce::Rectangle<int> RackPanel::getStretchBounds (int index) const
+{
+    // Phase 51: right end of the readout row — the slot the 越级 badge uses on
+    // synth cards, which a sampler never draws. Same row, same height as the
+    // SAMPLE pill, so the card keeps one baseline.
+    auto card = getCardBounds (index);
+    return { card.getRight() - ui::px (78), card.getY() + ui::px (40), ui::px (66), ui::px (18) };
 }
 
 juce::Rectangle<int> RackPanel::getSoloBounds (int index) const
@@ -519,6 +529,47 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
                                               cardW - ui::px (116), ui::px (18)),
                         juce::Justification::centredRight, false);
         }
+    }
+
+    //-- Phase 51: the sampler's stretch control -------------------------------
+    // 变速变调 / 不变速只变调 used to live only in the block's right-click
+    // menu; the pitch-only mode moved here because "where does this sample
+    // sit" is a question about the SOURCE, and the card is where a source's
+    // settings live. One button, one menu, applying to every block that plays
+    // this slot — the label says what those blocks are in right now, and 混合
+    // is the honest answer when they disagree.
+    if (slot->isSampler() && ! slot->collapsed)
+    {
+        const auto chip = getStretchBounds (index).toFloat();
+        const bool hot  = hovered && hoveredPart == Part::stretch;
+
+        const int  state = samplerStretchState != nullptr ? samplerStretchState (slot->id) : -2;
+        const bool live  = state >= 0;      // every block on one (non-default) mode
+
+        g.setColour (juce::Colours::white.withAlpha (hot ? 0.10f : 0.04f));
+        g.fillRoundedRectangle (chip, ui::pf (4));
+
+        g.setColour (live ? accent.withAlpha (hot ? 0.75f : 0.5f)
+                          : juce::Colours::white.withAlpha (hot ? 0.2f : 0.1f));
+        g.drawRoundedRectangle (chip, ui::pf (4), 1.0f);
+
+        const juce::String label =
+            state == -2 ? utf8 ("拉伸")
+            : state == -1 ? utf8 ("混合")
+            : state == (int) StretchMode::none     ? utf8 ("原速")
+            : state == (int) StretchMode::resample ? utf8 ("变速变调")
+            : state == (int) StretchMode::tempo    ? utf8 ("只变速")
+            :                                        utf8 ("只变调");
+
+        g.setColour (live ? accent : kMutedText.withAlpha (0.8f));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
+        g.drawText (label, chip.reduced (ui::pf (6), 0.0f).withTrimmedRight (ui::pf (10)),
+                    juce::Justification::centred, false);
+
+        mixerlook::drawCaret (g, chip.withTrimmedLeft (chip.getWidth() - ui::pf (14))
+                                       .reduced (ui::pf (3), ui::pf (5)),
+                              true, live ? accent.withAlpha (0.85f)
+                                         : kMutedText.withAlpha (0.7f));
     }
 
     //-- Volume ----------------------------------------------------------------
@@ -935,6 +986,46 @@ void RackPanel::mouseDown (const juce::MouseEvent& e)
                 return;
             }
 
+            if (getStretchBounds (i).contains (pos) && slot->isSampler())
+            {
+                // Phase 51: the stretch menu lives here now. The panel only
+                // knows ids — what the modes mean to the blocks is the host's
+                // business (they are a block property), so the choice goes
+                // through the callback untouched.
+                juce::PopupMenu menu;
+                const int state = samplerStretchState != nullptr
+                                    ? samplerStretchState (slot->id) : -2;
+
+                auto addMode = [&menu, state] (int mode, const juce::String& text)
+                {
+                    menu.addItem (mode, text, true, state == mode);
+                };
+
+                addMode ((int) StretchMode::none,     utf8 ("原速 · 只截取窗口"));
+                menu.addSeparator();
+                addMode ((int) StretchMode::resample, utf8 ("变速变调 · 像磁带"));
+                addMode ((int) StretchMode::pitch,    utf8 ("不变速只变调 · 按长度移调"));
+                addMode ((int) StretchMode::tempo,    utf8 ("只变速不变调 · 时间伸缩"));
+
+                const int slotId = slot->id;
+
+                menu.showMenuAsync (juce::PopupMenu::Options()
+                                        .withTargetScreenArea (
+                                            getStretchBounds (i)
+                                                .withX (getScreenX() + getStretchBounds (i).getX())
+                                                .withY (getScreenY() + getStretchBounds (i).getY())),
+                                    [this, slotId] (int result)
+                                    {
+                                        if (result <= 0)
+                                            return;
+
+                                        if (onSamplerStretchChosen != nullptr)
+                                            onSamplerStretchChosen (slotId, result);
+                                    });
+
+                return;
+            }
+
             if (getSendBounds (i).contains (pos))
             {
                 if (onCardMenuRequested != nullptr)
@@ -1077,6 +1168,9 @@ void RackPanel::mouseMove (const juce::MouseEvent& e)
         else if (getWaveformBounds (i).contains (pos)
                    && rack.getSlot (i) != nullptr && ! rack.getSlot (i)->isSampler())
             newPart = Part::waveform;
+        else if (getStretchBounds (i).contains (pos)
+                   && rack.getSlot (i) != nullptr && rack.getSlot (i)->isSampler())
+            newPart = Part::stretch;
         else if (getSendBounds (i).contains (pos))   newPart = Part::send;
         else if (getVolumeBounds (i).expanded (0, 6).contains (pos)) newPart = Part::volume;
         else if (getPanBounds (i).expanded (0, 6).contains (pos))    newPart = Part::pan;

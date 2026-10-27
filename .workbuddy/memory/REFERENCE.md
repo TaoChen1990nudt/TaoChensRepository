@@ -233,6 +233,30 @@
 - **组永远不决定采样块的路由**：`routing::resolveSample` 不看 `groupId`。重新挂载组不会换掉
   某块脚底下的音频文件——那是 P27 定下的，P35 没动。
 
+## 机架采样卡的"拉伸"控件（P51）
+- 卡片读数行右端一颗 chip（`RackPanel::getStretchBounds`，与 SAMPLE pill 同行同高、
+  右对齐——那是合成器卡"越级"徽章的槽位，采样器永远不画它）。label 显示该槽位全部块的
+  共同模式：原速 / 只变速 / 只变调 / 变速变调；不一致 = **混合**；没有块 = 拉伸（无勾选）。
+- **模式是块的属性，卡片是音源的界面**：所以读和写都走宿主回调——
+  `samplerStretchState`（→ `MainComponent::samplerStretchStateFor`，遍历层找
+  `outputSlotId == slotId` 的块）与 `onSamplerStretchChosen`（→ `applySamplerStretchToSlot`，
+  `findSample` 逐块写 + **一次** `notifyNotesChanged`，撤销一步、徽标与 schedule 一起走）。
+  面板自己看不见层，别给它加 LayerStack。
+- 菜单含全部四个模式（含 原速，那是"改回去"的路）；选哪个就写到该槽位的**所有块**。
+
+## 刻刀（P51：工具条第五个工具）
+- `Tool::knife`，按钮 index 4，图标是**美工刀**（橡皮同款旋转圆角矩形 + 刀尖三角 + 折断槽；
+  第一版"细三角+虚线"16 px 下就是一道斜杠，见 PITFALLS P51-C）。光标 = 十字线：切口发生在
+  点击点上，十字中心比刀尖图更精确。状态/编组/解组/磁铁顺移到 index 5–8。
+- **一刀两用**：点块走 `splitSamplesAt ({id}, beat)`，点音符走 `splitNotesAt ({id}, beat)`。
+  两个函数**内部不吸附**——刻刀在 mouseDown 处按磁铁开关决定 snap；播放头路径照旧精确切。
+  严格内部判定与块相同（切在边上 = 什么都不发生）。
+- **切分即选区**：切完两半就是当前选择；两条曲线（音量/声相）与音符包络都按同一接缝
+  `subEnvelope` 切分，ramp 不会在缝上重新开始。音符切开后**两半同组**——切开组成员是
+  变成两个成员，不是一个成员加一个外人。
+- 右键菜单的"在播放头处切割"已删（工具语义不该长在块菜单里）；反转、修剪、拉伸、挂载照旧。
+  `splitSelectedSamplesAtPlayhead` 保留为测试钩子（P50 断言还在用它）。
+
 ## 音源卡片（P9 VST3 / P38 命名与界面）
 - 一个槽三种身份：`isSampler()` / `isPlugin()`（`pluginId > 0`）/ 其余是内置振荡器。
   pill 依次写 `SAMPLE` / `VST3 · 插件` / `waveformName()`。
@@ -304,18 +328,20 @@
 - **删块会通知**，所以 `removeSlotAndItsClips` 也持有 `pruningSamplers` 守卫，否则那一瞬
   卡片被当成孤儿，用户会收到第二个问题（问的是"屏幕上的这张卡"）。
 
-## 走带（P33：空格是播放/停止开关）
+## 走带（P33 空格开关 / P51 停止回起点）
 - **暂停键已删除**，界面上只有播放 + 停止两个按钮（`play` 188 / `stop` 226，4 px 间距）。
-- `stopDecision(engaged)` 是停止语义的**唯一算术**，只有两支：
-  **在跑 → 停 + 播放头回 0**；**已经停着 → 什么都不做**。
-  P32 的"回到本次播放起点"和 `playStartBeat` 已删除——它让停止键变成第二个"从这里播"，
-  同时让键盘没有播放键。
-- **播放头也是"从这播"的控件**：点了第 20 小节再顺手按停止，不能被打回开头。要回开头有
-  `rewindTransport()`（回车）和标尺。
-- `playTransport()` 从当前播放头播，不记任何锚点。
+- `stopDecision(engaged, playStartBeat)` 是停止语义的**唯一算术**（`Util/SharedRules.h`）：
+  **在跑 → 停 + 回到本次播放的起点**（P51；起点由 `playTransport` 记在 `playStartBeat`，
+  默认 0 = 无锚点的调用方行为同旧的回零）；**已经停着 → 什么都不做**。
+  P32 曾以"停止变成第二个从这里播"为由删掉回起点——P51 用"记住的是本次运行自己的起点"
+  把它请了回来：空格再按一次还是从同一段开头播，回零仍然归回车和标尺。
+- `playTransport(bool openDevice)` 是唯一实现：先读 `audio.getPositionBeats()` 存锚点再
+  `audio.play()`。无设备重载供自检用（不抢声卡）。
+- `playStartBeat` 只在 playTransport 里写；**播放中途拖标尺不更新锚点**——停止仍回本次
+  播放的起点，这是已知的、用户认可的语义。
 - 落点写盘只有一处 `parkTransportAt(beat)`：`audio.stopTransport()`（引擎语义 = 归零 + 淡出）
   **之后**再 `setPositionBeats`，中间不重绘，看不到归零那一瞬。
-- **空格 / 回车**：空格 = 在跑就停、停着就播（`spaceStartsPlayback(engaged)`）；回车 = 永远回零。
+- **空格 / 回车**：空格 = 在跑就停、停着就播；回车 = 永远回零。
 
 ## 文件树与扫描（P28 / P33 默认折叠）
 - **层级唯一来源是扫描出来的 `DirNode` 树**：`buildRows()` 摊平成行。空目录不出行。
@@ -339,10 +365,12 @@
   `DragMode::moveSample` 已删除；块拖动走 `moveNote` 分支。
 - **块是窗口不是拷贝**：`sourceOffsetSeconds` 是文件内起点；左端拉伸同时改 `startBeat` 与
   offset（同样的秒数），音频留在原时间位置；右端拉伸只改 `lengthBeats`。
-- **两端上界都来自文件**：右 ≤ 文件剩余长度，左 ≥ offset 允许的距离（offset 不会 < 0）。
-  这就是"满长拖不长、但拖得短"；`maxSampleLengthBeats()` 是唯一判据，音频缺失时返回 0 = 不设限。
-- **三个命中区（P49 起是两个 + 一个按钮）**：整高的左右边 = 拉伸，其余 = 拖动，块尾 chevron =
-  展开曲线箱。**淡入淡出手柄已删除**（P29 的三个 `kFade*` 常量、`applySampleFade`、
+- **尾部无上限（P51）**：右端想拖多长拖多长（见"采样伸缩"节）；左 ≥ offset 允许的距离
+  （offset 不会 < 0，那个判据仍在）。旧的 `maxSampleLengthBeats()` 已删除。
+- **三个命中区（P49 起是两个 + 一个按钮；P51 按钮挪到块顶）**：整高的左右边 = 拉伸，
+  其余 = 拖动，**块顶右上**的 chevron = 展开曲线箱（Y = 块顶 + 1，距右缘 = 音符 chevron
+  的同一公式 band+air+width——"右上角的小箭头展开曲线"对音符和块是同一个习惯）。
+  **淡入淡出手柄已删除**（P29 的三个 `kFade*` 常量、`applySampleFade`、
   `hitTestSampleFadeHandle`、`drawSampleFades` 全套退场）。
 - **块自己的音量曲线**（P49）：`SampleEvent::volumeCurve`（`NoteEnvelope`，x 归一化 0..1）。
   新建/粘贴的块是 `makeIdle()`——平线 1.0 且**禁用**，第一次编辑才点亮。
@@ -399,16 +427,21 @@
 - 右键「恢复原始长度」= `restoreSampleLength()`：offset 归零、长度回到文件全长、
   `startBeat` 左移 offset 那么多（音频回到时间线原位）。**整个过程不吸附**。
 
-## 采样伸缩（P31）
+## 采样伸缩（P31 / P51 尾部无上限）
 - `SampleEvent::stretchMode`（`none/resample/tempo/pitch`）是**块**的属性，不是一个全局开关。
 - **唯一比例是 `stretchRatio(bpm) = 剩余源拍数 / lengthBeats`**：起点裁剪同时改 offset 与
   长度，比例不变；只有拖尾会改它。"恢复原长"= 比例 1.0。
+- **尾部没有上限（P51，P30 的上限已删）**：`applySampleTrim` 只夹最小长度。resample/tempo
+  拖长 = 真时间伸缩（比例 < 1，publish 期自己夹 0.125..8）；none/pitch 拖长 = 文件末尾之后
+  是静音，波形只画有声的列。P30 的断言（"不能比文件长"）已改写成新规则，不要复活。
 - publish 期折算成 `speed`（源秒/输出秒）与 `pitch`（颗粒内读取倍率），夹到 0.125..8：
   原速 1/1；变速变调 r/r；只变速 r/1；只变调 1/r。音频线程只做乘加，不算 log。
-- **拖入的块长度 = 文件精确长度**（不再 ceil 到网格）。这就是"恢复原长恢复不回去"的根：
-  投放 4.25、恢复 4.04。长度不在网格上是正确的——块就是那段音频。
+- **拖入的块长度 = 文件精确长度**（不再 ceil 到网格）。长度不在网格上是正确的——块就是那段音频。
 - 块上的黄色徽标是模式的唯一可见痕迹：`变速变调 ×2.50` / `变速 ×2.50` / `变调 +12.0`
   （半音 = `12*log2(pitch)`）。宽度 < 82% 块宽才画，"块上什么都不写"就是默认模式。
+- **入口分布（P51）**：右键"拉伸方式"只剩 原速 / 变速变调 / 只变速不变调；
+  不变速只变调从菜单移除，和变速变调一起进了**机架采样卡的"拉伸"控件**（见下节）。
+  模式本身与工程格式不变，老文件的 pitch 块照常播放、徽标照常画。
 
 ## 标尺缩放（P31）
 - 右键拖标尺 = 以**按下那一点**为锚缩放：`setBeatWidthAround(px, anchorBeat, anchorX)`，

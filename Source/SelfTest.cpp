@@ -554,25 +554,57 @@ juce::String MainComponent::runSelfTest()
                  && transport.getPositionBeats() == 0.0,
                "stopped at beat 0");
 
-        // Phase 33: the STOP button, as one pure function. Running -> stop and
-        // rewind to zero. Idle -> nothing at all, because the playhead is also
-        // the "play from here" control and a reflex stop must not rewind it.
-        const auto whileRunning = stopDecision (true);
-        const auto whileIdle    = stopDecision (false);
+        // Phase 33 + 51: the STOP button, as one pure function. Running ->
+        // stop and return to where THIS run started (the caller passes the
+        // beat playTransport() recorded; the default 0 keeps no-anchor
+        // callers identical to the old rewind-to-top). Idle -> nothing at
+        // all, because the playhead is also the "play from here" control and
+        // a reflex stop must not rewind it.
+        const auto whileRunning = stopDecision (true, 20.5);
+        const auto whileIdle    = stopDecision (false, 20.5);
 
-        check ("Stop while running ends the run at zero",
-               whileRunning.stop && whileRunning.beat == 0.0,
+        check ("Stop while running returns to the run's own start",
+               whileRunning.stop && whileRunning.beat == 20.5,
                juce::String (whileRunning.beat, 1));
+
+        check ("Stop without a remembered start still lands on zero",
+               stopDecision (true).stop && stopDecision (true).beat == 0.0,
+               juce::String (stopDecision (true).beat, 1));
 
         check ("Stop while already stopped does nothing (the playhead is a choice)",
                ! whileIdle.stop,
-               whileIdle.stop ? "it rewound" : "left alone");
+               whileIdle.stop ? "it moved" : "left alone");
 
         // Phase 33: the space bar. Idle -> play, rolling -> stop. Phase 32 had
         // it stop-only, which is why the keyboard could not start playback.
         check ("Space plays when idle and stops while rolling",
                spaceStartsPlayback (false) && ! spaceStartsPlayback (true),
                "idle=play / rolling=stop");
+
+        // Phase 51: the real path, headless (no sound card — that is what the
+        // openDevice flag is for). Start a run at 20.5, stop it, and the head
+        // must be back at 20.5: the run's own beginning. Return stays the
+        // explicit rewind to the top.
+        audio.setPositionBeats (20.5);
+        playTransport (false);
+
+        const bool runStarted = audio.isTransportEngaged();
+
+        stopTransport();
+
+        const double parkedAt = audio.getPositionBeats();
+
+        check ("A run started at 20.5 stops back at 20.5",
+               runStarted && ! audio.isTransportEngaged()
+                 && std::abs (parkedAt - 20.5) < 1.0e-9,
+               juce::String (parkedAt, 2));
+
+        rewindTransport();
+
+        check ("Return still rewinds to the top from anywhere",
+               std::abs (audio.getPositionBeats()) < 1.0e-9
+                 && ! audio.isTransportEngaged(),
+               juce::String (audio.getPositionBeats(), 2));
     }
 
     //-- Phase 5: faders, pan, mute / solo, macro automation -----------------
@@ -3056,7 +3088,7 @@ juce::String MainComponent::runSelfTest()
                      : juce::String ("no note"));
         }
 
-        //-- Phase 20: the toolbar has to fit eight buttons --------------------
+        //-- Phase 20: the toolbar has to fit its buttons (9 since Phase 51) ---
         {
             LayerStack t;
             RackModel  r;
@@ -3071,18 +3103,18 @@ juce::String MainComponent::runSelfTest()
                 if (roll.getToolButtonBounds (i).getRight() > roll.getToolButtonBounds (i + 1).getX())
                     overlap = true;
 
-            check ("Every toolbar button owns its own pixels (magnet and ungroup included)",
+            check ("Every toolbar button owns its own pixels (knife included now)",
                    ! overlap
-                     && PianoRollComponent::numToolButtons == 8
-                     && roll.getToolbarArea().contains (roll.getToolButtonBounds (7)),
+                     && PianoRollComponent::numToolButtons == 9
+                     && roll.getToolbarArea().contains (roll.getToolButtonBounds (8)),
                    juce::String (PianoRollComponent::numToolButtons) + utf8 (" 个按钮，右端 ")
-                     + juce::String (roll.getToolButtonBounds (7).getRight())
+                     + juce::String (roll.getToolButtonBounds (8).getRight())
                      + " / 栏宽 " + juce::String (roll.getToolbarArea().getWidth()));
 
-            // Phase 21: 编组 / 解组 are one pair, so the magnet had to move past
+            // Phase 21: 编组 / 解组 are one pair, so the magnet moved past
             // them. The order is the whole request, so the order is the check.
-            const auto ungroup = roll.getToolButtonBounds (6);
-            const auto magnet  = roll.getToolButtonBounds (7);
+            const auto ungroup = roll.getToolButtonBounds (7);
+            const auto magnet  = roll.getToolButtonBounds (8);
 
             check ("Ungroup sits directly left of the magnet now",
                    ungroup.getRight() <= magnet.getX()
@@ -6182,12 +6214,17 @@ juce::String MainComponent::runSelfTest()
         const double natural = clip->lengthBeats;     // 1.0 s at 120 BPM = 2.0 beats
         const double start   = clip->startBeat;
 
-        //-- 3: the tail stops at the end of the file -------------------------
+        //-- 3: Phase 51 — the tail goes wherever the drag goes ---------------
+        // The P30 ceiling ("the extra width is silence, so a block cannot be
+        // longer than its file") is gone at the user's request: resample and
+        // tempo turn the extra width into a real stretch, and even 原速 may
+        // reserve visual space past the file's end. The drag lands where the
+        // mouse lands.
         pianoRoll.simulateSampleTrim (a, start + 12.0, true);
         const double afterLonger = clip->lengthBeats;
 
-        check ("A block cannot be dragged longer than the file it plays",
-               std::abs (afterLonger - natural) < 1.0e-6,
+        check ("A block CAN now be dragged longer than the file it plays",
+               std::abs (afterLonger - 12.0) < 1.0e-6,
                utf8 ("自然 ") + juce::String (natural, 3) + utf8 (" 拖到 12 拍后 → ")
                  + juce::String (afterLonger, 3));
 
@@ -6197,8 +6234,8 @@ juce::String MainComponent::runSelfTest()
         pianoRoll.simulateSampleTrim (a, start + 12.0, true);
         const double backOut = clip->lengthBeats;
 
-        check ("...but a block at full length can still be shortened, then back out to the limit",
-               afterShorter < natural - 1.0e-6 && std::abs (backOut - natural) < 1.0e-6,
+        check ("...and the drag stays symmetrical: shorten, then back out past the file again",
+               afterShorter < natural - 1.0e-6 && std::abs (backOut - 12.0) < 1.0e-6,
                juce::String (natural, 3) + utf8 (" → ") + juce::String (afterShorter, 3)
                  + utf8 (" → ") + juce::String (backOut, 3));
 
@@ -6855,13 +6892,41 @@ juce::String MainComponent::runSelfTest()
                  + juce::String (exactBeats, 6) + utf8 ("）"));
 
         // ...and the same end is reachable by dragging the tail out, even though
-        // no grid point lands on it.
+        // no grid point lands on it. (Phase 51: the tail now goes wherever the
+        // drag goes — the file's end is no longer a ceiling, so the drag aims
+        // AT the end instead of relying on the old clamp to stop there.)
         pianoRoll.simulateSampleTrim (id, startBeat + 0.5, true);
-        pianoRoll.simulateSampleTrim (id, startBeat + exactBeats + 0.03, true);
+        pianoRoll.simulateSampleTrim (id, startBeat + exactBeats, true);
 
         check ("...and the tail can be dragged back to exactly the end of the file",
                std::abs (clip->lengthBeats - exactBeats) < 1.0e-9,
                juce::String (clip->lengthBeats, 6) + utf8 (" / ") + juce::String (exactBeats, 6));
+
+        //-- Phase 51: the tail can be dragged PAST the end of the file -------
+        // 原速: the extra width is silence — the window is what it is, and the
+        // picture may now be wider than the sound. 变速不变调: the same width
+        // is a real time-stretch, which the ratio states (remaining source over
+        // length, here clearly below 1 = slower than the file).
+        pianoRoll.simulateSampleTrim (id, startBeat + exactBeats + 2.0, true);
+
+        check ("原速模式：尾巴可以拖过文件末尾（多出的宽度是静音）",
+               std::abs (clip->lengthBeats - (exactBeats + 2.0)) < 1.0e-9,
+               juce::String (clip->lengthBeats, 4) + utf8(" / 文件 ")
+                 + juce::String (exactBeats, 4));
+
+        pianoRoll.setSampleStretchMode (id, StretchMode::tempo);
+
+        const double stretchedRatio = clip->stretchRatio (audio.getBpm());
+
+        check ("变速不变调：拉长后的块是真实的时间伸缩（比例 < 1）",
+               stretchedRatio > 0.0 && stretchedRatio < 1.0
+                 && std::abs (stretchedRatio - exactBeats / (exactBeats + 2.0)) < 1.0e-9,
+               juce::String (stretchedRatio, 4));
+
+        // ...and the trim is symmetrical: back to the file's exact end, because
+        // the checks below expect the untouched fixture.
+        pianoRoll.simulateSampleTrim (id, startBeat + exactBeats, true);
+        pianoRoll.setSampleStretchMode (id, StretchMode::none);
 
         //-- Phase 31: a squeezed block shows its whole file -------------------
         pianoRoll.setSampleStretchMode (id, StretchMode::tempo);
@@ -8816,6 +8881,222 @@ juce::String MainComponent::runSelfTest()
     // without ever asking — the exact thing this phase exists to stop.
     deferSamplerPrompt = true;
     installSamplerCascadePrompt();
+
+    //-- Phase 51: stop-to-start / card stretch / knife / chevron -------------
+    [&]
+    {
+        const bool oldSnap = pianoRoll.isSnapEnabled();
+        pianoRoll.setSnapEnabled (false);
+
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("Phase 51 needs a layer", false, "no active layer");
+            pianoRoll.setSnapEnabled (oldSnap);
+            return;
+        }
+
+        //-- the sampler card's stretch control -------------------------------
+        const auto loadA  = loadSampleFile (phase27A);
+        const int  slotId = rack.addSampler (loadA.buffer, phase27A.getFullPathName(), "P51");
+
+        const int cardA = pianoRoll.addSampleAt (200.0, 50, phase27A);
+        const int cardB = pianoRoll.addSampleAt (204.0, 50, phase27A);
+
+        if (auto* a = layer->findSample (cardA)) a->outputSlotId = slotId;
+        if (auto* b = layer->findSample (cardB)) b->outputSlotId = slotId;
+
+        check ("A slot whose blocks all sit on 原速 reports that state",
+               samplerStretchStateFor (slotId) == (int) StretchMode::none,
+               juce::String (samplerStretchStateFor (slotId)));
+
+        applySamplerStretchToSlot (slotId, StretchMode::tempo);
+
+        const auto* writtenA = layer->findSample (cardA);
+        const auto* writtenB = layer->findSample (cardB);
+
+        check ("Choosing 只变速不变调 on the card reaches every block of the slot",
+               writtenA != nullptr && writtenB != nullptr
+                 && writtenA->stretchMode == StretchMode::tempo
+                 && writtenB->stretchMode == StretchMode::tempo
+                 && samplerStretchStateFor (slotId) == (int) StretchMode::tempo,
+               writtenA != nullptr && writtenB != nullptr
+                 ? juce::String ((int) writtenA->stretchMode) + "/"
+                   + juce::String ((int) writtenB->stretchMode)
+                 : "missing clip");
+
+        // Disagreeing blocks are 混合, not one of the modes — a check mark on a
+        // menu item would be a lie the user cannot see through.
+        if (auto* a = layer->findSample (cardA))
+            a->stretchMode = StretchMode::pitch;
+
+        check ("Two blocks on different modes read as 混合 (-1)",
+               samplerStretchStateFor (slotId) == -1,
+               juce::String (samplerStretchStateFor (slotId)));
+
+        // The card's own geometry: inside the card, on the readout row, right
+        // end — the slot the 越级 badge uses on synths.
+        int cardIndex = -1;
+        for (int i = 0; i < rack.getNumSlots(); ++i)
+            if (const auto* s = rack.getSlot (i); s != nullptr && s->id == slotId)
+            {
+                cardIndex = i;
+                break;
+            }
+
+        const auto stretchRect = rackPanel.getStretchBounds (cardIndex);
+        const auto cardRect    = rackPanel.getCardBoundsForTest (cardIndex);
+
+        check ("The stretch chip sits inside its card, flush to the right edge",
+               cardIndex >= 0 && cardRect.contains (stretchRect)
+                 && cardRect.getRight() - stretchRect.getRight() <= ui::px (20)
+                 && stretchRect.getY() == cardRect.getY() + ui::px (40),
+               "x " + juce::String (stretchRect.getX()) + " y "
+                 + juce::String (stretchRect.getY()));
+
+        //-- the knife cuts notes ---------------------------------------------
+        pianoRoll.setTool (PianoRollComponent::Tool::knife);
+
+        check ("The knife is the toolbar's fifth tool button",
+               PianoRollComponent::numToolButtons == 9
+                 && pianoRoll.getToolButtonBounds (4).getX()
+                      > pianoRoll.getToolButtonBounds (3).getRight()
+                 && pianoRoll.getToolButtonBounds (5).getX()
+                      > pianoRoll.getToolButtonBounds (4).getRight(),
+               "btn4 x " + juce::String (pianoRoll.getToolButtonBounds (4).getX()));
+
+        const int noteId = pianoRoll.addNoteAt (210.0, 62);
+        int leftGroup = -2;
+
+        if (auto* note = layer->findNote (noteId))
+        {
+            note->lengthBeats = 2.0;
+            note->envelope.addPoint (0.5f, 0.42f);
+            leftGroup = note->groupId;
+        }
+
+        const int notesBefore = (int) layer->getNotes().size();
+
+        const int noteSplits = pianoRoll.splitNotesAt ({ noteId }, 210.5);
+
+        const auto* leftNote = layer->findNote (noteId);
+
+        int rightId = -1;
+        for (const auto& n : layer->getNotes())
+            if (n.groupId == leftGroup && n.id != noteId
+                  && n.startBeat > 210.4 && n.startBeat < 210.6)
+                rightId = n.id;
+
+        const auto* rightNote = layer->findNote (rightId);
+
+        check ("A knife click on a note makes two notes at the click",
+               noteSplits == 1 && (int) layer->getNotes().size() == notesBefore + 1
+                 && leftNote != nullptr && rightNote != nullptr
+                 && std::abs (leftNote->lengthBeats - 0.5) < 1.0e-9
+                 && std::abs (rightNote->lengthBeats - 1.5) < 1.0e-9,
+               leftNote != nullptr && rightNote != nullptr
+                 ? juce::String (leftNote->lengthBeats, 3) + " + "
+                   + juce::String (rightNote->lengthBeats, 3)
+                 : "missing half");
+
+        // The curve is split at the seam, not restarted: the left half's END
+        // value and the right half's START value are the same number, which is
+        // what "the ramp continues" means in numbers.
+        check ("The note's curve continues across the cut",
+               leftNote != nullptr && rightNote != nullptr
+                 && std::abs (leftNote->envelope.valueAt (1.0f)
+                                - rightNote->envelope.valueAt (0.0f)) < 1.0e-3,
+               leftNote != nullptr && rightNote != nullptr
+                 ? juce::String (leftNote->envelope.valueAt (1.0f), 3) + " vs "
+                   + juce::String (rightNote->envelope.valueAt (0.0f), 3)
+                 : "missing half");
+
+        //-- ...and blocks -----------------------------------------------------
+        const int blockId = pianoRoll.addSampleAt (220.0, 50, phase27A);
+        const auto* block = layer->findSample (blockId);
+
+        const int blockSplits = block != nullptr
+                                  ? pianoRoll.splitSamplesAt ({ blockId },
+                                                               block->startBeat + 1.0)
+                                  : 0;
+
+        // Re-find AFTER the split: addSample() can grow the layer's vector and
+        // move every element, so the pointer taken before the cut is stale.
+        const auto* leftHalf  = layer->findSample (blockId);
+
+        int rightHalfId = -1;
+        for (const auto& probe : layer->getSamples())
+            if (probe.id != blockId && probe.startBeat > 220.9 && probe.startBeat < 221.1)
+                rightHalfId = probe.id;
+
+        const auto* rightHalf = layer->findSample (rightHalfId);
+
+        check ("A knife click on a block cuts it with the offset advancing",
+               blockSplits == 1 && leftHalf != nullptr && rightHalf != nullptr
+                 && std::abs (leftHalf->lengthBeats - 1.0) < 1.0e-9
+                 && std::abs (leftHalf->sourceOffsetSeconds) < 1.0e-9
+                 && std::abs (rightHalf->lengthBeats - 1.0) < 1.0e-9
+                 && std::abs (rightHalf->sourceOffsetSeconds - 0.5) < 1.0e-9,
+               leftHalf != nullptr && rightHalf != nullptr
+                 ? juce::String (leftHalf->lengthBeats, 3) + "+"
+                   + juce::String (rightHalf->lengthBeats, 3) + utf8 (" 拍, offset ")
+                   + juce::String (leftHalf->sourceOffsetSeconds, 3) + "/"
+                   + juce::String (rightHalf->sourceOffsetSeconds, 3)
+                 : "missing half");
+
+        //-- the chevron: top edge, the note's own inset ----------------------
+        const auto sampleBounds = pianoRoll.getSampleScreenBounds (
+                                      stack.getActiveLayerIndex(), blockId);
+        const auto sampleHandle = pianoRoll.getSampleAutomationHandleForTest (blockId);
+
+        const int   someNoteId = pianoRoll.addNoteAt (230.0, 60);
+
+        if (auto* some = layer->findNote (someNoteId))
+            some->lengthBeats = 8.0;        // long enough to carry a tail button
+
+        const auto* someNote   = layer->findNote (someNoteId);
+        const auto  noteHandle = someNote != nullptr
+                                   ? pianoRoll.getNoteAutomationHandleBounds (*someNote)
+                                   : juce::Rectangle<float> {};
+        const auto  noteBounds = someNote != nullptr
+                                   ? pianoRoll.getNoteScreenBounds (
+                                         stack.getActiveLayerIndex(), someNoteId)
+                                   : juce::Rectangle<float> {};
+
+        const float sampleInset = sampleBounds.getRight() - sampleHandle.getX();
+        const float noteInset   = noteBounds.getRight() - noteHandle.getX();
+
+        check ("The block's chevron sits on the block's top edge",
+               ! sampleHandle.isEmpty()
+                 && std::abs (sampleHandle.getY() - (sampleBounds.getY() + 1.0f)) < 1.5f,
+               "y " + juce::String (sampleHandle.getY(), 1) + utf8 (" / 块顶 ")
+                 + juce::String (sampleBounds.getY(), 1));
+
+        check ("...and its distance from the right edge is the note's own",
+               ! sampleHandle.isEmpty() && ! noteHandle.isEmpty()
+                 && std::abs (sampleInset - noteInset) < 1.0e-3,
+               juce::String (sampleInset, 2) + " vs " + juce::String (noteInset, 2));
+
+        //-- cleanup ------------------------------------------------------------
+        layer->removeSample (cardA);
+        layer->removeSample (cardB);
+        layer->removeSample (blockId);
+        if (rightHalfId > 0)
+            layer->removeSample (rightHalfId);
+
+        layer->removeNote (noteId);
+        if (rightId > 0)
+            layer->removeNote (rightId);
+        layer->removeNote (someNoteId);
+
+        rack.removeSlot (slotId);
+        stack.notifyNotesChanged();
+        pruneOrphanSamplerSlots();
+
+        pianoRoll.setSnapEnabled (oldSnap);
+        pianoRoll.setTool (PianoRollComponent::Tool::select);
+    } ();
 
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after

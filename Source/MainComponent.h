@@ -129,12 +129,20 @@ public:
     bool isAudioRunning() const { return audio.isRunning(); }
 
     //-- Transport ------------------------------------------------------------
-    /** Starts (or resumes) playback from wherever the playhead is. */
+    /** Starts (or resumes) playback from wherever the playhead is. The beat it
+        started from is remembered (playStartBeat): Phase 51 makes stop return
+        there, so "play from bar 20, stop" parks the head at bar 20 again —
+        the run's own beginning, not the top of the timeline. */
     void playTransport();
-    /** Ends a run and rewinds to zero. Pressed while nothing is running it does
-        NOTHING — the playhead is also how playback is positioned, so a stop by
-        reflex must not undo a click on the ruler. Phase 33: there is no pause
-        button; space is a play/stop toggle. */
+    /** The one implementation, with the device flag exposed for the headless
+        self-test: stop-returns-to-start must be provable without grabbing the
+        sound card (the same reason AudioEngine::play takes openDevice). */
+    void playTransport (bool openDevice);
+    /** Ends a run and returns the playhead to where THIS run started. Pressed
+        while nothing is running it does NOTHING — the playhead is also how
+        playback is positioned, so a stop by reflex must not undo a click on
+        the ruler. Phase 33: there is no pause button; space is a play/stop
+        toggle. */
     void stopTransport();
     /** Return: the explicit rewind, from any state. */
     void rewindTransport();
@@ -451,6 +459,14 @@ private:
         idBase + 100 + index. */
     void addSlotAutomationItems (juce::PopupMenu& menu, int slotId, int idBase);
 
+    /** Phase 51: the sampler card's 拉伸 control, host half. The state is what
+        the slot's blocks agree on (StretchMode value / -1 mixed / -2 unused);
+        applying writes the mode onto every block playing the slot and notifies
+        through the one channel every model edit uses. Public for the
+        self-test, which asserts the write reaches the blocks. */
+    int  samplerStretchStateFor (int slotId) const;
+    void applySamplerStretchToSlot (int slotId, StretchMode mode);
+
     /** The other half of the pair: true when `result` was one of the ids
         addSlotAutomationItems() handed out and it has been acted on. One
         function for both menus, because "which id means which parameter" must
@@ -766,6 +782,12 @@ private:
 
     LayerStack          stack;
     RackModel           rack;
+
+    /** Phase 51: where the current (or last) run of the transport started.
+        Written by playTransport() only, read by stopTransport() — stop returns
+        here, not to zero. Zero until the first play, which keeps "stop on a
+        fresh session" identical to the old rewind-to-top. */
+    double              playStartBeat = 0.0;
 
     /** VST3 instances. Declared before the engine so it outlives every
         PlaybackEngine that points at it. */

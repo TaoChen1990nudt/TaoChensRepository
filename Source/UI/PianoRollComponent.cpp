@@ -59,10 +59,9 @@ namespace
     /** Phase 31: + (int) StretchMode. A block of four, well clear of the mount
         and group ranges above it. */
     constexpr int kClipStretchBase = 5000;
-    /** Phase 50: cut and reverse. Their own block again — the stretch range is
+    /** Phase 50: reverse. Its own id band — the stretch range is
         checked as `>= 5000 && < 5008`, so anything appended to that family has
         to start far enough away that the range test cannot swallow it. */
-    constexpr int kClipMenuSplit   = 6000;
     constexpr int kClipMenuReverse = 6001;
 
     juce::Font boldFont (float height)
@@ -687,6 +686,15 @@ void PianoRollComponent::updateCursor()
         case Tool::pencil: setMouseCursor (pencilCursor); break;
         case Tool::eraser: setMouseCursor (eraserCursor); break;
         case Tool::hand:   setMouseCursor (handCursor);   break;
+
+        case Tool::knife:
+            // Phase 51: a crosshair, not a custom blade image. The other tools
+            // draw their own cursors because their TIP is the tool; the knife's
+            // cut happens AT the click, so the crosshair's centre — one pixel,
+            // unambiguous — names the cut position better than a picture of a
+            // blade whose tip is somewhere near the hotspot.
+            setMouseCursor (juce::MouseCursor::CrosshairCursor); break;
+
         case Tool::select:
         default:           setMouseCursor (juce::MouseCursor::NormalCursor); break;
     }
@@ -2005,16 +2013,17 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     // ---- Tool strip ---------------------------------------------------------
     if (getToolbarArea().contains (pos))
     {
-        static const Tool tools[4] { Tool::pencil, Tool::eraser, Tool::select, Tool::hand };
+        static const Tool tools[5] { Tool::pencil, Tool::eraser, Tool::select, Tool::hand,
+                                     Tool::knife };
 
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 5; ++i)
             if (getToolButtonBounds (i).contains (pos))
             {
                 setTool (tools[i]);
                 return;
             }
 
-        if (getToolButtonBounds (4).contains (pos))
+        if (getToolButtonBounds (5).contains (pos))
         {
             // Copy / clear. Copying switches to the pencil in the same click:
             // "I copied this note's state" is only useful if the next thing you
@@ -2027,7 +2036,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
             return;
         }
 
-        if (getToolButtonBounds (5).contains (pos))
+        if (getToolButtonBounds (6).contains (pos))
         {
             // Phase 16. With nothing selected there is nothing to group, and
             // silently doing nothing is worse than saying so in the strip.
@@ -2039,7 +2048,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
             return;
         }
 
-        if (getToolButtonBounds (6).contains (pos))
+        if (getToolButtonBounds (7).contains (pos))
         {
             // Phase 20: the inverse of 编组, next to it — and Phase 21 moved the
             // magnet past it, because 编组 / 解组 are one pair and the snap
@@ -2054,7 +2063,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
             return;
         }
 
-        if (getToolButtonBounds (7).contains (pos))
+        if (getToolButtonBounds (8).contains (pos))
         {
             setSnapEnabled (! snapEnabled);
             repaint (getToolbarArea());
@@ -2293,6 +2302,18 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
             return;
         }
 
+        if (tool == Tool::knife)
+        {
+            // Phase 51: cut HERE — where the crosshair points, snapped when the
+            // magnet is on (a cut between grid lines sounds like an edit, a cut
+            // on the grid sounds like music). The two halves become the
+            // selection, which is the cut's own feedback.
+            const double at = beatAtScreenX (e.position.x);
+
+            splitSamplesAt ({ clipId }, snapEnabled ? snapBeat (at) : at);
+            return;
+        }
+
         const auto bounds = getSampleScreenBounds (stack.getActiveLayerIndex(), clipId);
 
         // Phase 49: the chevron on the block opens its curve box. Checked
@@ -2377,6 +2398,25 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         panAnchorScrollY = scrollY;
         panAnchorBeats = scrollBeats;
         return;
+    }
+
+    // ---- Phase 51: the knife cuts notes too --------------------------------
+    // One tool, two materials, one verb: click a note and it becomes two notes
+    // at the click, the same strictly-inside rule the block's cut uses. Both
+    // halves keep the group (a slice through a group member makes two members,
+    // not one member and one stranger) and the curve is split at the seam, so
+    // a ramp stays a ramp.
+    if (tool == Tool::knife)
+    {
+        if (auto* hit = hitTestActiveLayer (e.position))
+        {
+            const double at = beatAtScreenX (e.position.x);
+
+            splitNotesAt ({ hit->id }, snapEnabled ? snapBeat (at) : at);
+            return;
+        }
+
+        return;     // a knife click on empty canvas cuts nothing
     }
 
     // ---- Eraser: one click, one note ---------------------------------------
@@ -3639,11 +3679,12 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
     // Phase 8: icons instead of words. A DAW tool strip is read at a glance
     // while the eye is on the notes, and four two-character labels need a
     // second look every time.
-    const Tool tools[4] { Tool::pencil, Tool::eraser, Tool::select, Tool::hand };
+    // Phase 51: the knife is the fifth tool — a mode, exactly like the pencil.
+    const Tool tools[5] { Tool::pencil, Tool::eraser, Tool::select, Tool::hand, Tool::knife };
 
     const auto tint = theme::accent;
 
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 5; ++i)
     {
         const bool active  = tool == tools[i];
         const bool hovered = hoveredTool == i;
@@ -3667,8 +3708,8 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
     // because a dropper icon alone reads as "pick colour" to everyone who has
     // used a paint program.
     {
-        const auto bounds  = getToolButtonBounds (4).toFloat();
-        const bool hovered = hoveredTool == 4;
+        const auto bounds  = getToolButtonBounds (5).toFloat();
+        const bool hovered = hoveredTool == 5;
         const bool loaded  = hasPaintState;
 
         g.setColour (loaded ? tint.withAlpha (0.22f)
@@ -3679,7 +3720,7 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
                             : juce::Colours::white.withAlpha (hovered ? 0.20f : 0.10f));
         g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (4), 1.0f);
 
-        drawToolIcon (g, 4, bounds.withTrimmedLeft (ui::pf (6)).withWidth (ui::pf (18)),
+        drawToolIcon (g, 5, bounds.withTrimmedLeft (ui::pf (6)).withWidth (ui::pf (18)),
                       loaded ? juce::Colours::white : kText);
 
         g.setColour (loaded ? juce::Colours::white : kText);
@@ -3693,8 +3734,8 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
     // while the selection is inside one group, because that is when clicking it
     // again is the "pick the whole group up" gesture.
     {
-        const auto bounds  = getToolButtonBounds (5).toFloat();
-        const bool hovered = hoveredTool == 5;
+        const auto bounds  = getToolButtonBounds (6).toFloat();
+        const bool hovered = hoveredTool == 6;
         const bool inGroup = getSelectedGroupId() >= 0;
         const bool enabled = hasAnySelection();
 
@@ -3706,7 +3747,7 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
                              : juce::Colours::white.withAlpha (enabled ? 0.20f : 0.08f));
         g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (4), 1.0f);
 
-        drawToolIcon (g, 5, bounds.withTrimmedLeft (ui::pf (6)).withWidth (ui::pf (18)),
+        drawToolIcon (g, 6, bounds.withTrimmedLeft (ui::pf (6)).withWidth (ui::pf (18)),
                       inGroup ? juce::Colours::white : kText.withAlpha (enabled ? 1.0f : 0.4f));
 
         g.setColour (inGroup ? juce::Colours::white : kText.withAlpha (enabled ? 1.0f : 0.45f));
@@ -3720,8 +3761,8 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
     // one control with two directions, which is exactly what it is. Phase 21
     // put it directly right of 编组, ahead of the magnet.
     {
-        const auto bounds  = getToolButtonBounds (6).toFloat();
-        const bool hovered = hoveredTool == 6;
+        const auto bounds  = getToolButtonBounds (7).toFloat();
+        const bool hovered = hoveredTool == 7;
         const bool enabled = hasAnySelection();
         const bool grouped = getSelectedGroupId() >= 0;
 
@@ -3731,7 +3772,7 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
         g.setColour (juce::Colours::white.withAlpha (enabled ? 0.20f : 0.08f));
         g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (4), 1.0f);
 
-        drawToolIcon (g, 6, bounds.withTrimmedLeft (ui::pf (6)).withWidth (ui::pf (18)),
+        drawToolIcon (g, 7, bounds.withTrimmedLeft (ui::pf (6)).withWidth (ui::pf (18)),
                       kText.withAlpha (enabled ? 1.0f : 0.4f));
 
         g.setColour (kText.withAlpha (enabled && grouped ? 1.0f : (enabled ? 0.72f : 0.45f)));
@@ -3746,8 +3787,8 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
     // two independent snap flags is how a project ends up with notes on the
     // grid and curves half a tick off it.
     {
-        const auto bounds  = getToolButtonBounds (7).toFloat();
-        const bool hovered = hoveredTool == 7;
+        const auto bounds  = getToolButtonBounds (8).toFloat();
+        const bool hovered = hoveredTool == 8;
         const bool on      = snapEnabled;
 
         g.setColour (on ? tint.withAlpha (0.22f)
@@ -4746,7 +4787,41 @@ void PianoRollComponent::drawToolIcon (juce::Graphics& g, int toolIndex,
             break;
         }
 
-        case 4:     // copy note state: a dropper, with a drop of what it picked up
+        case 4:     // Phase 51: knife — a utility blade: body, snap grooves, tip
+        {
+            // First version was a slim filled triangle plus a handle stroke,
+            // and at 16 px it read as one thin diagonal line — indistinguishable
+            // from noise, let alone from the pencil. A utility knife reads
+            // instead: the eraser's rounded-rect body (one family look), a
+            // triangular blade sticking out of the working end, and the snap
+            // grooves across the blade. The eraser has no tip; the pencil has
+            // no grooves; this has both.
+            const auto knife = juce::AffineTransform::rotation (-0.55f).translated (c);
+
+            juce::Path body;
+            body.addRoundedRectangle (-5.6f, -2.2f, 9.2f, 4.4f, 1.4f);
+            body.applyTransform (knife);
+
+            g.strokePath (body, juce::PathStrokeType (1.6f));
+
+            juce::Path blade;
+            blade.addTriangle (11.0f, 0.0f, 4.6f, -2.2f, 4.6f, 2.2f);
+            blade.applyTransform (knife);
+
+            g.fillPath (blade);
+
+            juce::Path grooves;
+            grooves.startNewSubPath (6.4f, -1.5f);
+            grooves.lineTo (6.4f, 1.5f);
+            grooves.startNewSubPath (8.1f, -1.1f);
+            grooves.lineTo (8.1f, 1.9f);
+            grooves.applyTransform (knife);
+
+            g.strokePath (grooves, juce::PathStrokeType (1.0f));
+            break;
+        }
+
+        case 5:     // copy note state: a dropper, with a drop of what it picked up
         {
             juce::Path pipette;
             pipette.startNewSubPath (box.getRight() - 3.0f, box.getY() + 2.0f);
@@ -4770,7 +4845,7 @@ void PianoRollComponent::drawToolIcon (juce::Graphics& g, int toolIndex,
             break;
         }
 
-        case 5:     // group: three blocks behind a bracket
+        case 6:     // group: three blocks behind a bracket
         {
             g.fillRoundedRectangle (box.getX() + 4.5f, box.getY() + 3.5f, 7.5f, 3.0f, 1.0f);
             g.fillRoundedRectangle (box.getX() + 4.5f, box.getY() + 8.0f, 7.5f, 3.0f, 1.0f);
@@ -4792,7 +4867,7 @@ void PianoRollComponent::drawToolIcon (juce::Graphics& g, int toolIndex,
             break;
         }
 
-        case 6:     // ungroup: the group mark, with the brackets coming off
+        case 7:     // ungroup: the group mark, with the brackets coming off
         {
             g.fillRoundedRectangle (box.getX() + 5.0f, box.getY() + 3.5f, 6.5f, 3.0f, 1.0f);
             g.fillRoundedRectangle (box.getX() + 5.0f, box.getY() + 9.5f, 6.5f, 3.0f, 1.0f);
@@ -4823,7 +4898,7 @@ void PianoRollComponent::drawToolIcon (juce::Graphics& g, int toolIndex,
             break;
         }
 
-        case 7:     // snap: a small horseshoe magnet, poles up
+        case 8:     // snap: a small horseshoe magnet, poles up
         {
             // Drawn as a path, not as a filled shape: the U is one stroke of
             // constant width, so it stays a magnet at 16 px instead of turning
@@ -6676,19 +6751,6 @@ std::shared_ptr<const SampleBuffer> PianoRollComponent::clipAudio (const Layer& 
 //==============================================================================
 //  Phase 29: the window onto the file — trim limits and fade handles
 //==============================================================================
-double PianoRollComponent::maxSampleLengthBeats (const Layer& layer, const SampleEvent& sample) const
-{
-    const auto audio = clipAudio (layer, sample);
-
-    if (audio == nullptr || audio->lengthSeconds() <= 0.0)
-        return 0.0;                  // unknown file: no limit, so the block stays editable
-
-    const double remaining = juce::jmax (0.0, audio->lengthSeconds()
-                                              - juce::jmax (0.0, sample.sourceOffsetSeconds));
-
-    return SampleEvent::beatsForSeconds (remaining, bpm);
-}
-
 bool PianoRollComponent::applySampleTrim (const SampleEvent& origin, double wantedBeat, bool fromTail)
 {
     auto* active = stack.getActiveLayer();
@@ -6707,19 +6769,24 @@ bool PianoRollComponent::applySampleTrim (const SampleEvent& origin, double want
     {
         double length = juce::jmax (minLength, wantedBeat - origin.startBeat);
 
-        // A block cannot be longer than the part of the file it plays. Past that
-        // the extra width is silence, so "drag it longer" would be a gesture
-        // that changes the picture and not the sound — the one thing a block
-        // must never do. Shorter is always allowed, which is why this clamps the
-        // upper bound only.
+        // Phase 51: no upper clamp, in ANY mode. The three modes answer "what
+        // does the extra width sound like" differently and none of them needs
+        // a limit here:
         //
-        // Phase 30: the ceiling is never BELOW where the drag started. A block
-        // dropped onto the grid has its length rounded up, so it is already a
-        // little longer than its file; clamping to the file on the first pixel
-        // of a drag made the tail snap inwards on its own.
-        if (const double maxLength = maxSampleLengthBeats (*active, origin); maxLength > 0.0)
-            length = juce::jmin (length, juce::jmax (minLength, juce::jmax (origin.lengthBeats, maxLength)));
-
+        //   resample / tempo — the playback maths are ratio-based
+        //   (stretchRatio = remaining source / length), so a longer block is a
+        //   genuinely slower (or stretched) rendering of the same window, and
+        //   the ratio clamps itself at publish time (0.125..8);
+        //
+        //   none — the window is what it is, and the width past the file's end
+        //   is silence. The P30 argument against that was "a gesture that
+        //   changes the picture and not the sound"; the user overruled it:
+        //   being able to reserve visual space (and drag the tail without the
+        //   block snapping back) is worth more than the guarantee. The
+        //   waveform already draws only the columns that carry audio.
+        //
+        // Shorter is always allowed, which is why this clamps the lower bound
+        // only.
         clip->lengthBeats = length;
     }
     else
@@ -6813,6 +6880,13 @@ juce::Rectangle<float> PianoRollComponent::getSampleAutomationHandleBounds (cons
     // block is too short to carry one without covering a trim edge. Only the
     // ACTIVE layer's blocks draw or answer it, which is why the lookup goes
     // through the active index and no layerIndex is passed.
+    //
+    // Phase 51: it sits at the TOP of the block now, not vertically centred —
+    // same row the note's chevron lives on (top edge + 1), and the same
+    // distance from the right edge (the note's own band + air + width
+    // formula). "The arrow at the top right opens the curve" is one habit for
+    // both kinds of object; centring the block's arrow made it a different
+    // control on a different row.
     const auto bounds = getSampleScreenBounds (stack.getActiveLayerIndex(), sample.id);
 
     const float band  = ui::pf (kResizeHandleWidth);
@@ -6826,12 +6900,12 @@ juce::Rectangle<float> PianoRollComponent::getSampleAutomationHandleBounds (cons
         return {};
 
     // A block can be far taller than a note: the button takes a fixed strip
-    // and centres itself on the body instead of stretching full height.
+    // and pins it to the top instead of stretching full height.
     const float height = juce::jmin (ui::pf (14),
                                      juce::jmax (ui::pf (8), bounds.getHeight() - ui::pf (2)));
 
     return { bounds.getRight() - inset,
-             bounds.getY() + (bounds.getHeight() - height) * 0.5f,
+             bounds.getY() + ui::pf (1),
              width, height };
 }
 
@@ -7607,8 +7681,19 @@ int PianoRollComponent::splitSelectedSamplesAtPlayhead()
     if (layer == nullptr || sampleSelection.empty() || playheadBeat < 0.0)
         return 0;
 
-    const auto ids = sampleSelection;
-    const double at = playheadBeat;
+    return splitSamplesAt (sampleSelection, playheadBeat);
+}
+
+int PianoRollComponent::splitSamplesAt (const std::vector<int>& ids, double at)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || ids.empty() || at < 0.0)
+        return 0;
+
+    // No snapping here: the knife snaps (or not) where it reads the click, and
+    // the playhead path cuts exactly where the head is. One meaning per layer —
+    // a cut function that also moves the cut would be two features in one.
     int split = 0;
 
     std::vector<int> newSelection;
@@ -7691,6 +7776,63 @@ int PianoRollComponent::splitSelectedSamplesAtPlayhead()
 
     ensureTimelineExtendsTo (at);
     setSampleSelection (newSelection);
+    stack.notifyNotesChanged();
+    repaint();
+
+    return split;
+}
+
+int PianoRollComponent::splitNotesAt (const std::vector<int>& ids, double at)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || ids.empty() || at < 0.0)
+        return 0;
+
+    int split = 0;
+    std::vector<int> newSelection;
+
+    for (const int id : ids)
+    {
+        auto* note = layer->findNote (id);
+
+        if (note == nullptr)
+            continue;
+
+        // Strictly inside, same rule as the block's cut: an edge cut would
+        // create a zero-length note that nothing plays and the eraser must
+        // then clean up.
+        if (at <= note->startBeat + 1.0e-6 || at >= note->endBeat() - 1.0e-6)
+        {
+            newSelection.push_back (id);
+            continue;
+        }
+
+        const double u = (at - note->startBeat) / juce::jmax (1.0e-9, note->lengthBeats);
+
+        NoteEvent right = *note;          // pitch, velocity, mount, group all copy
+        right.startBeat   = at;
+        right.lengthBeats = note->endBeat() - at;
+        right.envelope    = subEnvelope (right.envelope, (float) u, 1.0f);
+
+        note->envelope    = subEnvelope (note->envelope, 0.0f, (float) u);
+        note->lengthBeats = at - note->startBeat;
+
+        // Both halves stay in the group: cutting one member of a group makes
+        // two members, not one member and one stranger. The group's curve
+        // keeps playing both — which is what "these notes are one thing"
+        // means even after the user slices through one of them.
+        const int newId = layer->addNote (std::move (right));
+
+        newSelection.push_back (id);
+        newSelection.push_back (newId);
+        ++split;
+    }
+
+    if (split == 0)
+        return 0;
+
+    setSelection (newSelection);
     stack.notifyNotesChanged();
     repaint();
 
@@ -9025,34 +9167,9 @@ void PianoRollComponent::showSampleMenu (int sampleId, juce::Point<int> screenPo
     menu.addItem (2, utf8 ("对齐到网格"), true, false);
     menu.addItem (7, utf8 ("恢复原始长度"), canRestore, false);
 
-    //-- Phase 50: cut at the playhead, flip the audio -----------------------
-    // "Cut" is enabled only when the playhead is actually inside a block the
-    // command would touch: a greyed-out item that explains itself is better than
-    // a click that silently does nothing.
-    const bool canSplit = [&]
-    {
-        if (playheadBeat < 0.0)
-            return false;
-
-        const auto inside = [this] (const SampleEvent& clip)
-        {
-            return playheadBeat > clip.startBeat + 1.0e-6
-                     && playheadBeat < clip.endBeat() - 1.0e-6;
-        };
-
-        if (isSampleSelected (sample->id))
-        {
-            for (const auto& clip : layer->getSamples())
-                if (isSampleSelected (clip.id) && inside (clip))
-                    return true;
-
-            return false;
-        }
-
-        return inside (*sample);
-    }();
-
-    menu.addItem (kClipMenuSplit, utf8 ("在播放头处切割"), canSplit, false);
+    // Phase 51: the cut moved to the toolbar's knife — the menu keeps the verbs
+    // that describe the block (reverse, trim, stretch, mount), and "cut here"
+    // is a tool, not a property of the block you happened to click.
     menu.addItem (kClipMenuReverse, sample->reversed ? utf8 ("取消反转") : utf8 ("反转音频"),
                   true, sample->reversed);
     menu.addItem (3, utf8 ("加高一行"));
@@ -9068,6 +9185,12 @@ void PianoRollComponent::showSampleMenu (int sampleId, juce::Point<int> screenPo
         juce::PopupMenu stretch;
         const auto current = sample->stretchMode;
 
+        // Phase 51: 不变速只变调 is no longer offered here. It is a SOURCE-ish
+        // decision ("this sample sits a few semitones up") rather than a
+        // what-happens-when-I-drag decision, so it lives on the sampler's rack
+        // card now — together with 变速变调, which the card also carries. The
+        // mode itself still exists and old files with pitch blocks still play
+        // (the badge still draws); only the menu entry is gone.
         stretch.addItem (kClipStretchBase + (int) StretchMode::none,
                          utf8 ("原速 · 只截取窗口"), true, current == StretchMode::none);
         stretch.addSeparator();
@@ -9075,8 +9198,6 @@ void PianoRollComponent::showSampleMenu (int sampleId, juce::Point<int> screenPo
                          utf8 ("变速变调 · 像磁带"), true, current == StretchMode::resample);
         stretch.addItem (kClipStretchBase + (int) StretchMode::tempo,
                          utf8 ("只变速不变调 · 时间伸缩"), true, current == StretchMode::tempo);
-        stretch.addItem (kClipStretchBase + (int) StretchMode::pitch,
-                         utf8 ("不变速只变调 · 按长度移调"), true, current == StretchMode::pitch);
 
         menu.addSubMenu (utf8 ("拉伸方式"), stretch);
         menu.addSeparator();
@@ -9176,12 +9297,6 @@ void PianoRollComponent::showSampleMenu (int sampleId, juce::Point<int> screenPo
 
         // Phase 50: both commands act on the whole selection, like delete and
         // restore already do — the right-click made the block part of it.
-        if (result == kClipMenuSplit)
-        {
-            safe->splitSelectedSamplesAtPlayhead();
-            return;
-        }
-
         if (result == kClipMenuReverse)
         {
             safe->toggleSelectedSampleReverse();
