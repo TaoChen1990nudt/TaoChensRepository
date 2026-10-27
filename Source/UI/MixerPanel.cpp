@@ -1007,8 +1007,13 @@ void MixerPanel::drawStrip (juce::Graphics& g, int channel)
         g.setColour (! fed ? juce::Colours::white.withAlpha (0.22f)
                            : readout.startsWith (utf8 ("-∞"))
                                ? juce::Colours::white.withAlpha (0.35f) : kText);
-        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
-        g.drawText (readout, r, juce::Justification::centred, false);
+
+        // Phase 50: tabular digits. A fader readout is the one number in this
+        // window that moves constantly, and "-6.0" is two pixels wider than
+        // "-9.8" in a proportional face — the whole column twitches while a
+        // fader is dragged.
+        ui::drawTabular (g, readout, r.toFloat(), ui::font (9.5f),
+                         juce::Justification::centred);
     }
 
     //-- Mono monitoring (Phase 25 / 26) ---------------------------------------

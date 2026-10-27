@@ -110,15 +110,22 @@ void BpmField::paint (juce::Graphics& g)
         return;
 
     g.setColour (kLabel);
-    g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (8.0f))));
+    // Phase 50: the caption is the section-label role — small, wide, bold — the
+    // hierarchy step DESIGN.md §5 asks for. It used to be a plain 8 pt label
+    // indistinguishable from body text.
+    g.setFont (atomic::ui::section (8.0f));
     g.drawText ("BPM", atomic::ui::px (8), atomic::ui::px (2),
                 atomic::ui::px (34), atomic::ui::px (12), juce::Justification::centredLeft, false);
 
     g.setColour (kValue);
-    g.setFont (juce::Font (juce::FontOptions{}.withHeight (atomic::ui::sp (13.0f)).withStyle ("Bold")));
-    g.drawText (formatBpm(), atomic::ui::px (8), atomic::ui::px (12),
-                getWidth() - kArrowColumnWidth - atomic::ui::px (10), atomic::ui::px (18),
-                juce::Justification::centredLeft, false);
+    // And the value is tabular: 120 → 87 used to shift the last digit by a
+    // pixel and, worse, let the field's arrow column drift with it.
+    atomic::ui::drawTabular (g, formatBpm(),
+                             { (float) atomic::ui::px (8), (float) atomic::ui::px (12),
+                               (float) (getWidth() - kArrowColumnWidth - atomic::ui::px (10)),
+                               (float) atomic::ui::px (18) },
+                             atomic::ui::title (13.0f),
+                             juce::Justification::centredLeft);
 
     // Up / down chevrons.
     auto drawChevron = [&g] (juce::Rectangle<int> area, bool up, bool bright)

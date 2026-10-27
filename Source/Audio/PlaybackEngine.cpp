@@ -748,6 +748,24 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
                 scheduled.gainAutomated = scheduled.gainCurve.size() >= 2;
             }
 
+            // Phase 50: the pan curve rides the same conversion. A ping-pong
+            // clip is the reason this exists; keeping its x in seconds means the
+            // render loop's only clock is `elapsed`, exactly like the gain
+            // curve, and neither curve has to know what a beat is.
+            if (clip.panCurve.isEnabled())
+            {
+                const double blockSeconds = juce::jmax (1.0e-6,
+                                                        clip.lengthBeats * secondsPerBeat);
+
+                for (const auto& p : clip.panCurve.getPoints())
+                    scheduled.panCurve.push_back ({ (double) p.time * blockSeconds,
+                                                    juce::jlimit (0.0f, 1.0f, p.value) });
+
+                scheduled.panAutomated = scheduled.panCurve.size() >= 2;
+            }
+
+            scheduled.reversed = clip.reversed;
+
             // Phase 31: the stretch ratio is "what the file would take" over
             // "what the block gives it". Computed from the SAME resolver the
             // block's drawing uses (routing::resolveSample), so a clip mounted
@@ -1313,10 +1331,6 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
             const float p0 = automation::stackPan (lb.pan0 + slotPan0, groupPan0, 0.0f);
             const float p1 = automation::stackPan (lb.pan1 + slotPan1, groupPan1, 0.0f);
 
-            const float balL0 = juce::jmin (1.0f, 1.0f - p0);
-            const float balR0 = juce::jmin (1.0f, 1.0f + p0);
-            const float balL1 = juce::jmin (1.0f, 1.0f - p1);
-            const float balR1 = juce::jmin (1.0f, 1.0f + p1);
 
             auto& bus = channelBuses[(size_t) busIndexFor (slot.mixerChannel)];
             float* busL = bus.getWritePointer (0);
@@ -1340,9 +1354,17 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
                 // ran past the file. A stretched clip legitimately reaches the
                 // end at a different moment than the block does, and the read
                 // returns silence past it either way.
+                // Phase 50: a reversed block asks the same reader for the
+                // mirror of this moment. `length - elapsed` keeps the block a
+                // window onto the SAME audio — the head of the file now arrives
+                // last — and because the read is stateless, nothing about it
+                // depends on which direction we walked in.
+                const double readElapsed = clip.reversed ? juce::jmax (0.0, length - elapsed)
+                                                         : juce::jmax (0.0, elapsed);
+
                 const auto frame = clipstretch::read (buffer, clip.stretch,
                                                       clip.sourceOffsetSeconds,
-                                                      juce::jmax (0.0, elapsed),
+                                                      readElapsed,
                                                       clipstretch::defaultGrainSeconds);
 
                 const float left  = frame.left;
@@ -1360,6 +1382,21 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
                 if (clip.gainAutomated)
                     fadeGain = automationValueAt (clip.gainCurve, juce::jmax (0.0, elapsed));
 
+                // Phase 50: pan is the fader sum PLUS the block's own curve,
+                // then clamped once. The old code pre-computed two balance
+                // endpoints and lerped between them; that is the same thing
+                // only while nothing else moves the pan, and a curve does. One
+                // expression, one clamp, one law.
+                float clipPan = p0 + (p1 - p0) * t;
+
+                if (clip.panAutomated)
+                    clipPan += automationValueAt (clip.panCurve, juce::jmax (0.0, elapsed)) * 2.0f - 1.0f;
+
+                clipPan = juce::jlimit (-1.0f, 1.0f, clipPan);
+
+                const float balL = juce::jmin (1.0f, 1.0f - clipPan);
+                const float balR = juce::jmin (1.0f, 1.0f + clipPan);
+
                 // Phase 36: the three layers through the one law. A block has no
                 // note envelope, so its note term is the identity — which is not
                 // a special case here but the definition of an absent layer. The
@@ -1375,8 +1412,8 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
                                      * (float) juce::jlimit (0.0, 1.0,
                                                             juce::jmin (elapsed, remaining) / kClickFadeSecond);
 
-                busL[i] += left  * gain * (balL0 + (balL1 - balL0) * t);
-                busR[i] += right * gain * (balR0 + (balR1 - balR0) * t);
+                busL[i] += left  * gain * balL;
+                busR[i] += right * gain * balR;
 
                 clipPeak = juce::jmax (clipPeak, juce::jmax (std::abs (left), std::abs (right)));
             }

@@ -227,13 +227,17 @@ void LayerPanel::paint (juce::Graphics& g)
     g.fillAll (kPanelBackground);
 
     //-- Header ---------------------------------------------------------------
+    // Phase 50: the two type roles of DESIGN.md §5 — title (11 pt bold, +0.5
+    // tracking) over section (8.5 pt bold, +0.8, upper-case). The old pair was
+    // 13.5 / 9.5 with no tracking at all, which is why the hierarchy had to be
+    // carried by a 4 pt size jump.
     g.setColour (juce::Colours::white.withAlpha (0.92f));
-    g.setFont (boldFont (13.5f));
+    g.setFont (ui::title (11.0f));
     g.drawText (utf8 ("图层与混音"), ui::px (14), ui::px (10), ui::px (140), ui::px (20),
                 juce::Justification::centredLeft, false);
 
-    g.setColour (juce::Colours::white.withAlpha (0.28f));
-    g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
+    g.setColour (juce::Colours::white.withAlpha (0.30f));
+    g.setFont (ui::section (8.5f));
     g.drawText ("LAYER MIX" + separatorDot() + juce::String (stack.getNumLayers()),
                 ui::px (14), ui::px (27), ui::px (180), ui::px (14),
                 juce::Justification::centredLeft, false);

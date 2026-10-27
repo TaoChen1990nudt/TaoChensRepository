@@ -146,6 +146,12 @@ namespace
         // and the hero image already carries the note box.
         writePng ("-clipauto", component.createClipAutomationSnapshot());
 
+        // Phase 50: same frame, the other curve. The pan lane is where the menu
+        // row's new target button earns its keep.
+        writePng ("-clippan", component.createClipAutomationSnapshot (atomic::ui::px (900),
+                                                                     atomic::ui::px (520),
+                                                                     atomic::SampleAutomationTarget::pan));
+
         // Phase 30: "highlight a synth" with no veil. The grid keeps its normal
         // brightness and the notes that reach the synth are marked in its
         // colour, which is a claim only a picture can make — every other frame

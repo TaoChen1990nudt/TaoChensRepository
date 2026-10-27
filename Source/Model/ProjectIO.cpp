@@ -125,9 +125,10 @@ namespace
         }
     }
 
-    void writeEnvelope (juce::XmlElement& noteXml, const NoteEnvelope& envelope)
+    void writeEnvelope (juce::XmlElement& parent, const NoteEnvelope& envelope,
+                        const char* tag = "Envelope")
     {
-        auto* xml = noteXml.createNewChildElement ("Envelope");
+        auto* xml = parent.createNewChildElement (tag);
         xml->setAttribute ("enabled", (int) envelope.isEnabled());
 
         for (const auto& point : envelope.getPoints())
@@ -617,6 +618,21 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                     // toggling the curve off keeps its shape on disk.
                     writeEnvelope (*sampleXml, sample.volumeCurve);
 
+                    // Phase 50 (v22): the pan curve gets its own tag. It cannot
+                    // share <Envelope> — a reader that took the first child
+                    // would read whichever happened to be written first, which
+                    // is exactly the "element order is the state" mistake P42
+                    // made with automation lanes.
+                    writeEnvelope (*sampleXml, sample.panCurve, "PanEnvelope");
+
+                    // Always written: which curve the box was showing is state,
+                    // not something to infer from which child exists.
+                    sampleXml->setAttribute ("autotarget",
+                                             sampleAutomationTargetKey (sample.automationTarget));
+
+                    if (sample.reversed)
+                        sampleXml->setAttribute ("reversed", 1);
+
                     // Phase 31: only written when it is something other than the
                     // window, so most clips stay unchanged on disk and a v15
                     // reader sees exactly what it expects.
@@ -945,6 +961,18 @@ bool fromXmlText (const juce::String& xmlText,
                         readEnvelope (*envXml, sample.volumeCurve);
                     else
                         migrateFadesToCurve (*sm, sample.volumeCurve);
+
+                    // Phase 50 (v22). A v21 file has neither child nor
+                    // attribute, and both defaults are the honest reading of
+                    // "this block was never asked": a flat 0.5 pan curve that is
+                    // switched off, and a box that shows the volume curve —
+                    // which is the only curve a v21 block had.
+                    if (auto* panXml = sm->getChildByName ("PanEnvelope"))
+                        readEnvelope (*panXml, sample.panCurve);
+
+                    sample.automationTarget = sampleAutomationTargetFromKey (
+                        sm->getStringAttribute ("autotarget", "volume"));
+                    sample.reversed = sm->getBoolAttribute ("reversed", false);
 
                     // Phase 31: clamped, not trusted. A stray 9 in the file must
                     // read back as "the window", not as an enum value nothing

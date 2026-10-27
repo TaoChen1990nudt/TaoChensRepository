@@ -552,6 +552,27 @@ public:
         which synth the user picked and mounts the group on it. */
     std::function<void (int layerIndex, int groupId, juce::Point<int> screenPos)> onGroupMountRequested;
 
+    //-- Phase 50: bounce a scope into a sample block -------------------------
+    /** What the user asked to render. A small POD instead of three overloads
+        because the host's renderer needs the same three answers either way, and
+        because "selection" is a list of ids that must be copied the moment the
+        menu closes — the selection can change while the render runs. */
+    struct RenderScopeRequest
+    {
+        int layerIndex = -1;
+        int groupId    = -1;                 // >= 0 for "this group"
+        bool wholeLayer = false;             // otherwise the id lists below
+        std::vector<int> noteIds;            // only for the selection case
+        std::vector<int> sampleIds;          // ditto — a mixed selection renders both
+
+        bool isSelection() const noexcept { return ! wholeLayer && groupId < 0; }
+    };
+
+    /** Fired by the canvas / group menus: "render this to a block". The host
+        owns the renderer, the sample library and the layer, so it does the
+        work; the roll only says what was asked for. */
+    std::function<void (const RenderScopeRequest&)> onRenderScopeRequested;
+
     //-- Phase 17: audio clips ------------------------------------------------
     /** A sample dropped anywhere on the grid becomes a block in the ACTIVE
         layer: the block covers a whole number of pitch lanes and its width is
@@ -726,6 +747,20 @@ public:
     juce::Rectangle<float> getSampleAutomationBoxForTest (int layerIndex,
                                                           int sampleId) const;
 
+    /** Phase 50: test hook — the curve's own rectangle, so "the curve starts
+        where the block starts" can be asserted instead of eyeballed. */
+    juce::Rectangle<float> getSampleCurveAreaForTest (int layerIndex, int sampleId) const
+    {
+        return getSampleCurveArea (layerIndex, sampleId);
+    }
+
+    /** Phase 50: test hook — the same cut the menu item runs. Returns how many
+        blocks were split. */
+    int simulateSampleSplitAtPlayhead() { return splitSelectedSamplesAtPlayhead(); }
+
+    /** Phase 50: test hook — the same reverse the menu item runs. */
+    int simulateSampleReverse() { return toggleSelectedSampleReverse(); }
+
     /** Phase 30: pixels of a block that actually carry audio — the waveform's
         own width at the current zoom. Zero when the file is missing.
 
@@ -886,6 +921,16 @@ public:
     juce::Rectangle<int>   getToolButtonBounds (int index) const;
     juce::Rectangle<int>   getToolbarArea() const;
 
+    /** Phase 50: the two "render this to a block" items, in one place so the
+        menu and the self-test read the same list. Ids 7 and 8 are the canvas
+        menu's own numbering, and the selection item greys out when there is
+        nothing selected.
+
+        Public for the same reason as the toolbar bounds above: the self-test
+        proves the items exist and that the first one disables itself with an
+        empty selection, instead of trusting a screenshot nobody diffs. */
+    static void addRenderScopeItems (juce::PopupMenu& menu, bool hasSelection);
+
 private:
     enum class DragMode { none, moveNote, resizeNote, resizeNoteLeft, marquee, panView,
                           scrollThumb, automationPoint, resizeSample, resizeSampleLeft,
@@ -973,9 +1018,23 @@ private:
     /** The floating box: exactly as wide as the block, under it, flipped above
         when the block sits near the bottom of the view. */
     juce::Rectangle<float> getSampleAutomationBoxBounds (int layerIndex, int sampleId) const;
+
+    /** Phase 50: the curve area ALIGNS with the block, pixel for pixel.
+
+        P49 inset it inside the box by 10% on each side, which meant the curve's
+        first point sat a few pixels right of the audio it shapes. At this zoom
+        that is a beat of drift, and the one promise of an inline curve — "this
+        pixel is this moment of the block" — stops being true. The area now takes
+        its x and width from `getSampleScreenBounds`, so the mapping is exactly
+        the block's own grid mapping. */
     juce::Rectangle<float> getSampleCurveArea (int layerIndex, int sampleId) const;
     juce::Rectangle<float> getSampleMenuArea (int layerIndex, int sampleId) const;
     juce::Rectangle<float> getSampleCloseArea (int layerIndex, int sampleId) const;
+
+    /** Phase 50: the menu row has three parts now — the target button on the
+        left, the enable switch on the right, the close cross in the corner. */
+    juce::Rectangle<float> getSampleTargetArea (int layerIndex, int sampleId) const;
+    juce::Rectangle<float> getSampleToggleArea (int layerIndex, int sampleId) const;
 
     SampleEvent*       getExpandedSample();
     const SampleEvent* getExpandedSample() const;
@@ -1002,6 +1061,27 @@ private:
 
     /** Right-click on a clip: delete, duplicate, fit to source, trim. */
     void showSampleMenu (int sampleId, juce::Point<int> screenPos);
+
+    //-- Phase 50: cut and reverse -------------------------------------------
+    /** Splits every selected block that straddles the playhead into two.
+
+        The right-hand half keeps the audio the left-hand half did not consume:
+        the source offset advances by `cutSeconds * stretch.speed`, which is the
+        same arithmetic the renderer reads with — so a cut block sounds exactly
+        like the block it came from, with the playhead as the seam. Returns how
+        many blocks were split (0 = the playhead was not inside any of them).
+
+        Both halves get their curve split at the same normalised position, so a
+        volume ramp stays a ramp instead of restarting on the second half. */
+    int splitSelectedSamplesAtPlayhead();
+
+    /** Flips `reversed` on every selected block. */
+    int toggleSelectedSampleReverse();
+
+    /** Phase 50: the block's window, in seconds of SOURCE — what a cut needs to
+        hand the right-hand half. One function so the cut and the badge cannot
+        disagree about where the block currently ends in the file. */
+    double sampleWindowSeconds (const SampleEvent&, const Layer&) const;
 
     /** Phase 29: one trim step, shared by the drag, the test hook and both
         edges. `fromTail` keeps the head and moves the end; the other way keeps

@@ -14,6 +14,7 @@
 #include "Audio/AudioEngine.h"
 #include "Audio/MidiInputHub.h"
 #include "Audio/PluginHost.h"
+#include "Audio/ScopeRender.h"
 #include "Audio/WavExport.h"
 #include "Model/AutomationModel.h"
 #include "Model/HardwareRack.h"
@@ -215,7 +216,12 @@ public:
         the hero image already carries the note box. The curve is given a shape
         for the shot and put back afterwards: a flat line would leave the reader
         wondering whether the box works, and a demo curve is not the user's. */
-    juce::Image createClipAutomationSnapshot (int width = ui::px (900), int height = ui::px (520));
+    /** Phase 50: `target` chooses which of the clip's two curves the frame
+        shows. Two frames instead of one, because the menu row's whole new job is
+        naming a target and a single picture cannot show both. */
+    juce::Image createClipAutomationSnapshot (int width = ui::px (900), int height = ui::px (520),
+                                              SampleAutomationTarget target
+                                                  = SampleAutomationTarget::volume);
 
     /** Phase 30: the roll with one synth highlighted, at normal brightness.
 
@@ -680,6 +686,23 @@ private:
     void showMessage (const juce::String& title, const juce::String& message, bool isError);
     void exportFinished();
 
+    //-- Phase 50: bounce a group / layer / selection into a sample block -----
+    /** Asks for nothing, renders in the background and then puts the file on the
+        layer as a block at the first free beat. When the layer is full the user
+        is told — a bounce that silently appends to the end of the song is a
+        bounce that moved the song. */
+    void renderScopeToSample (const PianoRollComponent::RenderScopeRequest& request);
+
+    /** Called on the message thread when the bounce thread finishes. */
+    void insertRenderedSample (const juce::File& file, int layerIndex,
+                               double lengthBeats, const juce::String& name);
+
+    /** Where a block of `lengthBeats` would fit on this layer, or "nowhere".
+        Used twice on purpose: once before rendering (so a full layer does not
+        cost four minutes of CPU) and once when the block is about to land (the
+        user may have edited the layer while the bounce ran). */
+    scope::FreeBeat freeBeatOnLayer (int layerIndex, double lengthBeats) const;
+
     //-- Phase 22: the menu bar ----------------------------------------------
     /** Two menus, drawn by this component rather than by juce::MenuBarComponent.
 
@@ -1006,6 +1029,11 @@ private:
     bool       dirtyCache = false;
 
     bool       exporting = false;
+
+    /** Phase 50: how many bounces have been written, used only to give each
+        render file a unique name. Never reused, so a second bounce of the same
+        group cannot overwrite the audio the first block is playing. */
+    int        scopeRenderSerial = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

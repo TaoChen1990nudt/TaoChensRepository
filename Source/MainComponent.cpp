@@ -133,6 +133,61 @@ namespace
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ExportTask)
     };
 
+    /** Phase 50: the same thread-with-progress the export uses, but it does not
+        announce itself. The result of a scope render is a block appearing on the
+        timeline — that IS the completion signal, and a modal "done!" in front of
+        it would have to be dismissed before the user could look at what they
+        asked for. */
+    class ScopeRenderTask final : public juce::ThreadWithProgressWindow
+    {
+    public:
+        ScopeRenderTask (std::shared_ptr<const PublishedSchedule> scheduleToRender,
+                         juce::File destinationFile,
+                         double startSeconds,
+                         PluginHost* plugins,
+                         std::function<void (const juce::File&, const wav::ExportResult&)> onFinished)
+            : juce::ThreadWithProgressWindow (utf8 ("正在渲染为采样"), true, true, 20000, utf8 ("取消")),
+              schedule (std::move (scheduleToRender)),
+              destination (std::move (destinationFile)),
+              start (startSeconds),
+              pluginHost (plugins),
+              finishedCallback (std::move (onFinished))
+        {
+        }
+
+        void run() override
+        {
+            setStatusMessage (utf8 ("离线渲染中…"));
+
+            result = wav::renderToFile (destination, *schedule, wav::exportSampleRate, 0.05,
+                                        [this] (double fraction)
+                                        {
+                                            setProgress (fraction);
+                                            return ! threadShouldExit();
+                                        },
+                                        pluginHost,
+                                        start);
+        }
+
+        void threadComplete (bool userPressedCancel) override
+        {
+            if (! userPressedCancel && finishedCallback != nullptr)
+                finishedCallback (destination, result);
+
+            delete this;
+        }
+
+    private:
+        std::shared_ptr<const PublishedSchedule> schedule;
+        juce::File destination;
+        double start = 0.0;
+        PluginHost* pluginHost = nullptr;
+        std::function<void (const juce::File&, const wav::ExportResult&)> finishedCallback;
+        wav::ExportResult result;
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ScopeRenderTask)
+    };
+
     /** Fills a popup with vendor submenus.
 
         A machine with Arturia, u-he and Steinberg installed has 90 instruments;
@@ -605,6 +660,15 @@ MainComponent::MainComponent()
     pianoRoll.onGroupMountRequested = [this] (int layerIndex, int groupId, juce::Point<int> pos)
     {
         showGroupMountMenu (layerIndex, groupId, pos);
+    };
+
+    //-- Phase 50: "render this to a block" ----------------------------------
+    // The roll names the scope; the host owns the renderer, the sample library
+    // and the layer. Nothing about the bounce lives in the UI layer, so the
+    // self-test can drive renderScopeToSample() without a mouse.
+    pianoRoll.onRenderScopeRequested = [this] (const PianoRollComponent::RenderScopeRequest& request)
+    {
+        renderScopeToSample (request);
     };
 
     // A group that disappears takes its curve's row with it. Done here because
@@ -1106,7 +1170,8 @@ juce::Image MainComponent::createClipCloseupSnapshot (int width, int height)
     return image;
 }
 
-juce::Image MainComponent::createClipAutomationSnapshot (int width, int height)
+juce::Image MainComponent::createClipAutomationSnapshot (int width, int height,
+                                                         SampleAutomationTarget target)
 {
     // Phase 49: the block's own curve, unfolded. Same staging trick as the
     // closeup — grown for the frame, zoomed onto the demo block, everything put
@@ -1131,6 +1196,7 @@ juce::Image MainComponent::createClipAutomationSnapshot (int width, int height)
     // the user's project. `getSamples()` hands out const views, so the edit
     // goes through findSample — the same door every gesture uses.
     NoteEnvelope previousCurve;
+    SampleAutomationTarget previousTarget = SampleAutomationTarget::volume;
 
     if (clip != nullptr)
     {
@@ -1139,11 +1205,25 @@ juce::Image MainComponent::createClipAutomationSnapshot (int width, int height)
 
         if (block != nullptr)
         {
-            previousCurve = block->volumeCurve;
+            previousCurve  = block->curveFor (target);
+            previousTarget = block->automationTarget;
 
-            block->volumeCurve.loadPoints ({ { 0.0f, 0.0f }, { 0.30f, 1.0f },
-                                             { 0.62f, 0.55f }, { 1.0f, 0.85f } });
-            block->volumeCurve.setEnabled (true);
+            if (target == SampleAutomationTarget::pan)
+            {
+                // A sweep across the field: the shape reads as "left, then
+                // right", which is what a pan lane is for. Half-way is centre,
+                // marked by the box's own centre hairline.
+                block->panCurve.loadPoints ({ { 0.0f, 0.15f }, { 0.35f, 0.75f },
+                                              { 0.70f, 0.25f }, { 1.0f, 0.62f } });
+            }
+            else
+            {
+                block->volumeCurve.loadPoints ({ { 0.0f, 0.0f }, { 0.30f, 1.0f },
+                                                 { 0.62f, 0.55f }, { 1.0f, 0.85f } });
+            }
+
+            block->curveFor (target).setEnabled (true);
+            block->automationTarget = target;
         }
 
         pianoRoll.setScrollBeats (juce::jmax (0.0, clip->startBeat - 0.6));
@@ -1156,7 +1236,10 @@ juce::Image MainComponent::createClipAutomationSnapshot (int width, int height)
 
     if (clip != nullptr)
         if (auto* block = layer->findSample (clip->id))
-            block->volumeCurve = previousCurve;
+        {
+            block->curveFor (target) = previousCurve;
+            block->automationTarget  = previousTarget;
+        }
 
     pianoRoll.setBounds (previousBounds);
     pianoRoll.setBeatWidth (previousBeatWidth);
@@ -4577,17 +4660,19 @@ void MainComponent::paint (juce::Graphics& g)
         {
             auto readout = getPositionReadoutBounds();
 
+            // Phase 50 (DESIGN.md §5): both readouts are tabular. The bar/beat
+            // pair changes at every beat and the timecode at every second, and
+            // with proportional digits the whole block shivers sideways each
+            // time a 1 becomes a 0.
             g.setColour (juce::Colours::white.withAlpha (0.92f));
-            g.setFont (juce::Font (juce::FontOptions{}.withHeight (atomic::ui::sp (14.0f)).withStyle ("Bold")));
-            g.drawText (formatBarBeat(),
-                        readout.withTrimmedBottom (ui::px (21)),
-                        juce::Justification::centredLeft, false);
+            ui::drawTabular (g, formatBarBeat(),
+                             readout.withTrimmedBottom (ui::px (21)).toFloat(),
+                             ui::title (14.0f), juce::Justification::centredLeft);
 
             g.setColour (juce::Colours::white.withAlpha (0.32f));
-            g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
-            g.drawText (formatTime(),
-                        readout.withTrimmedTop (ui::px (25)),
-                        juce::Justification::centredLeft, false);
+            ui::drawTabular (g, formatTime(),
+                             readout.withTrimmedTop (ui::px (25)).toFloat(),
+                             ui::font (9.5f), juce::Justification::centredLeft);
         }
 
         //-- Phase 8: new / undo / redo / mixer / settings ---------------------
@@ -5848,6 +5933,173 @@ void MainComponent::exportFinished()
 {
     exporting = false;
     repaint (topBarBounds);
+}
+
+//==============================================================================
+//-- Phase 50: render a scope into a sample block ----------------------------
+scope::FreeBeat MainComponent::freeBeatOnLayer (int layerIndex, double lengthBeats) const
+{
+    const auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr || lengthBeats <= 0.0)
+        return {};
+
+    std::vector<std::pair<double, double>> occupied;
+    double contentEnd = 0.0;
+
+    for (const auto& note : layer->getNotes())
+    {
+        occupied.push_back ({ note.startBeat, note.endBeat() });
+        contentEnd = juce::jmax (contentEnd, note.endBeat());
+    }
+
+    for (const auto& clip : layer->getSamples())
+    {
+        occupied.push_back ({ clip.startBeat, clip.endBeat() });
+        contentEnd = juce::jmax (contentEnd, clip.endBeat());
+    }
+
+    return scope::findFreeBeat (std::move (occupied), lengthBeats, contentEnd);
+}
+
+void MainComponent::renderScopeToSample (const PianoRollComponent::RenderScopeRequest& request)
+{
+    auto* layer = stack.getLayer (request.layerIndex);
+
+    if (layer == nullptr)
+    {
+        showMessage (utf8 ("无法渲染"), utf8 ("当前没有可写入的图层。"), true);
+        return;
+    }
+
+    // Freeze the session exactly as the export does: one mixer, one schedule.
+    PlaybackEngine staging;
+    staging.setSampleRate (wav::exportSampleRate);
+    staging.publishSchedule (stack, rack, audio.getBpm(), 0.0, &mixer);
+
+    auto full = staging.getSchedule();
+
+    if (full == nullptr)
+    {
+        showMessage (utf8 ("无法渲染"), utf8 ("无法生成渲染快照"), true);
+        return;
+    }
+
+    scope::Scope asked;
+
+    asked.layerIndex = request.layerIndex;
+    asked.noteIds    = request.noteIds;
+    asked.sampleIds  = request.sampleIds;
+
+    if (request.wholeLayer)
+    {
+        asked.kind = scope::Scope::Kind::layer;
+    }
+    else if (request.groupId >= 0)
+    {
+        asked.kind    = scope::Scope::Kind::group;
+        asked.groupId = request.groupId;
+    }
+    else
+    {
+        asked.kind = scope::Scope::Kind::selection;
+    }
+
+    auto extracted = scope::extract (*full, asked);
+
+    if (extracted.empty || extracted.lengthSeconds <= 0.001)
+    {
+        showMessage (utf8 ("没有可渲染的内容"),
+                     utf8 ("这次选择里没有音符或采样。"), false);
+        return;
+    }
+
+    const double secondsPerBeat = juce::jmax (1.0e-9, 60.0 / juce::jmax (1.0, audio.getBpm()));
+    const double lengthBeats    = extracted.lengthSeconds / secondsPerBeat;
+
+    // Ask before rendering, not after: the answer only depends on the model, and
+    // "there is nowhere to put it" is much cheaper to learn now than in four
+    // minutes.
+    if (! freeBeatOnLayer (request.layerIndex, lengthBeats).found)
+    {
+        showMessage (utf8 ("没有地方可以放"),
+                     utf8 ("这个图层里找不到一段 ") + juce::String (lengthBeats, 2)
+                       + utf8 (" 拍长的空白位置。\n\n先挪开一些内容，或者渲染到别的图层。"),
+                     true);
+        return;
+    }
+
+    const auto rendersDir = getProjectDirectory().getChildFile ("Renders");
+    rendersDir.createDirectory();
+
+    ++scopeRenderSerial;
+
+    const auto file = rendersDir.getChildFile ("render-" + juce::String (scopeRenderSerial)
+                                                 + "-" + juce::Time::getCurrentTime().formatted ("%H%M%S")
+                                                 + ".wav");
+
+    const juce::String displayName = utf8 ("渲染 ") + juce::String (scopeRenderSerial);
+
+    auto schedule = std::make_shared<PublishedSchedule> (std::move (extracted.schedule));
+    const double start = extracted.startSeconds;
+    const int    targetLayer = request.layerIndex;
+
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+
+    auto* task = new ScopeRenderTask (schedule, file, start, &plugins,
+                                      [safeThis, targetLayer, lengthBeats, displayName]
+                                      (const juce::File& rendered, const wav::ExportResult& result)
+    {
+        auto* component = safeThis.getComponent();
+
+        if (component == nullptr)
+            return;
+
+        if (! result.ok)
+        {
+            rendered.deleteFile();
+            component->showMessage (utf8 ("渲染失败"),
+                                    result.message.isNotEmpty() ? result.message
+                                                                : utf8 ("未知错误"),
+                                    true);
+            return;
+        }
+
+        component->insertRenderedSample (rendered, targetLayer, lengthBeats, displayName);
+    });
+
+    task->launchThread();
+}
+
+void MainComponent::insertRenderedSample (const juce::File& file, int layerIndex,
+                                          double lengthBeats, const juce::String& name)
+{
+    juce::ignoreUnused (lengthBeats);   // the file's own length is the answer
+
+    // All of the arithmetic — where it fits, what it is mounted on — lives in
+    // scope::insertSampleBlock. The window's share is the part that needs a
+    // window: telling the user, selecting the block, and writing one undo step.
+    const auto inserted = scope::insertSampleBlock (stack, rack, layerIndex, file,
+                                                    audio.getBpm(), name);
+
+    if (! inserted.ok)
+    {
+        // Either the layer changed while the bounce ran, or the file did not
+        // decode. The audio is kept on disk in both cases: deleting a render the
+        // user waited for would be worse than a stray file.
+        showMessage (inserted.message.contains (juce::String::fromUTF8 (u8"空位"))
+                       ? utf8 ("没有地方可以放") : utf8 ("渲染的文件读不回来"),
+                     inserted.message + "\n\n" + file.getFullPathName(),
+                     true);
+        return;
+    }
+
+    pianoRoll.setSampleSelection ({ inserted.sampleId });
+    pianoRoll.repaint();
+    repaint();
+
+    // One undo step for the whole bounce, like a drop.
+    commitHistory();
 }
 
 //==============================================================================

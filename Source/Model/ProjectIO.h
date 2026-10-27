@@ -168,7 +168,7 @@ namespace project
         sounding exactly as it saved.
 
       Nothing else changed: no attribute was renamed, no meaning was redefined. */
-inline constexpr int formatVersion = 21;
+inline constexpr int formatVersion = 22;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";

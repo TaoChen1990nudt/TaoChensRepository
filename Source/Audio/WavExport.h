@@ -56,13 +56,19 @@ struct ExportResult
     `progress` is called with 0..1 after every block; returning false cancels
     the export and deletes the partial file. It is called from the rendering
     thread, so it must not touch the UI directly.
+
+    Phase 50: `startSeconds` moves the whole bounce later in the timeline. Used
+    by "render this group to a block", where the group may start at beat 40 and
+    the block must contain the group, not forty beats of silence. Nothing is
+    rebased — see scope::extract for why.
 */
 ExportResult renderToFile (const juce::File& destination,
                            const PublishedSchedule& schedule,
                            double sampleRate = exportSampleRate,
                            double tailSeconds = 0.05,
                            const std::function<bool (double)>& progress = {},
-                           PluginHost* livePlugins = nullptr);
+                           PluginHost* livePlugins = nullptr,
+                           double startSeconds = 0.0);
 
 } // namespace wav
 

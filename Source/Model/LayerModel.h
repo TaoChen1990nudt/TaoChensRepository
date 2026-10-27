@@ -128,6 +128,46 @@ enum class StretchMode
 };
 
 //==============================================================================
+/** Phase 50: what a clip's automation box edits.
+
+    A block has two curves, both normalised across the block, and exactly one of
+    them is on screen at a time. Making the target a stored property of the
+    block (rather than "whatever the panel last showed") means reopening the box
+    tomorrow shows the same curve the user left, and a copied block carries its
+    own answer — the same rule the note's `modTarget` follows.
+
+    Kept in the model header because the renderer and the project file have to
+    name the same two things the menu does. */
+enum class SampleAutomationTarget
+{
+    volume = 0,   // 0..1 multiplies the clip's gain, 1.0 = untouched
+    pan    = 1    // 0..1 offsets the clip's pan, 0.5 = centre
+};
+
+/** ASCII key used in the project file. */
+inline const char* sampleAutomationTargetKey (SampleAutomationTarget target) noexcept
+{
+    switch (target)
+    {
+        case SampleAutomationTarget::pan: return "pan";
+        case SampleAutomationTarget::volume:
+        default:                          return "volume";
+    }
+}
+
+inline SampleAutomationTarget sampleAutomationTargetFromKey (const juce::String& key) noexcept
+{
+    return key == "pan" ? SampleAutomationTarget::pan : SampleAutomationTarget::volume;
+}
+
+/** The neutral value each target idles at — the one number "reset to a flat
+    line" and the disabled curve both have to agree on. */
+inline float sampleAutomationNeutral (SampleAutomationTarget target) noexcept
+{
+    return target == SampleAutomationTarget::pan ? 0.5f : 1.0f;
+}
+
+//==============================================================================
 /**
     Phase 17: an audio clip lying in the roll.
 
@@ -201,6 +241,46 @@ struct SampleEvent
         this curve, so an old project sounds the same without keeping two ways
         to shape a block alive in the model. */
     NoteEnvelope volumeCurve = NoteEnvelope::makeIdle();
+
+    //-- Phase 50: the second curve, and which one the box is editing ---------
+    /** Normalised 0..1 across the block; 0.5 is centre, so the idle curve is a
+        flat 0.5 line. Added as a separate member rather than a
+        map<target, curve> for the same reason the volume curve is a member:
+        copying a block must copy both shapes, and there is nothing to detach.
+
+        Like the volume curve it is an OFFSET applied on top of the layer / synth
+        / group pan, because that is what the layer's own pan lane does — one
+        arithmetic for "pan is a sum of statements" instead of two. */
+    NoteEnvelope panCurve = NoteEnvelope::makeIdle (0.5f);
+
+    /** Which curve the floating box shows. Always written to the project file:
+        P42's lesson was that "the last lane read wins" is not a selection rule,
+        it is an accident of element order. */
+    SampleAutomationTarget automationTarget = SampleAutomationTarget::volume;
+
+    NoteEnvelope& curveFor (SampleAutomationTarget target) noexcept
+    {
+        return target == SampleAutomationTarget::pan ? panCurve : volumeCurve;
+    }
+
+    const NoteEnvelope& curveFor (SampleAutomationTarget target) const noexcept
+    {
+        return target == SampleAutomationTarget::pan ? panCurve : volumeCurve;
+    }
+
+    /** The curve the box edits right now. */
+    NoteEnvelope&       activeCurve()       noexcept { return curveFor (automationTarget); }
+    const NoteEnvelope& activeCurve() const noexcept { return curveFor (automationTarget); }
+
+    //-- Phase 50: playing the file backwards --------------------------------
+    /** True = play the window right to left.
+
+        A flag, not a reversed copy of the buffer: the buffer belongs to the
+        sampler slot and is shared by every block mounted on it, so reversing
+        one block by rewriting audio would reverse the others and the file the
+        user dropped. The renderer mirrors its read position instead, which
+        also keeps a reversed block a pure function of the clock (Phase 31). */
+    bool reversed = false;
 
     //-- Phase 31: what a length change does to the audio --------------------
     /** How this block answers "make me longer". `none` keeps Phase 30's window

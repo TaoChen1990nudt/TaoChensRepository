@@ -62,7 +62,7 @@
 - 窗口门写作 `if (audio.isPlaying() || audio.getPlayback().hasMeters())`，**放在
   `if (! audio.isPlaying()) return;` 之前**——放后面就漏掉"停止后还在落"那一段，而那正是用户会看的。
 
-## 工程文件（`.atomic`，`formatVersion` = 19）
+## 工程文件（`.atomic`，`formatVersion` = 22）
 - **先解析到临时对象、末尾一次性提交**，坏文件绝不破坏当前会话。载入后重置
   `nextNoteId`/`nextSlotId`/组 id（max+1）。
 - 老文件必须仍能开：v3 `mod=`、v4 插件（标签 **"PLUGIN"** 全大写）、v5 `mixer=`、
@@ -73,7 +73,11 @@
   v18 `<Slot pluginparam="N">` + `<Slot autotarget="filter|level|plugin">` +
   `<Automation target="plugin">`（三条 lane 全写，`autotarget` 缺失=旧文件）、
   v19 `<Automation target="pan|mute|solo">`（槽位六条 lane 全写）+ `<MasterAutomation>`
-  多一条 `target="mute"`。**新 lane 一律追加在枚举末尾**，老文件不需要映射表。
+  多一条 `target="mute"`、v20 效果器多参数（EQ 九参 / COMP 六参 / REVERB 五参）、
+  v21 `<Sample>` 内的 `<Envelope>`（音量曲线，`fadein`/`fadeout` 读成等价斜坡）、
+  v22 `<Sample pan="…">` 的 `<PanEnvelope>` + `autotarget="pan"` + `reversed="1"`
+  （三者缺失 = 音量曲线 / 未反转 / 声相平 0.5 且禁用）。
+  **新 lane 一律追加在枚举末尾**，老文件不需要映射表。
 - **选中哪条 lane 显式写 `autotarget`，不靠元素顺序推断**：三条 lane 都写出来之后，
   "最后读到的那条算选中"恒把 target 变成 `plugin`。回退规则只在 `autotarget` **缺失**时启用。
 - **组静音存在组上，不存成员上**：一个属性熬过粘贴、复制、合并；写到六十个音符上就是六十个
@@ -327,7 +331,7 @@
 - 进度用**逐层 BFS**；收尾设 **1.0**（不是 0）。`waitForPendingScans()` 自己泵 AsyncUpdater，
   所以 `handleAsyncUpdate()` 必须幂等。**析构必须 `stopThread(-1)` 兜底**。
 
-## 采样块：选择 / 窗口 / 音量曲线（P28–P29 / P49）
+## 采样块：选择 / 窗口 / 曲线（P28–P29 / P49 / P50）
 - **单击替换整个选择，框选可以同时选中两类**。`setSelection`/`setSampleSelection` 清对方
   （单击语义）；`setMixedSelection(notes, clips)` 一次性替换两者（marquee 与粘贴用）。
   Delete / Ctrl+C / Ctrl+D 一律"两类一起"，不留"你指哪个"的暗选择。
@@ -344,8 +348,27 @@
   新建/粘贴的块是 `makeIdle()`——平线 1.0 且**禁用**，第一次编辑才点亮。
   `publishSchedule` 把 x 乘 `blockSeconds` 换成秒，渲染循环只求值；咔哒 ramp 保留。
   改动要走 `notifyNotesChanged()`（撤销与采样槽清扫都挂在通知上）。
+- **块自己的声相曲线**（P50）：同一个块可以带两条曲线，
+  `SampleEvent::automationTarget` 决定哪条生效、哪条显示。
+  `panCurve` 的空闲值是 `makeIdle(0.5f)`（中位），不是 1.0——`sampleAutomationNeutral()`
+  按目标返回中性值，重置菜单必须调它，不能写死 1.0。渲染端先按块两端声相插值，
+  再叠加曲线，最后**只夹一次** `jlimit (-1, 1)`。
 - **箱几何**：宽 = 块宽（与音符箱同一条规矩），块下方 3 px，没空间就翻到块上方；
   菜单行 26 设计像素，开关固定 22×12（**不要**拿行高当直径）。
+  菜单行三区：左侧目标按钮（"音量"/"声相"，带 caret）→ 开关 → 右上角叉号（关闭）。
+- **曲线区的横向范围就是块的横向范围**（P50 修）。P49 的实现给箱内缩了 10% 边距，
+  曲线与块对不齐；现在 `getSampleCurveArea` 直接用块的 `getX()/getWidth()`，
+  自检里有一条断言读同一对数字（"曲线 x 范围 = 块 x 范围"）。
+- **绘制顺序是一条规则**：底色 → 网格 → 填充 → 参考线 → 曲线 → 端点。
+  声相中线必须在 `fillPath` 之后画，否则被自己的洗色盖掉（见 PITFALLS P50-E）。
+- **切割**（P50）：`splitSelectedSamplesAtPlayhead()`，只切**被选中且跨越播放头**的块。
+  左手半段长度截到播放头，右手半段的 `sourceOffsetSeconds` 推进
+  `min (window, elapsedOutput * speed)`——是左半段**实际消耗的源秒数**，
+  不是窗口比例。两条曲线在接缝处 `subEnvelope (env, 0, u)` / `(env, u, 1)` 切分，
+  保持端点插值，ramp 不会在接缝处重新开始。
+- **反转**（P50）：`SampleEvent::reversed` 只是**播放期镜像**——
+  渲染循环用 `readElapsed = length - elapsed`，源文件不动、共享 buffer 不动。
+  波形按列反向绘制，块头加"反向"徽标。撤销是整工程快照，所以不用单独处理。
 - 波形只画窗口内的 peaks：裁过前后的块**画面必须不同**。
 - 复制/粘贴（Ctrl+C/X/V、Ctrl+D）：粘贴的块 **`groupId = -1`**，锚点与音符一致
   （playhead > 剪贴板起点 > 右移一个块长）。`copySelectionToClipboards()` **清空另一类**。
@@ -460,6 +483,37 @@
   `userArea` / 显示器 scale，再还原一次并打印尺寸。改窗口代码后跑它，不要靠肉眼看。
   本机实测：`maximised=1 titleBar=30 border=7/7/7 content=0 23 2048 1081
   userArea=0 0 2048 1104 scale=1.25x → OK`，`restored to 88 17 1872 1066`。
+
+## 渲染成采样（P50：`Audio/ScopeRender.h`）
+- **一个 mixer，不建第二个**：`scope::extract()` 读的是**已发布**的 `PublishedSchedule`，
+  按范围**过滤**出子集（`Kind::selection / group / layer`），不重新发布子图。
+  `renderToFile(schedule, …, startSeconds)` 多一个起点参数：时间**不 rebase**，
+  从该秒开始读，长度才按选区算。
+- **插入点由模型算，不由 UI 猜**：`scope::findFreeBeat (occupied, lengthBeats, contentEnd)`
+  在已占用区间合并后的空隙里找第一段够长的地方，空图层返回 beat 0。
+- **插入逻辑是自由函数**：`scope::insertSampleBlock (stack, rack, layerIndex, file, bpm, name,
+  laneSpan, pitch)` → `InsertResult{ok, sampleId, beat, message}`。
+  它不碰窗口、不碰单例，所以自检能用本地 `LayerStack` 跑同一份代码
+  （否则跑一次自检就往 `docs/demo.atomic` 里塞一个块，见 PITFALLS P50-D）。
+- **两段式空位检查**：渲染前查一次（省掉几分钟 CPU），渲染后**再查一次**（用户可能中途编辑）。
+  查不到就弹提示框，不静默丢弃。
+- 菜单项由 `PianoRollComponent::addRenderScopeItems (menu, hasSelection)` 统一产出
+  （id 7 = 渲染选中内容、id 8 = 渲染整个图层），自检用 `MenuItemIterator` **读菜单**
+  而不是截图；"没有选区时第一项变灰"就是这条断言的实质。
+- 后台任务 `ScopeRenderTask` 带 `scopeRenderSerial`，完成即插入，**不弹完成框**
+  （用户要的是"渲染好直接落到空位"，不是"渲染好了，请你自己放"）。
+
+## 排版层（P50：`Util/Metrics.h`）
+- **四个可复用入口**：`tracked (designPoints, kerningPixels, style)`、
+  `title (points)`、`section (points)`、`drawTabular()` / `tabularWidth()` / `digitCellWidth()`。
+  换字号只换调用，不要另写一套。
+- **`tracked` 的存在理由**：`withKerningFactor` 的单位是 **EM**，不是像素。
+  直接传 "0.5" 会得到半个字高的空隙（PITFALLS P50-A）。要"0.5 像素"就调 `tracked`。
+- **等宽数字是手绘的**：JUCE 8 不暴露 tabular figures。`drawTabular` 按"每字一格、
+  格宽 = 该字体最宽数字、字在格内居中"绘制，所以比例数字字体也能对齐。
+  用在：走带读数、混音台 dB 读数、BPM 数值。
+- **层级**：标题 `title()` > 正文 > 大写副标题 `section()`（小字号 + 字距 + 降饱和）。
+  已落地的面板：`LayerPanel` 标题与副标题、`BpmField` 标签与数值。
 
 ## 踩坑档案
 平台陷阱、自检夹具摆位、出图尺寸见同目录 **`PITFALLS.md`**。动以下任一处前先读它：

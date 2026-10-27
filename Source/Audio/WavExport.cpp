@@ -74,7 +74,8 @@ ExportResult renderToFile (const juce::File& destination,
                            double sampleRate,
                            double tailSeconds,
                            const std::function<bool (double)>& progress,
-                           PluginHost* livePlugins)
+                           PluginHost* livePlugins,
+                           double startSeconds)
 {
     ExportResult result;
 
@@ -87,7 +88,11 @@ ExportResult renderToFile (const juce::File& destination,
     // The content end, not the project grid: an export stops where the music
     // stops. A tiny tail keeps the very last release from being cut mid-sample.
     const double contentSeconds = juce::jmax (0.0, schedule.contentBeats) * schedule.secondsPerBeat;
-    const double totalSeconds   = juce::jmax (0.05, contentSeconds + juce::jmax (0.0, tailSeconds));
+
+    startSeconds = juce::jlimit (0.0, juce::jmax (0.0, contentSeconds - 0.001), startSeconds);
+
+    const double totalSeconds   = juce::jmax (0.05, contentSeconds - startSeconds
+                                                       + juce::jmax (0.0, tailSeconds));
 
     const int totalSamples = juce::jmax (1, (int) std::llround (totalSeconds * sampleRate));
 
@@ -120,7 +125,7 @@ ExportResult renderToFile (const juce::File& destination,
         const int numThisBlock = juce::jmin (blockSize, totalSamples - offset);
 
         renderer.renderScheduleSpan (schedule,
-                                     (double) offset / sampleRate,
+                                     startSeconds + (double) offset / sampleRate,
                                      numThisBlock, bounce, offset, nullptr);
 
         if (progress != nullptr && ! progress ((double) (offset + numThisBlock) / (double) totalSamples))

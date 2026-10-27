@@ -35,6 +35,7 @@ target_sources(AtomicDAW PRIVATE
     Source/Audio/MidiInputHub.cpp
     Source/Audio/PlaybackEngine.cpp
     Source/Audio/PluginHost.cpp
+    Source/Audio/ScopeRender.cpp
     Source/Audio/WavExport.cpp
     Source/Media/SampleLibrary.cpp
     Source/Model/AutomationLane.cpp

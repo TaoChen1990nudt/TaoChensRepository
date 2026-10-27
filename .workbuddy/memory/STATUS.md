@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-27 · 对应 **Phase 49**（采样块向下展开音量曲线箱；淡入淡出退场）
+> 最后更新：2026-10-27 · 对应 **Phase 50**（采样块声相曲线 + 切割/反转 + 音符·编组·图层渲染成采样 + 排版层等宽数字）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**。
 > 规则查 `MEMORY.md`，制度细节查 `REFERENCE.md`，踩过的坑查 `PITFALLS.md`。
 
@@ -18,25 +18,29 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 49**（采样块的音量曲线：箱宽=块宽、曲线点拖/加/删、淡入淡出删除、v21 迁移）；P44–48 见日志 |
-| 自检 | **442 ALL PASSED / 0 FAIL，失败时退出码 1**（P49 咬测：摘掉「拍→秒」换算 → 曲线音频断言 FAIL + EXIT=1） |
+| 已完成阶段 | **Phase 50**（采样块声相曲线与中线、播放头切割、反转、选中/编组/整层渲染成采样并自动落位、走带与混音台等宽数字）；P44–49 见日志 |
+| 自检 | **457 ALL PASSED / 0 FAIL，失败时退出码 1**（P50 咬测：把「渲染选中」恒设为可用 → 菜单断言 FAIL + EXIT=1；摘掉「拍→秒」换算 → 曲线音频断言 FAIL） |
 | 编译 | 零 error 零 warning |
-| `formatVersion` | **21**（采样音量曲线写 `<Envelope>`；老文件的 `fadein`/`fadeout` 读成等价斜坡） |
+| `formatVersion` | **22**（采样块新增 `<PanEnvelope>`、`autotarget`、`reversed`；v21 缺省读成「音量曲线 / 未反转 / 声相平 0.5 禁用」） |
 | 可执行 | `build/AtomicDAW_artefacts/Release/AtomicDAW.exe` |
 | 技术栈 | JUCE 8.0.4（FetchContent）+ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + C++17 |
 | 源码规模 | `Source/` 下 67 个 .cpp/.h，分 Model / Audio / UI / Util / Media |
 
 ## 下一步
 
-**未定。** 功能排期等你给。工程侧唯一挂着的老账是 DESIGN.md 第 5 节（排版层：等宽数字、字距层级），
-P48 只落了色值与圆角，没动字号与字距。工程侧（P45 收尾后）没有未还的已知债：
-- ~~const 设计债~~ 已还清（P45）：`Layer::findNote` 补 const 版；hitTestActiveLayer /
-  hitTestSample / getExpandedNote / getExpandedGroup / groupLaneFor 全部双版本；
-  28 个 const 查询函数成为真 const；const_cast 在 PianoRollComponent.cpp 归零。
-- `runSelfTest` 搬走后 `MainComponent.cpp` 6092 行（原 13909），产品/检查不再共用一个编译单元。
+**未定。** 功能排期等你给。P50 把 DESIGN.md 第 5 节的排版层（等宽数字、字距层级）
+和采样块的另外三件事一并做完了，工程侧没有挂账。
+- 排版层只落了「走带读数 / 混音台 dB / BPM 数值 / 面板标题与大写副标题」四处；
+  `Metrics.h` 里的 `tracked()`、`title()`、`section()`、`drawTabular()` 是可复用的，
+  其它面板要用就换调用，不要另写一套字号。
 
 ## 已知边界（用户提过、还没做）
 
+- **切割只在播放头处**：`splitSelectedSamplesAtPlayhead()` 不接受任意点，也没有「按网格切 N 段」。
+- **反转是播放期镜像**：`reversed` 只改 read 位置，源文件不变；波形图按列反向绘制，
+  但没有做「反转后重新对齐零交叉」这种精修。
+- **渲染没有进度条与取消**：`ScopeRenderTask` 跑在后台线程，完成就插入；
+  长选区的几秒钟里 UI 不给提示，也没法中止。
 - **音符粘贴没有 streak**：P37 只修了采样。音符连按 Ctrl+V 仍落同一处（用户还没要求）。
 - **VST 乐器没有双击打开界面**：只有右键菜单第 41 项，`RackPanel` 还没有 `mouseDoubleClick`。
 - **组复制粘贴不带成员**：`GroupClip` 无成员列表，粘贴出来的组是空壳。
@@ -71,6 +75,7 @@ P48 只落了色值与圆角，没动字号与字距。工程侧（P45 收尾后
 | P47 | 效果器多参数化：EQ 九参三段 / COMP 六参 / REVERB 五参，编辑窗口标题+按键转发，v20 | `memory/2026-10-27.md` |
 | P48 | 视觉规范落地：色值预算 + 静音/独奏统一 + 降饱和 + 圆角 + 色值门禁 | `memory/2026-10-27.md` |
 | P49 | 采样块的音量曲线：向下展开箱 / 箱宽=块宽 / 曲线点手势 / 淡入淡出删除 / v21 迁移 | `memory/2026-10-27.md` |
+| P50 | 声相曲线与中线 / 播放头切割 / 反转 / 音符·编组·整层渲染成采样并落位 / 等宽数字与字距层级 / v22 | `memory/2026-10-27.md` |
 | P26–P43 | 各阶段踩坑与不变量 | `PITFALLS.md` |
 
 **最近的三个阶段**（新会话最需要的前情）：

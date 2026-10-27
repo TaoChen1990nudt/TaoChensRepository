@@ -70,5 +70,119 @@ namespace ui
     {
         return font (designPoints, "Bold");
     }
+
+    //-- Phase 50: the typographic layer (DESIGN.md §5) ----------------------
+    /** A font with extra letter spacing, given in DESIGN-SPACE PIXELS.
+
+        JUCE's kerning factor is in EM, not pixels: the shaped-text code adds
+        `height * factor` after every glyph. Passing DESIGN.md's "+0.5" straight
+        through therefore meant half the font height — at 14 pt that is 9 px of
+        air per character, which the first P50 frame showed as "0 2 . 3 . 3".
+        The conversion lives here so every caller can keep thinking in pixels. */
+    inline juce::Font tracked (float designPoints, float kerningPixels,
+                               const juce::String& style = juce::String())
+    {
+        juce::FontOptions options { sp (designPoints) };
+        options = options.withKerningFactor (juce::jmax (1.0f, designPoints) > 0.0f
+                                               ? kerningPixels / juce::jmax (1.0f, designPoints)
+                                               : 0.0f);
+
+        if (style.isNotEmpty())
+            options = options.withStyle (style);
+
+        return juce::Font (options);
+    }
+
+    /** Panel titles: bold, slightly open. */
+    inline juce::Font title (float designPoints = 11.0f)
+    {
+        return tracked (designPoints, 0.5f, "Bold");
+    }
+
+    /** Panel subtitles / section headers ("LAYER MIX · 3"): small, wide,
+        upper-case. The caller passes text that is already capitalised —
+        `toUpperCase()` on a Chinese label is a no-op and on a code string is a
+        lie, so it is not done here. */
+    inline juce::Font section (float designPoints = 8.5f)
+    {
+        return tracked (designPoints, 0.8f, "Bold");
+    }
+
+    //-- Tabular figures ------------------------------------------------------
+    /** Width of the widest digit in this font.
+
+        JUCE's Font has no "tabular figures" switch — the OpenType feature is not
+        exposed — so the only portable way to stop a readout from twitching is to
+        reserve one cell per digit and centre each glyph in it. Measured once per
+        call site (these are 1-6 character strings, not paragraphs). */
+    inline float digitCellWidth (const juce::Font& f)
+    {
+        float widest = 0.0f;
+
+        for (int d = 0; d < 10; ++d)
+            widest = juce::jmax (widest, juce::GlyphArrangement::getStringWidth (
+                                             f, juce::String (d)));
+
+        return widest;
+    }
+
+    /** The width `text` would occupy if every digit were the same width. */
+    inline float tabularWidth (const juce::Font& f, const juce::String& text)
+    {
+        const float cell = digitCellWidth (f);
+        float width = 0.0f;
+
+        for (int i = 0; i < text.length(); ++i)
+        {
+            const juce::juce_wchar c = text[i];
+
+            width += (c >= '0' && c <= '9')
+                       ? cell
+                       : juce::GlyphArrangement::getStringWidth (f, juce::String::charToString (c));
+        }
+
+        return width;
+    }
+
+    /** Draws `text` with digits on a fixed pitch, so 120 → 87 does not move the
+        8 by two pixels. Everything else (colon, dot, dB, %) keeps its own width;
+        only the digits are forced into cells. */
+    inline void drawTabular (juce::Graphics& g, const juce::String& text,
+                             juce::Rectangle<float> area, const juce::Font& f,
+                             juce::Justification justification = juce::Justification::centredLeft)
+    {
+        const float total = tabularWidth (f, text);
+
+        float x = area.getX();
+
+        if (justification.testFlags (juce::Justification::right))
+            x = area.getRight() - total;
+        else if (justification.testFlags (juce::Justification::horizontallyCentred))
+            x = area.getCentreX() - total * 0.5f;
+
+        const float cell = digitCellWidth (f);
+
+        g.setFont (f);
+
+        for (int i = 0; i < text.length(); ++i)
+        {
+            const juce::juce_wchar c = text[i];
+            const bool isDigit = (c >= '0' && c <= '9');
+            const float width  = isDigit
+                                   ? cell
+                                   : juce::GlyphArrangement::getStringWidth (f, juce::String::charToString (c));
+
+            if (isDigit)
+                g.drawText (juce::String::charToString (c),
+                            juce::Rectangle<float> (x, area.getY(), cell, area.getHeight()),
+                            juce::Justification::centred, false);
+            else
+                g.drawText (juce::String::charToString (c),
+                            juce::Rectangle<float> (x, area.getY(), width, area.getHeight()),
+                            juce::Justification::centred, false);
+
+            x += width;
+        }
+    }
 } // namespace ui
 } // namespace atomic

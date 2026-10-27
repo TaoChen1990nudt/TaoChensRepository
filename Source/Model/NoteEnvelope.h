@@ -84,8 +84,14 @@ public:
         A note's default is an ADSR because a synth note without a shape sounds
         wrong; a clip's default must be "the file, untouched", which here is a
         flat 1.0 line that is switched off. Same class, different factory, so
-        the editor and the renderer cannot invent two different idle states. */
-    static NoteEnvelope makeIdle();
+        the editor and the renderer cannot invent two different idle states.
+
+        Phase 50: the flat value is a parameter because a clip now has two
+        curves and they do not share a neutral point — volume idles at 1.0
+        (unity) and pan idles at 0.5 (centre). Asking for `makeIdle (0.5f)`
+        keeps "what does an untouched clip sound like" in one factory instead
+        of copying a magic constant into the pan lane. */
+    static NoteEnvelope makeIdle (float flatValue = 1.0f);
 
     bool isEnabled() const noexcept  { return enabled; }
     void setEnabled (bool e) noexcept { enabled = e; }

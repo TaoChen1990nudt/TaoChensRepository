@@ -49,10 +49,11 @@ NoteEnvelope NoteEnvelope::makeFlat()
     return env;
 }
 
-NoteEnvelope NoteEnvelope::makeIdle()
+NoteEnvelope NoteEnvelope::makeIdle (float flatValue)
 {
     NoteEnvelope env (EmptyTag{});
-    env.points  = { { 0.0f, 1.0f }, { 1.0f, 1.0f } };
+    const float v = juce::jlimit (0.0f, 1.0f, flatValue);
+    env.points  = { { 0.0f, v }, { 1.0f, v } };
     env.enabled = false;
     return env;
 }

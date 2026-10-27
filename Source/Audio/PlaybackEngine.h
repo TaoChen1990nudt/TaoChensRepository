@@ -372,6 +372,18 @@ struct ScheduledClip
     bool                        gainAutomated = false;
     std::vector<AutomationPoint> gainCurve;    // x = seconds since clip start
 
+    /** Phase 50: the clip's pan curve, converted to seconds the same way and
+        for the same reason. 0.5 is centre, so the published values are offsets
+        in -1..+1 added to the fader sums — one arithmetic with the layer's own
+        pan lane, which is where "pan is a sum" was first written down. */
+    bool                        panAutomated = false;
+    std::vector<AutomationPoint> panCurve;     // x = seconds since clip start
+
+    /** Phase 50: read the window right to left. The renderer mirrors its
+        elapsed time instead of the buffer, so a reversed block stays a pure
+        function of the clock and cannot drag the shared file with it. */
+    bool                        reversed = false;
+
     //-- Phase 31: what a length change does to the sound --------------------
     /** Two ratios, frozen. The audio thread must not compute a log, a division
         or a lookup per sample, so the clip's mode and its natural/drawn ratio

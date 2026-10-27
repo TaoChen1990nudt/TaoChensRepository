@@ -6295,6 +6295,20 @@ juce::String MainComponent::runSelfTest()
                  + " top/bottom " + juce::String (blockRect.getY(), 1) + "/"
                  + juce::String (blockRect.getBottom(), 1));
 
+        // Phase 50: and the curve INSIDE the box lines up with the block, to
+        // the pixel. P49 inset it by 10% of the box width, which at 48 px/beat
+        // put the first point a beat and a half right of the audio it shapes.
+        const auto curveArea = pianoRoll.getSampleCurveAreaForTest (index, a);
+
+        check ("The curve's x range IS the block's x range",
+               ! curveArea.isEmpty()
+                 && std::abs (curveArea.getX() - blockRect.getX()) < 0.75f
+                 && std::abs (curveArea.getWidth() - blockRect.getWidth()) < 0.75f,
+               "curve x/w " + juce::String (curveArea.getX(), 1) + "/"
+                 + juce::String (curveArea.getWidth(), 1)
+                 + ", block x/w " + juce::String (blockRect.getX(), 1) + "/"
+                 + juce::String (blockRect.getWidth(), 1));
+
         // One floating editor at a time: opening the clip box must have
         // closed whatever the note box was showing, and the second toggle
         // closes it again.
@@ -8299,6 +8313,501 @@ juce::String MainComponent::runSelfTest()
                 closeInsertEditor (insertWindows.back().get());
 
             mixer.setInsertType (0, 1, fx::Type::none);   // 把 fixture 还回去
+        }
+    }
+
+    //-- Phase 50: pan curve / reverse / cut / scope render -------------------
+    [&]
+    {
+        LayerStack     t;
+        RackModel      r;
+        PlaybackEngine e;
+
+        e.setSampleRate (48000.0);
+        t.addLayer (utf8 ("P50 采样"), palette::layer1);
+        t.setLayerLevelDb (0, 0.0f);
+        t.setLayerPan (0, 0.0f);
+
+        const auto loaded  = loadSampleFile (phase27B);
+        const int  sampler = r.addSampler (loaded.buffer, phase27B.getFullPathName(), "P50 bus");
+
+        auto* layer = t.getLayer (0);
+
+        SampleEvent clip;
+        clip.name         = "P50";
+        clip.path         = phase27B.getFullPathName();
+        clip.audio        = loaded.buffer;
+        clip.startBeat    = 0.0;
+        clip.lengthBeats  = 8.0;               // 4 s at 120 bpm, not 1 s (P49-B)
+        clip.pitch        = 60;
+        clip.laneSpan     = 2;
+        clip.outputSlotId = sampler;
+
+        const int clipId = layer->addSample (clip);
+        const double sr  = 48000.0;
+
+        auto renderTo = [&] (juce::AudioBuffer<float>& b)
+        {
+            b.clear();
+            e.resetMixState();
+            e.publishSchedule (t, r, 120.0);
+            e.renderWindow (0.0, b.getNumSamples(), b, nullptr);
+        };
+
+        auto channelPeak = [] (const juce::AudioBuffer<float>& b, int ch, double from, double span)
+        {
+            const int first = (int) std::llround (from * 48000.0);
+            const int count = juce::jmax (1, (int) std::llround (span * 48000.0));
+
+            return b.getMagnitude (ch, first, count);
+        };
+
+        juce::AudioBuffer<float> neutral (2, (int) (4.0 * sr));
+        renderTo (neutral);
+
+        const float neutralL = channelPeak (neutral, 0, 0.10, 0.20);
+        const float neutralR = channelPeak (neutral, 1, 0.10, 0.20);
+
+        if (auto* c = layer->findSample (clipId))
+        {
+            c->panCurve.loadPoints ({ { 0.0f, 1.0f }, { 1.0f, 1.0f } });   // hard right
+            c->panCurve.setEnabled (true);
+            c->automationTarget = SampleAutomationTarget::pan;
+        }
+
+        juce::AudioBuffer<float> panned (2, (int) (4.0 * sr));
+        renderTo (panned);
+
+        const float pannedL = channelPeak (panned, 0, 0.10, 0.20);
+        const float pannedR = channelPeak (panned, 1, 0.10, 0.20);
+
+        // Hard right = left channel silent, right channel untouched (balance
+        // law: balL = 1-pan, balR = 1+pan). Compared per channel against the
+        // neutral render, so a stereo test file cannot fake the result.
+        check ("A clip's pan curve moves the block across the field",
+               neutralL > 0.005f && neutralR > 0.005f
+                 && pannedL < neutralL * 0.02f
+                 && pannedR > neutralR * 0.90f,
+               "neutral " + juce::String (neutralL, 4) + "/" + juce::String (neutralR, 4)
+                 + utf8 (" → 声相 ") + juce::String (pannedL, 4) + "/" + juce::String (pannedR, 4));
+
+        if (auto* c = layer->findSample (clipId))
+            c->panCurve.setEnabled (false);
+
+        //-- Reverse ----------------------------------------------------------
+        juce::AudioBuffer<float> forward (2, (int) (4.0 * sr));
+        renderTo (forward);
+
+        if (auto* c = layer->findSample (clipId))
+            c->reversed = true;
+
+        juce::AudioBuffer<float> backward (2, (int) (4.0 * sr));
+        renderTo (backward);
+
+        // Matched windows, not "the start looks different": at t the reversed
+        // block reads the source at (length - t), so its head must equal the
+        // forward block's tail. The test file decays, which is what makes the
+        // two windows distinguishable at all.
+        const float forwardHead = channelPeak (forward, 0, 0.03, 0.20);
+        const float forwardTail = channelPeak (forward, 0, 3.77, 0.20);
+        const float backHead    = channelPeak (backward, 0, 0.03, 0.20);
+
+        check ("Reverse reads the window backwards, not the file",
+               forwardHead > forwardTail * 1.5f
+                 && std::abs (backHead - forwardTail) < juce::jmax (0.002f, forwardTail * 0.30f),
+               utf8 ("正放头/尾 ") + juce::String (forwardHead, 4) + "/" + juce::String (forwardTail, 4)
+                 + utf8 ("，反转头 ") + juce::String (backHead, 4));
+
+        if (auto* c = layer->findSample (clipId))
+            c->reversed = false;
+
+        //-- The cut ----------------------------------------------------------
+        // Its own fixture and its own roll: the split reads the SELECTION and the
+        // PLAYHEAD, and both belong to a view.
+        LayerStack t2;
+        RackModel  r2;
+
+        t2.addLayer (utf8 ("P50 切割"), palette::layer1);
+
+        auto* cutLayer = t2.getLayer (0);
+
+        SampleEvent cutClip;
+        cutClip.name                = "cut";
+        cutClip.audio               = loaded.buffer;
+        cutClip.startBeat           = 1.0;
+        cutClip.lengthBeats         = 6.0;
+        cutClip.sourceOffsetSeconds = 0.4;
+        cutClip.pitch               = 60;
+        cutClip.laneSpan            = 2;
+        cutClip.volumeCurve.loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 1.0f } });
+        cutClip.volumeCurve.setEnabled (true);
+
+        const int cutId = cutLayer->addSample (cutClip);
+
+        PianoRollComponent roll (t2, r2);
+        roll.setBpm (120.0);
+        roll.setSampleSelection ({ cutId });
+        roll.setPlayheadBeat (3.0);            // 2 beats into a 6-beat block
+
+        const int splits = roll.simulateSampleSplitAtPlayhead();
+
+        const auto& pieces = cutLayer->getSamples();
+        const SampleEvent* left  = pieces.size() == 2 ? &pieces[0] : nullptr;
+        const SampleEvent* right = pieces.size() == 2 ? &pieces[1] : nullptr;
+
+        // 2 beats at 120 bpm = 1 s of source consumed. The right half must pick
+        // up there, or a cut block replays its own head.
+        check ("Cutting at the playhead hands the right half the consumed audio",
+               splits == 1 && left != nullptr && right != nullptr
+                 && std::abs (left->lengthBeats - 2.0) < 1.0e-6
+                 && std::abs (right->startBeat - 3.0) < 1.0e-6
+                 && std::abs (right->lengthBeats - 4.0) < 1.0e-6
+                 && std::abs (right->sourceOffsetSeconds - 1.4) < 1.0e-3,
+               splits == 1 && left != nullptr && right != nullptr
+                 ? "left " + juce::String (left->lengthBeats, 3)
+                     + utf8 (" / right @") + juce::String (right->startBeat, 3)
+                     + " len " + juce::String (right->lengthBeats, 3)
+                     + " off " + juce::String (right->sourceOffsetSeconds, 3)
+                 : "splits=" + juce::String (splits) + " n=" + juce::String ((int) pieces.size()));
+
+        // The ramp is split, not restarted: at the seam both halves read the
+        // value the original had there (2/6 = 0.333).
+        check ("The curve is cut at the seam, not restarted",
+               left != nullptr && right != nullptr
+                 && std::abs (left->volumeCurve.valueAt (1.0f) - 0.3333f) < 0.01f
+                 && std::abs (right->volumeCurve.valueAt (0.0f) - 0.3333f) < 0.01f
+                 && std::abs (right->volumeCurve.valueAt (1.0f) - 1.0f) < 0.01f,
+               left != nullptr && right != nullptr
+                 ? "l(1)=" + juce::String (left->volumeCurve.valueAt (1.0f), 3)
+                     + " r(0)=" + juce::String (right->volumeCurve.valueAt (0.0f), 3)
+                     + " r(1)=" + juce::String (right->volumeCurve.valueAt (1.0f), 3)
+                 : "no pieces");
+
+        //-- Scope render -----------------------------------------------------
+        // Two layers with notes 20 beats apart: the layer extract must keep the
+        // layer's rows and report the real start, which is what stops a bounce
+        // from beginning with ten seconds of silence.
+        LayerStack st;
+        RackModel  rr;
+
+        st.addLayer (utf8 ("P50 A"), palette::layer1);
+        st.addLayer (utf8 ("P50 B"), palette::layer2);
+
+        for (int i = 0; i < 2; ++i)
+        {
+            NoteEvent note;
+            note.id          = 0;
+            note.pitch       = 60 + i;
+            note.startBeat   = 20.0 + i * 2.0;
+            note.lengthBeats = 1.0;
+            st.getLayer (0)->addNote (note);
+        }
+
+        {
+            NoteEvent note;
+            note.pitch       = 64;
+            note.startBeat   = 1.0;
+            note.lengthBeats = 1.0;
+            st.getLayer (1)->addNote (note);
+        }
+
+        PlaybackEngine probe;
+        probe.setSampleRate (48000.0);
+        probe.publishSchedule (st, rr, 120.0);
+
+        const auto full = probe.getSchedule();
+        scope::Scope asked;
+        asked.kind       = scope::Scope::Kind::layer;
+        asked.layerIndex = 0;
+
+        const auto extracted = scope::extract (*full, asked);
+
+        check ("Rendering a layer keeps its rows and starts where they start",
+               ! extracted.empty
+                 && extracted.schedule.notes.size() == 2
+                 && std::abs (extracted.startSeconds - 10.0) < 1.0e-6
+                 && std::abs (extracted.lengthSeconds - 1.5) < 1.0e-3,
+               "n=" + juce::String ((int) extracted.schedule.notes.size())
+                 + " start " + juce::String (extracted.startSeconds, 3)
+                 + " len " + juce::String (extracted.lengthSeconds, 3));
+
+        // Free-slot search: gaps inside the layer's own span only.
+        const auto inGap   = scope::findFreeBeat ({ { 0.0, 2.0 }, { 4.0, 6.0 } }, 1.5, 6.0);
+        const auto inTight = scope::findFreeBeat ({ { 0.0, 2.0 }, { 4.0, 6.0 } }, 2.5, 6.0);
+        const auto overloaded = scope::findFreeBeat ({ { 0.0, 3.0 }, { 3.0, 6.0 } }, 1.0, 6.0);
+
+        check ("A bounced block lands in a gap, and a full layer says so",
+               inGap.found && std::abs (inGap.beat - 2.0) < 1.0e-9
+                 && ! inTight.found                       // 2 beats of gap, 2.5 asked
+                 && ! overloaded.found,                   // tiled end to end
+               "gap " + juce::String (inGap.found ? inGap.beat : -1.0, 2)
+                 + " tight " + juce::String (inTight.found ? 1 : 0)
+                 + " full " + juce::String (overloaded.found ? 1 : 0));
+
+        //-- The insert half of the bounce ------------------------------------
+        // Renders through the real exporter into a real WAV, then hands it to
+        // the host's own insert path — the same function the bounce thread calls
+        // when it finishes. Only the thread itself is left untested.
+        {
+            LayerStack rt;
+            RackModel  rr2;
+            PlaybackEngine re;
+
+            re.setSampleRate (wav::exportSampleRate);
+            rt.addLayer (utf8 ("P50 渲染"), palette::layer2);
+
+            NoteEvent note;
+            note.pitch       = 60;
+            note.startBeat   = 0.0;
+            note.lengthBeats = 2.0;
+            rt.getLayer (0)->addNote (note);
+
+            re.publishSchedule (rt, rr2, 120.0);
+
+            scope::Scope only;
+            only.kind       = scope::Scope::Kind::layer;
+            only.layerIndex = 0;
+
+            const auto kept = scope::extract (*re.getSchedule(), only);
+            const auto bounceFile = phase27Dir.getChildFile ("atomic-p50-bounce.wav");
+
+            const auto bounced = wav::renderToFile (bounceFile, kept.schedule,
+                                                    wav::exportSampleRate, 0.05, {}, nullptr,
+                                                    kept.startSeconds);
+
+            // A LOCAL stack and rack, not the live session: a bounce that lands
+            // in the demo project would end up in the snapshot AND in
+            // docs/demo.atomic, and a test that changes the fixture it runs
+            // against is a test that cannot be repeated.
+            LayerStack target;
+            RackModel  targetRack;
+
+            target.addLayer (utf8 ("P50 渲染结果"), palette::layer3);
+
+            const int slotsBefore = targetRack.getNumSlots();
+            const auto emptyFree  = scope::findFreeBeat ({}, 1.0, 0.0);
+
+            check ("The bounce is a real WAV, and an empty layer accepts it at beat 0",
+                   bounced.ok && bounced.seconds > 0.1
+                     && emptyFree.found && std::abs (emptyFree.beat) < 1.0e-9,
+                   "ok " + juce::String ((int) bounced.ok)
+                     + " len " + juce::String (bounced.seconds, 2)
+                     + " empty-beat " + juce::String (emptyFree.beat, 2));
+
+            const auto inserted = scope::insertSampleBlock (target, targetRack, 0, bounceFile,
+                                                            120.0, utf8 ("渲染"));
+
+            const auto* placed = (inserted.ok && target.getLayer (0) != nullptr
+                                    && target.getLayer (0)->getSampleCount() == 1)
+                                   ? &target.getLayer (0)->getSamples().front() : nullptr;
+
+            check ("A finished bounce becomes a mounted block on the target layer",
+                   placed != nullptr
+                     && std::abs (placed->startBeat) < 1.0e-6
+                     && placed->lengthBeats > 1.0
+                     && placed->isLoaded()
+                     && placed->outputSlotId >= 0
+                     && targetRack.getNumSlots() == slotsBefore + 1
+                     && placed->audio->lengthSeconds() > 1.0,
+                   placed != nullptr
+                     ? "beat " + juce::String (placed->startBeat, 2)
+                         + " len " + juce::String (placed->lengthBeats, 2)
+                         + " slot " + juce::String (placed->outputSlotId)
+                         + " aud " + juce::String (placed->audio->lengthSeconds(), 2)
+                     : (inserted.message.isNotEmpty() ? inserted.message
+                                                      : juce::String (utf8 ("没有落下来"))));
+        }
+
+        //-- Serialisation ----------------------------------------------------
+        {
+            LayerStack s3;
+            RackModel  r3;
+
+            s3.addLayer (utf8 ("P50 存盘"), palette::layer1);
+
+            SampleEvent saved;
+            saved.name             = "roundtrip";
+            saved.startBeat        = 4.0;
+            saved.lengthBeats      = 2.0;
+            saved.automationTarget = SampleAutomationTarget::pan;
+            saved.reversed         = true;
+            saved.panCurve.loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 1.0f } });
+            saved.panCurve.setEnabled (true);
+            saved.volumeCurve.loadPoints ({ { 0.0f, 0.5f }, { 1.0f, 0.5f } });
+            saved.volumeCurve.setEnabled (true);
+
+            s3.getLayer (0)->addSample (saved);
+
+            const juce::String xml = project::toXmlText (s3, r3, 120.0);
+
+            LayerStack s4;
+            RackModel  r4;
+            double bpm4 = 0.0;
+            juce::String error;
+
+            const bool ok = project::fromXmlText (xml, s4, r4, bpm4, error,
+                                                  nullptr, nullptr, nullptr);
+
+            const auto* back = (s4.getLayer (0) != nullptr && s4.getLayer (0)->getSampleCount() == 1)
+                                 ? &s4.getLayer (0)->getSamples().front() : nullptr;
+
+            check ("v22 keeps the pan curve, the shown target and the reverse flag",
+                   ok && back != nullptr
+                     && back->automationTarget == SampleAutomationTarget::pan
+                     && back->reversed
+                     && back->panCurve.isEnabled()
+                     && std::abs (back->panCurve.valueAt (1.0f) - 1.0f) < 1.0e-6
+                     && std::abs (back->volumeCurve.valueAt (0.5f) - 0.5f) < 1.0e-6,
+                   ok && back != nullptr
+                     ? "target " + juce::String ((int) back->automationTarget)
+                         + " rev " + juce::String ((int) back->reversed)
+                         + " pan(1) " + juce::String (back->panCurve.valueAt (1.0f), 3)
+                     : error);
+
+            // A v21 file has neither the pan child nor the two attributes. It
+            // must open as "volume curve, not reversed, pan untouched".
+            juce::String legacy = xml;
+            legacy = legacy.replace ("<PanEnvelope", "<Ignored")
+                           .replace ("</PanEnvelope>", "</Ignored>")
+                           .replace ("autotarget=\"pan\"", "")
+                           .replace (" reversed=\"1\"", "");
+
+            LayerStack s5;
+            RackModel  r5;
+            double bpm5 = 0.0;
+            juce::String error5;
+
+            const bool ok5 = project::fromXmlText (legacy, s5, r5, bpm5, error5,
+                                                   nullptr, nullptr, nullptr);
+
+            const auto* old = (s5.getLayer (0) != nullptr && s5.getLayer (0)->getSampleCount() == 1)
+                                ? &s5.getLayer (0)->getSamples().front() : nullptr;
+
+            check ("A v21 file opens with the volume curve showing and nothing reversed",
+                   ok5 && old != nullptr
+                     && old->automationTarget == SampleAutomationTarget::volume
+                     && ! old->reversed
+                     && ! old->panCurve.isEnabled(),
+                   ok5 && old != nullptr
+                     ? "target " + juce::String ((int) old->automationTarget)
+                         + " rev " + juce::String ((int) old->reversed)
+                     : error5);
+        }
+    } ();
+
+    //-- Phase 50: the "render to a block" menu items ------------------------
+    // Two verbs, one list: the canvas menu builds them through this function,
+    // so reading the function is the same as reading the menu. The interesting
+    // half is not that the ids exist but that the selection verb GREYS OUT with
+    // nothing selected — the whole point of choosing the scope at click time.
+    {
+        juce::PopupMenu withSelection, withoutSelection;
+        PianoRollComponent::addRenderScopeItems (withSelection, true);
+        PianoRollComponent::addRenderScopeItems (withoutSelection, false);
+
+        struct Snapshot { int id; juce::String text; bool enabled; };
+
+        auto read = [] (const juce::PopupMenu& menu)
+        {
+            std::vector<Snapshot> out;
+            juce::PopupMenu::MenuItemIterator it (menu);
+            while (it.next())
+            {
+                const auto& item = it.getItem();
+                if (! item.isSeparator)
+                    out.push_back ({ item.itemID, item.text, item.isEnabled });
+            }
+            return out;
+        };
+
+        const auto full = read (withSelection);
+        const auto bare = read (withoutSelection);
+
+        const bool ok = full.size() == 2 && bare.size() == 2
+                         && full[0].id == 7 && bare[0].id == 7
+                         && full[0].enabled && ! bare[0].enabled
+                         && full[1].id == 8 && bare[1].id == 8
+                         && full[1].enabled && bare[1].enabled
+                         && full[0].text.contains (utf8 ("选中"))
+                         && full[1].text.contains (utf8 ("图层"));
+
+        check ("The render-to-block menu offers selection + layer, and only the first needs a selection",
+               ok,
+               ok ? full[0].text + " / " + full[1].text
+                  : "items " + juce::String ((int) full.size()) + " / " + juce::String ((int) bare.size()));
+    }
+
+    //-- Phase 50: tabular figures -------------------------------------------
+    // DESIGN.md §5's first hard rule, asserted instead of assumed. Two parts:
+    // the default UI face is measured (on this machine its digits happen to be
+    // uniform already, so that alone would be a vacuous check), and then a font
+    // with genuinely proportional digits is used to prove the cell logic does
+    // something. The bite test for this phase replaced the cell with the glyph
+    // width and only the second assertion turned red — which is exactly why the
+    // second one exists.
+    {
+        const auto f = ui::font (10.0f);
+
+        const float one = ui::tabularWidth (f, "1");
+        const float zero = ui::tabularWidth (f, "0");
+        const float eightSeven = ui::tabularWidth (f, "87");
+        const float oneTwo = ui::tabularWidth (f, "12");
+
+        check ("Tabular figures: every digit gets the same cell",
+               std::abs (one - zero) < 0.01f
+                 && std::abs (eightSeven - oneTwo) < 0.01f
+                 && zero > 0.5f,
+               "1=" + juce::String (one, 3) + " 0=" + juce::String (zero, 3)
+                 + " 87=" + juce::String (eightSeven, 3)
+                 + " 12=" + juce::String (oneTwo, 3));
+
+        // Asking for a wider family must not collapse the cells back to
+        // proportional: the helper has to keep working after a font change.
+        check ("Tabular cells follow the font they are measured in",
+               ui::tabularWidth (ui::title (14.0f), "87")
+                 > ui::tabularWidth (f, "87") * 1.05f,
+               juce::String (ui::tabularWidth (ui::title (14.0f), "87"), 2)
+                 + " vs " + juce::String (ui::tabularWidth (f, "87"), 2));
+
+        // The real proof: a face whose '1' is narrower than its '0'. Calibri and
+        // Georgia ship with Windows and are the usual proportional-figure fonts;
+        // if none of them is installed the assertion is skipped rather than
+        // faked against a font that was already monospaced.
+        juce::String proportional;
+        float narrow = 0.0f, wide = 0.0f;
+
+        for (const auto* name : { "Calibri", "Georgia", "Times New Roman", "Cambria" })
+        {
+            const juce::Font probe (juce::FontOptions (juce::String (name), 14.0f, juce::Font::plain));
+
+            if (! probe.getTypefaceName().equalsIgnoreCase (name))
+                continue;                    // not installed
+
+            const float w1 = juce::GlyphArrangement::getStringWidth (probe, "1");
+            const float w0 = juce::GlyphArrangement::getStringWidth (probe, "0");
+
+            if (w0 - w1 > 0.2f)
+            {
+                proportional = name;
+                narrow = w1;
+                wide = w0;
+                break;
+            }
+        }
+
+        if (proportional.isNotEmpty())
+        {
+            const juce::Font probe (juce::FontOptions (proportional, 14.0f, juce::Font::plain));
+
+            // Three narrow digits must take three cells, not three narrow
+            // advances: that is the whole mechanism, and a proportional face is
+            // the only place it is visible.
+            check ("Tabular drawing widens a proportional font's narrow digits",
+                   std::abs (ui::tabularWidth (probe, "111") - wide * 3.0f) < 0.05f,
+                   proportional + " 1=" + juce::String (narrow, 2)
+                     + " 0=" + juce::String (wide, 2)
+                     + " 111=" + juce::String (ui::tabularWidth (probe, "111"), 2)
+                     + utf8 ("（应为 ") + juce::String (wide * 3.0f, 2) + utf8 ("）"));
         }
     }
 
