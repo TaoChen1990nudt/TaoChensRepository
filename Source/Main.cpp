@@ -5,6 +5,7 @@
 
 #include "MainComponent.h"
 #include "Util/Metrics.h"
+#include "Util/Theme.h"
 #include "Util/UiLookAndFeel.h"
 
 namespace
@@ -258,7 +259,7 @@ public:
                 {
                     juce::Graphics g (sheet);
 
-                    g.setColour (juce::Colour (0xff2a2d35));
+                    g.setColour (atomic::theme::surface4);
                     g.fillAll();
 
                     const atomic::PianoRollComponent::Tool which[2]
@@ -578,7 +579,7 @@ public:
     public:
         explicit MainWindow (const juce::String& name)
             : DocumentWindow (name,
-                              juce::Colour (0xff0d0e11),
+                              atomic::theme::bgApp,
                               DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar (true);

@@ -13,15 +13,15 @@ namespace
 {
     const juce::Colour& kPanelBackground = theme::surface1;
     const juce::Colour& kDivider        = theme::hairline;
-    const juce::Colour kRowHover        { 0x0dffffff };
-    const juce::Colour kFileText        { 0xffb9bfcc };
-    const juce::Colour kFolderText      { 0xffd6dae2 };
+    const juce::Colour kRowHover        = juce::Colours::white.withAlpha (0.051f);
+    const juce::Colour kFileText        = theme::ink;
+    const juce::Colour kFolderText      = theme::ink;
     const juce::Colour& kAccent         = theme::accent;
     /** Phase 20: the audition line. Green, because it is "playing", and green
         is the one colour in this palette nothing else uses. */
-    const juce::Colour kPreviewAccent   { 0xff7bd88f };
+    const juce::Colour kPreviewAccent   = theme::live;
     /** Phase 28: the scan line. Amber — it is "working", not "playing". */
-    const juce::Colour kScanAccent      { 0xffe0b268 };
+    const juce::Colour kScanAccent      = theme::warn;
 
     juce::Font boldFont (float height)
     {
@@ -703,9 +703,9 @@ void FileBrowserPanel::paint (juce::Graphics& g)
     {
         const auto button = getAddButtonBounds().toFloat();
         g.setColour (juce::Colours::white.withAlpha (0.05f));
-        g.fillRoundedRectangle (button, ui::pf (5));
+        g.fillRoundedRectangle (button, ui::pf (4));
         g.setColour (juce::Colours::white.withAlpha (0.14f));
-        g.drawRoundedRectangle (button, ui::pf (5), 1.0f);
+        g.drawRoundedRectangle (button, ui::pf (4), 1.0f);
 
         g.setColour (juce::Colours::white.withAlpha (0.66f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.0f))));
@@ -1179,7 +1179,7 @@ juce::Image FileBrowserPanel::makeDragImage (const juce::String& name) const
     juce::Image image (juce::Image::ARGB, width, height, true);
     juce::Graphics g (image);
 
-    g.setColour (juce::Colour (0xf01b1d24));
+    g.setColour (theme::surface3.withAlpha (0.94f));
     g.fillRoundedRectangle (image.getBounds().toFloat(), ui::pf (4));
     g.setColour (kAccent.withAlpha (0.55f));
     g.drawRoundedRectangle (image.getBounds().toFloat().reduced (0.5f), ui::pf (4), 1.0f);

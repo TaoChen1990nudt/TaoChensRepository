@@ -17,8 +17,8 @@ namespace
     const juce::Colour& kDivider        = theme::hairline;
     const juce::Colour& kLaneHeader     = theme::surface2;
 
-    const juce::Colour& kSoloColour     = theme::warn;
-    const juce::Colour kMuteColour      { 0xffff6b6b };
+    const juce::Colour& kSoloColour     = theme::accent;   // P48 11.2：独奏统一 accent（原黄）
+    const juce::Colour& kMuteColour     = theme::warn;      // P48 11.1：静音统一黄色（原红）
 
     juce::Font boldFont (float height)
     {
@@ -317,7 +317,7 @@ void LayerPanel::drawRow (juce::Graphics& g, int index)
     const bool attached = isLayerAttachedToFocus (index);
     const auto* focusedSlot = focusSlotId >= 0 ? rack.findSlot (focusSlotId) : nullptr;
     const auto focusColour  = focusedSlot != nullptr ? focusedSlot->colour
-                                                     : juce::Colour (0xff4fd1c5);
+                                                     : theme::accent;
 
     juce::Rectangle<float> plate (body.getX() + ui::pf (6), body.getY() + ui::pf (3),
                                   body.getWidth() - ui::pf (12), body.getHeight() - ui::pf (6));

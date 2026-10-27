@@ -17,8 +17,8 @@ namespace atomic
 namespace
 {
     const juce::Colour& kBackground = theme::surface0;
-    const juce::Colour kPanel      { 0xff15161b };
-    const juce::Colour kRow        { 0xff191b21 };
+    const juce::Colour kPanel      = theme::surface2;
+    const juce::Colour kRow        = theme::surface2;
     const juce::Colour& kOutline   = theme::surface4;
     const juce::Colour& kText      = theme::inkMuted;
     const juce::Colour& kAccent    = theme::accent;
@@ -85,14 +85,14 @@ namespace
             setLookAndFeel (&look);
 
             lf.setColour (juce::ResizableWindow::backgroundColourId, kPanel);
-            lf.setColour (juce::ListBox::backgroundColourId, juce::Colour (0xff121419));
+            lf.setColour (juce::ListBox::backgroundColourId, theme::surface1);
             lf.setColour (juce::ListBox::textColourId, juce::Colours::white.withAlpha (0.8f));
-            lf.setColour (juce::ComboBox::backgroundColourId, juce::Colour (0xff1c1f27));
+            lf.setColour (juce::ComboBox::backgroundColourId, theme::surface3);
             lf.setColour (juce::ComboBox::textColourId, juce::Colours::white.withAlpha (0.85f));
             lf.setColour (juce::ComboBox::outlineColourId, kOutline);
             lf.setColour (juce::Label::textColourId, kText);
             lf.setColour (juce::ToggleButton::textColourId, kText);
-            lf.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff22252e));
+            lf.setColour (juce::TextButton::buttonColourId, theme::surface3);
             lf.setColour (juce::TextButton::textColourOnId, juce::Colours::white);
             lf.setColour (juce::TextButton::textColourOffId, juce::Colours::white.withAlpha (0.8f));
         }
@@ -497,7 +497,7 @@ namespace
                     const auto bounds = deviceRowBounds (p, i, getWidth());
                     const auto& row   = rows[(size_t) i];
 
-                    g.setColour (i % 2 == 0 ? kRow : juce::Colour (0xff15171c));
+                    g.setColour (i % 2 == 0 ? kRow : theme::surface1);
                     g.fillRoundedRectangle (bounds.toFloat(), 4.0f);
 
                     const auto box = juce::Rectangle<float> (12.0f, 12.0f)
@@ -518,7 +518,7 @@ namespace
             }
 
             //-- Monitor -----------------------------------------------------
-            g.setColour (juce::Colour (0xff0d0e12));
+            g.setColour (theme::bgApp);
             g.fillRoundedRectangle (p.monitor.toFloat(), 4.0f);
 
             g.setColour (kText.withAlpha (0.85f));
@@ -606,12 +606,12 @@ namespace
         {
             instrList.setModel (&instruments);
             instrList.setRowHeight (atomic::ui::px (26));
-            instrList.setColour (juce::ListBox::backgroundColourId, juce::Colour (0xff121419));
+            instrList.setColour (juce::ListBox::backgroundColourId, theme::surface1);
             addAndMakeVisible (instrList);
 
             fxList.setModel (&effects);
             fxList.setRowHeight (atomic::ui::px (26));
-            fxList.setColour (juce::ListBox::backgroundColourId, juce::Colour (0xff121419));
+            fxList.setColour (juce::ListBox::backgroundColourId, theme::surface1);
             addAndMakeVisible (fxList);
 
             scanButton.setButtonText (utf8 ("扫描 VST3"));

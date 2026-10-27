@@ -13,13 +13,13 @@ namespace
 {
     const juce::Colour& kPanelBackground = theme::surface1;
     const juce::Colour& kDivider        = theme::hairline;
-    const juce::Colour kRowPlate        { 0x08ffffff };
-    const juce::Colour kRowHover        { 0x0effffff };
+    const juce::Colour kRowPlate        = juce::Colours::white.withAlpha (0.031f);
+    const juce::Colour kRowHover        = juce::Colours::white.withAlpha (0.055f);
 
     /** Phase 35: the mixer's mute amber, repeated rather than shared. The two
         panels have no common header to put it in, and inventing one for a
         single colour would be a worse dependency than a line of duplication. */
-    const juce::Colour kMuteColour      { 0xffffb020 };
+    const juce::Colour& kMuteColour     = theme::warn;      // P48 11.1：静音统一黄色
 
     juce::Font boldFont (float height)
     {

@@ -13,14 +13,14 @@ namespace atomic
 namespace
 {
     const juce::Colour& kBackground = theme::surface0;
-    const juce::Colour kPanel      { 0xff15161b };
-    const juce::Colour kStrip      { 0xff191b21 };
+    const juce::Colour kPanel      = theme::surface2;
+    const juce::Colour kStrip      = theme::surface2;
     const juce::Colour& kOutline   = theme::surface4;
     const juce::Colour& kText      = theme::inkMuted;
     const juce::Colour& kAccent    = theme::accent;
-    const juce::Colour kMute       { 0xffffb020 };
-    const juce::Colour& kSolo      = theme::live;
-    const juce::Colour kMaster     { 0xffe2e8f0 };
+    const juce::Colour kMute       = theme::warn;      // 静音统一黄色（P48，11.1 bug）
+    const juce::Colour& kSolo      = theme::accent;   // P48 11.2：独奏统一 accent（原绿，绿留给运行态）
+    const juce::Colour kMaster     = theme::ink;
 
     juce::String dbText (float db)
     {
@@ -518,7 +518,7 @@ juce::Colour MixerPanel::getChannelColour (int channel) const
     if (const auto* slot = slotOnChannel (channel))
         return slot->colour;
 
-    return juce::Colour (0xff3a3d47);
+    return theme::surface4;
 }
 
 juce::String MixerPanel::getOutputName (int channel) const
@@ -828,7 +828,7 @@ void MixerPanel::drawStrip (juce::Graphics& g, int channel)
     const bool exists = master || slotIdOnChannel (channel) >= 0;
     const bool live   = exists;
 
-    g.setColour (master ? juce::Colour (0xff1b1e25) : kStrip);
+    g.setColour (master ? theme::surface3 : kStrip);
     g.fillRoundedRectangle (bounds, ui::pf (4));
 
     if (selected)
@@ -952,8 +952,7 @@ void MixerPanel::drawStrip (juce::Graphics& g, int channel)
         if (live)
         {
             g.setColour (colour.withAlpha (hot ? 1.0f : 0.92f));
-            g.fillRoundedRectangle (fader.getCentreX() - ui::pf (9), thumbY - ui::pf (5),
-                                    ui::pf (18), ui::pf (10), ui::pf (2.5));
+            g.fillRoundedRectangle (fader.getCentreX() - ui::pf (9), thumbY - ui::pf (5), ui::pf (18), ui::pf (10), ui::pf (2));
             g.setColour (juce::Colours::black.withAlpha (0.5f));
             g.drawHorizontalLine ((int) thumbY, fader.getCentreX() - ui::pf (9),
                                   fader.getCentreX() + ui::pf (9));
@@ -961,8 +960,7 @@ void MixerPanel::drawStrip (juce::Graphics& g, int channel)
         else
         {
             g.setColour (juce::Colours::white.withAlpha (0.18f));
-            g.drawRoundedRectangle (fader.getCentreX() - ui::pf (9), thumbY - ui::pf (5),
-                                    ui::pf (18), ui::pf (10), ui::pf (2.5), 1.0f);
+            g.drawRoundedRectangle (fader.getCentreX() - ui::pf (9), thumbY - ui::pf (5), ui::pf (18), ui::pf (10), ui::pf (2), 1.0f);
         }
     }
 
@@ -1025,7 +1023,7 @@ void MixerPanel::drawStrip (juce::Graphics& g, int channel)
 
         g.setColour (on ? kAccent.withAlpha (0.92f)
                         : juce::Colours::white.withAlpha (hot ? 0.16f : 0.07f));
-        g.fillRoundedRectangle (r, ui::pf (2.5));
+        g.fillRoundedRectangle (r, ui::pf (2));
 
         g.setColour (on ? juce::Colours::black.withAlpha (0.85f)
                         : juce::Colours::white.withAlpha (hot ? 0.70f : 0.45f));
@@ -1043,7 +1041,7 @@ void MixerPanel::drawStrip (juce::Graphics& g, int channel)
                            && hoveredPart == (solo ? Part::solo : Part::mute);
 
         g.setColour (on ? (solo ? kSolo : kMute) : juce::Colours::white.withAlpha (hot ? 0.16f : 0.07f));
-        g.fillRoundedRectangle (r, ui::pf (2.5));
+        g.fillRoundedRectangle (r, ui::pf (2));
 
         g.setColour (on ? juce::Colours::black.withAlpha (0.8f)
                         : juce::Colours::white.withAlpha (hot ? 0.7f : 0.45f));
@@ -1072,7 +1070,7 @@ void MixerPanel::drawStrip (juce::Graphics& g, int channel)
 
             const float h = bar.getHeight() * fill;
 
-            g.setColour (fill > 0.92f ? juce::Colour (0xffff5f6d) : colour.withAlpha (0.9f));
+            g.setColour (fill > 0.92f ? theme::record : colour.withAlpha (0.9f));
             g.fillRect (bar.withHeight (h).withY (bar.getBottom() - h));
         }
     }
@@ -1083,7 +1081,7 @@ void MixerPanel::drawRack (juce::Graphics& g)
 {
     auto area = getRackArea();
 
-    g.setColour (juce::Colour (0xff0e0f13));
+    g.setColour (theme::bgApp);
     g.fillRect (area);
 
     g.setColour (kOutline);
@@ -1110,7 +1108,7 @@ void MixerPanel::drawRack (juce::Graphics& g)
         const bool active = insert.type != fx::Type::none;
         const bool on = active && insert.enabled;
 
-        g.setColour (slot % 2 == 0 ? juce::Colour (0xff14161c) : juce::Colour (0xff111318));
+        g.setColour (slot % 2 == 0 ? theme::surface2 : theme::surface1);
         g.fillRoundedRectangle (row.toFloat(), ui::pf (3));
 
         // Phase 43: the row being dragged says so. Without this the insert under
@@ -1134,7 +1132,7 @@ void MixerPanel::drawRack (juce::Graphics& g)
 
         g.setColour (active ? channelColour.withAlpha (on ? 0.22f : 0.10f)
                             : juce::Colours::white.withAlpha (typeHot ? 0.10f : 0.04f));
-        g.fillRoundedRectangle (type, ui::pf (2.5));
+        g.fillRoundedRectangle (type, ui::pf (2));
 
         g.setColour (active ? juce::Colours::white.withAlpha (on ? 0.9f : 0.45f)
                             : juce::Colours::white.withAlpha (0.30f));
@@ -1146,8 +1144,7 @@ void MixerPanel::drawRack (juce::Graphics& g)
         auto param = getInsertParamBounds (slot).toFloat();
 
         g.setColour (juce::Colours::black.withAlpha (0.35f));
-        g.fillRoundedRectangle (param.withHeight (ui::pf (5)).withY (param.getCentreY() - ui::pf (2.5)),
-                                ui::pf (2.5));
+        g.fillRoundedRectangle (param.withHeight (ui::pf (5)).withY (param.getCentreY() - ui::pf (2.5)), ui::pf (2));
 
         if (insert.type == fx::Type::vst)
         {
@@ -1159,8 +1156,7 @@ void MixerPanel::drawRack (juce::Graphics& g)
         {
             g.setColour (channelColour.withAlpha (on ? 0.85f : 0.35f));
             g.fillRoundedRectangle (param.withHeight (ui::pf (5)).withY (param.getCentreY() - ui::pf (2.5))
-                                        .withWidth (param.getWidth() * juce::jlimit (0.0f, 1.0f, insert.params[(size_t) 0])),
-                                    ui::pf (2.5));
+                                        .withWidth (param.getWidth() * juce::jlimit (0.0f, 1.0f, insert.params[(size_t) 0])), ui::pf (2));
 
             g.setColour (juce::Colours::white.withAlpha (0.35f));
             g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (8.0f))));
@@ -1172,7 +1168,7 @@ void MixerPanel::drawRack (juce::Graphics& g)
 
         // Power dot.
         auto power = getInsertPowerBounds (slot).toFloat();
-        g.setColour (on ? juce::Colour (0xff5ecf9a) : juce::Colours::white.withAlpha (active ? 0.3f : 0.12f));
+        g.setColour (on ? theme::accent : juce::Colours::white.withAlpha (active ? 0.3f : 0.12f));
         g.fillEllipse (power);
     }
 

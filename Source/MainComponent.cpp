@@ -4441,7 +4441,7 @@ void MainComponent::paint (juce::Graphics& g)
     // Darker than the transport bar below it, so the two strips read as
     // "commands" and "transport" instead of one thick header.
     {
-        g.setColour (juce::Colour (0xff0a0b0e));
+        g.setColour (theme::bgApp);
         g.fillRect (menuBarBounds);
 
         for (int i = 0; i < numMenus; ++i)
@@ -4675,7 +4675,7 @@ void MainComponent::paint (juce::Graphics& g)
             const bool running = audio.isRunning();
             const int x = getSettingsButtonBounds().getRight() + ui::px (16);
 
-            g.setColour (running ? juce::Colour (0xff5ecf9a) : kPlayhead.withAlpha (0.75f));
+            g.setColour (running ? theme::live : kPlayhead.withAlpha (0.75f));
             g.fillEllipse ((float) x, (float) topBarBounds.getCentreY() - ui::pf (4),
                            ui::pf (8), ui::pf (8));
 
@@ -4731,7 +4731,7 @@ void MainComponent::paint (juce::Graphics& g)
                                     ? currentProject.getFileNameWithoutExtension()
                                     : utf8 ("未命名工程");
 
-        g.setColour (dirtyCache ? juce::Colour (0xffffc46b)
+        g.setColour (dirtyCache ? theme::warn
                                 : juce::Colours::white.withAlpha (0.34f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
         g.drawText ((dirtyCache ? juce::String (utf8 ("● ")) : juce::String())

@@ -14,11 +14,11 @@ namespace atomic
 namespace
 {
     const juce::Colour& kRollBackground = theme::surface0;
-    const juce::Colour kGridBackground  { 0xff17181f };
-    const juce::Colour kBlackRowColour  { 0xff0e0f14 };
-    const juce::Colour kRulerBackground { 0xff1a1b21 };
-    const juce::Colour kKeyWhite        { 0xffd7dae2 };
-    const juce::Colour kKeyBlack        { 0xff26282f };
+    const juce::Colour kGridBackground  = theme::surface2;
+    const juce::Colour kBlackRowColour  = theme::bgApp;
+    const juce::Colour kRulerBackground = theme::surface2;
+    const juce::Colour kKeyWhite        = theme::ink;
+    const juce::Colour kKeyBlack        = theme::surface4;
     const juce::Colour& kOutline        = theme::surface4;
     const juce::Colour& kText           = theme::inkMuted;
     const juce::Colour& kPlayheadColour = theme::record;
@@ -581,7 +581,7 @@ namespace
 
             g.setColour (colour);
             g.fillPath (path);
-            g.setColour (juce::Colour (0xff1b1c20));
+            g.setColour (theme::surface3);
             g.strokePath (path, juce::PathStrokeType (1.2f));
         };
 
@@ -595,9 +595,9 @@ namespace
         lead.closeSubPath();
         lead.applyTransform (toScreen);
 
-        g.setColour (juce::Colour (0xff6b7280));
+        g.setColour (theme::inkFaint);
         g.fillPath (lead);
-        g.setColour (juce::Colour (0xff1b1c20));
+        g.setColour (theme::surface3);
         g.strokePath (lead, juce::PathStrokeType (1.0f));
 
         // Sharpened wood, then the painted barrel.
@@ -652,7 +652,7 @@ namespace
         outline.addRoundedRectangle (-11.0f, -6.0f, 22.0f, 12.0f, 3.0f);
         outline.applyTransform (spin);
 
-        g.setColour (juce::Colour (0xff1b1c20));
+        g.setColour (theme::surface3);
         g.strokePath (outline, juce::PathStrokeType (1.4f));
 
         return image;
@@ -3524,7 +3524,7 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
     // second look every time.
     const Tool tools[4] { Tool::pencil, Tool::eraser, Tool::select, Tool::hand };
 
-    const auto tint = juce::Colour (0xff4fd1c5);
+    const auto tint = theme::accent;
 
     for (int i = 0; i < 4; ++i)
     {
@@ -3534,12 +3534,12 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
 
         g.setColour (active ? tint.withAlpha (0.22f)
                             : juce::Colours::white.withAlpha (hovered ? 0.12f : 0.05f));
-        g.fillRoundedRectangle (bounds, ui::pf (5));
+        g.fillRoundedRectangle (bounds, ui::pf (4));
 
         if (active)
         {
             g.setColour (tint.withAlpha (0.85f));
-            g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (5), 1.0f);
+            g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (4), 1.0f);
         }
 
         drawToolIcon (g, i, bounds, active ? juce::Colours::white : kText);
@@ -3556,11 +3556,11 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
 
         g.setColour (loaded ? tint.withAlpha (0.22f)
                             : juce::Colours::white.withAlpha (hovered ? 0.12f : 0.05f));
-        g.fillRoundedRectangle (bounds, ui::pf (5));
+        g.fillRoundedRectangle (bounds, ui::pf (4));
 
         g.setColour (loaded ? tint.withAlpha (0.85f)
                             : juce::Colours::white.withAlpha (hovered ? 0.20f : 0.10f));
-        g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (5), 1.0f);
+        g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (4), 1.0f);
 
         drawToolIcon (g, 4, bounds.withTrimmedLeft (ui::pf (6)).withWidth (ui::pf (18)),
                       loaded ? juce::Colours::white : kText);
@@ -3583,11 +3583,11 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
 
         g.setColour (inGroup ? tint.withAlpha (0.22f)
                              : juce::Colours::white.withAlpha (hovered && enabled ? 0.12f : 0.05f));
-        g.fillRoundedRectangle (bounds, ui::pf (5));
+        g.fillRoundedRectangle (bounds, ui::pf (4));
 
         g.setColour (inGroup ? tint.withAlpha (0.85f)
                              : juce::Colours::white.withAlpha (enabled ? 0.20f : 0.08f));
-        g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (5), 1.0f);
+        g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (4), 1.0f);
 
         drawToolIcon (g, 5, bounds.withTrimmedLeft (ui::pf (6)).withWidth (ui::pf (18)),
                       inGroup ? juce::Colours::white : kText.withAlpha (enabled ? 1.0f : 0.4f));
@@ -3609,10 +3609,10 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
         const bool grouped = getSelectedGroupId() >= 0;
 
         g.setColour (juce::Colours::white.withAlpha (hovered && enabled ? 0.12f : 0.05f));
-        g.fillRoundedRectangle (bounds, ui::pf (5));
+        g.fillRoundedRectangle (bounds, ui::pf (4));
 
         g.setColour (juce::Colours::white.withAlpha (enabled ? 0.20f : 0.08f));
-        g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (5), 1.0f);
+        g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (4), 1.0f);
 
         drawToolIcon (g, 6, bounds.withTrimmedLeft (ui::pf (6)).withWidth (ui::pf (18)),
                       kText.withAlpha (enabled ? 1.0f : 0.4f));
@@ -3635,11 +3635,11 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
 
         g.setColour (on ? tint.withAlpha (0.22f)
                         : juce::Colours::white.withAlpha (hovered ? 0.12f : 0.05f));
-        g.fillRoundedRectangle (bounds, ui::pf (5));
+        g.fillRoundedRectangle (bounds, ui::pf (4));
 
         g.setColour (on ? tint.withAlpha (0.85f)
                         : juce::Colours::white.withAlpha (0.20f));
-        g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (5), 1.0f);
+        g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (4), 1.0f);
 
         // Phase 20: a magnet instead of the 3x3 dot grid. "Snap" is a thing
         // every DAW draws as a magnet, and a dot grid reads as "grid view".
@@ -3733,7 +3733,7 @@ void PianoRollComponent::drawScrollBar (juce::Graphics& g)
     g.fillRoundedRectangle (track, track.getHeight() * 0.5f);
 
     const auto thumb = getScrollThumb();
-    g.setColour (juce::Colour (0xff4fd1c5).withAlpha (dragMode == DragMode::scrollThumb ? 0.75f : 0.45f));
+    g.setColour (theme::accent.withAlpha (dragMode == DragMode::scrollThumb ? 0.75f : 0.45f));
     g.fillRoundedRectangle (thumb, thumb.getHeight() * 0.5f);
 }
 
@@ -3777,7 +3777,7 @@ void PianoRollComponent::drawTimeGrid (juce::Graphics& g)
     const int firstSecond = (int) std::floor (scrollBeats / beatsPerSecond);
     const int lastSecond  = (int) std::ceil ((scrollBeats + visibleBeats) / beatsPerSecond);
 
-    g.setColour (juce::Colour (0xff4fd1c5).withAlpha (0.075f));
+    g.setColour (theme::accent.withAlpha (0.075f));
 
     for (int second = firstSecond; second <= lastSecond; ++second)
     {
@@ -3907,10 +3907,10 @@ void PianoRollComponent::drawGroupBands (juce::Graphics& g)
             const auto frame   = content.expanded (ui::pf (3), ui::pf (3));
 
             g.setColour (colour.withAlpha (baseAlpha * (focused ? 0.10f : 0.05f)));
-            g.fillRoundedRectangle (frame, ui::pf (5));
+            g.fillRoundedRectangle (frame, ui::pf (4));
 
             g.setColour (colour.withAlpha (baseAlpha * (focused ? 0.85f : 0.34f)));
-            g.drawRoundedRectangle (frame, ui::pf (5), focused ? ui::pf (1.4) : ui::pf (1.0));
+            g.drawRoundedRectangle (frame, ui::pf (4), focused ? ui::pf (1.4) : ui::pf (1.0));
         }
     }
 }
@@ -3964,7 +3964,7 @@ void PianoRollComponent::drawGroupLabels (juce::Graphics& g)
 
             const juce::String text = groupLabelText (*layer, group);
 
-            g.setColour (focused || hovered ? juce::Colour (0xff10141a)
+            g.setColour (focused || hovered ? theme::surface1
                                             : colour.withAlpha (pillAlpha));
             g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
             g.drawText (text, pill.reduced (ui::pf (5), 0.0f).withTrimmedRight (ui::pf (13)),
@@ -4009,7 +4009,7 @@ void PianoRollComponent::drawGroupLabels (juce::Graphics& g)
             {
                 const auto* slot = rack.findSlot (group.getOutputSlotId());
 
-                g.setColour ((slot != nullptr ? slot->colour : juce::Colour (0xffff6b6b))
+                g.setColour ((slot != nullptr ? slot->colour : theme::record)
                                 .withAlpha (alpha * 0.95f));
                 g.fillRoundedRectangle (pill.withTrimmedTop (pill.getHeight() - ui::pf (2.5f))
                                             .withTrimmedLeft (ui::pf (4))
@@ -4117,7 +4117,7 @@ void PianoRollComponent::drawSpotlightExitChip (juce::Graphics& g)
 
     // Dark and opaque: it is drawn on top of a 46% black veil, and a translucent
     // chip on a veil is exactly the thing the user cannot find.
-    g.setColour (juce::Colour (0xff1b1e25));
+    g.setColour (theme::surface3);
     g.fillRoundedRectangle (box, ui::pf (4));
 
     g.setColour (kPlayheadColour.withAlpha (0.80f));
@@ -4165,7 +4165,7 @@ void PianoRollComponent::drawNote (juce::Graphics& g, const NoteEvent& note, juc
     if (note.outputSlotOverride >= 0 && bounds.getWidth() >= 14.0f)
     {
         const auto* target = rack.findSlot (note.outputSlotOverride);
-        const auto badgeColour = target != nullptr ? target->colour : juce::Colour (0xffff6b6b);
+        const auto badgeColour = target != nullptr ? target->colour : theme::record;
 
         juce::Path notch;
         notch.addTriangle (bounds.getRight() - 10.0f, bounds.getY() + 1.0f,
@@ -4396,7 +4396,7 @@ void PianoRollComponent::drawRuler (juce::Graphics& g)
         g.drawText (utf8 ("1 小节"), ui::px (8), corner.getY() + ui::px (3),
                     ui::px (60), ui::px (14), juce::Justification::centredLeft, false);
 
-        g.setColour (juce::Colour (0xff4fd1c5).withAlpha (0.90f));
+        g.setColour (theme::accent.withAlpha (0.90f));
         g.setFont (boldFont (9.5f));
         g.drawText (juce::String (barSeconds, 2) + " s", ui::px (8), corner.getY() + ui::px (18),
                     ui::px (70), ui::px (16), juce::Justification::centredLeft, false);
@@ -4426,7 +4426,7 @@ void PianoRollComponent::drawRuler (juce::Graphics& g)
             const int lastSecond  = (int) std::ceil ((scrollBeats + (double) ruler.getWidth() / beatWidth)
                                                        / beatsPerSecond);
 
-            g.setColour (juce::Colour (0xff4fd1c5).withAlpha (0.30f));
+            g.setColour (theme::accent.withAlpha (0.30f));
 
             for (int second = firstSecond; second <= lastSecond; ++second)
             {
@@ -4469,7 +4469,7 @@ void PianoRollComponent::drawRuler (juce::Graphics& g)
 
             // Changing the tempo rewrites this row — the beat grid itself must
             // not move, so the seconds are what tells you the tempo changed.
-            g.setColour (juce::Colour (0xff4fd1c5).withAlpha (0.45f));
+            g.setColour (theme::accent.withAlpha (0.45f));
             g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (8.5f))));
             g.drawText (formatTime (beat * secondsPerBeat),
                         juce::Rectangle<int> ((int) x + ui::px (4), ruler.getY() + ui::px (19),
@@ -4508,7 +4508,7 @@ void PianoRollComponent::drawKeyboard (juce::Graphics& g)
 {
     auto keys = getKeyboardArea();
 
-    g.setColour (juce::Colour (0xff15161b));
+    g.setColour (theme::surface2);
     g.fillRect (keys);
 
     {
@@ -4537,10 +4537,10 @@ void PianoRollComponent::drawKeyboard (juce::Graphics& g)
             // note selection read as the same kind of thing.
             if (pitch == pressedKeyPitch)
             {
-                g.setColour (juce::Colour (0xff4fd1c5).withAlpha (black ? 0.55f : 0.40f));
+                g.setColour (theme::accent.withAlpha (black ? 0.55f : 0.40f));
                 g.fillRect (row);
 
-                g.setColour (juce::Colour (0xff4fd1c5));
+                g.setColour (theme::accent);
                 g.drawRect (row, 1.2f);
             }
 
@@ -5105,7 +5105,7 @@ void PianoRollComponent::drawNoteAutomationBox (juce::Graphics& g)
     // curve", and that has to be a thing you can see without guessing.
     const bool selected = curveSelection == CurveSelection::noteEnvelope;
 
-    g.setColour (juce::Colour (0xff0b0c10).withAlpha (0.97f));
+    g.setColour (theme::bgApp.withAlpha (0.97f));
     g.fillRoundedRectangle (box, 5.0f);
     g.setColour (colour.withAlpha (selected ? 1.0f : 0.8f));
     g.drawRoundedRectangle (box, 5.0f, selected ? 2.2f : 1.2f);
@@ -5874,7 +5874,7 @@ void PianoRollComponent::drawGroupAutomationBox (juce::Graphics& g)
     // Phase 22: same selection signal as the note box.
     const bool selected = curveSelection == CurveSelection::groupLane;
 
-    g.setColour (juce::Colour (0xff0b0c10).withAlpha (0.97f));
+    g.setColour (theme::bgApp.withAlpha (0.97f));
     g.fillRoundedRectangle (box, 5.0f);
     g.setColour (colour.withAlpha (selected ? 1.0f : 0.8f));
     g.drawRoundedRectangle (box, 5.0f, selected ? 2.2f : 1.2f);
@@ -7938,7 +7938,7 @@ void PianoRollComponent::drawSampleBlock (juce::Graphics& g, int layerIndex,
                                                        tagWidth,
                                                        headerH - ui::pf (3));
 
-                    g.setColour (juce::Colour (0xffffd166).withAlpha (0.86f * alpha));
+                    g.setColour (groupPalette::group1.withAlpha (0.86f * alpha));
                     g.fillRoundedRectangle (pill, ui::pf (2.5f));
 
                     g.setColour (juce::Colours::black.withAlpha (0.82f * alpha));
@@ -8113,7 +8113,7 @@ void PianoRollComponent::drawDropPreview (juce::Graphics& g)
     juce::Rectangle<float> rect (x0, top, juce::jmax (2.0f, x1 - x0),
                                  juce::jmax (keyHeight, bottom - top));
 
-    const auto colour = juce::Colour (0xff4fd1c5);
+    const auto colour = theme::accent;
 
     g.setColour (colour.withAlpha (0.16f));
     g.fillRoundedRectangle (rect, ui::pf (3));

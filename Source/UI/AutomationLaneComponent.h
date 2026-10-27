@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "Util/Theme.h"
 
 #include <functional>
 
@@ -56,7 +57,7 @@ private:
 
     std::function<AutomationLane*()> laneSource;
 
-    juce::Colour accent { 0xff4fd1c5 };
+    juce::Colour accent = theme::accent;
     double lengthBeats  = timeline::defaultLengthBeats;
     double playheadBeat = -1.0;
 

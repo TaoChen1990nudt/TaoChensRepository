@@ -13,7 +13,7 @@ namespace
 {
     const juce::Colour& kPanelBody  = theme::surface3;
     const juce::Colour& kPanelBorder = theme::hairlineStrong;
-    const juce::Colour kEditorBg    { 0xff101116 };
+    const juce::Colour kEditorBg    = theme::surface0;
     const juce::Colour& kMuted      = theme::inkSubtle;
 
     //-- Phase 36: the three layers, three colours ---------------------------
@@ -22,8 +22,8 @@ namespace
     // violet, so the references must not be. Teal for the mix (layer + synth),
     // orange for the group, amber for the result.
     const juce::Colour& kMacroColour = theme::accent;
-    const juce::Colour kGroupColour { 0xffffa06b };
-    const juce::Colour kStackColour { 0xffffd479 };
+    const juce::Colour kGroupColour = groupPalette::group3;   // 珊瑚：随色板降饱和
+    const juce::Colour kStackColour = groupPalette::group1;   // 金：随色板降饱和
 
     constexpr int kEditorX  = atomic::ui::px (16);
     constexpr int kOutputY  = atomic::ui::px (58);
@@ -357,10 +357,10 @@ void EnvelopeEditor::paint (juce::Graphics& g)
         const float v = envelope->valueAt ((float) playheadProgress);
         const float y = curve.getBottom() - juce::jlimit (0.0f, 1.0f, v) * curve.getHeight();
 
-        g.setColour (juce::Colour (0xffff5f6d).withAlpha (0.55f));
+        g.setColour (theme::record.withAlpha (0.55f));
         g.drawVerticalLine ((int) x, curve.getY(), curve.getBottom());
 
-        g.setColour (juce::Colour (0xffff5f6d));
+        g.setColour (theme::record);
         g.fillEllipse (juce::Rectangle<float> (8.0f, 8.0f).withCentre ({ x, y }));
     }
 }
@@ -723,7 +723,7 @@ void NoteEnvelopePanel::paint (juce::Graphics& g)
 
     auto* note  = getNote();
     auto* layer = stack.getLayer (layerIndex);
-    const auto accent = layer != nullptr ? layer->getColour() : juce::Colour (0xff4fd1c5);
+    const auto accent = layer != nullptr ? layer->getColour() : theme::accent;
 
     //-- Header ---------------------------------------------------------------
     g.setColour (accent);
@@ -808,7 +808,7 @@ void NoteEnvelopePanel::paint (juce::Graphics& g)
                                                           : utf8 ("跟随图层");
 
         const juce::Colour badgeColour = route.overridden   ? slotColour
-                                       : route.danglingOverride ? juce::Colour (0xffff6b6b)
+                                       : route.danglingOverride ? theme::record
                                                                 : kMuted;
 
         g.setFont (juce::Font (juce::FontOptions{}.withHeight (atomic::ui::sp (9.5f)).withStyle ("Bold")));

@@ -1,15 +1,16 @@
 #include "AutomationLaneComponent.h"
 
 #include "Util/Metrics.h"
+#include "Util/Theme.h"
 
 namespace atomic
 {
 
 namespace
 {
-    const juce::Colour kLaneBackground { 0xff12131a };
-    const juce::Colour kLaneBorder     { 0xff2a2d38 };
-    const juce::Colour kGrid           { 0xff20222c };
+    const juce::Colour kLaneBackground = theme::surface0;
+    const juce::Colour kLaneBorder     = theme::surface3;
+    const juce::Colour kGrid           = theme::hairline;
 
     constexpr float kHandleRadius = atomic::ui::pf (3.4);
     constexpr float kHitRadius    = atomic::ui::pf (8.0);
@@ -178,7 +179,7 @@ void AutomationLaneComponent::paint (juce::Graphics& g)
         filled.lineTo (area.getX(), area.getBottom());
         filled.closeSubPath();
 
-        g.setColour (ink.withAlpha (enabled ? 0.13f : 0.06f));
+        g.setColour (ink.withAlpha (enabled ? 0.12f : 0.06f));
         g.fillPath (filled);
 
         g.setColour (ink.withAlpha (enabled ? 0.95f : 0.55f));
@@ -209,7 +210,7 @@ void AutomationLaneComponent::paint (juce::Graphics& g)
     {
         const float x = beatToPoint (playheadBeat, 0.0f).getX();
 
-        g.setColour (juce::Colour (0xffff5f6d).withAlpha (0.75f));
+        g.setColour (theme::record.withAlpha (0.75f));
         g.drawVerticalLine ((int) x, area.getY() - 3.0f, area.getBottom() + 3.0f);
     }
 

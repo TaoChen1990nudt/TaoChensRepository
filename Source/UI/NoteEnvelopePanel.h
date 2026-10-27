@@ -3,6 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "Util/Metrics.h"
+#include "Util/Theme.h"
 #include <functional>
 
 #include "Model/AutomationStack.h"
@@ -115,7 +116,7 @@ private:
                           const NoteEnvelope* envelope) const;
 
     std::function<NoteEnvelope*()> envelopeSource;
-    juce::Colour accent { 0xff4fd1c5 };
+    juce::Colour accent = theme::accent;
     double playheadProgress = -1.0;
     AutomationOverlay overlay;
 

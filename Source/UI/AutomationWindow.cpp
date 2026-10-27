@@ -11,9 +11,9 @@ namespace atomic
 namespace
 {
     const juce::Colour& kBackground = theme::surface0;
-    const juce::Colour kPanel       { 0xff15161b };
+    const juce::Colour kPanel       = theme::surface2;
     const juce::Colour& kRowEven    = theme::surface1;
-    const juce::Colour kRowOdd      { 0xff111216 };
+    const juce::Colour kRowOdd      = theme::surface1;
     const juce::Colour& kOutline    = theme::surface4;
     const juce::Colour& kText       = theme::inkMuted;
     const juce::Colour& kAccent     = theme::accent;
@@ -66,7 +66,7 @@ AutomationWindow::Resolved AutomationWindow::resolve (const AutomationTrack& tra
 
         resolved.lane      = &const_cast<MixerModel&> (mixer).automationFor (target);
         resolved.name      = utf8 ("主输出");
-        resolved.colour    = juce::Colour (0xffe0c46a);
+        resolved.colour    = groupPalette::group1;   // 主输出：金色系身份，随色板降饱和
         resolved.parameter = target == 1 ? utf8 ("主声相") : utf8 ("主音量");
     }
     else if (track.owner == AutomationOwner::layer)
@@ -589,7 +589,7 @@ void AutomationWindow::drawList (juce::Graphics& g)
         // Delete cross.
         const auto del = getDeleteBounds (i).toFloat();
         g.setColour (hoveredRow == i && hoveredPart == 2
-                         ? juce::Colour (0xffff5f6d) : kText.withAlpha (0.42f));
+                         ? theme::record : kText.withAlpha (0.42f));
         g.drawLine (del.getX(), del.getY(), del.getRight(), del.getBottom(), ui::pf (1.2));
         g.drawLine (del.getRight(), del.getY(), del.getX(), del.getBottom(), ui::pf (1.2));
 

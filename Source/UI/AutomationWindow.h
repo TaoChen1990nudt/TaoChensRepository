@@ -3,6 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "Util/Metrics.h"
+#include "Util/Theme.h"
 
 #include <functional>
 #include <map>
@@ -116,7 +117,7 @@ private:
     {
         AutomationLane* lane = nullptr;
         juce::String name;
-        juce::Colour colour { 0xff4fd1c5 };
+        juce::Colour colour = theme::accent;
         juce::String parameter;      // "音量" / "声相" / "滤波"
     };
 

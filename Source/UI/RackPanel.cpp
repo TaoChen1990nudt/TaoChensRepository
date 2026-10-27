@@ -14,13 +14,13 @@ namespace
 {
     const juce::Colour& kPanelBackground = theme::surface1;
     const juce::Colour& kCardBackground = theme::surface3;
-    const juce::Colour kCardHover       { 0xff212430 };
-    const juce::Colour kCardBorder      { 0xff2b2e39 };
+    const juce::Colour& kCardHover      = theme::surface4;
+    const juce::Colour& kCardBorder     = theme::hairline;
     const juce::Colour& kDivider        = theme::hairline;
     const juce::Colour& kMutedText      = theme::inkSubtle;
     const juce::Colour& kLaneHeader     = theme::surface2;
-    const juce::Colour& kSoloColour     = theme::warn;
-    const juce::Colour kMuteColour      { 0xffff6b6b };
+    const juce::Colour& kSoloColour     = theme::accent;   // P48 11.2：独奏统一 accent（原黄）
+    const juce::Colour& kMuteColour     = theme::warn;      // P48 11.1：静音统一黄色（原红）
     /** The routing highlight. Same teal as the app's accent, so "this is the
         thing you are pointing at" reads the same everywhere. */
     const juce::Colour& kFocusAccent    = theme::accent;
@@ -324,13 +324,13 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
 
     const auto card = getCardBounds (index).toFloat();
     const bool hovered = (index == hoveredCard);
-    const juce::Colour accent = slot->muted ? juce::Colour (0xff5a5f6d) : slot->colour;
+    const juce::Colour accent = slot->muted ? theme::inkFaint : slot->colour;
 
     g.setColour (hovered ? kCardHover : kCardBackground);
-    g.fillRoundedRectangle (card, ui::pf (8));
+    g.fillRoundedRectangle (card, ui::pf (6));
 
     g.setColour (kCardBorder);
-    g.drawRoundedRectangle (card, ui::pf (8), 1.0f);
+    g.drawRoundedRectangle (card, ui::pf (6), 1.0f);
 
     // Left edge in the synth's own colour — the same colour the routed notes
     // use for their override badge, so the mapping is readable at a glance.
@@ -402,7 +402,7 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
         if (index == hoveredCard && hoveredPart == Part::close && rack.getNumSlots() > 1)
         {
             g.setColour (juce::Colours::white.withAlpha (0.10f));
-            g.fillRoundedRectangle (close, ui::pf (5));
+            g.fillRoundedRectangle (close, ui::pf (4));
         }
 
         const float alpha = (rack.getNumSlots() > 1)
@@ -423,7 +423,7 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
     if (focusActive && focusSlotId == slot->id)
     {
         g.setColour (accent.withAlpha (0.22f));
-        g.drawRoundedRectangle (card.expanded (ui::pf (3)), ui::pf (10), ui::pf (3));
+        g.drawRoundedRectangle (card.expanded (ui::pf (3)), ui::pf (6), ui::pf (3));
         g.setColour (accent.withAlpha (0.95f));
         g.drawRoundedRectangle (card.reduced (ui::pf (0.5)), ui::pf (7.5), ui::pf (1.8));
     }
@@ -447,9 +447,9 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
                            && ! slot->isPlugin() && ! slot->isSampler();
 
         g.setColour (juce::Colours::white.withAlpha (hot ? 0.11f : 0.055f));
-        g.fillRoundedRectangle (pill, ui::pf (5));
+        g.fillRoundedRectangle (pill, ui::pf (4));
         g.setColour (accent.withAlpha (hot ? 0.60f : 0.35f));
-        g.drawRoundedRectangle (pill, ui::pf (5), 1.0f);
+        g.drawRoundedRectangle (pill, ui::pf (4), 1.0f);
 
         if (slot->isSampler())
         {
@@ -613,7 +613,7 @@ void RackPanel::drawLaneHeader (juce::Graphics& g, int index)
                                                (float) laneHeight - ui::pf (4));
 
     g.setColour (kLaneHeader);
-    g.fillRoundedRectangle (strip, ui::pf (5));
+    g.fillRoundedRectangle (strip, ui::pf (4));
 
     const auto accent = slot->colour;
     const bool enabled = slot->getAutomation().isEnabled();

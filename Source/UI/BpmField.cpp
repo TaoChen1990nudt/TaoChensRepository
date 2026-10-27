@@ -11,9 +11,9 @@ namespace atomic
 
 namespace
 {
-    const juce::Colour kFieldBg    { 0xff1e2027 };
-    const juce::Colour kFieldHover { 0xff262932 };
-    const juce::Colour kFieldEdge   { 0xff333744 };
+    const juce::Colour kFieldBg    = theme::surface3;
+    const juce::Colour kFieldHover = theme::surface4;
+    const juce::Colour kFieldEdge  = theme::hairlineStrong;
     const juce::Colour& kLabel      = theme::inkFaint;
     const juce::Colour& kValue      = theme::ink;
     const juce::Colour& kAccent     = theme::accent;

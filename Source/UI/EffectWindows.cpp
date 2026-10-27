@@ -181,9 +181,9 @@ void InsertEditorContent::paint (juce::Graphics& g)
         const auto pill = getPowerBounds().toFloat();
 
         g.setColour (on ? kAccent.withAlpha (0.20f) : juce::Colours::white.withAlpha (0.05f));
-        g.fillRoundedRectangle (pill, atomic::ui::pf (5));
+        g.fillRoundedRectangle (pill, atomic::ui::pf (4));
         g.setColour (on ? kAccent.withAlpha (0.7f) : juce::Colours::white.withAlpha (0.16f));
-        g.drawRoundedRectangle (pill, atomic::ui::pf (5), 1.0f);
+        g.drawRoundedRectangle (pill, atomic::ui::pf (4), 1.0f);
 
         g.setColour (on ? kAccent : juce::Colours::white.withAlpha (0.4f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));

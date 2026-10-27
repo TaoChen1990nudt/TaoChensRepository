@@ -673,11 +673,15 @@ private:
 /** Shared palette so panel and roll never drift apart. */
 namespace palette
 {
-    const juce::Colour layer1 { 0xff4fd1c5 };   // teal
-    const juce::Colour layer2 { 0xfff6ad55 };   // amber
-    const juce::Colour layer3 { 0xff9f7aea };   // violet
-    const juce::Colour layer4 { 0xffed64a6 };   // pink
-    const juce::Colour layer5 { 0xff63b3ed };   // blue
+    // P48: desaturated per DESIGN.md 3.5 (S x0.80, V x0.88 in HSB) — identity
+    // colour must not compete with accent/warn/record for attention. layer1 is
+    // left alone: it shares the accent hue and big solid uses, accent keeps the
+    // thin-line uses, so the two stay distinguishable by SHAPE not value.
+    const juce::Colour layer1 { 0xff4fd1c5 };   // teal (unchanged)
+    const juce::Colour layer2 { 0xffd99a4d };   // amber (was f6ad55)
+    const juce::Colour layer3 { 0xff8a6ccb };   // violet (was 9f7aea)
+    const juce::Colour layer4 { 0xffcf5a91 };   // pink (was ed64a6)
+    const juce::Colour layer5 { 0xff599ecf };   // blue (was 63b3ed)
 
     inline juce::Colour nextLayerColour (int index)
     {
@@ -693,11 +697,14 @@ namespace palette
     "this note belongs to its layer", which is already obvious. */
 namespace groupPalette
 {
-    const juce::Colour group1 { 0xffffd166 };   // gold
-    const juce::Colour group2 { 0xff8ce99a };   // mint
-    const juce::Colour group3 { 0xffff9f7a };   // coral
-    const juce::Colour group4 { 0xff74c0fc };   // sky
-    const juce::Colour group5 { 0xffd0bfff };   // lilac
+    // P48: desaturated per DESIGN.md 3.5 (S x0.80, V x0.88). NOTE: values are
+    // serialised into .atomic files (colour attribute), so existing projects
+    // keep their saved colours — only NEW layers/groups get these.
+    const juce::Colour group1 { 0xffdfb95d };   // gold (was ffd166)
+    const juce::Colour group2 { 0xff7bcb88 };   // mint (was 8ce99a)
+    const juce::Colour group3 { 0xffdf8c6e };   // coral (was ff9f7a)
+    const juce::Colour group4 { 0xff68a8d9 };   // sky (was 74c0fc)
+    const juce::Colour group5 { 0xffb6a9df };   // lilac (was d0bfff)
 
     inline juce::Colour nextGroupColour (int index)
     {
