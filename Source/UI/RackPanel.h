@@ -118,6 +118,21 @@ public:
     void setRoutingFocus (int slotId, bool hasSelection);
     bool hasRoutingFocus() const noexcept { return focusActive; }
 
+    /** Phase 54: the cards the current NOTE selection plays on.
+
+        Deliberately not the same thing as the spotlight above. The spotlight
+        DIMMS the rest of the sheet, which is why Phase 30 took it off the
+        selection: clicking a note used to grey the whole grid out. This mark
+        answers the smaller question the same click raises — "where does what I
+        just selected come out?" — and costs nothing visually: a dashed ring on
+        the card(s) involved, no veil anywhere.
+
+        A set, because one selection can straddle synths: an override on one
+        note, a group mount on another, and both are honest answers. Empty means
+        nothing to mark, which is what "no note selection" looks like. */
+    void setSelectionRouteSlots (std::vector<int> slotIds);
+    const std::vector<int>& getSelectionRouteSlots() const noexcept { return selectionRouteSlots; }
+
     /** Phase 51: the sampler card's 拉伸 button. Public because the self-test
         asserts it sits inside the card and clear of the readout text — a
         control that overlaps the text it sits beside is invisible in a
@@ -171,6 +186,16 @@ private:
     bool isCollapsed (int index) const;
     int  cardHeightAt (int index) const;
     void clampScroll();
+
+    /** Phase 54: is this card one the current note selection plays on? Binary
+        search, because the vector is kept sorted by the setter — a card paint
+        runs for every slot on every repaint and a linear scan there is a scan
+        that gets copied into the next panel too. */
+    bool isSelectionRouted (int slotId) const;
+
+    /** Phase 54: the dashed ring, drawn from the same place as the spotlight's
+        solid one so the two cannot end up in different corners of the card. */
+    void drawRoutingMarks (juce::Graphics&, int index, juce::Rectangle<float> card);
     juce::Rectangle<int> getViewArea() const;
     juce::Rectangle<int> getCollapseBounds (int index) const;
 
@@ -214,6 +239,10 @@ private:
     bool focusActive = false;
     bool selectionActive = false;   // Phase 23: a plain click may mount the selection
     bool hoveringAdd = false;
+
+    /** Phase 54: sorted, unique, and only ids that still resolve — the mark is
+        drawn from this, so a stale id would be a ring around nothing. */
+    std::vector<int> selectionRouteSlots;
 
     Part dragPart = Part::none;
     int  dragCard = -1;

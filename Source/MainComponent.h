@@ -260,6 +260,16 @@ public:
                                         int width = ui::px (900),
                                         int height = ui::px (420));
 
+    /** Phase 54: a note selection and the cards it plays on, in one frame.
+
+        The whole point of the mark is that it is NOT the spotlight — the grid
+        keeps its brightness while the cards are ringed — and that is a claim
+        only a picture can make: both states are "a card with a ring on it" in
+        prose. Selects one note per distinct routed slot so the multi-card case
+        is what gets photographed, then puts the selection and the spotlight
+        back. */
+    juce::Image createSelectionMarkSnapshot (bool wholeShell = false);
+
     /** Phase 35: the demo group, muted, with its mixed members selected — the
         pill reads 静音 and the block inside the bracket is lit at the same time.
         The mute is put back before returning: it exists for the frame. */
@@ -519,6 +529,18 @@ private:
         has to be built when it is shown, not when the window opens. */
     void fillFileMenu (juce::PopupMenu& menu) const;
     void fillEditMenu (juce::PopupMenu& menu) const;
+
+    /** Phase 54: the tool strip as a menu.
+
+        Not a second implementation of the tools — every item calls the same
+        method the strip's click handler calls, with the same "nothing selected
+        means nothing happens" guards, so the two entry points cannot drift.
+        The point is reach: the strip has nine icon buttons whose states (which
+        mode is on, whether 编组 is possible) are only visible if you are
+        looking at them. */
+    void fillToolsMenu (juce::PopupMenu& menu) const;
+    void applyToolsChoice (int itemId);
+
     void applyFileChoice (int itemId);
     void applyEditChoice (int itemId);
     void showMenuBarMenu (int index);
@@ -751,13 +773,18 @@ private:
     scope::FreeBeat freeBeatOnLayer (int layerIndex, double lengthBeats) const;
 
     //-- Phase 22: the menu bar ----------------------------------------------
-    /** Two menus, drawn by this component rather than by juce::MenuBarComponent.
+    /** Three menus, drawn by this component rather than by juce::MenuBarComponent.
 
         A stock menu bar would be a light grey strip in the middle of a dark
         transport bar, and this app has one look. The cost is that the items,
         their bounds and their hover state are all here — which is also why the
         shortcuts are listed in one table instead of two. */
-    static constexpr int numMenus = 2;
+    static constexpr int numMenus = 3;
+
+    /** The label above each menu, in one place: paint() and the bounds maths
+        have to agree about how many there are, and a ternary chain in paint()
+        was how the second menu spelled itself in two different places. */
+    static juce::String menuTitle (int index);
 
     juce::Rectangle<int> getMenuBarBounds() const { return menuBarBounds; }
     juce::Rectangle<int> getMenuBarItemBounds (int index) const;

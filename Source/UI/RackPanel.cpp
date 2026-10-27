@@ -9,6 +9,8 @@
 #include "Util/Theme.h"
 #include "Util/ValueMenu.h"
 
+#include <algorithm>              // Phase 54: the routed-slot set is sorted
+
 namespace atomic
 {
 
@@ -317,6 +319,23 @@ void RackPanel::paint (juce::Graphics& g)
                     ui::px (14), ui::px (27), getWidth() - ui::px (24), ui::px (14),
                     juce::Justification::centredLeft, true);
     }
+    else if (! selectionRouteSlots.empty())
+    {
+        // Phase 54: the header names what the selection plays on, so the dashed
+        // ring does not have to be guessed at. One card gets its name; several
+        // get the first and a count, because a header that lists four synths is
+        // a header nobody reads.
+        juce::String where = rack.getSlotName (selectionRouteSlots.front());
+
+        if (selectionRouteSlots.size() > 1)
+            where += utf8 (" 等 ") + juce::String ((int) selectionRouteSlots.size()) + utf8 (" 个");
+
+        g.setColour (kFocusAccent.withAlpha (0.78f));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
+        g.drawText (utf8 ("选区 · ") + where,
+                    ui::px (14), ui::px (27), getWidth() - ui::px (24), ui::px (14),
+                    juce::Justification::centredLeft, true);
+    }
     else
     {
         g.setColour (juce::Colours::white.withAlpha (0.28f));
@@ -325,7 +344,6 @@ void RackPanel::paint (juce::Graphics& g)
                     ui::px (14), ui::px (27), ui::px (180), ui::px (14),
                     juce::Justification::centredLeft, false);
     }
-
     g.setColour (kDivider);
     g.drawHorizontalLine (headerHeight - 1, 0.0f, (float) getWidth());
 
@@ -395,6 +413,43 @@ void RackPanel::paint (juce::Graphics& g)
 }
 
 //==============================================================================
+void RackPanel::drawRoutingMarks (juce::Graphics& g, int index, juce::Rectangle<float> card)
+{
+    const auto* slot = rack.getSlot (index);
+
+    if (slot == nullptr)
+        return;
+
+    if (focusActive && focusSlotId == slot->id)
+    {
+        // A second outline, outside the normal border: the card the spotlight
+        // is on. Loud on purpose — the rest of the screen is dimmed around it,
+        // so the card has to look like the reason.
+        g.setColour (theme::accent.withAlpha (0.22f));
+        g.drawRoundedRectangle (card.expanded (ui::pf (3)), ui::pf (6), ui::pf (3));
+        g.setColour (theme::accent.withAlpha (0.95f));
+        g.drawRoundedRectangle (card.reduced (ui::pf (0.5)), ui::pf (7.5), ui::pf (1.8));
+        return;
+    }
+
+    if (! isSelectionRouted (slot->id))
+        return;
+
+    // Phase 54: dashed, and INSIDE the border. Solid-plus-outside already means
+    // "spotlit, everything else is dimmed"; this one is a mark on a card in a
+    // view where nothing is dimmed, and if the two looked alike the user would
+    // keep hunting for a veil that is not there.
+    juce::Path ring;
+    ring.addRoundedRectangle (card.reduced (ui::pf (2.0)), ui::pf (5));
+
+    juce::Path dashed;
+    const float dashes[] = { ui::pf (4.0), ui::pf (3.0) };
+    juce::PathStrokeType (ui::pf (1.4)).createDashedStroke (dashed, ring, dashes, 2);
+
+    g.setColour (theme::accent.withAlpha (focusActive ? 0.34f : 0.72f));
+    g.fillPath (dashed);
+}
+
 void RackPanel::drawCard (juce::Graphics& g, int index)
 {
     auto* slot = rack.getSlot (index);
@@ -423,6 +478,11 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
     const int cardX = (int) card.getX();
     const int cardY = (int) card.getY();
     const int cardW = (int) card.getWidth();
+
+    // Drawn before the contents: a ring that covers the controls it points at
+    // helps nobody. Folded cards get it too — a folded card is exactly the one
+    // you cannot otherwise tell anything about.
+    drawRoutingMarks (g, index, card);
 
     //-- Phase 17: the folded card --------------------------------------------
     // One line: what this synth is called. The fader and the routing chips come
@@ -496,17 +556,8 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
                     close.getX() + ui::pf (7), close.getBottom() - ui::pf (7), ui::pf (1.3));
     }
 
-    //-- Routing focus ---------------------------------------------------------
-    // A second outline, outside the normal border: the card a selected note is
-    // currently playing on. Drawn before the contents so the glow never covers
-    // a control.
-    if (focusActive && focusSlotId == slot->id)
-    {
-        g.setColour (accent.withAlpha (0.22f));
-        g.drawRoundedRectangle (card.expanded (ui::pf (3)), ui::pf (6), ui::pf (3));
-        g.setColour (accent.withAlpha (0.95f));
-        g.drawRoundedRectangle (card.reduced (ui::pf (0.5)), ui::pf (7.5), ui::pf (1.8));
-    }
+    //-- Routing marks ---------------------------------------------------------
+    // (drawn at the top of drawCard, before the contents — see drawRoutingMarks)
 
     //-- Meter -----------------------------------------------------------------
     {
@@ -844,6 +895,17 @@ void RackPanel::syncLaneEditors()
 
 void RackPanel::updateLayout()
 {
+    // Phase 54: clamp HERE, not in resized(). `scrollY` is a pixel count and
+    // the view height is not fixed, so the two drift apart whenever the panel
+    // changes size — and a session that is built before the panel is laid out
+    // (a project load, the headless snapshot run) never gets a resized() at
+    // all. rackChanged() is the only path a card list ever grows by, and it
+    // ends here, so this is the one place every geometry change passes through.
+    // Without it the rack paints blank above the "添加音源" button: the offset
+    // outlived the content it was clamped against, which reads as "my
+    // instruments are gone".
+    clampScroll();
+
     for (int i = 0; i < (int) laneEditors.size(); ++i)
     {
         auto* slot = rack.getSlot (i);
@@ -903,6 +965,34 @@ void RackPanel::setSelectionActive (bool active)
     repaint();
 }
 
+void RackPanel::setSelectionRouteSlots (std::vector<int> slotIds)
+{
+    // Normalise here rather than in the painter: the caller works from layers
+    // and notes and has no reason to know that "one card, four notes" is one
+    // card. Dropping ids that no longer resolve matters too — a ring around a
+    // deleted synth is a ring the user cannot explain.
+    std::vector<int> next;
+    next.reserve (slotIds.size());
+
+    for (int id : slotIds)
+        if (rack.findSlot (id) != nullptr)
+            next.push_back (id);
+
+    std::sort (next.begin(), next.end());
+    next.erase (std::unique (next.begin(), next.end()), next.end());
+
+    if (next == selectionRouteSlots)
+        return;
+
+    selectionRouteSlots = std::move (next);
+    repaint();
+}
+
+bool RackPanel::isSelectionRouted (int slotId) const
+{
+    return std::binary_search (selectionRouteSlots.begin(), selectionRouteSlots.end(), slotId);
+}
+
 void RackPanel::rackChanged()
 {
     // A deleted card can leave the hover index pointing at nothing.
@@ -932,7 +1022,7 @@ void RackPanel::rackChanged()
 void RackPanel::resized()
 {
     lastSlotCount = rack.getNumSlots();
-    updateLayout();
+    updateLayout();     // also re-clamps the scroll offset — see updateLayout()
 }
 
 //==============================================================================

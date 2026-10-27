@@ -1455,6 +1455,69 @@ juce::Image MainComponent::createCardDropSnapshot (bool instrumentCard, int widt
     return image;
 }
 
+juce::Image MainComponent::createSelectionMarkSnapshot (bool wholeShell)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || layer->getNotes().empty())
+        return {};
+
+    const auto   previousSelection = pianoRoll.getSelection();
+    const int    previousFocus     = getFocusedSlotId();
+
+    // One note per DISTINCT routed slot, found through routing::resolve — the
+    // picture has to be produced by the same rule the mark is drawn from, or
+    // the frame documents a routing the engine does not play.
+    std::vector<int> picked;
+    std::vector<int> seen;
+
+    for (const auto& note : layer->getNotes())
+    {
+        const auto resolved = routing::resolve (*layer, note, rack);
+
+        if (! resolved.isValid())
+            continue;
+
+        if (std::find (seen.begin(), seen.end(), resolved.slotId) != seen.end())
+            continue;
+
+        seen.push_back (resolved.slotId);
+        picked.push_back (note.id);
+
+        if (picked.size() >= 2)
+            break;
+    }
+
+    // The spotlight would dim the whole grid and turn this frame into the very
+    // picture this feature exists to NOT be.
+    focusSynth (-1);
+
+    pianoRoll.setSelection (picked);
+    updateRackRoutingFocus();
+
+    // The rack's own scroll offset is wherever the last card growth left it;
+    // a documentation frame wants the top of the list, where the first card's
+    // header is, not the bottom.
+    const int previousScroll = rackPanel.getScrollY();
+    rackPanel.setScrollY (0);
+
+    // The RACK, not the whole window: the mark is a 1.4 px dashed ring inside a
+    // card's border, and the shell's own frame is 1800 px wide with the rack
+    // squeezed into 300 of them — a mark that has to be hunted for documents
+    // nothing. `wholeShell` is the other half of the claim: the grid around it
+    // is at full brightness, which is exactly what the spotlight does NOT do.
+    auto image = wholeShell ? createComponentSnapshot (getLocalBounds(), true)
+                            : rackPanel.createComponentSnapshot (rackPanel.getLocalBounds(), true);
+
+    rackPanel.setScrollY (previousScroll);
+
+    pianoRoll.setSelection (previousSelection);
+    updateRackRoutingFocus();
+    focusSynth (previousFocus);
+
+    return image;
+}
+
 juce::Image MainComponent::createGroupMuteSnapshot (int width, int height)
 {
     auto* layer = stack.getActiveLayer();
@@ -2737,6 +2800,42 @@ void MainComponent::updateRackRoutingFocus()
     // decides whether a plain card click mounts or merely inspects — and that is
     // a different question, answered by setSelectionActive in applyFocus().
     applyFocus();
+
+    //-- Phase 54: where the selected notes come out --------------------------
+    // The spotlight above answers "show me only this synth" and dims the sheet,
+    // which is why it stays a deliberate act. This one answers the smaller
+    // question the same click asks — "which card is playing what I just
+    // selected?" — and dims nothing, so it can be automatic.
+    //
+    // Resolved through routing::resolve, not by reading outputSlotId: the
+    // answer has three tiers (note override / group mount / layer default) and
+    // a second copy of that rule here is precisely how the card would end up
+    // naming a synth the ear does not hear.
+    {
+        std::vector<int> routed;
+        auto selected = pianoRoll.getSelection();
+
+        if (! selected.empty())
+        {
+            std::sort (selected.begin(), selected.end());
+
+            for (int i = 0; i < stack.getNumLayers(); ++i)
+            {
+                const auto* layer = stack.getLayer (i);
+
+                if (layer == nullptr)
+                    continue;
+
+                for (const auto& note : layer->getNotes())
+                    if (std::binary_search (selected.begin(), selected.end(), note.id))
+                        if (const auto resolved = routing::resolve (*layer, note, rack);
+                            resolved.isValid())
+                            routed.push_back (resolved.slotId);
+            }
+        }
+
+        rackPanel.setSelectionRouteSlots (std::move (routed));
+    }
 }
 
 void MainComponent::focusSynth (int slotId)
@@ -4853,8 +4952,7 @@ void MainComponent::paint (juce::Graphics& g)
 
             g.setColour ((hot ? juce::Colours::white : kAccent).withAlpha (hot ? 0.98f : 0.62f));
             g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.5f))));
-            g.drawText (i == 0 ? utf8 ("文件") : utf8 ("编辑"),
-                        item, juce::Justification::centred, false);
+            g.drawText (menuTitle (i), item, juce::Justification::centred, false);
         }
 
         g.setColour (kDivider);
@@ -5507,12 +5605,23 @@ namespace
    #endif
 }
 
+juce::String MainComponent::menuTitle (int index)
+{
+    switch (index)
+    {
+        case 0:  return utf8 ("文件");
+        case 1:  return utf8 ("编辑");
+        case 2:  return utf8 ("工具");
+        default: return {};
+    }
+}
+
 juce::Rectangle<int> MainComponent::getMenuBarItemBounds (int index) const
 {
     if (! juce::isPositiveAndBelow (index, numMenus))
         return {};
 
-    static constexpr int widths[numMenus] { 54, 54 };   // design px
+    static constexpr int widths[numMenus] { 54, 54, 54 };   // design px
 
     int x = menuBarBounds.getX() + ui::px (8);
 
@@ -5623,6 +5732,105 @@ void MainComponent::fillEditMenu (juce::PopupMenu& menu) const
     menu.addSectionHeader (utf8 ("粘贴目标 · ") + where);
 }
 
+void MainComponent::fillToolsMenu (juce::PopupMenu& menu) const
+{
+    using Tool = PianoRollComponent::Tool;
+
+    auto addCommand = [&menu] (int id, const juce::String& text,
+                               const juce::String& keys, bool enabled = true, bool ticked = false)
+    {
+        juce::PopupMenu::Item item;
+
+        item.itemID                 = id;
+        item.text                   = text;
+        item.isEnabled              = enabled;
+        item.isTicked               = ticked;
+        item.shortcutKeyDescription = keys;
+
+        menu.addItem (item);
+    };
+
+    //-- Modes ----------------------------------------------------------------
+    // Ticked, not radio buttons: JUCE's tick is the one mark the platform draws
+    // consistently in a dark popup, and "which mode am I in" is the single
+    // question this block answers. The arrow in front of the label is the same
+    // signal the strip uses (a lit plate), spelled for a menu.
+    const Tool current = pianoRoll.getTool();
+
+    menu.addSectionHeader (utf8 ("模式 · ") + (current == Tool::pencil ? utf8 ("画笔")
+                                              : current == Tool::eraser ? utf8 ("橡皮")
+                                              : current == Tool::select ? utf8 ("选择")
+                                              : current == Tool::hand   ? utf8 ("抓手")
+                                                                        : utf8 ("刻刀")));
+
+    addCommand (21, utf8 ("画笔（点击空白画音符）"), {}, true, current == Tool::pencil);
+    addCommand (22, utf8 ("橡皮（点击删除）"),       {}, true, current == Tool::eraser);
+    addCommand (23, utf8 ("选择（拖动 / 框选）"),     {}, true, current == Tool::select);
+    addCommand (24, utf8 ("抓手（拖动平移）"),       {}, true, current == Tool::hand);
+    addCommand (25, utf8 ("刻刀（切开音符或采样）"),  {}, true, current == Tool::knife);
+
+    menu.addSeparator();
+
+    //-- Actions --------------------------------------------------------------
+    // Same guards as the strip: a greyed item here and a dead button there are
+    // the same rule, so both read hasAnySelection().
+    const bool hasSelection = pianoRoll.hasAnySelection();
+
+    addCommand (26, pianoRoll.hasPencilState() ? utf8 ("清除画笔状态")
+                                               : utf8 ("复制选中音符的画笔状态"),
+                kCommandKey + "Shift+C",
+                pianoRoll.hasPencilState() || hasSelection);
+
+    menu.addSeparator();
+
+    // The pair reads as one control with two directions in the strip; in a menu
+    // it reads as two verbs, which is why they sit next to each other here too.
+    const bool inGroup = pianoRoll.getSelectedGroupId() >= 0;
+
+    addCommand (27, inGroup ? utf8 ("编组（选中已在组内，点此选中整组）") : utf8 ("编组"),
+                "G", hasSelection);
+    addCommand (28, utf8 ("解组"), "Shift+G", hasSelection);
+
+    menu.addSeparator();
+
+    addCommand (29, utf8 ("吸附到 1/16 网格"), {}, true, pianoRoll.isSnapEnabled());
+}
+
+void MainComponent::applyToolsChoice (int itemId)
+{
+    using Tool = PianoRollComponent::Tool;
+
+    switch (itemId)
+    {
+        case 21: pianoRoll.setTool (Tool::pencil); break;
+        case 22: pianoRoll.setTool (Tool::eraser); break;
+        case 23: pianoRoll.setTool (Tool::select); break;
+        case 24: pianoRoll.setTool (Tool::hand);   break;
+        case 25: pianoRoll.setTool (Tool::knife);  break;
+
+        case 26:
+            // The strip's two states in one item: lit means "clear it", dark
+            // means "load it from the selection AND switch to the pencil" —
+            // copying is only useful if the next thing you do is draw.
+            if (pianoRoll.hasPencilState())
+                pianoRoll.clearPencilState();
+            else if (pianoRoll.copyNoteStateFromSelection())
+                pianoRoll.setTool (Tool::pencil);
+            break;
+
+        case 27: if (pianoRoll.hasAnySelection()) pianoRoll.groupSelection();   break;
+        case 28: if (pianoRoll.hasAnySelection()) pianoRoll.ungroupSelection(); break;
+        case 29: pianoRoll.setSnapEnabled (! pianoRoll.isSnapEnabled());        break;
+
+        default: break;
+    }
+
+    // The menu is not inside the strip, so the strip's own repaint does not
+    // happen and the lit plates would keep describing the old mode.
+    pianoRoll.repaint();
+    repaint();
+}
+
 void MainComponent::applyFileChoice (int itemId)
 {
     switch (itemId)
@@ -5657,8 +5865,10 @@ void MainComponent::showMenuBarMenu (int index)
 
     if (index == 0)
         fillFileMenu (menu);
-    else
+    else if (index == 1)
         fillEditMenu (menu);
+    else
+        fillToolsMenu (menu);
 
     hoveredMenuItem = index;
     repaint (menuBarBounds);
@@ -5681,8 +5891,10 @@ void MainComponent::showMenuBarMenu (int index)
 
                             if (index == 0)
                                 safe->applyFileChoice (result);
-                            else
+                            else if (index == 1)
                                 safe->applyEditChoice (result);
+                            else
+                                safe->applyToolsChoice (result);
                         });
 }
 

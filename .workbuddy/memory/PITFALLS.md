@@ -701,3 +701,29 @@ Windows 8+ 的 Media Foundation sink writer（`MFCreateSinkWriterFromURL` + `MFA
 RackPanel::mouseDown 的 `selectionActive && onSlotChosen` 分支直接 return，拖卡手势在那里
 根本不会 arm。这是刻意的：P23 的"点卡片 = 把选区挂上去"和 P53 的"拖卡片 = 单点挂载"
 共享同一个卡片正文，鼠标按下那一刻就分道——点击立即生效（无法撤），拖拽松手才生效。
+
+## P54-A：机架空白的真凶是 scrollY，不是没画卡
+
+`drawCard` 明明被调用（stderr 探针看得见），画面却是空的——因为卡片全在 `getViewArea()`
+上方。`rackChanged()` 在槽数增长时把偏移设成 `content - viewHeight`，用的是**当时**的
+`getViewHeight()`；会话先建内容、后面板才拿到尺寸时，那次计算得到 0，偏移直接等于整份内容，
+之后再也没有人钳制它。`resized()` 原来也没有 `clampScroll()`。
+
+修法：`updateLayout()` 开头钳一次（`resized` 与 `rackChanged` 都走它），`setScrollY` 早就自带钳制。
+症状值得记住：**空机架 + 按钮还在 = 滚动跑飞**，不是模型丢了。
+
+## P54-B：虚线环与实线环是两件事，别为了省事复用
+
+P54 的选区标记如果直接用聚光灯的绘制，用户会把"我选了这些音符"读成"进入了只看这个音源的模式"，
+接下来会去找那个根本不存在的退出方式（P29/P30 的教训）。规则：实线+外扩=聚光灯（网格变暗），
+虚线+卡内=选区落点（什么都不变暗）。
+
+## P54-C：自检里"画笔状态"是全局残留
+
+`hasPaintState` 是会话级开关，P11 那批断言会把它点亮。测"没选中时菜单项置灰"之前必须先
+`clearPencilState()`，否则测的是上一块的残留——首次跑就吃过一次 FAIL（bare 0 / armed 1 里的 copy 项）。
+
+## P54-D：`std::cout` 在快照分支里可能丢失，探针用 `std::cerr`
+
+headless 快照运行结束时缓冲区没机会刷出去，`std::cout` 打的调试行在重定向日志里看不见；
+`std::cerr` 是无缓冲的。别据此判断"代码没跑到"。

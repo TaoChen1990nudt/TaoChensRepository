@@ -9665,6 +9665,299 @@ juce::String MainComponent::runSelfTest()
         pianoRoll.setSnapEnabled (oldSnap);
     } ();
 
+    //-- Phase 54: the card a note selection plays on, and the tool menu ------
+    [&]
+    {
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("Phase 54 needs a layer", false, "no active layer");
+            return;
+        }
+
+        const auto previousSelection = pianoRoll.getSelection();
+        const int  previousFocus     = getFocusedSlotId();
+        const auto previousTool      = pianoRoll.getTool();
+        const bool previousSnap      = pianoRoll.isSnapEnabled();
+
+        // A clean starting point: no selection, no spotlight. Both are states
+        // the checks below are about, so neither may be inherited.
+        focusSynth (-1);
+        pianoRoll.setSelection ({});
+
+        const int synthA = rack.addSynth();
+        const int synthB = rack.addSynth();
+
+        const auto makeNote = [layer] (int pitch, double beat, int override)
+        {
+            NoteEvent note;
+            note.pitch              = pitch;
+            note.startBeat          = beat;
+            note.lengthBeats        = 1.0;
+            note.outputSlotOverride = override;
+            return layer->addNote (note);
+        };
+
+        const int noteToA = makeNote (84, 600.0, synthA);
+        const int noteToB = makeNote (86, 601.0, synthB);
+
+        const auto describe = [] (const std::vector<int>& slots)
+        {
+            juce::String out;
+
+            for (int id : slots)
+                out += juce::String (id) + " ";
+
+            return out.isEmpty() ? juce::String ("none") : out;
+        };
+
+        //-- 1. one note marks the card that plays it -------------------------
+        pianoRoll.setSelection ({ noteToA });
+        updateRackRoutingFocus();
+
+        const auto marksA = rackPanel.getSelectionRouteSlots();
+
+        check ("Selecting a note marks the card it plays on",
+               marksA.size() == 1 && marksA.front() == synthA,
+               describe (marksA) + "vs " + juce::String (synthA));
+
+        // The whole reason this mark exists: P30 took the spotlight off the
+        // selection because it veiled the grid. A mark that also turned the
+        // veil on would be the same bug with a new name.
+        check ("...and it is not the spotlight: nothing gets dimmed",
+               ! rackPanel.hasRoutingFocus() && getFocusedSlotId() < 0,
+               "focus " + juce::String (getFocusedSlotId())
+                 + " / active " + juce::String ((int) rackPanel.hasRoutingFocus()));
+
+        //-- 2. one selection, two synths, two rings --------------------------
+        pianoRoll.setSelection ({ noteToA, noteToB });
+        updateRackRoutingFocus();
+
+        const auto marksBoth = rackPanel.getSelectionRouteSlots();
+
+        check ("A selection that straddles two synths rings both cards",
+               marksBoth.size() == 2 && marksBoth[0] < marksBoth[1]
+                 && marksBoth[0] == juce::jmin (synthA, synthB)
+                 && marksBoth[1] == juce::jmax (synthA, synthB),
+               describe (marksBoth));
+
+        //-- 3. letting go takes the marks away -------------------------------
+        pianoRoll.setSelection ({});
+        updateRackRoutingFocus();
+
+        check ("Clearing the selection clears the marks",
+               rackPanel.getSelectionRouteSlots().empty(),
+               describe (rackPanel.getSelectionRouteSlots()));
+
+        //-- 4. the two states coexist without overwriting each other --------
+        // A card lit by hand must survive a selection that points elsewhere —
+        // that is the P32 rule the spotlight already had, and the mark lives
+        // next to it rather than replacing it.
+        focusSynth (synthA);
+        pianoRoll.setSelection ({ noteToB });
+        updateRackRoutingFocus();
+
+        const auto marksElsewhere = rackPanel.getSelectionRouteSlots();
+
+        check ("A hand-lit card keeps its spotlight while the selection marks the other one",
+               getFocusedSlotId() == synthA && rackPanel.hasRoutingFocus()
+                 && marksElsewhere.size() == 1 && marksElsewhere.front() == synthB,
+               "focus " + juce::String (getFocusedSlotId()) + " / marks "
+                 + describe (marksElsewhere));
+
+        //-- 5. the mark is resolved, never remembered ------------------------
+        // Deleting the synth a selected note names does not leave a ring around
+        // nothing: the note falls back down the priority chain and the ring
+        // follows it. A stored slot id would keep pointing at the hole.
+        rack.removeSlot (synthB);
+
+        updateRackRoutingFocus();
+
+        const int fallback = routing::layerSlotId (*layer, rack);
+        const auto marksFallback = rackPanel.getSelectionRouteSlots();
+
+        check ("A note whose synth was deleted marks where it falls back to",
+               marksFallback.size() == 1 && marksFallback.front() == fallback,
+               describe (marksFallback) + "vs " + juce::String (fallback));
+
+        //-- 6. the menu bar's third title ------------------------------------
+        const auto fileItem = getMenuBarItemBounds (0);
+        const auto editItem = getMenuBarItemBounds (1);
+        const auto toolItem = getMenuBarItemBounds (2);
+
+        check ("The menu bar has three titles, and the third is 工具",
+               MainComponent::menuTitle (0) == utf8 ("文件")
+                 && MainComponent::menuTitle (1) == utf8 ("编辑")
+                 && MainComponent::menuTitle (2) == utf8 ("工具")
+                 && getMenuBarItemBounds (MainComponent::numMenus).isEmpty()
+                 && fileItem.getRight() <= editItem.getX()
+                 && editItem.getRight() <= toolItem.getX()
+                 && getMenuBarBounds().contains (toolItem),
+               juce::String (toolItem.getX()) + ".." + juce::String (toolItem.getRight()));
+
+        //-- 7. the menu IS the strip -----------------------------------------
+        struct MenuItem { int id; juce::String text; bool enabled; bool ticked; };
+
+        const auto readTools = [this]
+        {
+            juce::PopupMenu menu;
+            fillToolsMenu (menu);
+
+            std::vector<MenuItem> out;
+
+            for (juce::PopupMenu::MenuItemIterator it (menu); it.next();)
+            {
+                const auto& item = it.getItem();
+
+                // Id 0 is a section header — it has text and a place, but
+                // nothing to invoke, so counting it as a button would make the
+                // "nine buttons" check fail on a correct menu.
+                if (item.isSeparator || item.itemID <= 0)
+                    continue;
+
+                out.push_back ({ item.itemID, item.text, item.isEnabled, item.isTicked });
+            }
+
+            return out;
+        };
+
+        const auto slotsFor = [] (const std::vector<MenuItem>& items, int id) -> const MenuItem*
+        {
+            for (const auto& item : items)
+                if (item.id == id)
+                    return &item;
+
+            return nullptr;
+        };
+
+        pianoRoll.setTool (PianoRollComponent::Tool::knife);
+
+        const auto tools = readTools();
+
+        const auto* knifeItem = slotsFor (tools, 25);
+        const auto* pencilItem = slotsFor (tools, 21);
+
+        check ("The 工具 menu carries all nine strip buttons",
+               tools.size() == 9 && tools.front().id == 21 && tools.back().id == 29,
+               juce::String ((int) tools.size()) + " items");
+
+        check ("...and ticks the mode the strip is actually in",
+               knifeItem != nullptr && pencilItem != nullptr
+                 && knifeItem->ticked && ! pencilItem->ticked
+                 && knifeItem->text.contains (utf8 ("刻刀"))
+                 && tools.front().text.contains (utf8 ("画笔")),
+               knifeItem == nullptr ? juce::String ("no knife item")
+                                    : "knife " + juce::String ((int) knifeItem->ticked)
+                                        + " / pencil " + juce::String ((int) pencilItem->ticked));
+
+        //-- 8. an item does what the button does -----------------------------
+        applyToolsChoice (21);
+
+        const bool wentToPencil = pianoRoll.getTool() == PianoRollComponent::Tool::pencil;
+
+        const bool snapBefore = pianoRoll.isSnapEnabled();
+        applyToolsChoice (29);
+        const bool toggled = pianoRoll.isSnapEnabled() != snapBefore;
+        applyToolsChoice (29);
+
+        check ("Choosing a mode in the menu switches the strip's own tool",
+               wentToPencil && toggled && pianoRoll.isSnapEnabled() == snapBefore,
+               juce::String ((int) pianoRoll.getTool()) + " / snap "
+                 + juce::String ((int) pianoRoll.isSnapEnabled()));
+
+        //-- 9. the actions grey out exactly when the strip's do --------------
+        // The paint state is a session flag that earlier phases load, and a
+        // LOADED state keeps the copy item enabled on purpose — clearing it has
+        // to be possible with nothing selected. So the bare read has to start
+        // from "nothing loaded", or it tests last block's leftover.
+        if (pianoRoll.hasPencilState())
+            pianoRoll.clearPencilState();
+
+        pianoRoll.setSelection ({});
+
+        const auto bare = readTools();
+
+        const auto* bareGroup    = slotsFor (bare, 27);
+        const auto* bareUngroup  = slotsFor (bare, 28);
+        const auto* bareCopy     = slotsFor (bare, 26);
+
+        pianoRoll.setSelection ({ noteToA });
+
+        const auto withSelection = readTools();
+
+        const auto* armedGroup   = slotsFor (withSelection, 27);
+        const auto* armedCopy    = slotsFor (withSelection, 26);
+
+        check ("编组/解组 and 复制状态 grey out with nothing selected, like the strip",
+               bareGroup != nullptr && bareUngroup != nullptr && bareCopy != nullptr
+                 && armedGroup != nullptr && armedCopy != nullptr
+                 && ! bareGroup->enabled && ! bareUngroup->enabled
+                 && ! bareCopy->enabled && armedGroup->enabled && armedCopy->enabled,
+               "bare " + juce::String ((int) (bareGroup != nullptr && bareGroup->enabled))
+                 + " / armed " + juce::String ((int) (armedGroup != nullptr && armedGroup->enabled)));
+
+        // ...and a LOADED pencil stays clearable with nothing selected: an exit
+        // that needs something selected first is not an exit.
+        pianoRoll.copyNoteStateFromSelection();
+
+        const auto loaded = readTools();
+        const auto* loadedCopy = slotsFor (loaded, 26);
+
+        check ("...but a loaded 画笔状态 can be cleared with nothing selected",
+               loadedCopy != nullptr && loadedCopy->enabled
+                 && loadedCopy->text.contains (utf8 ("清除"))
+                 && pianoRoll.hasPencilState(),
+               loadedCopy == nullptr ? juce::String ("no copy item") : loadedCopy->text);
+
+        pianoRoll.clearPencilState();
+
+        //-- 10. the card a selection names is never scrolled off its own list --
+        // Phase 54 also fixed this: the offset is a pixel count and the view is
+        // not fixed, so a rack grown while it was short kept an offset that
+        // left every card above the view — a blank rack with the 添加音源
+        // button still drawn, which reads as "my instruments are gone". Local
+        // models: the shared rack is a fixture for a dozen other checks.
+        {
+            RackModel localRack;
+            RackPanel localPanel (localRack);
+
+            localPanel.setSize (ui::px (300), ui::px (260));   // short: cards get pushed out
+
+            for (int i = 0; i < 6; ++i)
+                localRack.addSynth();
+
+            const int shortScroll = localPanel.getScrollY();
+
+            // Now tall enough for everything. The offset must come back to 0,
+            // not stay where the short panel left it.
+            localPanel.setSize (ui::px (300), ui::px (2000));
+
+            const int excess = juce::jmax (0, localPanel.getContentHeight() - localPanel.getViewHeight());
+
+            check ("The card list never scrolls past its own content after a resize",
+                   shortScroll > 0 && localPanel.getScrollY() == 0 && excess == 0,
+                   "short " + juce::String (shortScroll) + " / now "
+                     + juce::String (localPanel.getScrollY()) + " / excess "
+                     + juce::String (excess));
+        }
+
+        //-- cleanup -----------------------------------------------------------
+        pianoRoll.setSelection (previousSelection);
+        pianoRoll.setTool (previousTool);
+        pianoRoll.setSnapEnabled (previousSnap);
+
+        layer->removeNote (noteToA);
+        layer->removeNote (noteToB);
+
+        rack.removeSlot (synthA);
+
+        updateRackRoutingFocus();
+        focusSynth (previousFocus);
+        stack.notifyNotesChanged();
+        pruneOrphanSamplerSlots();
+    } ();
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

@@ -31,6 +31,13 @@
   它**不看 group** —— 组挂载陈述的是"这些音符由哪个乐器演奏"，采样不由乐器演奏。
 - `layerSlotId()` 兜底 `getFirstInstrumentSlotId()`，**跳过 sampler**：落到采样音源会让整层
   音符无声，而且屏幕上找不到原因。
+- **P54：卡片上有两种环，不能长得一样**。`focusActive` = 聚光灯（实线 + 外扩 + 整张网格变暗），
+  是用户手动开的；`selectionRouteSlots` = 音符选区落在哪（**虚线、画在卡内**，什么都不变暗），
+  随选区自动走。P30 摘掉"选音符就聚光"是因为它把网格压暗；这个标记补的是同一个点击问的
+  小问题（"我选的这些从哪个卡出声"），所以必须是无害的。
+- **P54：标记是算出来的，不是记下来的**。`updateRackRoutingFocus()` 遍历层 × 音符，用
+  `routing::resolve()` 取样集，`setSelectionRouteSlots` 再排序去重、**丢掉已不存在的槽**。
+  存 id 的写法会在删槽后留下一个指着洞的环；算的写法自然回落到下一层（层默认）。
 
 ## 音频
 - 音频线程**绝不**读 Layer / NoteEvent / RackModel：消息线程 `publishSchedule()` 构建不可变
@@ -62,7 +69,7 @@
 - 窗口门写作 `if (audio.isPlaying() || audio.getPlayback().hasMeters())`，**放在
   `if (! audio.isPlaying()) return;` 之前**——放后面就漏掉"停止后还在落"那一段，而那正是用户会看的。
 
-## 工程文件（`.atomic`，`formatVersion` = 22）
+## 工程文件（`.atomic`，`formatVersion` = 23）
 - **先解析到临时对象、末尾一次性提交**，坏文件绝不破坏当前会话。载入后重置
   `nextNoteId`/`nextSlotId`/组 id（max+1）。
 - 老文件必须仍能开：v3 `mod=`、v4 插件（标签 **"PLUGIN"** 全大写）、v5 `mixer=`、
@@ -204,6 +211,13 @@
 - **琴键可弹**：键盘区分支排在标尺/网格之前，用 `routing::layerSlotId()`。
 - **菜单栏自绘**：`shortcutKeyDescription` 画快捷键，`kCommandKey` 分平台；新增命令要同时改
   `fill*Menu` 和 `keyPressed`。
+- **P54：菜单标题只有一张表** `MainComponent::menuTitle(i)`，`numMenus = 3`（文件 / 编辑 / 工具）。
+  标题曾在 `paint()` 里用三元链写死，加第三个菜单时要改四处；现在 `getMenuBarItemBounds` 的
+  `widths[numMenus]` 与 `menuTitle` 是唯一的两个地方。
+- **P54：工具菜单不实现工具**。9 项全部调工具条同一个方法（`setTool` / `copyNoteStateFromSelection`
+  / `groupSelection` / `ungroupSelection` / `setSnapEnabled`），置灰也读同一个 `hasAnySelection()`。
+  菜单里另写一份判断，就是"按钮能用、菜单不能用"的开始。模式项用 `isTicked`（平台唯一画得一致的勾），
+  节头写当前模式名。
 
 ## 编组
 - **内联曲线框**：框的左右 = **组的起止拍**，`getGroupCurveBounds()` 水平零内边距；X 轴是组自身
