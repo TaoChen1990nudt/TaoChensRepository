@@ -12,7 +12,7 @@ namespace atomic::scope
 /**
     Phase 50: "render THIS to a block" — what the scope is, and what comes back.
 
-    The bounce itself is `wav::renderToFile`, the same function the export menu
+    The bounce itself is `bounce::renderToFile`, the same function the export menu
     calls. This module only answers "which part of the schedule is the user
     pointing at", because that is the only new question: a group, a layer and a
     selection are three ways of naming a subset of one frozen schedule.

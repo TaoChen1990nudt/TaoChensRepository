@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-27 · 对应 **Phase 51**（停止回播放起点 + 采样尾部无上限 + 机架卡拉伸控件 + 刻刀工具 + 采样 chevron 上移）
+> 最后更新：2026-10-27 · 对应 **Phase 52**（只变调范围控件 + 采样卡拖入钢琴窗 + 文件菜单设置/导出 + 导出框：WAV 位深/MP3 比特率/单声道）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**。
 > 规则查 `MEMORY.md`，制度细节查 `REFERENCE.md`，踩过的坑查 `PITFALLS.md`。
 
@@ -18,13 +18,13 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 51**（停止停在本次播放起点；采样尾部可拖过文件末尾；机架卡"拉伸"控件接管变调；工具条第 5 个工具=刻刀，切采样也切音符，右键菜单切割项删除；采样 chevron 移到块顶右上）；P44–50 见日志 |
-| 自检 | **472 ALL PASSED / 0 FAIL，失败时退出码 1**（P51 咬测：停止回零 → 断言 FAIL；假上限 2.0 → 5 条 FAIL；chevron 居中 → FAIL；卡片拉伸只写第一层 → FAIL） |
+| 已完成阶段 | **Phase 52**（只变调出现 ±N 半音范围 chip；采样卡可直接拖进钢琴窗落块；文件菜单新增 设置…/导出…；导出框可选 WAV/MP3、位深 16/24/32f、比特率 128–320、单声道；WavExport 改名 AudioExport、命名空间 wav→bounce）；P44–51 见日志 |
+| 自检 | **490 ALL PASSED / 0 FAIL，失败时退出码 1**（P52 咬测 6 处全部 FAIL 后还原：去夹取 / chip 恒显 / 落块不挂槽 / 24-bit 写成 16 / 灰行接点击） |
 | 编译 | 零 error 零 warning |
-| `formatVersion` | **22**（采样块新增 `<PanEnvelope>`、`autotarget`、`reversed`；v21 缺省读成「音量曲线 / 未反转 / 声相平 0.5 禁用」） |
+| `formatVersion` | **23**（采样块新增 `pitchrange`，只在与默认 24 不同时写出；v22 缺省读成 24） |
 | 可执行 | `build/AtomicDAW_artefacts/Release/AtomicDAW.exe` |
 | 技术栈 | JUCE 8.0.4（FetchContent）+ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + C++17 |
-| 源码规模 | `Source/` 下 67 个 .cpp/.h，分 Model / Audio / UI / Util / Media |
+| 源码规模 | `Source/` 下 70 个 .cpp/.h，分 Model / Audio / UI / Util / Media |
 
 ## 下一步
 
@@ -38,6 +38,10 @@
 
 - **停止只记住"最后一次播放从哪开始"**：播放中途拖标尺换位置，停止仍回到本次播放的起点，不是新的落点。
 - **刻刀一次只切点中的那一个**：不切整个选区（旧菜单行为是切选区，工具语义是切点中的对象）。
+- **MP3 只在 Windows 上可用**：走 Media Foundation（系统自带）；其它平台 `mp3::isAvailable()==false`，
+  导出框里 MP3 chip 灰掉。N 版 Windows 缺媒体功能包时同样灰掉，错误信息会带 HRESULT。
+- **变调范围默认 ±24 半音**：老工程（v22 及更早）读进来就是 24，ratio 超过 4 的极端块会开始被夹住——
+  想要旧的无限制行为就把 chip 拖到 36。
 - **反转是播放期镜像**：`reversed` 只改 read 位置，源文件不变；没有「反转后重新对齐零交叉」这种精修。
 - **渲染没有进度条与取消**：`ScopeRenderTask` 跑在后台线程，完成就插入；
   长选区的几秒钟里 UI 不给提示，也没法中止。

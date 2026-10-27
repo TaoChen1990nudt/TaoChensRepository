@@ -60,6 +60,32 @@ inline StopDecision stopDecision (bool engaged, double playStartBeat = 0.0) noex
     left to get back to the top without touching the ruler. */
 inline bool spaceStartsPlayback (bool engaged) noexcept { return ! engaged; }
 
+//-- Drag payloads --------------------------------------------------------------
+
+/** Phase 52: "this drag is a sampler card, and here is which one".
+
+    The rack starts the drag and the roll accepts it, so the spelling lives in
+    one place both can read: a string built in one file and parsed in another
+    is exactly how the two ends drift apart. A file drag is a plain absolute
+    path, which is why the sampler payload needs a prefix at all — without one,
+    `C:\\loops\\kick.wav` and a slot id would arrive through the same channel
+    and only the receiver could tell them apart, by guessing. */
+inline juce::String samplerDragDescription (int slotId)
+{
+    return "atomic-sampler:" + juce::String (slotId);
+}
+
+/** -1 when `text` is not a sampler drag at all (a file path, say). */
+inline int samplerDragSlotId (const juce::String& text)
+{
+    if (! text.startsWith ("atomic-sampler:"))
+        return -1;
+
+    const int id = text.fromFirstOccurrenceOf (":", false, false).getIntValue();
+
+    return id > 0 ? id : -1;
+}
+
 //-- Transport glyph geometry ---------------------------------------------------
 
 /** The square a transport glyph is drawn into.

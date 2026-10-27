@@ -1064,7 +1064,7 @@ juce::String MainComponent::runSelfTest()
             bounceLayer->findNote (bn2)->envelope = NoteEnvelope::makeFlat();
 
             PlaybackEngine stage;
-            stage.setSampleRate (wav::exportSampleRate);
+            stage.setSampleRate (bounce::exportSampleRate);
             stage.publishSchedule (tx, rx, 120.0);
 
             auto schedule = stage.getSchedule();
@@ -1076,12 +1076,12 @@ juce::String MainComponent::runSelfTest()
             const auto unityFile  = testDir.getChildFile ("bounce-unity.wav");
             const auto quietFile  = testDir.getChildFile ("bounce-minus12.wav");
 
-            const auto unity = wav::renderToFile (unityFile, *schedule, wav::exportSampleRate, 0.0);
+            const auto unity = bounce::renderToFile (unityFile, *schedule, bounce::exportSampleRate, 0.0);
             const auto quiet = [&]
             {
                 tx.setLayerLevelDb (lx, -12.0f);
                 stage.publishSchedule (tx, rx, 120.0);
-                return wav::renderToFile (quietFile, *stage.getSchedule(), wav::exportSampleRate, 0.0);
+                return bounce::renderToFile (quietFile, *stage.getSchedule(), bounce::exportSampleRate, 0.0);
             }();
 
             check ("Export writes a WAV file", unity.ok && unityFile.existsAsFile(), unity.message);
@@ -1137,7 +1137,7 @@ juce::String MainComponent::runSelfTest()
 
             {
                 const auto cancelFile = testDir.getChildFile ("cancelled.wav");
-                const auto cancelled = wav::renderToFile (cancelFile, *schedule, wav::exportSampleRate, 0.0,
+                const auto cancelled = bounce::renderToFile (cancelFile, *schedule, bounce::exportSampleRate, 0.0,
                                                           [] (double progress) { return progress < 0.1; });
 
                 check ("Cancelling leaves no half-written WAV",
@@ -8618,7 +8618,7 @@ juce::String MainComponent::runSelfTest()
             RackModel  rr2;
             PlaybackEngine re;
 
-            re.setSampleRate (wav::exportSampleRate);
+            re.setSampleRate (bounce::exportSampleRate);
             rt.addLayer (utf8 ("P50 渲染"), palette::layer2);
 
             NoteEvent note;
@@ -8636,8 +8636,8 @@ juce::String MainComponent::runSelfTest()
             const auto kept = scope::extract (*re.getSchedule(), only);
             const auto bounceFile = phase27Dir.getChildFile ("atomic-p50-bounce.wav");
 
-            const auto bounced = wav::renderToFile (bounceFile, kept.schedule,
-                                                    wav::exportSampleRate, 0.05, {}, nullptr,
+            const auto bounced = bounce::renderToFile (bounceFile, kept.schedule,
+                                                    bounce::exportSampleRate, 0.05, {}, nullptr,
                                                     kept.startSeconds);
 
             // A LOCAL stack and rack, not the live session: a bounce that lands
@@ -9096,6 +9096,298 @@ juce::String MainComponent::runSelfTest()
 
         pianoRoll.setSnapEnabled (oldSnap);
         pianoRoll.setTool (PianoRollComponent::Tool::select);
+    } ();
+
+    //-- Phase 52: 只变调 range / card drag / export settings & writers -------
+    [&]
+    {
+        //-- 1. the range, as arithmetic ---------------------------------------
+        // 2.0 over 2.0 is exactly +12 semitones, so a 12-semitone ceiling has to
+        // leave it alone; 8.0 is +36 and has to stop at the ceiling.
+        const auto atCeiling = clipstretch::Playback::make (StretchMode::pitch, 2.0, 12);
+        const auto pastCeiling = clipstretch::Playback::make (StretchMode::pitch, 8.0, 12);
+        const auto wideOpen = clipstretch::Playback::make (StretchMode::pitch, 8.0, 36);
+        const auto otherMode = clipstretch::Playback::make (StretchMode::tempo, 8.0, 1);
+
+        check ("A 12-semitone range transposes by at most an octave",
+               std::abs (atCeiling.pitch - 2.0) < 1.0e-9
+                 && std::abs (pastCeiling.pitch - 2.0) < 1.0e-9
+                 && std::abs (pastCeiling.speed - 1.0) < 1.0e-9,
+               juce::String (pastCeiling.pitch, 3) + " / speed "
+                 + juce::String (pastCeiling.speed, 3));
+
+        check ("...and a wider range lets the same block go further",
+               std::abs (wideOpen.pitch - 8.0) < 1.0e-9,
+               juce::String (wideOpen.pitch, 3));
+
+        check ("The range belongs to 只变调 only",
+               std::abs (otherMode.pitch - 1.0) < 1.0e-9
+                 && std::abs (otherMode.speed - 8.0) < 1.0e-9,
+               "pitch " + juce::String (otherMode.pitch, 3));
+
+        //-- 2. the card's half: a real slot, real blocks ----------------------
+        auto* layer = stack.getActiveLayer();
+
+        if (layer == nullptr)
+        {
+            check ("Phase 52 needs a layer", false, "no active layer");
+            return;
+        }
+
+        const bool oldSnap = pianoRoll.isSnapEnabled();
+        pianoRoll.setSnapEnabled (false);
+
+        const auto loadA  = loadSampleFile (phase27A);
+        const int  slotId = rack.addSampler (loadA.buffer, phase27A.getFullPathName(), "P52");
+
+        const int clipA = pianoRoll.addSampleAt (240.0, 50, phase27A);
+
+        if (auto* clip = layer->findSample (clipA))
+        {
+            clip->outputSlotId = slotId;
+            clip->stretchMode  = StretchMode::pitch;
+        }
+
+        check ("A block starts with the default 24-semitone range",
+               layer->findSample (clipA) != nullptr
+                 && layer->findSample (clipA)->pitchRangeSemitones == 24,
+               juce::String (layer->findSample (clipA) != nullptr
+                               ? layer->findSample (clipA)->pitchRangeSemitones : -1));
+
+        applySamplerPitchRangeToSlot (slotId, 5);
+
+        check ("Choosing a range on the card writes every block of the slot",
+               layer->findSample (clipA) != nullptr
+                 && layer->findSample (clipA)->pitchRangeSemitones == 5
+                 && samplerPitchRangeStateFor (slotId) == 5,
+               juce::String (samplerPitchRangeStateFor (slotId)));
+
+        // Out of range is clamped, not stored: the UI prints this number.
+        applySamplerPitchRangeToSlot (slotId, 99);
+
+        check ("A range past the maximum is clamped, not stored",
+               layer->findSample (clipA) != nullptr
+                 && layer->findSample (clipA)->pitchRangeSemitones
+                      == SampleEvent::maxPitchRangeSemitones,
+               juce::String (layer->findSample (clipA) != nullptr
+                               ? layer->findSample (clipA)->pitchRangeSemitones : -1));
+
+        //-- 3. the chip: present in 只变调, absent otherwise ------------------
+        int cardIndex = -1;
+        for (int i = 0; i < rack.getNumSlots(); ++i)
+            if (const auto* s = rack.getSlot (i); s != nullptr && s->id == slotId)
+                cardIndex = i;
+
+        const auto cardRect  = rackPanel.getCardBoundsForTest (cardIndex);
+        const auto stretchRect = rackPanel.getStretchBounds (cardIndex);
+        const auto rangeRect   = rackPanel.getPitchRangeBounds (cardIndex);
+
+        check ("The 变调范围 chip appears in 只变调, left of the stretch chip",
+               ! rangeRect.isEmpty() && cardRect.contains (rangeRect)
+                 && rangeRect.getRight() <= stretchRect.getX()
+                 && rangeRect.getY() == cardRect.getY() + ui::px (40),
+               "range x " + juce::String (rangeRect.getX()) + ".."
+                 + juce::String (rangeRect.getRight()) + " / stretch "
+                 + juce::String (stretchRect.getX()));
+
+        applySamplerStretchToSlot (slotId, StretchMode::tempo);
+
+        check ("...and is gone as soon as the mode is not 只变调",
+               rackPanel.getPitchRangeBounds (cardIndex).isEmpty(),
+               "still there");
+
+        applySamplerStretchToSlot (slotId, StretchMode::pitch);
+
+        //-- 4. the drag payload ----------------------------------------------
+        check ("A sampler drag payload round-trips, a file path does not",
+               samplerDragSlotId (samplerDragDescription (7)) == 7
+                 && samplerDragSlotId ("C:\\loops\\kick.wav") == -1
+                 && samplerDragSlotId ("atomic-sampler:") == -1,
+               juce::String (samplerDragSlotId (samplerDragDescription (7))));
+
+        //-- 5. dropping the card onto the grid -------------------------------
+        const int slotsBefore  = rack.getNumSlots();
+        const int droppedId    = pianoRoll.addSampleFromSlot (250.0, 60, slotId);
+        const auto* dropped    = layer->findSample (droppedId);
+
+        check ("Dropping a card makes a block on that same slot, with no twin",
+               droppedId > 0 && dropped != nullptr && dropped->outputSlotId == slotId
+                 && rack.getNumSlots() == slotsBefore,
+               juce::String (dropped != nullptr ? dropped->outputSlotId : -1)
+                 + " / slots " + juce::String (rack.getNumSlots())
+                 + " vs " + juce::String (slotsBefore));
+
+        //-- 6. the export settings describe themselves ------------------------
+        ExportSettings wav24;
+        wav24.bitDepth = 24;
+        wav24.mono     = true;
+
+        ExportSettings mp3Settings;
+        mp3Settings.format     = ExportFormat::mp3;
+        mp3Settings.mp3Bitrate = 320;
+
+        check ("24-bit mono describes itself as the file it will write",
+               wav24.extension() == "wav" && wav24.wildcard() == "*.wav"
+                 && wav24.describe().contains ("24-bit")
+                 && wav24.describe().contains (utf8 ("单声道")),
+               wav24.describe());
+
+        check ("320 kbps MP3 describes itself too",
+               mp3Settings.extension() == "mp3" && mp3Settings.wildcard() == "*.mp3"
+                 && mp3Settings.describe().contains ("320"),
+               mp3Settings.describe());
+
+        //-- the dialog's own geometry -----------------------------------------
+        ExportDialog preview;
+
+        const auto formatRow = preview.getFormatBounds (0);
+        const auto depthRow  = preview.getBitDepthBounds (0);
+        const auto rateRow   = preview.getBitrateBounds (0);
+        const auto chanRow   = preview.getChannelBounds (0);
+
+        check ("The export dialog's four rows stack without touching",
+               formatRow.getBottom() <= depthRow.getY()
+                 && depthRow.getBottom() <= rateRow.getY()
+                 && rateRow.getBottom() <= chanRow.getY()
+                 && chanRow.getBottom() < preview.getExportButtonBounds().getY(),
+               juce::String (formatRow.getBottom()) + "/" + juce::String (depthRow.getY())
+                 + "/" + juce::String (chanRow.getBottom()) + "/"
+                 + juce::String (preview.getExportButtonBounds().getY()));
+
+        check ("A click on a chip selects the chip that is drawn there",
+               ExportDialog::segmentAt (rateRow, 4, rateRow.getCentre()) == 0
+                 && ExportDialog::segmentAt (rateRow, 4,
+                                             preview.getBitrateBounds (2).getCentre()) == 2
+                 && ExportDialog::segmentAt (rateRow, 4,
+                                             { preview.getBitrateBounds (3).getRight() + 4,
+                                               rateRow.getCentreY() }) == -1,
+               "row " + juce::String (rateRow.getWidth()));
+
+        // The rule behind the greyed row: a click on it does nothing, and the
+        // same click on the live row does exactly what it looks like.
+        preview.chooseFormat (ExportFormat::wav);
+        preview.chooseBitrate (192);
+
+        preview.clickAt (preview.getBitrateBounds (3).getCentre());     // greyed
+        const int bitrateAfterGreyed = preview.getSettings().mp3Bitrate;
+
+        preview.clickAt (preview.getBitDepthBounds (2).getCentre());    // live
+        const int depthAfterLive = preview.getSettings().bitDepth;
+
+        check ("The greyed row of the dialog ignores the click, the live one takes it",
+               bitrateAfterGreyed == 192 && depthAfterLive == 32,
+               "bitrate " + juce::String (bitrateAfterGreyed) + " / depth "
+                 + juce::String (depthAfterLive));
+
+        //-- 7. the writers, measured on the bytes they produced ---------------
+        PlaybackEngine probe;
+        probe.setSampleRate (bounce::exportSampleRate);
+        probe.publishSchedule (stack, rack, audio.getBpm(), 0.0, &mixer);
+
+        const auto schedule = probe.getSchedule();
+
+        if (schedule == nullptr)
+        {
+            check ("Phase 52 needs a schedule", false, "publish failed");
+        }
+        else
+        {
+            const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                               .getChildFile ("atomic-p52");
+
+            dir.createDirectory();
+
+            const auto monoFile   = dir.getChildFile ("mono24.wav");
+            const auto floatFile  = dir.getChildFile ("float32.wav");
+            const auto mp3File    = dir.getChildFile ("bounce.mp3");
+
+            const auto monoResult = bounce::renderToFile (monoFile, *schedule, wav24,
+                                                          bounce::exportSampleRate, 0.0);
+
+            // A WAV header is a fixed layout: format tag at byte 20, channel
+            // count at 22, bits per sample at 34. Reading them back is the only
+            // way "24-bit mono" is a fact rather than a struct field nobody
+            // looked at.
+            juce::FileInputStream headerStream (monoFile);
+
+            const auto readShort = [&headerStream] (int offset) -> int
+            {
+                headerStream.setPosition (offset);
+                return (int) headerStream.readShort();
+            };
+
+            const int monoTag      = readShort (20);
+            const int monoChannels = readShort (22);
+            const int monoBits     = readShort (34);
+
+            check ("A mono 24-bit WAV really writes one channel of 24-bit PCM",
+                   monoResult.ok && monoTag == 1 && monoChannels == 1 && monoBits == 24
+                     && monoResult.numChannels == 1,
+                   "tag " + juce::String (monoTag) + " ch " + juce::String (monoChannels)
+                     + " bits " + juce::String (monoBits) + " / "
+                     + juce::String (monoResult.numChannels) + utf8 (" 声道"));
+
+            ExportSettings floatSettings;
+            floatSettings.bitDepth = 32;
+
+            const auto floatResult = bounce::renderToFile (floatFile, *schedule, floatSettings,
+                                                            bounce::exportSampleRate, 0.0);
+
+            juce::FileInputStream floatStream (floatFile);
+
+            const auto readFloatShort = [&floatStream] (int offset) -> int
+            {
+                floatStream.setPosition (offset);
+                return (int) floatStream.readShort();
+            };
+
+            const int floatTag  = readFloatShort (20);
+            const int floatBits = readFloatShort (34);
+
+            check ("A 32-bit WAV writes an IEEE-float data chunk",
+                   floatResult.ok && floatTag == 3 && floatBits == 32,
+                   "tag " + juce::String (floatTag) + " bits " + juce::String (floatBits));
+
+            //-- 8. MP3, through the platform encoder ---------------------------
+            const auto mp3Result = bounce::renderToFile (mp3File, *schedule, mp3Settings,
+                                                          bounce::exportSampleRate, 0.0);
+
+            juce::FileInputStream mp3Stream (mp3File);
+
+            const int mp3FirstByte = mp3Stream.openedOk()
+                                       ? (int) (juce::uint8) mp3Stream.readByte() : -1;
+            const int mp3SecondByte = mp3Stream.openedOk()
+                                        ? (int) (juce::uint8) mp3Stream.readByte() : -1;
+
+            // An MP3 starts either with an ID3 tag ('I','D','3') or with a
+            // frame sync (0xFF 0xEx/0xFx). Either is proof the bytes are MPEG
+            // audio and not, say, PCM that someone renamed.
+            const bool looksMpeg = (mp3FirstByte == 'I' && mp3SecondByte == 'D')
+                                     || (mp3FirstByte == 0xFF && (mp3SecondByte & 0xE0) == 0xE0);
+
+            check ("An MP3 export produces MPEG audio, not a renamed WAV",
+                   mp3Result.ok && mp3File.existsAsFile() && mp3File.getSize() > 1000
+                     && looksMpeg,
+                   mp3Result.ok ? juce::String (mp3File.getSize()) + utf8 (" 字节, 首字节 ")
+                                    + juce::String (mp3FirstByte)
+                                : mp3Result.message);
+
+            monoFile.deleteFile();
+            floatFile.deleteFile();
+            mp3File.deleteFile();
+            dir.deleteRecursively();
+        }
+
+        //-- cleanup -----------------------------------------------------------
+        layer->removeSample (clipA);
+        if (droppedId > 0)
+            layer->removeSample (droppedId);
+
+        rack.removeSlot (slotId);
+        stack.notifyNotesChanged();
+        pruneOrphanSamplerSlots();
+
+        pianoRoll.setSnapEnabled (oldSnap);
     } ();
 
     // The summary MUST come after the last check. It used to sit mid-function

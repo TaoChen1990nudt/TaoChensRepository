@@ -584,6 +584,16 @@ public:
         nothing is added. */
     int addSampleAt (double beat, int pitch, const juce::File& file);
 
+    /** Phase 52: the same drop, but the file is already in the rack — this is
+        the drag from a sampler card, and the block is mounted on THAT slot.
+
+        No new sampler is grown. `addSampleAt` grows one because a dropped file
+        arrives with nothing to play it; a dragged card is by definition already
+        mounted, and growing a second slot for the same file would answer "which
+        one am I editing" with a choice nobody asked for. Returns -1 when the
+        slot is not a loaded sampler. */
+    int addSampleFromSlot (double beat, int pitch, int slotId);
+
     /** Local-space bounds of a clip block. Empty when it does not exist. */
     juce::Rectangle<float> getSampleScreenBounds (int layerIndex, int sampleId) const;
 
@@ -948,6 +958,14 @@ private:
     enum class DragMode { none, moveNote, resizeNote, resizeNoteLeft, marquee, panView,
                           scrollThumb, automationPoint, resizeSample, resizeSampleLeft,
                           rulerScrub, rulerZoom, groupAutomationPoint, sampleCurvePoint };
+
+    /** Phase 52: the one place a block is actually built. `addSampleAt` (a
+        dropped file) and `addSampleFromSlot` (a dragged card) differ only in
+        where the buffer and the slot id come from, so they share this — the
+        block they produce cannot drift apart. */
+    int addSampleBlock (double beat, int pitch,
+                        std::shared_ptr<const SampleBuffer> buffer,
+                        juce::String path, juce::String name, int outputSlotId);
 
     //-- Geometry helpers -----------------------------------------------------
     juce::Rectangle<float> getGridArea() const;

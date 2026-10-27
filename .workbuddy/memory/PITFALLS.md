@@ -646,3 +646,34 @@ vector）→ 再读 `block->lengthBeats`：vector 搬家，指针悬垂，实测
 P45 的 const 审计把 `getSamples()` 定成 const。之后任何人想"遍历改所有块"
 （机架卡拉伸、未来的批量操作）都必须 `findSample (probe.id)` 拿可写指针——
 直接 `for (auto& clip : layer->getSamples())` 编译都过不了，这是设计不是疏漏。
+
+## P52-A：命名空间 / 文件名不能比功能活得久
+
+导出模块叫 `WavExport` / `wav::renderToFile`，是 P25 只导 16-bit WAV 时起的名。
+P52 让它写 MP3、24-bit、float 之后，这个名字就在撒谎——读代码的人会以为它只管 WAV。
+**改法**：当天改名（`AudioExport` / `bounce::`），sed 全量替换 + 逐处过目。名字比注释更常被读；
+注释说"其实也导 MP3"救不了一个叫 wav 的命名空间。
+
+## P52-B：MF 的 SampleTime 必须是绝对帧位置，不能逐块累加
+
+Media Foundation 以 100 ns 计时。逐块 `time += duration` 会把每一块的 llround 误差累起来，
+长文件尾帧漂移；用 `llround(frameOffset * 1e7 / sr)` 从绝对帧位置算，误差不跨块。
+
+## P52-C：MP3 编码器不在 JUCE 里，在操作系统里
+
+`MP3AudioFormat` 只解码；`LAMEEncoderAudioFormat` 要随包发 lame_enc.dll（没做）。
+Windows 8+ 的 Media Foundation sink writer（`MFCreateSinkWriterFromURL` + `MFAudioFormat_MP3`）
+就是系统自带的编码器，链接 mfplat/mfreadwrite/mfuuid 三个库即可，实测本机出标准 MP3。
+**别**在 MP3 失败时悄悄改写 WAV——.mp3 后缀装着 PCM 是给下一个程序挖的坑，报错就报错。
+
+## P52-D：WAV 头不能只信自己写的
+
+24/32-bit 的头是手写的（fmt tag 1/3 + fact chunk）。自检必须用 FileInputStream 把
+字节 20/22/34（format tag / channels / bits）读回来断言，而不是信 `ExportSettings` 结构体——
+"我设置了 24"和"文件里真的是 24"是两回事，中间隔着一次序列化。
+
+## P52-E：禁用行的选中态要"保留位置、收敛亮度"
+
+位深/比特率两行永远都在，一行灰一行活。灰行的选中项如果还用全亮 accent 画，
+看起来就像"这一行其实能用"。改法：选中色在 disabled 时降到 0.35 alpha、文字用 inkSubtle——
+位置保留（切回格式时选择还在），亮度收敛（不再假装可点）。

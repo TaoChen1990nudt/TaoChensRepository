@@ -288,6 +288,27 @@ struct SampleEvent
         because two blocks of the same file may want different answers. */
     StretchMode stretchMode = StretchMode::none;
 
+    //-- Phase 52: how far 只变调 is allowed to transpose ----------------------
+    static constexpr int defaultPitchRangeSemitones = 24;
+    static constexpr int minPitchRangeSemitones     = 1;
+    static constexpr int maxPitchRangeSemitones     = 36;
+
+    /** Semitones, 1..36, applied only when `stretchMode == pitch`.
+
+        Pitch-only mode derives its transposition from the length ratio, and
+        that ratio is unbounded in practice: squashing a four-bar loop into one
+        beat asks for +24 semitones and sounds like a chipmunk. This is the
+        ceiling the user sets on the sampler card — a RANGE, not an offset,
+        because the offset is already the block's length. Outside the range the
+        pitch stops moving and the block simply plays the window at its own
+        rate, which is the honest outcome of "I asked for at most an octave".
+
+        Default 24 (two octaves): wide enough that nothing a user did before
+        Phase 52 changes character, small enough to be a limit at all. Files
+        older than v23 read it missing → 24, which is why the default is also
+        the migration value. */
+    int pitchRangeSemitones = defaultPitchRangeSemitones;
+
     std::shared_ptr<const SampleBuffer> audio;
 
     /** The roll is 128 lanes tall, so no block can be taller than that. */

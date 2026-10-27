@@ -167,8 +167,25 @@ namespace project
         (v14-v20) converts the ramps onto the curve, so an old project opens
         sounding exactly as it saved.
 
-      Nothing else changed: no attribute was renamed, no meaning was redefined. */
-inline constexpr int formatVersion = 22;
+      Nothing else changed: no attribute was renamed, no meaning was redefined.
+
+    v22 (Phase 50): a block's pan curve, which curve its box shows, and reversal.
+
+      * `<Sample>` gains `<PanEnvelope>` — a second envelope under its own tag,
+        because a reader that took "the first <Envelope> child" would be reading
+        whichever one happened to be written first. That is the element-order
+        mistake Phase 42 made with automation lanes, and this is how it is not
+        made twice.
+      * `autotarget="volume|pan"` is ALWAYS written: which curve the box was
+        showing is state, not something to infer from which child exists.
+      * `reversed="1"` when the block plays its window right to left.
+
+    v23 (Phase 52): the range that 只变调 may transpose within.
+
+      * `<Sample>` gains `pitchrange` (1..36 semitones), written only when it
+        differs from the default 24 — a file that never touched the control
+        keeps the same `<Sample>` line it had in v22. */
+inline constexpr int formatVersion = 23;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";

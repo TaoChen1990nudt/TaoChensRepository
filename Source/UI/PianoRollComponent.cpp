@@ -1,6 +1,7 @@
 #include "PianoRollComponent.h"
 
 #include "Util/Metrics.h"
+#include "Util/SharedRules.h"     // Phase 52: the sampler drag payload
 
 #include "Media/SampleLibrary.h"
 #include "Util/Text.h"
@@ -8716,10 +8717,45 @@ int PianoRollComponent::addSampleAt (double beat, int pitch, const juce::File& f
         return -1;
     }
 
+    return addSampleBlock (beat, pitch, loaded.buffer, file.getFullPathName(),
+                           file.getFileName(), rack.addSampler (loaded.buffer,
+                                                               file.getFullPathName(),
+                                                               file.getFileName()));
+}
+
+int PianoRollComponent::addSampleFromSlot (double beat, int pitch, int slotId)
+{
+    const auto* slot = [this, slotId]() -> const SynthSlot*
+    {
+        for (int i = 0; i < rack.getNumSlots(); ++i)
+            if (const auto* candidate = rack.getSlot (i); candidate != nullptr
+                  && candidate->id == slotId)
+                return candidate;
+
+        return nullptr;
+    }();
+
+    if (slot == nullptr || ! slot->isSampler() || slot->sampleBuffer == nullptr)
+        return -1;
+
+    return addSampleBlock (beat, pitch, slot->sampleBuffer, slot->samplePath,
+                           juce::File (slot->samplePath).getFileName(), slotId);
+}
+
+int PianoRollComponent::addSampleBlock (double beat, int pitch,
+                                        std::shared_ptr<const SampleBuffer> buffer,
+                                        juce::String path, juce::String name,
+                                        int outputSlotId)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || buffer == nullptr)
+        return -1;
+
     SampleEvent sample;
-    sample.name  = file.getFileName();
-    sample.path  = file.getFullPathName();
-    sample.audio = loaded.buffer;
+    sample.name  = std::move (name);
+    sample.path  = std::move (path);
+    sample.audio = std::move (buffer);
     sample.pitch = juce::jlimit (0, numPitches - 1, pitch);
 
     // How tall the block is: four lanes by default. It is a view-and-target
@@ -8736,7 +8772,7 @@ int PianoRollComponent::addSampleAt (double beat, int pitch, const juce::File& f
     // the drop had created. Rounding was the bug; a block is now exactly as long
     // as the audio it holds, and the two commands agree by construction.
     sample.lengthBeats = juce::jmax (gridDivision,
-                                     SampleEvent::beatsForSeconds (loaded.buffer->lengthSeconds(),
+                                     SampleEvent::beatsForSeconds (sample.audio->lengthSeconds(),
                                                                    bpm));
 
     sample.startBeat = juce::jmax (0.0, snapEnabled ? snapBeat (beat) : beat);
@@ -8747,7 +8783,10 @@ int PianoRollComponent::addSampleAt (double beat, int pitch, const juce::File& f
     // and a second clip can be pointed at the same sampler instead of decoding
     // the file again. A rack that already holds this exact path reuses its
     // sampler, so dropping one file twice does not leave twins behind.
-    sample.outputSlotId = rack.addSampler (loaded.buffer, sample.path, sample.name);
+    //
+    // Phase 52: the caller passes the slot when it already has one (a card
+    // dragged out of the rack); otherwise the sampler is grown here.
+    sample.outputSlotId = outputSlotId;
 
     const int newId = layer->addSample (std::move (sample));
 
@@ -9383,7 +9422,14 @@ void PianoRollComponent::showSampleMenu (int sampleId, juce::Point<int> screenPo
 //==============================================================================
 bool PianoRollComponent::isInterestedInDragSource (const SourceDetails& details)
 {
-    const juce::File file (details.description.toString());
+    const auto text = details.description.toString();
+
+    // Phase 52: a card dragged out of the rack — the file is already decoded
+    // and already has a slot, so this drop is "that source, here".
+    if (samplerDragSlotId (text) > 0)
+        return true;
+
+    const juce::File file (text);
 
     return file.hasFileExtension ("wav;wave");
 }
@@ -9418,6 +9464,16 @@ void PianoRollComponent::itemDropped (const SourceDetails& details)
 
     if (! getGridArea().contains (point))
     {
+        repaint();
+        return;
+    }
+
+    // Phase 52: a card from the rack. The same anchor rules as a file drop —
+    // beat under the pointer, pitch under the pointer — because to the user it
+    // is the same gesture; only the bookkeeping differs.
+    if (const int slotId = samplerDragSlotId (details.description.toString()); slotId > 0)
+    {
+        addSampleFromSlot (beatAtScreenX (point.x), pitchAtScreenY (point.y), slotId);
         repaint();
         return;
     }

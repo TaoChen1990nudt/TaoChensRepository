@@ -33,10 +33,11 @@ target_sources(AtomicDAW PRIVATE
     Source/SelfTest.cpp
     Source/Audio/AudioEngine.cpp
     Source/Audio/MidiInputHub.cpp
+    Source/Audio/Mp3Encoder.cpp
     Source/Audio/PlaybackEngine.cpp
     Source/Audio/PluginHost.cpp
     Source/Audio/ScopeRender.cpp
-    Source/Audio/WavExport.cpp
+    Source/Audio/AudioExport.cpp
     Source/Media/SampleLibrary.cpp
     Source/Model/AutomationLane.cpp
     Source/Model/AutomationModel.cpp
@@ -49,6 +50,7 @@ target_sources(AtomicDAW PRIVATE
     Source/UI/AutomationWindow.cpp
     Source/UI/BpmField.cpp
     Source/UI/EffectWindows.cpp
+    Source/UI/ExportDialog.cpp
     Source/UI/FileBrowserPanel.cpp
     Source/UI/GroupPanel.cpp
     Source/UI/LayerPanel.cpp
@@ -60,6 +62,13 @@ target_sources(AtomicDAW PRIVATE
     Source/UI/SettingsWindow.cpp)
 
 target_include_directories(AtomicDAW PRIVATE Source)
+
+# Phase 52: MP3 export goes through the Windows Media Foundation sink writer —
+# it is part of the OS, so there is no encoder to bundle. These are the three
+# libraries that hold MFStartup, the sink writer, and the format GUIDs.
+if (WIN32)
+    target_link_libraries(AtomicDAW PRIVATE mfplat mfreadwrite mfuuid)
+endif()
 
 # Source files are UTF-8 without BOM. Without /utf-8 MSVC decodes them using the
 # system code page (936 here) and every Chinese UI string turns into mojibake.

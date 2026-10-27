@@ -638,6 +638,13 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                     // reader sees exactly what it expects.
                     if (sample.stretchMode != StretchMode::none)
                         sampleXml->setAttribute ("stretch", (int) sample.stretchMode);
+
+                    // Phase 52: the 只变调 range. Absent means the default, so
+                    // the attribute only appears once someone moved the control
+                    // — and a v22 reader ignores it, which is the point of an
+                    // additive attribute.
+                    if (sample.pitchRangeSemitones != SampleEvent::defaultPitchRangeSemitones)
+                        sampleXml->setAttribute ("pitchrange", sample.pitchRangeSemitones);
                 }
             }
 
@@ -982,6 +989,15 @@ bool fromXmlText (const juce::String& xmlText,
                         sample.stretchMode = (mode >= 0 && mode <= 3) ? (StretchMode) mode
                                                                       : StretchMode::none;
                     }
+
+                    // Phase 52: same rule for the range — a hand-edited 0 or
+                    // 900 must land inside what the clamp in Playback::make
+                    // promises, and it is read here rather than trusted there
+                    // because the UI prints this number.
+                    sample.pitchRangeSemitones = juce::jlimit (
+                        SampleEvent::minPitchRangeSemitones,
+                        SampleEvent::maxPitchRangeSemitones,
+                        sm->getIntAttribute ("pitchrange", SampleEvent::defaultPitchRangeSemitones));
 
                     if (sample.path.isNotEmpty())
                     {

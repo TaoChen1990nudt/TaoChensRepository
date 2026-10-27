@@ -6,6 +6,7 @@
 
 #include "Model/AutomationStack.h"
 #include "Model/Routing.h"
+#include "Audio/Mp3Encoder.h"
 #include "UI/MixerLook.h"
 #include "Util/Text.h"
 
@@ -71,10 +72,12 @@ namespace
     public:
         ExportTask (std::shared_ptr<const PublishedSchedule> scheduleToRender,
                     juce::File destinationFile,
+                    ExportSettings settingsToUse,
                     std::function<void()> onFinished)
             : juce::ThreadWithProgressWindow (utf8 ("正在导出音频"), true, true, 20000, utf8 ("取消")),
               schedule (std::move (scheduleToRender)),
               destination (std::move (destinationFile)),
+              settings (settingsToUse),
               finishedCallback (std::move (onFinished))
         {
         }
@@ -83,12 +86,13 @@ namespace
         {
             setStatusMessage (utf8 ("离线渲染中…"));
 
-            result = wav::renderToFile (destination, *schedule, wav::exportSampleRate, 0.05,
-                                        [this] (double fraction)
-                                        {
-                                            setProgress (fraction);
-                                            return ! threadShouldExit();
-                                        });
+            result = bounce::renderToFile (destination, *schedule, settings,
+                                           bounce::exportSampleRate, 0.05,
+                                           [this] (double fraction)
+                                           {
+                                               setProgress (fraction);
+                                               return ! threadShouldExit();
+                                           });
         }
 
         void threadComplete (bool userPressedCancel) override
@@ -102,7 +106,7 @@ namespace
                     juce::MessageBoxIconType::InfoIcon,
                     utf8 ("导出完成"),
                     destination.getFileName() + "\n"
-                      + juce::String (result.seconds, 2) + utf8 (" 秒 · 44.1 kHz · 16-bit 立体声")
+                      + juce::String (result.seconds, 2) + utf8 (" 秒 · ") + settings.describe()
                       + utf8 ("\n峰值 ") + peakText + utf8 (" dBFS")
                       + (result.peakLimited ? utf8 ("（已启用峰值保护）") : juce::String())
                       + "\n\n" + destination.getFullPathName(),
@@ -127,8 +131,9 @@ namespace
     private:
         std::shared_ptr<const PublishedSchedule> schedule;
         juce::File destination;
+        ExportSettings settings;
         std::function<void()> finishedCallback;
-        wav::ExportResult result;
+        bounce::ExportResult result;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ExportTask)
     };
@@ -145,7 +150,7 @@ namespace
                          juce::File destinationFile,
                          double startSeconds,
                          PluginHost* plugins,
-                         std::function<void (const juce::File&, const wav::ExportResult&)> onFinished)
+                         std::function<void (const juce::File&, const bounce::ExportResult&)> onFinished)
             : juce::ThreadWithProgressWindow (utf8 ("正在渲染为采样"), true, true, 20000, utf8 ("取消")),
               schedule (std::move (scheduleToRender)),
               destination (std::move (destinationFile)),
@@ -159,7 +164,7 @@ namespace
         {
             setStatusMessage (utf8 ("离线渲染中…"));
 
-            result = wav::renderToFile (destination, *schedule, wav::exportSampleRate, 0.05,
+            result = bounce::renderToFile (destination, *schedule, bounce::exportSampleRate, 0.05,
                                         [this] (double fraction)
                                         {
                                             setProgress (fraction);
@@ -182,8 +187,8 @@ namespace
         juce::File destination;
         double start = 0.0;
         PluginHost* pluginHost = nullptr;
-        std::function<void (const juce::File&, const wav::ExportResult&)> finishedCallback;
-        wav::ExportResult result;
+        std::function<void (const juce::File&, const bounce::ExportResult&)> finishedCallback;
+        bounce::ExportResult result;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ScopeRenderTask)
     };
@@ -625,6 +630,17 @@ MainComponent::MainComponent()
     rackPanel.onSamplerStretchChosen = [this] (int slotId, int stretchMode)
     {
         applySamplerStretchToSlot (slotId, (StretchMode) stretchMode);
+    };
+
+    //-- Phase 52: the 只变调 range ------------------------------------------
+    rackPanel.samplerPitchRangeState = [this] (int slotId)
+    {
+        return samplerPitchRangeStateFor (slotId);
+    };
+
+    rackPanel.onSamplerPitchRangeChanged = [this] (int slotId, int semitones)
+    {
+        applySamplerPitchRangeToSlot (slotId, semitones);
     };
 
     //-- Phase 32: a block left a sampler with nothing to play ----------------
@@ -1680,6 +1696,27 @@ juce::Image MainComponent::createSamplerLinkSnapshot()
     }
 
     return createComponentSnapshot (getLocalBounds(), true);
+}
+
+juce::Image MainComponent::createExportDialogSnapshot (bool mp3)
+{
+    // Phase 52: the dialog lives in its own (modal) window, so a headless run
+    // builds the CONTENT and photographs that — the same widget the window
+    // holds, with the same settings the button would hand it.
+    ExportDialog dialog;
+
+    ExportSettings demo;
+    demo.format     = mp3 ? ExportFormat::mp3 : ExportFormat::wav;
+    demo.bitDepth   = 24;
+    demo.mp3Bitrate = 192;
+    demo.mono       = true;
+
+    dialog.setSettings (demo);
+    dialog.setContentSeconds (getContentSeconds());
+    dialog.setMp3Available (mp3::isAvailable());
+    dialog.setSize (ui::px (480), ui::px (320));
+
+    return dialog.createComponentSnapshot (dialog.getLocalBounds(), true);
 }
 
 juce::Image MainComponent::createSamplerPromptSnapshot()
@@ -3031,6 +3068,56 @@ void MainComponent::applySamplerStretchToSlot (int slotId, StretchMode mode)
     // roll repaints its badges, and the schedule republishes with the new
     // ratios. This is the same channel every model edit uses — no callback
     // chains of "who remembers to tell whom".
+    stack.notifyNotesChanged();
+    rackPanel.repaint();
+}
+
+//-- Phase 52: the 只变调 range ------------------------------------------------
+// Same shape as the stretch pair above, and for the same reason: the value
+// belongs to the BLOCKS, the card only shows it and reports a change.
+int MainComponent::samplerPitchRangeStateFor (int slotId) const
+{
+    int state = -2;
+
+    for (int i = 0; i < stack.getNumLayers(); ++i)
+        if (const auto* layer = stack.getLayer (i))
+            for (const auto& clip : layer->getSamples())
+                if (clip.outputSlotId == slotId)
+                {
+                    if (state == -2)
+                        state = clip.pitchRangeSemitones;
+                    else if (state != clip.pitchRangeSemitones)
+                        return -1;          // 混合
+                }
+
+    return state;
+}
+
+void MainComponent::applySamplerPitchRangeToSlot (int slotId, int semitones)
+{
+    const int value = juce::jlimit (SampleEvent::minPitchRangeSemitones,
+                                    SampleEvent::maxPitchRangeSemitones,
+                                    semitones);
+
+    bool changed = false;
+
+    for (int i = 0; i < stack.getNumLayers(); ++i)
+        if (auto* layer = stack.getLayer (i))
+            for (const auto& probe : layer->getSamples())
+                if (auto* clip = layer->findSample (probe.id);
+                    clip != nullptr && clip->outputSlotId == slotId
+                      && clip->pitchRangeSemitones != value)
+                {
+                    clip->pitchRangeSemitones = value;
+                    changed = true;
+                }
+
+    if (! changed)
+        return;
+
+    // One notification for the whole edit — undo sees a single step, and the
+    // schedule republishes with the new ceiling (it is read at publish time in
+    // PlaybackEngine, not by the audio thread).
     stack.notifyNotesChanged();
     rackPanel.repaint();
 }
@@ -5235,6 +5322,14 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
 
     if (key.getModifiers().isCommandDown())
     {
+        // Phase 52: the standard "settings" shortcut. Checked before the letter
+        // comparisons because Ctrl+, has no letter to compare.
+        if (key.getKeyCode() == ',' || key.getTextCharacter() == ',')
+        {
+            openSettings (0);
+            return true;
+        }
+
         const auto character = juce::CharacterFunctions::toUpperCase (
                                   (juce::juce_wchar) (key.getKeyCode() != 0 ? key.getKeyCode()
                                                                             : key.getTextCharacter()));
@@ -5370,6 +5465,16 @@ void MainComponent::fillFileMenu (juce::PopupMenu& menu) const
     addCommand (4, utf8 ("另存为…"),     kCommandKey + "Shift+S");
 
     menu.addSeparator();
+
+    // Phase 52: the two commands that used to live only on a button and a
+    // shortcut. A menu is where a user looks for "export" and "settings"; the
+    // button and Ctrl+E stay, and all three land on the same dialog.
+    addCommand (6, utf8 ("导出…"), kCommandKey + "E", getContentSeconds() > 0.001);
+
+    menu.addSeparator();
+    addCommand (7, utf8 ("设置…"), kCommandKey + ",");
+
+    menu.addSeparator();
     addCommand (5, utf8 ("退出"),        kCommandKey + "Q");
 
     juce::ignoreUnused (hasProject);
@@ -5446,6 +5551,8 @@ void MainComponent::applyFileChoice (int itemId)
         case 3: saveProject();       break;
         case 4: askToSaveProject();  break;
         case 5: requestQuit();       break;
+        case 6: askToExportAudio();  break;
+        case 7: openSettings (0);    break;
         default: break;
     }
 }
@@ -5728,7 +5835,7 @@ bool MainComponent::loadProjectFromFile (const juce::File& file, juce::String& e
 }
 
 //==============================================================================
-wav::ExportResult MainComponent::exportAudioToFile (const juce::File& file,
+bounce::ExportResult MainComponent::exportAudioToFile (const juce::File& file,
                                                     const std::function<bool (double)>& progress,
                                                     double tailSeconds)
 {
@@ -5737,26 +5844,26 @@ wav::ExportResult MainComponent::exportAudioToFile (const juce::File& file,
     // this schedule by publishSchedule(), so the bounce cannot read a model
     // while the message thread is editing it.
     PlaybackEngine staging;
-    staging.setSampleRate (wav::exportSampleRate);
+    staging.setSampleRate (bounce::exportSampleRate);
     staging.publishSchedule (stack, rack, audio.getBpm(), 0.0, &mixer);
 
     auto schedule = staging.getSchedule();
 
     if (schedule == nullptr)
     {
-        wav::ExportResult failed;
+        bounce::ExportResult failed;
         failed.message = utf8 ("无法生成渲染快照");
         return failed;
     }
 
-    return wav::renderToFile (file, *schedule, wav::exportSampleRate, tailSeconds, progress,
+    return bounce::renderToFile (file, *schedule, bounce::exportSampleRate, tailSeconds, progress,
                               &plugins);
 }
 
 double MainComponent::getContentSeconds() const
 {
     PlaybackEngine probe;
-    probe.setSampleRate (wav::exportSampleRate);
+    probe.setSampleRate (bounce::exportSampleRate);
     probe.publishSchedule (stack, rack, audio.getBpm(), 0.0, &mixer);
 
     auto schedule = probe.getSchedule();
@@ -5948,6 +6055,11 @@ void MainComponent::showLoadChooser()
 
 void MainComponent::askToExportAudio()
 {
+    showExportDialog();
+}
+
+void MainComponent::showExportDialog()
+{
     if (exporting)
     {
         showMessage (utf8 ("导出"), utf8 ("已经有一个导出任务正在进行。"), false);
@@ -5963,31 +6075,95 @@ void MainComponent::askToExportAudio()
         return;
     }
 
-    auto initial = getProjectDirectory().getChildFile ("AtomicDAW-Mix.wav");
+    // One dialog at a time. A second Ctrl+E while it is up would otherwise put
+    // two copies of the same four choices on screen, each with its own idea of
+    // what will be written.
+    if (exportDialogOpen)
+        return;
+
+    auto* dialog = new ExportDialog();
+    dialog->setSettings (exportSettings);
+    dialog->setContentSeconds (contentSeconds);
+    dialog->setMp3Available (mp3::isAvailable());
+
+    juce::DialogWindow::LaunchOptions options;
+    options.content.setOwned (dialog);
+    options.dialogTitle                  = utf8 ("导出");
+    options.dialogBackgroundColour       = theme::surface1;
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar            = false;
+    options.resizable                    = false;
+    options.componentToCentreAround      = this;
+
+    auto* window = options.launchAsync();
+
+    exportDialogOpen = true;
+
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    juce::Component::SafePointer<juce::DialogWindow> safeWindow (window);
+
+    // Closing the window by any route (Esc, ×, either button) has to clear the
+    // flag; the two button callbacks below are not the only ways out, which is
+    // why the hook lives on the dialog's own destruction.
+    dialog->onClosedByUser = [safeThis]
+    {
+        if (auto* component = safeThis.getComponent())
+            component->exportDialogOpen = false;
+    };
+
+    dialog->onCancel = [safeWindow]
+    {
+        if (auto* w = safeWindow.getComponent())
+            w->exitModalState (0);
+    };
+
+    dialog->onExport = [safeThis, safeWindow] (const ExportSettings& settings)
+    {
+        if (auto* component = safeThis.getComponent())
+        {
+            component->exportDialogOpen = false;
+            component->exportSettings   = settings;
+            component->beginExport (settings);
+        }
+
+        if (auto* w = safeWindow.getComponent())
+            w->exitModalState (0);
+    };
+}
+
+void MainComponent::beginExport (const ExportSettings& settings)
+{
+    const juce::String extension = settings.extension();
+
+    auto initial = getProjectDirectory().getChildFile ("AtomicDAW-Mix." + extension);
 
     if (currentProject.existsAsFile())
         initial = currentProject.getParentDirectory()
-                    .getChildFile (currentProject.getFileNameWithoutExtension() + ".wav");
+                    .getChildFile (currentProject.getFileNameWithoutExtension() + "." + extension);
 
-    chooser = std::make_unique<juce::FileChooser> (utf8 ("导出 WAV"), initial, "*.wav");
+    chooser = std::make_unique<juce::FileChooser> (utf8 ("导出 ") + extension.toUpperCase(),
+                                                   initial, settings.wildcard());
 
     chooser->launchAsync (juce::FileBrowserComponent::saveMode
                             | juce::FileBrowserComponent::canSelectFiles
                             | juce::FileBrowserComponent::warnAboutOverwriting,
-                          [this] (const juce::FileChooser& fc)
+                          [this, settings] (const juce::FileChooser& fc)
                           {
                               auto file = fc.getResult();
 
                               if (file.getFullPathName().isEmpty())
                                   return;
 
-                              if (file.getFileExtension().isEmpty())
-                                  file = file.withFileExtension ("wav");
+                              // The extension follows the FORMAT, not whatever
+                              // the chooser was left on: an MP3 named .wav is
+                              // a file that opens in the wrong program.
+                              if (! file.hasFileExtension (settings.extension()))
+                                  file = file.withFileExtension (settings.extension());
 
                               // Snapshot on the message thread; the render runs
                               // on its own thread with its own copy.
                               PlaybackEngine staging;
-                              staging.setSampleRate (wav::exportSampleRate);
+                              staging.setSampleRate (bounce::exportSampleRate);
                               staging.publishSchedule (stack, rack, audio.getBpm(), 0.0, &mixer);
 
                               auto schedule = staging.getSchedule();
@@ -6003,7 +6179,7 @@ void MainComponent::askToExportAudio()
 
                               juce::Component::SafePointer<MainComponent> safeThis (this);
 
-                              auto* task = new ExportTask (schedule, file, [safeThis]
+                              auto* task = new ExportTask (schedule, file, settings, [safeThis]
                               {
                                   if (auto* component = safeThis.getComponent())
                                       component->exportFinished();
@@ -6058,7 +6234,7 @@ void MainComponent::renderScopeToSample (const PianoRollComponent::RenderScopeRe
 
     // Freeze the session exactly as the export does: one mixer, one schedule.
     PlaybackEngine staging;
-    staging.setSampleRate (wav::exportSampleRate);
+    staging.setSampleRate (bounce::exportSampleRate);
     staging.publishSchedule (stack, rack, audio.getBpm(), 0.0, &mixer);
 
     auto full = staging.getSchedule();
@@ -6132,7 +6308,7 @@ void MainComponent::renderScopeToSample (const PianoRollComponent::RenderScopeRe
 
     auto* task = new ScopeRenderTask (schedule, file, start, &plugins,
                                       [safeThis, targetLayer, lengthBeats, displayName]
-                                      (const juce::File& rendered, const wav::ExportResult& result)
+                                      (const juce::File& rendered, const bounce::ExportResult& result)
     {
         auto* component = safeThis.getComponent();
 

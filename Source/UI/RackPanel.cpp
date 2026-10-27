@@ -2,6 +2,7 @@
 
 #include "Model/LayerModel.h"     // Phase 51: StretchMode for the sampler card
 #include "Util/Metrics.h"
+#include "Util/SharedRules.h"     // Phase 52: the sampler drag payload
 
 #include "UI/MixerLook.h"
 #include "Util/Text.h"
@@ -45,6 +46,44 @@ namespace
             case SlotAutomationTarget::solo:   return utf8 ("独奏");
             default:                           return utf8 ("滤波器");
         }
+    }
+
+    /** Phase 52: the thumbnail a dragged sampler card carries.
+
+        It is NOT a snapshot of the card — the card is 300 px tall and a drag
+        image that covers the drop target is a drag image that hides where you
+        are dropping. A compact ticket with the file's name says "this file",
+        which is the only thing the pointer has to say. */
+    juce::Image makeSamplerDragImage (const SynthSlot& slot)
+    {
+        const int w = (int) std::round (atomic::ui::px (150));
+        const int h = (int) std::round (atomic::ui::px (34));
+
+        juce::Image image (juce::Image::ARGB, juce::jmax (1, w), juce::jmax (1, h), true);
+
+        juce::Graphics g (image);
+
+        g.setColour (theme::surface3.withAlpha (0.94f));
+        g.fillRoundedRectangle (image.getBounds().toFloat(), atomic::ui::pf (4));
+
+        g.setColour (theme::accent.withAlpha (0.85f));
+        g.drawRoundedRectangle (image.getBounds().toFloat().reduced (0.5f),
+                                atomic::ui::pf (4), 1.0f);
+
+        g.setColour (theme::accent.withAlpha (0.95f));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (8.5f))));
+        g.drawText ("SAMPLE", image.getBounds().reduced ((int) atomic::ui::px (8), 0)
+                                                .removeFromTop ((int) atomic::ui::px (14)),
+                    juce::Justification::centredLeft, false);
+
+        g.setColour (theme::inkSubtle);
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
+        g.drawText (juce::File (slot.samplePath).getFileName(),
+                    image.getBounds().reduced ((int) atomic::ui::px (8), 0)
+                                     .withTrimmedTop ((int) atomic::ui::px (14)),
+                    juce::Justification::centredLeft, true);
+
+        return image;
     }
 }
 
@@ -159,6 +198,27 @@ juce::Rectangle<int> RackPanel::getStretchBounds (int index) const
     // SAMPLE pill, so the card keeps one baseline.
     auto card = getCardBounds (index);
     return { card.getRight() - ui::px (78), card.getY() + ui::px (40), ui::px (66), ui::px (18) };
+}
+
+juce::Rectangle<int> RackPanel::getPitchRangeBounds (int index) const
+{
+    // Phase 52: to the LEFT of the stretch chip, on the same readout row. It
+    // only exists while the slot's blocks are in 只变调, so asking for the
+    // rectangle is also the answer to "is it on screen" — a chip that is drawn
+    // somewhere else than it is clickable is a chip that lies.
+    auto card = getCardBounds (index);
+
+    const auto* slot = rack.getSlot (index);
+
+    if (slot == nullptr || ! slot->isSampler() || slot->collapsed)
+        return {};
+
+    const int state = samplerStretchState != nullptr ? samplerStretchState (slot->id) : -2;
+
+    if (state != (int) StretchMode::pitch)
+        return {};
+
+    return { card.getRight() - ui::px (150), card.getY() + ui::px (40), ui::px (66), ui::px (18) };
 }
 
 juce::Rectangle<int> RackPanel::getSoloBounds (int index) const
@@ -570,6 +630,34 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
                                        .reduced (ui::pf (3), ui::pf (5)),
                               true, live ? accent.withAlpha (0.85f)
                                          : kMutedText.withAlpha (0.7f));
+    }
+
+    //-- Phase 52: the 只变调 range --------------------------------------------
+    // Drawn only in pitch mode (getPitchRangeBounds returns empty otherwise).
+    // The number IS the control: dragging it left or right moves the ceiling,
+    // double-click puts it back to two octaves. No menu — a menu of six numbers
+    // would be a menu the user reopens every time they overshoot.
+    if (const auto range = getPitchRangeBounds (index); ! range.isEmpty())
+    {
+        const auto chip = range.toFloat();
+        const bool hot  = hovered && hoveredPart == Part::pitchRange;
+
+        const int semis = samplerPitchRangeState != nullptr ? samplerPitchRangeState (slot->id)
+                                                           : -2;
+
+        g.setColour (juce::Colours::white.withAlpha (hot ? 0.10f : 0.04f));
+        g.fillRoundedRectangle (chip, ui::pf (4));
+
+        g.setColour (accent.withAlpha (hot ? 0.75f : 0.5f));
+        g.drawRoundedRectangle (chip, ui::pf (4), 1.0f);
+
+        const juce::String label = semis == -2 ? utf8 ("±-- 半音")
+                                : semis == -1 ? utf8 ("±混合")
+                                : utf8 ("±") + juce::String (semis) + utf8 (" 半音");
+
+        g.setColour (semis >= 0 ? accent : kMutedText.withAlpha (0.8f));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
+        g.drawText (label, chip.reduced (ui::pf (4), 0.0f), juce::Justification::centred, false);
     }
 
     //-- Volume ----------------------------------------------------------------
@@ -986,6 +1074,29 @@ void RackPanel::mouseDown (const juce::MouseEvent& e)
                 return;
             }
 
+            if (getPitchRangeBounds (i).contains (pos))
+            {
+                // Phase 52: drag the number. Double-click is "put it back",
+                // which is the only other thing a one-number control needs.
+                if (e.getNumberOfClicks() >= 2)
+                {
+                    if (onSamplerPitchRangeChanged != nullptr)
+                        onSamplerPitchRangeChanged (slot->id,
+                                                    SampleEvent::defaultPitchRangeSemitones);
+
+                    return;
+                }
+
+                const int state = samplerPitchRangeState != nullptr
+                                    ? samplerPitchRangeState (slot->id) : -2;
+
+                dragPart       = Part::pitchRange;
+                dragCard       = i;
+                dragStartValue = state >= 0 ? state : SampleEvent::defaultPitchRangeSemitones;
+                dragStartX     = pos.x;
+                return;
+            }
+
             if (getStretchBounds (i).contains (pos) && slot->isSampler())
             {
                 // Phase 51: the stretch menu lives here now. The panel only
@@ -1076,6 +1187,17 @@ void RackPanel::mouseDown (const juce::MouseEvent& e)
             if (onCardFocused != nullptr)
                 onCardFocused (slot->id);
 
+            // Phase 52: a sampler card is also the handle of its file. The
+            // press arms a drag; whether it becomes one is decided in
+            // mouseDrag by how far the pointer travels, so a plain click keeps
+            // doing exactly what it did above.
+            if (slot->isSampler())
+            {
+                dragMayStart = true;
+                dragOrigin   = pos;
+                dragCard     = i;
+            }
+
             return;
         }
 
@@ -1108,6 +1230,25 @@ void RackPanel::mouseDown (const juce::MouseEvent& e)
 
 void RackPanel::mouseDrag (const juce::MouseEvent& e)
 {
+    // Phase 52: dragging a sampler card out of the rack. Checked before the
+    // slider guard because this drag never set dragPart — it is a different
+    // gesture, not a value being dragged.
+    if (dragMayStart && dragCard >= 0 && e.getDistanceFromDragStart() > ui::px (4))
+    {
+        dragMayStart = false;
+
+        if (auto* slot = rack.getSlot (dragCard); slot != nullptr && slot->isSampler())
+        {
+            if (auto* container = juce::DragAndDropContainer::findParentDragContainerFor (this))
+                if (! container->isDragAndDropActive())
+                    container->startDragging (samplerDragDescription (slot->id), this,
+                                              juce::ScaledImage (makeSamplerDragImage (*slot)),
+                                              false, nullptr, &e.source);
+        }
+
+        return;
+    }
+
     if (dragPart == Part::none || dragCard < 0)
         return;
 
@@ -1115,6 +1256,24 @@ void RackPanel::mouseDrag (const juce::MouseEvent& e)
 
     if (slot == nullptr)
         return;
+
+    if (dragPart == Part::pitchRange)
+    {
+        // Three pixels a semitone, measured from the press: the number under
+        // the pointer changes by one per three pixels no matter where on the
+        // chip the drag started, which is what makes it feel like a value and
+        // not like a position.
+        const int delta = (e.getPosition().x - dragStartX) / 3;
+
+        const int value = juce::jlimit (SampleEvent::minPitchRangeSemitones,
+                                        SampleEvent::maxPitchRangeSemitones,
+                                        dragStartValue + delta);
+
+        if (onSamplerPitchRangeChanged != nullptr)
+            onSamplerPitchRangeChanged (slot->id, value);
+
+        return;
+    }
 
     if (dragPart == Part::volume)
     {
@@ -1142,8 +1301,9 @@ void RackPanel::mouseDrag (const juce::MouseEvent& e)
 
 void RackPanel::mouseUp (const juce::MouseEvent&)
 {
-    dragPart = Part::none;
-    dragCard = -1;
+    dragPart     = Part::none;
+    dragCard     = -1;
+    dragMayStart = false;
 }
 
 void RackPanel::mouseMove (const juce::MouseEvent& e)
@@ -1171,6 +1331,8 @@ void RackPanel::mouseMove (const juce::MouseEvent& e)
         else if (getStretchBounds (i).contains (pos)
                    && rack.getSlot (i) != nullptr && rack.getSlot (i)->isSampler())
             newPart = Part::stretch;
+        else if (getPitchRangeBounds (i).contains (pos))
+            newPart = Part::pitchRange;
         else if (getSendBounds (i).contains (pos))   newPart = Part::send;
         else if (getVolumeBounds (i).expanded (0, 6).contains (pos)) newPart = Part::volume;
         else if (getPanBounds (i).expanded (0, 6).contains (pos))    newPart = Part::pan;
@@ -1181,7 +1343,8 @@ void RackPanel::mouseMove (const juce::MouseEvent& e)
 
     const bool newAdd = getAddButtonBounds().contains (pos) && getHeight() > 200;
 
-    setMouseCursor ((newPart == Part::volume || newPart == Part::pan)
+    setMouseCursor ((newPart == Part::volume || newPart == Part::pan
+                       || newPart == Part::pitchRange)
                       ? juce::MouseCursor::LeftRightResizeCursor
                       : (newPart == Part::none || newPart == Part::body)
                           ? (newAdd ? juce::MouseCursor::PointingHandCursor

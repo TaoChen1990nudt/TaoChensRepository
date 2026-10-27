@@ -55,7 +55,8 @@ struct Playback
         return std::abs (speed - 1.0) < 1.0e-12 && std::abs (pitch - 1.0) < 1.0e-12;
     }
 
-    static Playback make (Mode requested, double ratio) noexcept
+    static Playback make (Mode requested, double ratio,
+                          int pitchRangeSemitones = SampleEvent::maxPitchRangeSemitones) noexcept
     {
         Playback p;
         p.mode = requested;
@@ -67,7 +68,23 @@ struct Playback
             case Mode::none:     break;
             case Mode::resample: p.speed = r; p.pitch = r; break;
             case Mode::tempo:    p.speed = r; break;      // pitch stays 1
-            case Mode::pitch:    p.pitch = r; break;      // speed stays 1
+
+            case Mode::pitch:
+            {
+                // Phase 52: the ratio is unbounded, the transposition is not.
+                // A range of N semitones means "the read rate may move between
+                // 2^(-N/12) and 2^(+N/12) and no further" — past that the block
+                // keeps playing at its own rate and the overshoot becomes
+                // silence or truncation, which is what "I capped the range"
+                // has to mean. The default (36) leaves the old behaviour alone.
+                const int    semis = juce::jlimit (SampleEvent::minPitchRangeSemitones,
+                                                   SampleEvent::maxPitchRangeSemitones,
+                                                   pitchRangeSemitones);
+                const double limit = std::pow (2.0, (double) semis / 12.0);
+
+                p.pitch = juce::jlimit (1.0 / limit, limit, r);
+                break;
+            }
         }
 
         return p;

@@ -86,6 +86,20 @@ public:
     std::function<int (int slotId)>  samplerStretchState;
     std::function<void (int slotId, int stretchMode)> onSamplerStretchChosen;
 
+    /** Phase 52: the 只变调 range, in semitones.
+
+        Same contract as the stretch pair above and for the same reason — the
+        value is a BLOCK property (two blocks of one file may want different
+        ceilings), and this panel cannot see blocks. `samplerPitchRangeState`
+        returns the semitones when every block on the slot agrees, -1 when they
+        differ (labelled 混合), -2 when no block uses the slot at all. The chip
+        is only drawn while those blocks are in 只变调: a range for a mode
+        nobody is in is a control that changes nothing. */
+    std::function<int (int slotId)>  samplerPitchRangeState;
+    std::function<void (int slotId, int semitones)> onSamplerPitchRangeChanged;
+
+
+
     /** Phase 23: "there is a note/group selection right now". With a selection
         on screen, a plain card click mounts it on that synth — the gesture the
         user is already making when they look at a selection and then reach for
@@ -109,6 +123,12 @@ public:
         control that overlaps the text it sits beside is invisible in a
         screenshot and obvious only when the click does the wrong thing. */
     juce::Rectangle<int> getStretchBounds (int index) const;
+
+    /** Phase 52: the 只变调 range chip, left of the stretch chip on the readout
+        row. Empty when the slot is not a sampler or its blocks are not in
+        只变调 — which is also the hit test, so "not drawn" and "not clickable"
+        cannot disagree. */
+    juce::Rectangle<int> getPitchRangeBounds (int index) const;
 
     /** Phase 51: test hook — the card rectangle, so "the chip is inside the
         card" is a comparison, not an impression. */
@@ -144,7 +164,7 @@ public:
 
 private:
     enum class Part { none, body, solo, mute, close, waveform, volume, pan, send, collapse,
-                      stretch };
+                      stretch, pitchRange };
 
     int  cardTop (int index) const;
     bool isExpanded (int index) const;
@@ -197,6 +217,17 @@ private:
 
     Part dragPart = Part::none;
     int  dragCard = -1;
+
+    /** Phase 52: the numeric chip is dragged RELATIVELY — the value at the
+        press plus one semitone per three pixels. Mapping 1..36 absolutely
+        across 66 px would make the control jump two semitones per pixel. */
+    int   dragStartValue = 0;
+    int   dragStartX     = 0;
+
+    /** Phase 52: where a pointer went down on a sampler card, so a drag can be
+        told from a click that is still just a click. */
+    juce::Point<int> dragOrigin;
+    bool  dragMayStart = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RackPanel)
 };

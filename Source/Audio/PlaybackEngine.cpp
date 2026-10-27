@@ -780,7 +780,8 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
                                                             - scheduled.sourceOffsetSeconds);
 
             scheduled.stretch = clipstretch::Playback::make (clip.stretchMode,
-                                                             naturalSeconds / windowSeconds);
+                                                             naturalSeconds / windowSeconds,
+                                                             clip.pitchRangeSemitones);
 
             // Phase 35: membership, for the group's trim only. Nothing above
             // this line consulted it — `res` was resolved from the mount and the

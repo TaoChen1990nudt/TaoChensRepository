@@ -121,6 +121,12 @@ namespace
         // can never contain — it lives in its own window.
         writePng ("-prompt", component.createSamplerPromptSnapshot());
 
+        // Phase 52: the export dialog, in both formats — WAV with the bitrate
+        // row greyed and MP3 with the depth row greyed is the whole control,
+        // and a modal window cannot be photographed by a headless run.
+        writePng ("-export", component.createExportDialogSnapshot (false));
+        writePng ("-exportmp3", component.createExportDialogSnapshot (true));
+
         // Phase 23: 通道 1 → 2 → 3 → 主输出, so the console image documents the
         // strip-to-strip routing instead of eight strips that all say the same.
         component.showDemoConsoleRouting();

@@ -15,7 +15,7 @@
 #include "Audio/MidiInputHub.h"
 #include "Audio/PluginHost.h"
 #include "Audio/ScopeRender.h"
-#include "Audio/WavExport.h"
+#include "Audio/AudioExport.h"
 #include "Model/AutomationModel.h"
 #include "Model/HardwareRack.h"
 #include "Model/LayerModel.h"
@@ -24,6 +24,7 @@
 #include "UI/AutomationWindow.h"
 #include "UI/BpmField.h"
 #include "UI/EffectWindows.h"
+#include "UI/ExportDialog.h"
 #include "UI/FileBrowserPanel.h"
 #include "UI/GroupPanel.h"
 #include "UI/LayerPanel.h"
@@ -280,6 +281,11 @@ public:
         build the window off-screen and photograph it. */
     juce::Image createSamplerPromptSnapshot();
 
+    /** Phase 52: the export dialog, headless. `mp3` picks which format the
+        picture shows — the two frames together are the whole control (WAV with
+        the bitrate row greyed, MP3 with the depth row greyed). */
+    juce::Image createExportDialogSnapshot (bool mp3);
+
     //-- Phase 6: project files and offline bounce ----------------------------
     /** Writes the whole session to a .atomic file. Also the path the self-test
         and the command line use — the Save button only adds a file chooser in
@@ -292,7 +298,7 @@ public:
 
     /** Renders the project to a 16-bit stereo WAV, from 0 to the last note's
         end. `progress` may be null; returning false cancels. */
-    wav::ExportResult exportAudioToFile (const juce::File& file,
+    bounce::ExportResult exportAudioToFile (const juce::File& file,
                                          const std::function<bool (double)>& progress = {},
                                          double tailSeconds = 0.05);
 
@@ -466,6 +472,11 @@ private:
         self-test, which asserts the write reaches the blocks. */
     int  samplerStretchStateFor (int slotId) const;
     void applySamplerStretchToSlot (int slotId, StretchMode mode);
+
+    /** Phase 52: the same pair for the 只变调 range, in semitones. -2 when no
+        block plays the slot, -1 when they disagree. */
+    int  samplerPitchRangeStateFor (int slotId) const;
+    void applySamplerPitchRangeToSlot (int slotId, int semitones);
 
     /** The other half of the pair: true when `result` was one of the ids
         addSlotAutomationItems() handed out and it has been acted on. One
@@ -699,6 +710,14 @@ private:
     /** The file dialog itself, with no "save first?" question in front of it. */
     void showLoadChooser();
     void askToExportAudio();
+
+    /** Phase 52: opens the export dialog (format / depth / bitrate / channels)
+        and, if the user accepts, runs the chooser and the bounce with those
+        settings. The button, the menu item and Ctrl+E all land here, so there
+        is exactly one export path. */
+    void showExportDialog();
+    void beginExport (const ExportSettings& settings);
+
     void showMessage (const juce::String& title, const juce::String& message, bool isError);
     void exportFinished();
 
@@ -1051,6 +1070,16 @@ private:
     bool       dirtyCache = false;
 
     bool       exporting = false;
+
+    /** Phase 52: what the export dialog offered last time. Kept for the
+        session so a second bounce is one click, not four — and kept HERE
+        rather than on disk because it describes one sitting's intent, not a
+        project property. */
+    ExportSettings exportSettings;
+
+    /** The dialog can only be open once; a second Ctrl+E while it is up brings
+        it forward rather than stacking another. */
+    bool exportDialogOpen = false;
 
     /** Phase 50: how many bounces have been written, used only to give each
         render file a unique name. Never reused, so a second bounce of the same
