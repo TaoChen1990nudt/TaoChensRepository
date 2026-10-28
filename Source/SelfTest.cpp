@@ -12174,6 +12174,118 @@ juce::String MainComponent::runSelfTest()
                  + utf8 ("（应为 64+64 / 88+40：低的顶到 127，高的先封顶）"));
     }
 
+    //-- Phase 77: 双击 ghost 音符 = 去那一层编辑 ------------------------------
+    // 单击仍然点穿（P1/P20：看不见的图层不是能抓住的东西），但"让我过去"是
+    // 另一个动词，而且在那一像素上活动层什么都没有，双击没有别的意思可言。
+    // 判据要落在两件事上：活动图层换了，**且**换过去之后那东西能改——组里的
+    // 成员要连组一起打开，不然接下去那一下还是整组一起拖（P73）。
+    {
+        LayerStack t77;
+        RackModel  r77;
+        PianoRollComponent roll (t77, r77);
+        roll.setSize (1200, 620);
+
+        t77.addLayer (utf8 ("底"), palette::layer1);        // 0，待会儿的 ghost
+        t77.addLayer (utf8 ("表"), palette::layer2);        // 1，addLayer 把新层设为活动
+
+        auto* under = t77.getLayer (0);
+        auto* over  = t77.getLayer (1);
+
+        const int plain   = under->addNote ({ 0, 72, 0.0, 1.0, 0.9f });
+        const int grouped = under->addNote ({ 0, 76, 4.0, 1.0, 0.9f });
+        const int partner = under->addNote ({ 0, 80, 6.0, 1.0, 0.9f });
+
+        const int gid = under->addGroup (utf8 ("G"), groupPalette::group1);
+        under->assignNotesToGroup ({ grouped, partner }, gid);
+
+        const int onTop = over->addNote ({ 0, 64, 0.0, 1.0, 0.9f });
+
+        t77.setLayerVisible (0, true);      // 眼睛开着才有 ghost
+
+        const auto centreOfUnder = [&] (int id)
+        {
+            return roll.getNoteScreenBounds (0, id).getCentre();
+        };
+
+        //-- 1. 单击还是点穿 ---------------------------------------------
+        roll.setSelection ({ onTop });
+        roll.simulatePressForTest (centreOfUnder (plain));
+
+        check (utf8 ("单击 ghost 音符仍然点穿，选不到它"),
+               roll.getEditableNoteIdAt (centreOfUnder (plain)) == -1
+                 && t77.getActiveLayerIndex() == 1,
+               juce::String (roll.getEditableNoteIdAt (centreOfUnder (plain)))
+                 + utf8 (" / 层 ") + juce::String (t77.getActiveLayerIndex()));
+
+        //-- 2. 双击不分组的那一个：换层 + 选中它 -------------------------
+        roll.setSelection ({ onTop });
+        roll.simulateDoubleClickForTest (centreOfUnder (plain));
+
+        check (utf8 ("双击 ghost 音符会换成它所在的图层，并选中它"),
+               t77.getActiveLayerIndex() == 0 && roll.isNoteSelectedForTest (plain)
+                 && roll.getSelection().size() == 1 && roll.getEditingGroupId() < 0,
+               utf8 ("层 ") + juce::String (t77.getActiveLayerIndex())
+                 + utf8 (" / 选中 ") + juce::String ((int) roll.getSelection().size())
+                 + utf8 (" 个 / 组 ") + juce::String (roll.getEditingGroupId()));
+
+        //-- 3. 双击组里的那一个：换层 + 进组 + 整次出现 -------------------
+        // 只换层不进组的话，用户到了那一层还是要再双击一次，而这一步正是这一
+        // 阶段要省掉的。整次出现而不是单个成员，是 P74 的答案。
+        // 上一轮已经把活动层挪到 0 了，先退回去，让 grouped 重新变回 ghost。
+        t77.setActiveLayerIndex (1);
+        roll.simulateDoubleClickForTest (centreOfUnder (grouped));
+
+        check (utf8 ("双击组里的 ghost 音符会连组一起打开，并选中整次出现"),
+               t77.getActiveLayerIndex() == 0 && roll.getEditingGroupId() == gid
+                 && roll.isNoteSelectedForTest (grouped) && roll.isNoteSelectedForTest (partner),
+               juce::String (t77.getActiveLayerIndex()) + utf8 (" / 组 ")
+                 + juce::String (roll.getEditingGroupId()) + utf8 (" / 选中 ")
+                 + juce::String ((int) roll.getSelection().size()) + utf8 (" 个"));
+
+        //-- 4. 同一像素上活动层自己有音符：先问活动层 ---------------------
+        // 判据是"这一像素在这一层回答谁"，不是"选中了谁"：普通音符的双击本来
+        // 就不改选区（P76 打开不是选择），它只回答"我点了你"。
+        const int shadow = over->addNote ({ 0, 72, 0.0, 1.0, 0.9f });
+        t77.setActiveLayerIndex (1);
+        roll.setSelection ({});
+
+        roll.simulateDoubleClickForTest (roll.getNoteScreenBounds (1, shadow).getCentre());
+
+        check (utf8 ("ghost 上面压着活动层自己的音符时，双击改的是它，不会跳到 ghost 那一层"),
+               t77.getActiveLayerIndex() == 1
+                 && roll.getEditableNoteIdAt (roll.getNoteScreenBounds (1, shadow).getCentre()) == shadow,
+               utf8 ("层 ") + juce::String (t77.getActiveLayerIndex())
+                 + utf8 (" / 命中 ") + juce::String (roll.getEditableNoteIdAt (
+                       roll.getNoteScreenBounds (1, shadow).getCentre()))
+                 + utf8 ("（应为 1 / ") + juce::String (shadow) + "）");
+
+        //-- 4b. 钩子自己的契约：绝不回答"你正在编辑的这一层" ----------------
+        // 上一条那个像素上其实**有** ghost（另一层同一位置也有音符），所以在那里
+        // 答 0 是对的。要问"会不会把自己当成 ghost"，得挑一个只有活动层有东西
+        // 的位置——那种地方没有任何东西可跳。
+        const int ownOnly = over->addNote ({ 0, 68, 10.0, 1.0, 0.9f });
+
+        check (utf8 ("只有活动层自己在那儿有音符时，ghost 命中不会回答自己这一层"),
+               roll.getGhostLayerAtForTest (roll.getNoteScreenBounds (1, ownOnly).getCentre()) == -1,
+               juce::String (roll.getGhostLayerAtForTest (roll.getNoteScreenBounds (1, ownOnly).getCentre()))
+                 + utf8 ("（应为 -1，活动层是 1）"));
+
+        //-- 5. 眼睛关掉的图层不参与 -------------------------------------
+        // 必须挑一个**只**在 ghost 层有东西的像素：用 plain 的话会撞上第 4 条
+        // 刚压在同一个位置的 shadow，活动层先回答，这条就变成空断言了。
+        t77.setLayerVisible (0, false);
+        t77.setActiveLayerIndex (1);
+
+        roll.simulateDoubleClickForTest (centreOfUnder (grouped));
+
+        check (utf8 ("眼睛关掉的图层，双击它原来的位置不会跳过去"),
+               t77.getActiveLayerIndex() == 1
+                 && roll.getEditableNoteIdAt (centreOfUnder (grouped)) == -1,
+               utf8 ("层 ") + juce::String (t77.getActiveLayerIndex())
+                 + utf8 (" / 命中 ") + juce::String (roll.getEditableNoteIdAt (centreOfUnder (grouped)))
+                 + utf8 ("（应为 1 / -1）"));
+    }
+
     //-- Phase 73: 编组要先双击进去，才能改里面的东西 -------------------------
     // 组是一个对象：点它就整块拖，像视频剪辑里的片段。把七个音符里的一个单独
     // 挪走是另一种意图，需要另一种手势——双击。在此之前，任何一次按下都得到

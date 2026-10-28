@@ -267,6 +267,39 @@ bool PianoRollComponent::isLayerShown (int layerIndex) const
     return layerIndex == stack.getActiveLayerIndex() || layer->isVisible();
 }
 
+PianoRollComponent::GhostHit PianoRollComponent::hitTestGhost (juce::Point<float> position) const
+{
+    const int activeIndex = stack.getActiveLayerIndex();
+
+    // Descending, and in the painter's own order turned inside out: ghosts are
+    // painted in ascending layer order (drawNotes pass 1), so the highest index
+    // is the one the user sees on top; notes are painted after blocks, so a note
+    // wins over a block it sits on. No active sheet here at all — it is opaque,
+    // drawn last, and its own hit tests ran before this one.
+    for (int i = stack.getNumLayers() - 1; i >= 0; --i)
+    {
+        if (i == activeIndex || ! isLayerShown (i))
+            continue;
+
+        auto* layer = stack.getLayer (i);
+
+        if (layer == nullptr)
+            continue;
+
+        const auto& notes = layer->getNotes();
+
+        for (auto it = notes.rbegin(); it != notes.rend(); ++it)
+            if (getNoteBounds (*it).contains (position))
+                return { i, it->id, false };
+
+        for (const auto& clip : layer->getSamples())
+            if (getSampleScreenBounds (i, clip.id).contains (position))
+                return { i, clip.id, true };
+    }
+
+    return {};
+}
+
 //==============================================================================
 void PianoRollComponent::layersChanged()
 {
@@ -3407,6 +3440,61 @@ void PianoRollComponent::handleDoubleClick (juce::Point<float> pos)
         if (labelGroup != editingGroupId)
             enterGroupEdit (labelGroup);
 
+        return;
+    }
+
+    //-- Phase 77: double click on a ghost = go and edit it -------------------
+    // The ghost is click-through on the press (P1/P20), and stays that way: a
+    // sheet you are not editing is not something a click can grab. A double
+    // click is a different verb though — "take me there" — and over there it has
+    // no other meaning, because the pixel is empty on the sheet you are looking
+    // at. Checked after EVERY hit test on the active sheet, which is the order
+    // the painter uses: ghosts go underneath all of it.
+    if (const auto ghost = hitTestGhost (pos); ghost.layerIndex >= 0)
+    {
+        // Switching sheets is the whole jump. layersChanged() closes the open
+        // group and drops the old selection there — both belonged to the sheet
+        // we are leaving — so nothing below can fight with either.
+        stack.setActiveLayerIndex (ghost.layerIndex);
+
+        auto* layer = stack.getLayer (ghost.layerIndex);
+
+        if (layer == nullptr)
+            return;
+
+        if (ghost.isSample)
+        {
+            if (const auto* clip = layer->findSample (ghost.itemId))
+            {
+                // A grouped block answers as its whole appearance (P74), and the
+                // group is opened so the very next drag edits it instead of
+                // pushing the whole thing around (P73). Same gesture, same answer
+                // as a double click on the sheet it lives on.
+                if (clip->groupId >= 0)
+                {
+                    selectGroup (clip->groupId, clip->groupOccurrence);
+                    enterGroupEdit (clip->groupId);
+                }
+                else
+                {
+                    setSampleSelection ({ clip->id });
+                }
+            }
+        }
+        else if (const auto* note = layer->findNote (ghost.itemId))
+        {
+            if (note->groupId >= 0)
+            {
+                selectGroup (note->groupId, note->groupOccurrence);
+                enterGroupEdit (note->groupId);
+            }
+            else
+            {
+                setSelection ({ note->id });
+            }
+        }
+
+        repaint();
         return;
     }
 

@@ -170,6 +170,18 @@ public:
         caller remembering to filter. */
     int getEditableNoteIdAt (juce::Point<float> position) const;
 
+    /** Phase 77: which sheet a DOUBLE CLICK would jump to; -1 when it would not
+        jump at all.
+
+        Asked directly because a gesture cannot reach this contract: the active
+        sheet's own hit tests run before the ghost one, so "never answers the
+        sheet you are already on" is invisible from the outside. A guard nothing
+        can ask about is a guard that silently rots. */
+    int getGhostLayerAtForTest (juce::Point<float> position) const
+    {
+        return hitTestGhost (position).layerIndex;
+    }
+
     /** Local-space bounds of a note, empty if that layer/note does not exist. */
     juce::Rectangle<float> getNoteScreenBounds (int layerIndex, int noteId) const;
 
@@ -1490,6 +1502,25 @@ private:
         to the mouse by construction, not by an if-check at the call site. */
     NoteEvent*       hitTestActiveLayer (juce::Point<float> position);
     const NoteEvent* hitTestActiveLayer (juce::Point<float> position) const;
+
+    /** Phase 77: what a DOUBLE CLICK would open on another sheet.
+
+        The single press stays click-through (P1/P20: a ghost is not something
+        you can grab), but "show me that" is a different verb, and a double click
+        on a ghost has no other meaning. Everything the active sheet has at that
+        pixel is asked first — ghosts are painted underneath it — so this is only
+        reached when the pointer is on genuinely empty canvas over there.
+
+        `layerIndex < 0` = nothing found. `isSample` says which material, so the
+        jump can carry the right thing into that sheet's selection. */
+    struct GhostHit
+    {
+        int  layerIndex = -1;
+        int  itemId     = -1;
+        bool isSample   = false;
+    };
+
+    GhostHit hitTestGhost (juce::Point<float> position) const;
 
     /** Phase 68: the alpha for one grid line, decided by what the line IS (bar,
         beat, subdivision) rather than by its index — once the step climbs, an

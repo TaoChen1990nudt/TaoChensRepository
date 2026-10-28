@@ -280,6 +280,13 @@
   宿主侧 `fillStripAutomationItems` / `applyStripAutomationChoice` 决定"推子=level lane"。
 
 ## 编辑手势（P22 起）
+- **ghost 挡单击、不挡双击**（P77）：`getEditableNoteIdAt()` / 所有手势命中都只看活动层
+  （ghost 点穿，P1/P20 不变）；`handleDoubleClick()` 末尾加一问 `hitTestGhost(pos)`，
+  命中就 `setActiveLayerIndex()` 换层，再按 P74/P73 收尾——组里的成员 `selectGroup(gid, occ)`
+  + `enterGroupEdit(gid)`，不在组里就选中它自己。位置在**活动层全部命中之后**，因为 ghost
+  画在所有东西下面；`hitTestGhost` 内部倒序扫非活动+可见层（`drawNotes` pass 1 是升序画的，
+  后画的在上），层内先音符后块（块画在音符下面）。换层本身会让 `layersChanged()` 清掉旧选区
+  并关掉旧组，所以"先换层、再选"的顺序是必需的。
 - **打开不是选择**（P76）：`handleDoubleClick()` 进组只改 `editingGroupId`，**不重写选区**。
   `if (! isSampleSelected (clip->id)) setSampleSelection ({ clip->id });`（音符侧同构，
   用 `isSelected`）。无条件的 `setSampleSelection({clip->id})` 会把双击第一击刚选好的
