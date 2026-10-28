@@ -12217,30 +12217,45 @@ juce::String MainComponent::runSelfTest()
                juce::String (roll.getEditableNoteIdAt (centreOfUnder (plain)))
                  + utf8 (" / 层 ") + juce::String (t77.getActiveLayerIndex()));
 
-        //-- 2. 双击不分组的那一个：换层 + 选中它 -------------------------
+        //-- 2. 双击不分组的那一个：换层 + 选中它 + 打开它的包络 --------------
+        // 最后那半条是为了"同一手势同一结果"：在那一层上双击同一个音符会打开
+        // 它的包络检查器，跨层双击只做换层就成了两套语义。
+        int openedLayer = -2, openedNote = -2;
+        roll.onNoteDoubleClicked = [&] (int layerIndex, int noteId)
+        {
+            openedLayer = layerIndex;
+            openedNote  = noteId;
+        };
+
         roll.setSelection ({ onTop });
         roll.simulateDoubleClickForTest (centreOfUnder (plain));
 
-        check (utf8 ("双击 ghost 音符会换成它所在的图层，并选中它"),
+        check (utf8 ("双击 ghost 音符会换成它所在的图层，选中它，并打开它的包络"),
                t77.getActiveLayerIndex() == 0 && roll.isNoteSelectedForTest (plain)
-                 && roll.getSelection().size() == 1 && roll.getEditingGroupId() < 0,
+                 && roll.getSelection().size() == 1 && roll.getEditingGroupId() < 0
+                 && openedLayer == 0 && openedNote == plain,
                utf8 ("层 ") + juce::String (t77.getActiveLayerIndex())
                  + utf8 (" / 选中 ") + juce::String ((int) roll.getSelection().size())
-                 + utf8 (" 个 / 组 ") + juce::String (roll.getEditingGroupId()));
+                 + utf8 (" 个 / 组 ") + juce::String (roll.getEditingGroupId())
+                 + utf8 (" / 包络 ") + juce::String (openedLayer) + ":"
+                 + juce::String (openedNote) + utf8 ("（应为 0:") + juce::String (plain) + "）");
 
         //-- 3. 双击组里的那一个：换层 + 进组 + 整次出现 -------------------
         // 只换层不进组的话，用户到了那一层还是要再双击一次，而这一步正是这一
         // 阶段要省掉的。整次出现而不是单个成员，是 P74 的答案。
         // 上一轮已经把活动层挪到 0 了，先退回去，让 grouped 重新变回 ghost。
         t77.setActiveLayerIndex (1);
+        openedLayer = openedNote = -2;      // 组里的成员双击是"打开组"，不是打开包络
         roll.simulateDoubleClickForTest (centreOfUnder (grouped));
 
         check (utf8 ("双击组里的 ghost 音符会连组一起打开，并选中整次出现"),
                t77.getActiveLayerIndex() == 0 && roll.getEditingGroupId() == gid
-                 && roll.isNoteSelectedForTest (grouped) && roll.isNoteSelectedForTest (partner),
+                 && roll.isNoteSelectedForTest (grouped) && roll.isNoteSelectedForTest (partner)
+                 && openedNote == -2,
                juce::String (t77.getActiveLayerIndex()) + utf8 (" / 组 ")
                  + juce::String (roll.getEditingGroupId()) + utf8 (" / 选中 ")
-                 + juce::String ((int) roll.getSelection().size()) + utf8 (" 个"));
+                 + juce::String ((int) roll.getSelection().size()) + utf8 (" 个")
+                 + (openedNote == -2 ? juce::String() : utf8 (" / 却也打开了包络")));
 
         //-- 4. 同一像素上活动层自己有音符：先问活动层 ---------------------
         // 判据是"这一像素在这一层回答谁"，不是"选中了谁"：普通音符的双击本来

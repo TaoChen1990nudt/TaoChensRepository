@@ -3491,6 +3491,15 @@ void PianoRollComponent::handleDoubleClick (juce::Point<float> pos)
             else
             {
                 setSelection ({ note->id });
+
+                // The double click that would have happened on that sheet, made
+                // here: an ungrouped note's double click opens its envelope
+                // inspector. Doing only half of it would make the same gesture
+                // on the same note mean two different things depending on which
+                // sheet you happened to be standing on — and the sheet you were
+                // on is exactly what this gesture is about.
+                if (onNoteDoubleClicked != nullptr)
+                    onNoteDoubleClicked (ghost.layerIndex, note->id);
             }
         }
 
