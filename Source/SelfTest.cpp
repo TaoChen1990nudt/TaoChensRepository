@@ -11576,6 +11576,137 @@ juce::String MainComponent::runSelfTest()
                showSpan (dd0) + " / " + showSpan (dd1) + utf8 ("（应为 70+4 / 70+4）"));
     }
 
+    //-- Phase 73: 编组要先双击进去，才能改里面的东西 -------------------------
+    // 组是一个对象：点它就整块拖，像视频剪辑里的片段。把七个音符里的一个单独
+    // 挪走是另一种意图，需要另一种手势——双击。在此之前，任何一次按下都得到
+    // "整个出现"这个答案，所以一次误拖不可能悄悄把成员带出队形。
+    {
+        LayerStack t73;
+        RackModel  r73;
+        PianoRollComponent roll (t73, r73);
+        roll.setSize (1200, 620);
+
+        t73.addLayer (utf8 ("P73 组"), palette::layer1);
+        auto* layer = t73.getLayer (0);
+
+        const int na      = layer->addNote ({ 0, 60, 0.0, 2.0, 0.9f });
+        const int nb      = layer->addNote ({ 0, 64, 6.0, 2.0, 0.9f });
+        // 组框之外，但仍在可见区里：pitch 56 在组成员（60..71）下方，
+        // beat 4 在组的时间范围内。放太靠右会落到可视区外——那样这一按
+        // 落在空白上，断言测的就不是"点到组外成员"了。
+        const int outside = layer->addNote ({ 0, 56, 4.0, 2.0, 0.9f });
+
+        const int gid = layer->addGroup (utf8 ("P73 组"), groupPalette::group1);
+        layer->assignNotesToGroup ({ na, nb }, gid);
+
+        SampleEvent clip;
+        clip.name        = "p73";
+        clip.startBeat   = 12.0;
+        clip.lengthBeats = 2.0;
+        clip.pitch       = 70;
+        clip.laneSpan    = 2;
+
+        const int clipId = layer->addSample (clip);
+        layer->assignSamplesToGroup ({ clipId }, gid);
+
+        const auto centreOf = [&] (int id)
+        {
+            return roll.getNoteScreenBounds (0, id).getCentre();
+        };
+
+        const auto showSel = [&] ()
+        {
+            return juce::String (roll.isNoteSelectedForTest (na) ? "A" : "-")
+                     + juce::String (roll.isNoteSelectedForTest (nb) ? "B" : "-")
+                     + juce::String (roll.isNoteSelectedForTest (outside) ? "O" : "-")
+                     + utf8 (" / 组 ") + juce::String (roll.getEditingGroupId());
+        };
+
+        //-- 1. 没进去之前，按下只回答"整个组" -----------------------------
+        roll.setSelection ({});
+        roll.simulatePressForTest (centreOf (na));
+
+        check (utf8 ("未进入组内编辑时，点组里一个音符会选中整组，而不是那一个"),
+               roll.isNoteSelectedForTest (na) && roll.isNoteSelectedForTest (nb) && ! roll.isNoteSelectedForTest (outside)
+                 && roll.getEditingGroupId() < 0,
+               showSel() + utf8 ("（应为 AB-，组 -1）"));
+
+        //-- 2. 双击才是"进去" --------------------------------------------
+        roll.simulateDoubleClickForTest (centreOf (na));
+
+        check (utf8 ("双击组里的音符会进入这个组的编辑，并选中被双击的那一个"),
+               roll.getEditingGroupId() == gid && roll.isNoteSelectedForTest (na) && ! roll.isNoteSelectedForTest (nb),
+               showSel() + utf8 ("（应为 A--，组 ") + juce::String (gid) + "）");
+
+        //-- 3. 进去之后，点谁选谁 ----------------------------------------
+        roll.simulatePressForTest (centreOf (nb));
+
+        check (utf8 ("进入组内编辑后，点哪一个音符就只选哪一个"),
+               roll.isNoteSelectedForTest (nb) && ! roll.isNoteSelectedForTest (na) && roll.getEditingGroupId() == gid,
+               showSel() + utf8 ("（应为 -B-，组未退出）"));
+
+        //-- 4. 双击空白退出 ----------------------------------------------
+        const auto grid = roll.getGridBounds();
+
+        roll.simulateDoubleClickForTest ({ grid.getRight() - ui::pf (24.0f),
+                                           grid.getBottom() - ui::pf (24.0f) });
+
+        check (utf8 ("组内编辑时双击空白区域会退出编辑"),
+               roll.getEditingGroupId() < 0,
+               juce::String (roll.getEditingGroupId()) + utf8 ("（应为 -1）"));
+
+        //-- 5. 采样块也一样：没进去就只是"这一组" ------------------------
+        roll.setSelection ({});
+        roll.simulatePressForTest (roll.getSampleScreenBounds (0, clipId).getCentre());
+
+        check (utf8 ("未进入组内编辑时，点组里的采样块会抓住整个组"),
+               roll.isNoteSelectedForTest (na) && roll.isNoteSelectedForTest (nb) && roll.isSampleSelected (clipId)
+                 && roll.getEditingGroupId() < 0,
+               showSel() + utf8 (" / 块 ") + (roll.isSampleSelected (clipId) ? "1" : "0"));
+
+        //-- 6. 组外一击就是离开 ------------------------------------------
+        roll.simulateDoubleClickForTest (centreOf (na));
+        const bool wasInside = roll.getEditingGroupId() == gid;
+
+        roll.simulatePressForTest (centreOf (outside));
+
+        check (utf8 ("组内编辑时点到组外的音符，会离开这个组"),
+               wasInside && roll.getEditingGroupId() < 0
+                 && roll.isNoteSelectedForTest (outside) && ! roll.isNoteSelectedForTest (na),
+               showSel() + (wasInside ? utf8 ("（进去过）") : utf8 ("（没进去）")));
+
+        //-- 7. 连"抓住边缘改长度"也是进去之后才行 ------------------------
+        // 选中了整组不等于抓住了整组：选中和起拖是两次写入，一个只选对了、
+        // 却把单音符的缩放臂起来的实现，能骗过所有只看选择的断言。
+        const auto tailOf = [&] (int id)
+        {
+            const auto b = roll.getNoteScreenBounds (0, id);
+            return juce::Point<float> { b.getRight() - ui::pf (3.0f),
+                                        b.getBottom() - ui::pf (3.0f) };
+        };
+
+        roll.setSelection ({});
+        roll.simulatePressForTest (tailOf (na));
+
+        const bool lockedGrab = roll.getDragOriginalCountForTest() == 2
+                                  && ! roll.pressArmedNoteResizeForTest();
+
+        roll.simulateDoubleClickForTest (centreOf (na));
+        roll.simulatePressForTest (tailOf (na));
+
+        const bool openGrab = roll.getDragOriginalCountForTest() == 1
+                                && roll.pressArmedNoteResizeForTest();
+
+        check (utf8 ("组的长度只有进去之后才能单独改：没进去时按边缘仍是整组，进去后才是缩放那一个"),
+               lockedGrab && openGrab,
+               juce::String (roll.getDragOriginalCountForTest())
+                 + (roll.pressArmedNoteResizeForTest() ? utf8 (" 个 / 缩放")
+                                                       : utf8 (" 个 / 不缩放"))
+                 + utf8 ("（关门时应 2 个 / 不缩放，开门后 1 个 / 缩放；")
+                 + (lockedGrab ? utf8 ("关门对") : utf8 ("关门错"))
+                 + " / " + (openGrab ? utf8 ("开门对") : utf8 ("开门错")) + "）");
+    }
+
     //-- Phase 64 / 66: the playhead follower must not oscillate ---------------
     {
         LayerStack t64;

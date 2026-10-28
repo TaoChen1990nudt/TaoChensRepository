@@ -586,6 +586,20 @@ public:
     bool simulateGroupMove (int layerIndex, int groupId, double deltaBeats, int deltaPitch,
                             int occurrence = -1);
 
+    /** Phase 73: test hooks — the real press and the real double click, driven
+        by the three facts a MouseEvent carries. See handlePress / handleDoubleClick
+        for why the event itself cannot be synthesised here. */
+    void simulatePressForTest (juce::Point<float> at, juce::ModifierKeys mods = {},
+                               int clicks = 1)
+    {
+        handlePress (at, mods, clicks);
+    }
+
+    void simulateDoubleClickForTest (juce::Point<float> at)
+    {
+        handleDoubleClick (at);
+    }
+
     /** Phase 27: the frame a group draws around its members, notes AND clips.
         Public so a test can assert "the clip is inside the bracket" without
         synthesising the paint pass. Empty when the group has no visible member. */
@@ -674,6 +688,54 @@ public:
     /** Selects every member of a group, so "drag the group" is just "drag the
         selection" — one drag implementation, two ways to fill it. */
     void selectGroup (int groupId, int occurrence = -1);
+
+    /** Phase 73: 组内编辑 — the group whose CONTENTS may be edited right now, or
+        -1.
+
+        A group is an object: click it and you drag all of it, the way a clip
+        behaves in a video editor. Editing one note out of seven is a different
+        intention, and it needs a different gesture — a double click on the
+        group (its pill, its frame, or any member). Until then every press
+        inside the group is answered with "the whole appearance", so a stray
+        drag can never silently take one member out of formation.
+
+        One value, not a flag: two groups must not be open at once, and
+        "which one" is a question every hit test has to answer anyway. */
+    int  getEditingGroupId() const noexcept { return editingGroupId; }
+    bool isEditingGroup() const noexcept    { return editingGroupId >= 0; }
+
+    /** Phase 73: true when `groupId` names a group whose members may NOT be
+        edited individually — i.e. any group that is not the one open. */
+    bool isGroupLocked (int groupId) const noexcept
+    {
+        return groupId >= 0 && groupId != editingGroupId;
+    }
+
+    /** Phase 73: opens a group for editing (`groupId < 0` closes). Public
+        because the pill's double click, the member's double click and the
+        self-test all have to go through the same two functions. */
+    void enterGroupEdit (int groupId);
+    void exitGroupEdit();
+
+    /** Phase 73: test hook — the note-level counterpart of isSampleSelected,
+        which is already public. "This press selected one member" and "it
+        selected the whole appearance" are different claims about the same
+        press, and the difference is the whole phase. */
+    bool isNoteSelectedForTest (int noteId) const { return isSelected (noteId); }
+
+    /** Phase 73: test hooks — what the last press ARMED.
+
+        The selection cannot tell "the whole appearance" from "one member"
+        reliably, because arming and selecting are two separate writes: an
+        implementation that selects the group and then arms a single-note drag
+        still passes any assertion that only looks at the selection. These ask
+        the drag itself. */
+    int  getDragOriginalCountForTest() const noexcept { return (int) dragOriginals.size(); }
+
+    bool pressArmedNoteResizeForTest() const noexcept
+    {
+        return dragMode == DragMode::resizeNote || dragMode == DragMode::resizeNoteLeft;
+    }
 
     /** Detaches the selected notes from their group(s). The group entity stays
         as long as it still has members. Returns true when anything changed. */
@@ -1421,6 +1483,17 @@ private:
     void updateCursor();
     void rebuildToolCursors();
 
+    //-- Phase 73: the press, taken apart ---------------------------------------
+    /** The body of mouseDown / mouseDoubleClick with the event disassembled.
+
+        A synthetic MouseEvent cannot be built without a peer, so the self-test
+        had no way to prove anything about a press — it could only call the
+        helpers a press calls, which is a claim about the helpers. These take the
+        same three facts the event carries (where, which modifiers, how many
+        clicks) and run the real path. */
+    void handlePress (juce::Point<float> pos, juce::ModifierKeys mods, int clicks);
+    void handleDoubleClick (juce::Point<float> pos);
+
     //-- Phase 19: audition ---------------------------------------------------
     /** Sounds one note on whatever the routing says plays it. Silent when the
         host has not wired the callback (the headless self-test). */
@@ -1502,7 +1575,7 @@ private:
     int  findSampleCurvePointAt (int layerIndex, int sampleId,
                                  juce::Point<float> position) const;
     void dragSampleCurvePoint (int layerIndex, int sampleId, juce::Point<float> position);
-    bool handleSampleAutomationMouseDown (const juce::MouseEvent& e,
+    bool handleSampleAutomationMouseDown (juce::Point<float> pos, juce::ModifierKeys mods,
                                           int layerIndex, int sampleId);
     void showSampleCurveMenu (int layerIndex, int sampleId, juce::Point<int> screenPosition);
     void drawSampleAutomationBox (juce::Graphics&);
@@ -1716,7 +1789,8 @@ private:
     const NoteEvent* getExpandedNote() const;
 
     void showModTargetMenu (const NoteEvent&, juce::Point<int> screenPosition);
-    bool handleAutomationMouseDown (const juce::MouseEvent&, NoteEvent&);
+    bool handleAutomationMouseDown (juce::Point<float> pos, juce::ModifierKeys mods,
+                                    NoteEvent&);
     void dragAutomationPoint (NoteEvent&, juce::Point<float> position);
     int  findEnvelopePointAt (const NoteEvent&, juce::Point<float>) const;
 
@@ -1745,7 +1819,7 @@ private:
     const AutomationLane& groupLaneFor (const NoteGroup&, int target) const;
 
     void showGroupTargetMenu (juce::Point<int> screenPosition);
-    bool handleGroupAutomationMouseDown (const juce::MouseEvent&);
+    bool handleGroupAutomationMouseDown (juce::Point<float> pos, juce::ModifierKeys mods);
     void dragGroupCurvePoint (juce::Point<float> position);
     int  findGroupCurvePointAt (juce::Point<float>) const;
 
@@ -1942,6 +2016,11 @@ private:
     int hoveredGroupId = -1;
     int hoveredGroupLayer = -1;
     int hoveredGroupOccurrence = 0;          // Phase 58
+
+    /** Phase 73: the group open for member-level editing, or -1. Group ids are
+        unique across layers (a session-wide counter), so the id alone answers
+        "which sheet" — the same way groupFrameOf is asked. */
+    int editingGroupId = -1;
 
     //-- Phase 17 -------------------------------------------------------------
     /** The clip being moved or trimmed, and its state when the drag began. */

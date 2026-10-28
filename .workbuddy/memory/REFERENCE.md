@@ -321,6 +321,24 @@
   （首次推走时 `if (!followScrolled) userScrollBeats = scrollBeats`）。
 
 ## 编组
+- **默认是对象，不是容器**（P73）：没进入编辑时，组里任何成员的按下都只回答"整个出现"——
+  `armGroupMove()` 选中整组并起拖，缩放带、橡皮、刻刀、右键盘菜单一并改道组菜单。
+  双击成员 / 组框 / 组名 pill 才 `enterGroupEdit(groupId)`，之后点谁选谁，可以单独移动、改长度、
+  删除。双击空白 `exitGroupEdit()`；点到组外的成员（含别的组）当场退出。
+- **状态只有一个 `editingGroupId`**（P73）：组 id 全会话唯一（`groupIdCounter()` 静态），所以不另存
+  layer。判定只有 `isGroupLocked(gid)`（`gid >= 0 && gid != editingGroupId`）。
+- **失效判据写在 `layersChanged()`，且无条件**（P73）：撤销/加载会把同一个组 id 带回来，
+  "这个组还在吗"会答 yes，然后把用户没双击过的组悄悄打开。`notesChanged()` 另有一条按存在性清的
+  自愈（对应 `pruneEmptyGroups`），它只在组真的消失时才生效。
+- **`mouseDown` / `mouseDoubleClick` 的实体是 `handlePress` / `handleDoubleClick`**（P73）：
+  参数是 `(Point<float>, ModifierKeys, int clicks)`，自检走 `simulatePressForTest` /
+  `simulateDoubleClickForTest`。事件里的整数点单独取 `ipos = pos.roundToInt()`——JUCE 的
+  `Rectangle<T>::contains` 只吃 `Point<T>`，两种点不能互相隐式转换。
+- **`clicks >= 2` 的空白按下由 `handlePress` 先吞掉**（P73）：`mouseDoubleClick` 在那之后才跑，
+  不吞的话铅笔会在"退出编辑"的同一次双击里再画一个音符。
+- **视觉：外圈虚线**（P73）：编辑中的组在实线框外 3 px 再画一圈 `drawDashedLine`（dash 4/3.5），
+  pill 实心 + `surface1` 描边。不用加粗，加粗已经是 hover/focus 的语义；不用四角角标，
+  组名 pill 长在左上角会吃掉一个，组越短越看不见。
 - **内联曲线框**：框的左右 = **组的起止拍**，`getGroupCurveBounds()` 水平零内边距；X 轴是组自身
   跨度、Y 轴 0..1。打开即 `setEnabled(true)`；**与音符内联框互斥**。
 - **组要能拖起来**：唯一入口 `armGroupMove(groupId, pos)`。两条路：点标签 `getGroupLabelAt`、

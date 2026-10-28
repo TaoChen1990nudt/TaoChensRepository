@@ -1548,3 +1548,97 @@ occ 1 排序还是 B1(48), A1(60)
 上限要按"还剩多少行"算：`min (128, numPitches - pitch)`。这条数字第一次写的时候
 只在拖动路径上生效是看不出来的——拖动的目标行本来就被 `pitchAtScreenY` 夹过，所以
 `jmax(bottom, lane) - bottom + 1` 自己就不会超；只有"菜单一步一行"那条路才会撞上去。
+
+## P73-A：把事件拆开才能测——但拆开的第一个代价是两种坐标点
+
+`mouseDown` 里同时住着两个点：`e.getPosition()`（`Point<int>`，事件自己的整数像素）和
+`e.position`（`Point<float>`，给几何用的）。后者是前者的 float 视图，平时混着写没有代价。
+
+拆成 `handlePress (Point<float> pos, ModifierKeys, int clicks)` 之后，所有 `Rectangle<int>::contains`
+就编不过了——JUCE 的 `Rectangle<T>::contains` 只接受 `Point<T>`，`Point<int>` 和 `Point<float>`
+之间**没有转换构造函数**（JUCE 8 只有 `(x, y)` 和 copy，跨类型要走 `toFloat()` / `roundToInt()`）。
+
+所以在函数顶部做一次 `const auto ipos = pos.roundToInt();`，工具条/滚动条/标尺/键盘/网格这几个
+整数矩形用它，其余继续用 `pos`。
+
+**收益**：自检第一次能走真正的按下路径。之前所有"点击"断言都只能调按下时调用的 helper
+（`armGroupMove`、`simulateNoteResize`），那是在测 helper，不是测按下。P73 的七条断言全部
+经 `simulatePressForTest` / `simulateDoubleClickForTest`。
+
+**代价**：三个 `handleXxxAutomationMouseDown` 的签名也得跟着从 `const MouseEvent&` 改成
+`(Point<float>, ModifierKeys)`，否则 `handlePress` 里没有 `e` 可传。这类"顺手改签名"要一次做干净，
+不然会出现"函数体里 `e` 未声明"的一串错误。
+
+## P73-B：选择性断言会骗人——"选中了整组"不等于"抓住了整组"
+
+P73 的核心承诺是：没进入编辑时，按组里的音符只能整体拖。第一版断言检查的是选择集
+（`isSelected(a) && isSelected(b)`）。
+
+这条断言守不住它该守的东西，因为一次按下里有两处独立写入：
+
+```cpp
+selectGroup (groupId, occurrence);   // 写选择集
+captureDragOriginals();              // 写起拖集合
+```
+
+一个"选择对了、但起拖只抓了那一个音符"的实现，能完全通过只看选择集的断言——而这正是
+用户会遇到的 bug（高亮整组，拖动却只走一个）。
+
+所以补了两个钩子，让断言盯**起拖**：
+
+```cpp
+int  getDragOriginalCountForTest() const { return (int) dragOriginals.size(); }
+bool pressArmedNoteResizeForTest() const  { return dragMode == resizeNote
+                                                  || dragMode == resizeNoteLeft; }
+```
+
+第 7 条断言于是变成"关门时按边缘 = 2 个 / 不缩放；开门后 = 1 个 / 缩放"。删掉锁守卫，
+这条和选择集那条一起挂。
+
+同族错误见 P71-C（`hasLiveNotes()` 看不见死槽）、P72-C（守卫是死代码）。
+
+## P73-C：失效判据写成"东西还在吗"，撤销会让它答错
+
+编辑状态（`editingGroupId`）什么时候失效？第一版写的是"每次按下时检查这个组还在不在"：
+
+```cpp
+if (editingGroupId >= 0 && layerIndexOfGroup (editingGroupId) < 0)
+    editingGroupId = -1;
+```
+
+它看上去很稳，实际上答的是错误的问题。组 id 是**序列化**进工程文件的，撤销把整个工程恢复到
+上一份快照时，同一个 id 会原样回来。于是：
+
+1. 用户在组 G 里编辑，删掉一个成员；
+2. Ctrl+Z，G 和它的成员回来了（id 还是 G）；
+3. 存在性检查答"在"，`editingGroupId` 仍然是 G —— **用户从没双击过的组，自己打开了**。
+
+正确的位置是 `layersChanged()`，而且是无条件清：
+
+```cpp
+void PianoRollComponent::layersChanged()
+{
+    editingGroupId = -1;   // 加载 / 撤销 / 重做 / 切层都会到这里
+    ...
+}
+```
+
+代价是"改个图层名也退出组内编辑"，这比"编辑器以为自己还在里面"要便宜得多。
+
+**规律**：判断"某个外部 id 是否还指向同一个东西"时，先问 id 是不是会被重新创建。卸载/重建
+型的模型里，`id` 是名字不是地址，存在性永远答 yes。
+
+## P73-D：视觉标记不能用"更粗"，因为它已经被占用了
+
+想表达"这个组已打开"，第一版画了四个 L 形角标 + 加粗边框。两个问题：
+
+1. **加粗已经意味着 hover/focus**（`focused ? 1.4 : 1.0`），再加一档只是"更亮"，用户分不出
+   是"我在编辑"还是"鼠标在这儿"。
+2. **角标会被组名 pill 吃掉一个**。pill 长在组框左上角，正好压住左上角标；组越短 pill 占比越大，
+   越需要提示的组越看不见提示。
+
+改成：实线框保留，外面再画一圈**虚线**（`drawDashedLine` 四条边，dash 4 / 3.5，外扩 3 px）。
+虚线绕一圈，四边都看得见，pill 只能盖住顶上的一小段。
+
+**规律**：一个新状态要找一种**没用过**的视觉维度（形状、线型、位置），不要复用已有的
+（粗细、亮度），否则两个状态会互相冒充。

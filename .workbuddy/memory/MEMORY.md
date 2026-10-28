@@ -7,7 +7,7 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
 编组、采样、走带、文件树、波形、伸缩、缩放、电平表）；平台陷阱与自检夹具在 `PITFALLS.md`。
 动代码前按主题查这两份，本文件只留跨主题硬规则。
 
-## 七条硬规则
+## 八条硬规则
 1. **中文一律 `atomic::utf8("...")`**，自检的失败信息也算。裸中文 = 乱码。
 2. **几何走 `ui::px()/pf()`、字号 `ui::sp()`**，唯一密度旋钮 `ui::scale = 1.3f`，禁止裸像素。
    `numPitches` / gutter / 内联自动化框最小宽度不缩放。
@@ -21,6 +21,10 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
    （先删块再删槽）；撤销 = 整工程 XML 快照，**粒度是一次鼠标手势**（`beginUndoGesture()` /
    `endUndoGesture()` 包住按下与释放，手势期间 `commitHistory()` 直接返回）；试听分岔 =
    `MainComponent::auditionPreview()`（插件槽发真 MIDI，内置合成器才发正弦）。
+8. **编组默认是对象，不是容器**（P73）：没双击进去之前，组内成员的按下只回答「整个出现」
+   （选中 + 整组起拖），缩放/删除/切割都不生效；双击成员、组框或组名进入 `enterGroupEdit()`，
+   双击空白或点到组外成员退出。状态只有一个 `editingGroupId`；失效判据在 `layersChanged()`
+   里**无条件**清——撤销/加载会把同一个组 id 带回来，存在性检查会答 yes。
 7. **组的形状只按「起点 + 名字」配对**（`clipShapeLess`）：配对键不能是形状编辑自己会改的
    字段——pitch 曾经是，拖采样块下边缘把 pitch 一改，序号配对就错位、两个副本互换名字和音频。
    宽度、窗口、曲线、`laneSpan` 全是形状，改完一律走 `syncShapeOfClip()`。：会话重置 = `buildSession(withEmptyLayer)`；删槽 = `removeSlotAndItsClips()`

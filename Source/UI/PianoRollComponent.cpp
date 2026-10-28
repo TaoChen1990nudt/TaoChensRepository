@@ -262,6 +262,15 @@ bool PianoRollComponent::isLayerShown (int layerIndex) const
 //==============================================================================
 void PianoRollComponent::layersChanged()
 {
+    //-- Phase 73: any structural change closes the open group ---------------
+    // Unconditional, and deliberately so. This notification is how a project
+    // load, an undo and a layer switch all arrive. After an undo the SAME group
+    // id can come back (ids are serialised), so "does the group still exist"
+    // would answer yes and quietly re-open a group the user never double-clicked
+    // in this session. The cost of clearing is one double click; the cost of
+    // keeping is an editor that thinks it is still inside something.
+    editingGroupId = -1;
+
     // Switching sheets must not carry a stale selection across layers, or you
     // would end up dragging notes you cannot see.
     if (stack.getActiveLayerIndex() != lastActiveLayer)
@@ -283,6 +292,13 @@ void PianoRollComponent::layersChanged()
 
 void PianoRollComponent::notesChanged()
 {
+    // Phase 73: an emptied group is pruned on this notification (see
+    // pruneEmptyGroups), so this is where the open group can have just ceased
+    // to exist. Healing here rather than at each of the four call sites keeps
+    // the rule "a group id is valid only while it names a group".
+    if (editingGroupId >= 0 && layerIndexOfGroup (editingGroupId) < 0)
+        editingGroupId = -1;
+
     repaint();
 }
 
@@ -2536,27 +2552,35 @@ const NoteEvent* PianoRollComponent::hitTestActiveLayer (juce::Point<float> posi
 //==============================================================================
 void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
 {
+    handlePress (e.getPosition().toFloat(), e.mods, e.getNumberOfClicks());
+}
+
+void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys mods,
+                                      int clicks)
+{
     grabKeyboardFocus();
 
     if (onCanvasMouseDown != nullptr)
         onCanvasMouseDown();
 
-    const auto pos = e.getPosition();
+    // The event's own point is integral; the grid is in floats. Both are needed
+    // below, so the conversion happens once, at the top.
+    const auto ipos = pos.roundToInt();
 
     // ---- Tool strip ---------------------------------------------------------
-    if (getToolbarArea().contains (pos))
+    if (getToolbarArea().contains (ipos))
     {
         static const Tool tools[5] { Tool::pencil, Tool::eraser, Tool::select, Tool::hand,
                                      Tool::knife };
 
         for (int i = 0; i < 5; ++i)
-            if (getToolButtonBounds (i).contains (pos))
+            if (getToolButtonBounds (i).contains (ipos))
             {
                 setTool (tools[i]);
                 return;
             }
 
-        if (getToolButtonBounds (5).contains (pos))
+        if (getToolButtonBounds (5).contains (ipos))
         {
             // Copy / clear. Copying switches to the pencil in the same click:
             // "I copied this note's state" is only useful if the next thing you
@@ -2569,7 +2593,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
             return;
         }
 
-        if (getToolButtonBounds (6).contains (pos))
+        if (getToolButtonBounds (6).contains (ipos))
         {
             // Phase 16. With nothing selected there is nothing to group, and
             // silently doing nothing is worse than saying so in the strip.
@@ -2581,7 +2605,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
             return;
         }
 
-        if (getToolButtonBounds (7).contains (pos))
+        if (getToolButtonBounds (7).contains (ipos))
         {
             // Phase 20: the inverse of 编组, next to it — and Phase 21 moved the
             // magnet past it, because 编组 / 解组 are one pair and the snap
@@ -2596,7 +2620,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
             return;
         }
 
-        if (getToolButtonBounds (8).contains (pos))
+        if (getToolButtonBounds (8).contains (ipos))
         {
             setSnapEnabled (! snapEnabled);
             repaint (getToolbarArea());
@@ -2607,14 +2631,14 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     }
 
     // ---- Horizontal scrollbar ----------------------------------------------
-    if (getScrollBarArea().contains (pos))
+    if (getScrollBarArea().contains (ipos))
     {
         const auto thumb = getScrollThumb();
 
-        if (thumb.expanded (4.0f, 2.0f).contains (e.position))
+        if (thumb.expanded (4.0f, 2.0f).contains (pos))
         {
             dragMode = DragMode::scrollThumb;
-            scrollDragAnchorX = e.position.x;
+            scrollDragAnchorX = pos.x;
             scrollDragAnchorBeats = scrollBeats;
         }
         else
@@ -2624,7 +2648,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
             const double visible = getVisibleBeats();
             const float span = juce::jmax (1.0f, track.getWidth() - thumb.getWidth());
             const float t = juce::jlimit (0.0f, 1.0f,
-                                          (e.position.x - track.getX() - thumb.getWidth() * 0.5f) / span);
+                                          (pos.x - track.getX() - thumb.getWidth() * 0.5f) / span);
             setScrollBeats ((double) t * juce::jmax (0.0, timelineBeats - visible));
         }
 
@@ -2636,7 +2660,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     // Before the ruler and the grid: the keys are outside both, and the old
     // code simply fell through to "not in the grid, ignore". A pitch grid you
     // cannot hear while pointing at it is a picture of a keyboard.
-    if (getKeyboardArea().contains (pos))
+    if (getKeyboardArea().contains (ipos))
     {
         const int pitch = juce::jlimit (0, numPitches - 1, pitchAtScreenY ((float) pos.y));
 
@@ -2651,9 +2675,9 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     // Both live on the same strip because that is how the users of this editor
     // expect a time axis to behave: pointing at a beat moves time there, and
     // "the thing that is scaled" is the scale itself, not the transport.
-    if (getRulerArea().contains (pos))
+    if (getRulerArea().contains (ipos))
     {
-        if (e.mods.isPopupMenu())
+        if (mods.isPopupMenu())
         {
             // Right button: zoom. Anchored on the value the drag started with,
             // so the scale cannot wind up or down as the mouse jitters.
@@ -2662,10 +2686,10 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
             // point of the gesture. A right-drag on a ruler is "pull this moment
             // apart" — the moment under the mouse is the one that must not move.
             dragMode = DragMode::rulerZoom;
-            rulerDragAnchorY      = e.position.y;
+            rulerDragAnchorY      = pos.y;
             rulerDragAnchorBeatWidth = beatWidth;
-            rulerZoomAnchorX      = e.position.x;
-            rulerZoomAnchorBeat   = beatAtScreenX (e.position.x);
+            rulerZoomAnchorX      = pos.x;
+            rulerZoomAnchorBeat   = beatAtScreenX (pos.x);
             setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
             return;
         }
@@ -2675,18 +2699,33 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
 
         // Phase 67: one function, so a click and a drag cannot disagree about
         // where the playhead is.
-        scrubRulerTo (e.position.x);
+        scrubRulerTo (pos.x);
 
         return;
     }
 
-    if (! getGridArea().contains (e.position))
+    if (! getGridArea().contains (pos))
         return;
+
+    //-- Phase 73: the second press of a double click on empty canvas ---------
+    // mouseDoubleClick runs AFTER this, so without the early exit the pencil
+    // would draw a note here and the double click would then close the group —
+    // "get me out of here" leaving a note behind. Only genuinely empty space
+    // counts: anything the double click would open must not be swallowed.
+    if (clicks >= 2 && editingGroupId >= 0
+          && hitTestActiveLayer (pos) == nullptr
+          && hitTestSample (pos) == nullptr
+          && getGroupLabelAt (pos) < 0
+          && getGroupFrameAt (pos) < 0)
+    {
+        exitGroupEdit();
+        return;
+    }
 
     // ---- Phase 29: the way out of the spotlight ----------------------------
     // Checked before everything else in the grid: the chip is an override, and
     // a click that lands on it must not also move something out from under it.
-    if (focusSlotId >= 0 && getSpotlightExitChipBounds().toFloat().contains (e.position))
+    if (focusSlotId >= 0 && getSpotlightExitChipBounds().toFloat().contains (pos))
     {
         dismissSpotlight();
         return;
@@ -2699,12 +2738,12 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     {
         if (auto* expanded = getExpandedNote())
         {
-            if (getNoteAutomationBoxBounds (*expanded).contains (e.position))
+            if (getNoteAutomationBoxBounds (*expanded).contains (pos))
             {
                 // Phase 22: a click inside a box (re)selects its curve, whether
                 // that click lands on a point, the parameter cell or the frame.
                 curveSelection = CurveSelection::noteEnvelope;
-                handleAutomationMouseDown (e, *expanded);
+                handleAutomationMouseDown (pos, mods, *expanded);
                 return;
             }
         }
@@ -2720,10 +2759,10 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         if (auto* expanded = getExpandedGroup())
         {
             if (getGroupAutomationBoxBounds (expandedGroupLayerIndex, expandedGroupId)
-                  .contains (e.position))
+                  .contains (pos))
             {
                 curveSelection = CurveSelection::groupLane;
-                handleGroupAutomationMouseDown (e);
+                handleGroupAutomationMouseDown (pos, mods);
                 return;
             }
         }
@@ -2739,9 +2778,9 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         if (getExpandedSample() != nullptr)
         {
             if (getSampleAutomationBoxBounds (expandedSampleLayerIndex, expandedSampleId)
-                  .contains (e.position))
+                  .contains (pos))
             {
-                handleSampleAutomationMouseDown (e, expandedSampleLayerIndex, expandedSampleId);
+                handleSampleAutomationMouseDown (pos, mods, expandedSampleLayerIndex, expandedSampleId);
                 return;
             }
         }
@@ -2768,7 +2807,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
 
         for (const auto& group : layer->getGroups())
         {
-            if (! getGroupAutomationHandleBounds (i, group.getId()).contains (e.position))
+            if (! getGroupAutomationHandleBounds (i, group.getId()).contains (pos))
                 continue;
 
             if (expandedGroupId == group.getId() && expandedGroupLayerIndex == i)
@@ -2786,26 +2825,54 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     // test rather than a modifier key nobody would guess.
     int labelOccurrence = 0;
 
-    if (const int groupId = getGroupLabelAt (e.position, &labelOccurrence); groupId >= 0)
+    if (const int groupId = getGroupLabelAt (pos, &labelOccurrence); groupId >= 0)
     {
         const int layerIndex = layerIndexOfGroup (groupId);
 
-        if (e.mods.isPopupMenu())
+        if (mods.isPopupMenu())
         {
-            showGroupMenu (layerIndex, groupId, labelOccurrence, e.getScreenPosition());
+            showGroupMenu (layerIndex, groupId, labelOccurrence, localPointToGlobal (pos.roundToInt()));
             return;
         }
 
-        armGroupMove (groupId, labelOccurrence, e.position);
+        armGroupMove (groupId, labelOccurrence, pos);
         return;
     }
 
     // ---- Phase 17: an audio clip under the cursor --------------------------
     // Before the notes: a block is the size of several lanes, so it is the
     // thing you are aiming at when both are under the pointer.
-    if (auto* clipUnder = hitTestSample (e.position))
+    if (auto* clipUnder = hitTestSample (pos))
     {
         const int clipId = clipUnder->id;
+
+        //-- Phase 73: a block inside a CLOSED group answers as the group -------
+        // A group is one object until it is opened: the press selects the whole
+        // appearance and arms a rigid move of it. Without this, grabbing what
+        // looks like one block took that one block out of formation — the group
+        // was still on screen, still named, and its contents had quietly
+        // scattered. The trim bands are locked too: "the group's block is
+        // longer" is a shape edit, and shapes belong to all appearances.
+        if (isGroupLocked (clipUnder->groupId))
+        {
+            if (mods.isPopupMenu())
+            {
+                showGroupMenu (stack.getActiveLayerIndex(), clipUnder->groupId,
+                               clipUnder->groupOccurrence,
+                               localPointToGlobal (pos.roundToInt()));
+                return;
+            }
+
+            armGroupMove (clipUnder->groupId, clipUnder->groupOccurrence, pos);
+            return;
+        }
+
+        // Inside the open group, or a stranger: a block that is not a member of
+        // the group being edited means the user has moved on, so the group
+        // closes here. Clicking OUT of a container leaves it — that is the same
+        // rule as clicking out of a text box.
+        if (editingGroupId >= 0 && clipUnder->groupId != editingGroupId)
+            exitGroupEdit();
 
         //-- Phase 58: a SELECTED block's edge outranks the hit --------------
         // The hit test can only answer with ONE block, and with two blocks
@@ -2815,7 +2882,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         // The pointer's own cursor already says "trim band", so ask that
         // question first: if the edge belongs to something selected, that edge
         // is what the gesture is about, and the selection must survive.
-        const auto edge      = clipEdgeAt (e.position);
+        const auto edge      = clipEdgeAt (pos);
         const int  edgeId    = edge.first;
         const auto edgeKind  = edge.second;
         const int  grabbedId = edgeId >= 0 ? edgeId : clipId;
@@ -2823,7 +2890,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         // Phase 28: the click is also the selection — except on a trim grab
         // that belongs to an already-selected block, where rewriting the
         // selection would throw away exactly the blocks the trim is for.
-        if (e.mods.isShiftDown() || e.mods.isCommandDown())
+        if (mods.isShiftDown() || mods.isCommandDown())
             toggleSampleSelection (clipId);
         else if (edgeId < 0 && ! isSampleSelected (clipId))
             setSampleSelection ({ clipId });
@@ -2835,9 +2902,9 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         if (grabbed == nullptr)
             return;
 
-        if (e.mods.isPopupMenu())
+        if (mods.isPopupMenu())
         {
-            showSampleMenu (grabbedId, e.getScreenPosition());
+            showSampleMenu (grabbedId, localPointToGlobal (pos.roundToInt()));
             return;
         }
 
@@ -2862,7 +2929,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
             // magnet is on (a cut between grid lines sounds like an edit, a cut
             // on the grid sounds like music). The two halves become the
             // selection, which is the cut's own feedback.
-            const double at = beatAtScreenX (e.position.x);
+            const double at = beatAtScreenX (pos.x);
 
             splitSamplesAt ({ grabbedId }, snapEnabled ? snapBeat (at) : at);
             return;
@@ -2872,14 +2939,14 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         // this very press has no entry in the selection hit test yet, so the
         // band is computed from the block the press landed on.
         const auto bounds    = getSampleScreenBounds (stack.getActiveLayerIndex(), grabbedId);
-        const ClipEdge edgeUnder = edgeId >= 0 ? edgeKind : edgeOfClip (bounds, e.position);
+        const ClipEdge edgeUnder = edgeId >= 0 ? edgeKind : edgeOfClip (bounds, pos);
 
         // Phase 49: the chevron on the block opens its curve box. Checked
         // before the trim bands because it sits between them — the same order
         // the note's tail button answers in.
         const auto handle = getSampleAutomationHandleBounds (*grabbed);
 
-        if (! handle.isEmpty() && handle.contains (e.position))
+        if (! handle.isEmpty() && handle.contains (pos))
         {
             if (expandedSampleId == grabbedId && expandedSampleLayerIndex == stack.getActiveLayerIndex())
                 closeSampleAutomation();
@@ -2898,7 +2965,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         {
             dragSampleId       = grabbedId;
             dragSampleOriginal = *grabbed;
-            dragAnchorBeat     = beatAtScreenX (e.position.x);
+            dragAnchorBeat     = beatAtScreenX (pos.x);
             dragMode           = edgeUnder == ClipEdge::tail ? DragMode::resizeSample
                                                              : DragMode::resizeSampleLeft;
 
@@ -2921,7 +2988,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
             // same one-delta arithmetic (see applySampleSpanDrag).
             dragSampleId       = grabbedId;
             dragSampleOriginal = *grabbed;
-            dragAnchorBeat     = beatAtScreenX (e.position.x);
+            dragAnchorBeat     = beatAtScreenX (pos.x);
             dragMode           = edgeUnder == ClipEdge::top ? DragMode::resizeSampleTop
                                                             : DragMode::resizeSampleBottom;
 
@@ -2935,27 +3002,59 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         }
         else
         {
-            armSampleMove (e.position);
+            armSampleMove (pos);
         }
 
         repaint();
         return;
     }
 
-    if (e.mods.isPopupMenu())
+    //-- Phase 73: a closed group answers for ALL of its members ---------------
+    // Placed before the note's chevron, before the canvas menu, and before the
+    // knife / eraser / note body, because "only drag and select" has to hold for
+    // every tool and every button: the same note must not be untouchable with
+    // the selector and one click away from being cut in half with the knife.
+    // The press becomes the group's own grab — select the appearance, arm the
+    // rigid move — which is exactly what the pill and the bracket already do,
+    // so there is one gesture here and not three.
+    //
+    // The hand tool is exempt: panning the view is not an edit.
+    if (tool != Tool::hand)
+    {
+        if (auto* member = hitTestActiveLayer (pos))
+        {
+            if (isGroupLocked (member->groupId))
+            {
+                if (mods.isPopupMenu())
+                    showGroupMenu (stack.getActiveLayerIndex(), member->groupId,
+                                   member->groupOccurrence,
+                                   localPointToGlobal (pos.roundToInt()));
+                else
+                    armGroupMove (member->groupId, member->groupOccurrence, pos);
+
+                return;
+            }
+
+            // A note that is NOT in the open group means the user has left it.
+            if (editingGroupId >= 0 && member->groupId != editingGroupId)
+                exitGroupEdit();
+        }
+    }
+
+    if (mods.isPopupMenu())
     {
         // Right-click anywhere else: the group actions for whatever the
         // selection currently is. Before Phase 16 this click was simply ignored.
-        showCanvasMenu (e.getScreenPosition());
+        showCanvasMenu (localPointToGlobal (pos.roundToInt()));
         return;
     }
 
     // ---- Phase 8: the "v" handle at the note's tail -------------------------
-    if (auto* noteUnderMouse = hitTestActiveLayer (e.position))
+    if (auto* noteUnderMouse = hitTestActiveLayer (pos))
     {
         const auto handle = getNoteAutomationHandleBounds (*noteUnderMouse);
 
-        if (! handle.isEmpty() && handle.contains (e.position))
+        if (! handle.isEmpty() && handle.contains (pos))
         {
             const int id = noteUnderMouse->id;
 
@@ -2982,7 +3081,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     if (tool == Tool::hand)
     {
         dragMode = DragMode::panView;
-        panAnchor = e.position;
+        panAnchor = pos;
         panAnchorScrollY = scrollY;
         panAnchorBeats = scrollBeats;
         return;
@@ -2996,9 +3095,9 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     // a ramp stays a ramp.
     if (tool == Tool::knife)
     {
-        if (auto* hit = hitTestActiveLayer (e.position))
+        if (auto* hit = hitTestActiveLayer (pos))
         {
-            const double at = beatAtScreenX (e.position.x);
+            const double at = beatAtScreenX (pos.x);
 
             splitNotesAt ({ hit->id }, snapEnabled ? snapBeat (at) : at);
             return;
@@ -3010,7 +3109,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     // ---- Eraser: one click, one note ---------------------------------------
     if (tool == Tool::eraser)
     {
-        if (auto* hit = hitTestActiveLayer (e.position))
+        if (auto* hit = hitTestActiveLayer (pos))
         {
             if (auto* active = stack.getActiveLayer())
             {
@@ -3026,12 +3125,12 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     }
 
     // ---- Pencil: click empty grid to draw a note ---------------------------
-    if (tool == Tool::pencil && hitTestActiveLayer (e.position) == nullptr)
+    if (tool == Tool::pencil && hitTestActiveLayer (pos) == nullptr)
     {
         // Phase 11: the note is stamped, not invented — if a state was copied
         // off another note it carries that length, velocity, curve and synth.
-        if (const int newId = addNoteAt (beatAtScreenX (e.position.x),
-                                          pitchAtScreenY (e.position.y));
+        if (const int newId = addNoteAt (beatAtScreenX (pos.x),
+                                          pitchAtScreenY (pos.y));
             newId > 0)
         {
             setSelection ({ newId });
@@ -3050,7 +3149,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     }
 
     // ---- Is there an editable note under the cursor? -------------------------
-    if (auto* hit = hitTestActiveLayer (e.position))
+    if (auto* hit = hitTestActiveLayer (pos))
     {
         const int  hitId = hit->id;
         const int  hitPitch = hit->pitch;
@@ -3059,17 +3158,17 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
 
         // Phase 19: both ends resize. The right end keeps priority when the note
         // is short enough that the two bands would overlap.
-        const bool onRightEdge = e.position.x > noteBounds.getRight() - band;
-        const bool onLeftEdge  = ! onRightEdge && e.position.x < noteBounds.getX() + band;
+        const bool onRightEdge = pos.x > noteBounds.getRight() - band;
+        const bool onLeftEdge  = ! onRightEdge && pos.x < noteBounds.getX() + band;
 
-        if (e.mods.isShiftDown() || e.mods.isCommandDown())
+        if (mods.isShiftDown() || mods.isCommandDown())
             toggleSelection (hitId);
         else if (! isSelected (hitId))
             setSelection ({ hitId });
 
         // Alt-drag: leave the original where it is and drag a copy — which
         // carries the envelope, because the copy is a whole NoteEvent.
-        if (e.mods.isAltDown() && ! onRightEdge && ! onLeftEdge)
+        if (mods.isAltDown() && ! onRightEdge && ! onLeftEdge)
         {
             const auto copies = duplicateSelectedNotes (0.0);
 
@@ -3081,8 +3180,8 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         {
             dragMode = onRightEdge ? DragMode::resizeNote
                        : (onLeftEdge ? DragMode::resizeNoteLeft : DragMode::moveNote);
-            dragAnchorBeat = beatAtScreenX (e.position.x);
-            dragAnchorPitch = pitchAtScreenY (e.position.y);
+            dragAnchorBeat = beatAtScreenX (pos.x);
+            dragAnchorPitch = pitchAtScreenY (pos.y);
             dragAuditionPitch = hitPitch;
 
             // Phase 25: only the grabbed note resizes. The selection may be a
@@ -3105,13 +3204,13 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     //
     // Shift is exempt on purpose: additive marquee INSIDE a group still has to
     // work, and that is what Shift already means on empty canvas.
-    if (! e.mods.isShiftDown())
+    if (! mods.isShiftDown())
     {
         int frameOccurrence = 0;
 
-        if (const int frameGroup = getGroupFrameAt (e.position, &frameOccurrence); frameGroup >= 0)
+        if (const int frameGroup = getGroupFrameAt (pos, &frameOccurrence); frameGroup >= 0)
         {
-            armGroupMove (frameGroup, frameOccurrence, e.position);
+            armGroupMove (frameGroup, frameOccurrence, pos);
             return;
         }
     }
@@ -3123,7 +3222,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     // dismisses it.
     dismissSpotlight();
 
-    if (! e.mods.isShiftDown())
+    if (! mods.isShiftDown())
     {
         selection.clear();
         sampleSelection.clear();     // Phase 28: clicking the grid lets go of both
@@ -3131,26 +3230,79 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     }
 
     dragMode = DragMode::marquee;
-    marqueeStart = marqueeCurrent = e.position;
+    marqueeStart = marqueeCurrent = pos;
     repaint();
 }
 
 void PianoRollComponent::mouseDoubleClick (const juce::MouseEvent& e)
 {
-    if (! getGridArea().contains (e.position))
+    handleDoubleClick (e.getPosition().toFloat());
+}
+
+void PianoRollComponent::handleDoubleClick (juce::Point<float> pos)
+{
+    if (! getGridArea().contains (pos))
         return;
 
-    auto* hit = hitTestActiveLayer (e.position);
+    //-- Phase 73: 双击 = 打开组。空白处双击 = 关掉它 ------------------------
+    // The order is the whole behaviour: members first (open or switch), then the
+    // group's own frame and pill, then — only if nothing at all is under the
+    // pointer — "close". A double click on a note inside the open group keeps
+    // its old meaning (open that note), because "open what is already open" is
+    // not a second gesture, it is the gesture that was there before.
+    if (auto* clip = hitTestSample (pos))
+    {
+        if (clip->groupId >= 0 && clip->groupId != editingGroupId)
+        {
+            enterGroupEdit (clip->groupId);
+            setSampleSelection ({ clip->id });
+            return;
+        }
+    }
 
-    if (hit == nullptr)      // double-clicking empty space does nothing
+    if (auto* hit = hitTestActiveLayer (pos))
+    {
+        if (hit->groupId >= 0 && hit->groupId != editingGroupId)
+        {
+            enterGroupEdit (hit->groupId);
+            setSelection ({ hit->id });
+            return;
+        }
+
+        dragMode = DragMode::none;
+        dragOriginals.clear();
+        dragResizeNoteId = -1;
+
+        if (onNoteDoubleClicked != nullptr)
+            onNoteDoubleClicked (stack.getActiveLayerIndex(), hit->id);
+
         return;
+    }
 
-    dragMode = DragMode::none;
-    dragOriginals.clear();
-    dragResizeNoteId = -1;
+    // The bracket and the name tag are the group too: double-clicking the pill
+    // is what a user tries when they want "inside this thing".
+    int occurrence = 0;
 
-    if (onNoteDoubleClicked != nullptr)
-        onNoteDoubleClicked (stack.getActiveLayerIndex(), hit->id);
+    if (const int frameGroup = getGroupFrameAt (pos, &occurrence); frameGroup >= 0)
+    {
+        if (frameGroup != editingGroupId)
+            enterGroupEdit (frameGroup);
+
+        return;
+    }
+
+    if (const int labelGroup = getGroupLabelAt (pos, &occurrence); labelGroup >= 0)
+    {
+        if (labelGroup != editingGroupId)
+            enterGroupEdit (labelGroup);
+
+        return;
+    }
+
+    // Nothing under the pointer. Before Phase 73 this was simply "nothing
+    // happens"; now it is the way out of a group that has been opened.
+    if (editingGroupId >= 0)
+        exitGroupEdit();
 }
 
 //==============================================================================
@@ -3626,6 +3778,37 @@ juce::Rectangle<float> PianoRollComponent::groupFrameOf (int layerIndex, int gro
 
     return group != nullptr ? getGroupContentBounds (*layer, *group, occurrence)
                             : juce::Rectangle<float>();
+}
+
+//==============================================================================
+//  Phase 73: opening a group for member-level editing
+//==============================================================================
+void PianoRollComponent::enterGroupEdit (int groupId)
+{
+    if (groupId < 0 || groupId == editingGroupId)
+        return;
+
+    // Only a group that still exists can be opened. A double click can arrive
+    // one message loop after an undo removed the group — the panel list is not
+    // the only way in, so the id is checked here rather than trusted.
+    if (layerIndexOfGroup (groupId) < 0)
+        return;
+
+    editingGroupId = groupId;
+
+    // Opening is an edit-session change, not a selection change: whatever was
+    // selected stays selected (the caller narrows it when the double click
+    // named a specific member). The paint is the announcement.
+    repaint();
+}
+
+void PianoRollComponent::exitGroupEdit()
+{
+    if (editingGroupId < 0)
+        return;
+
+    editingGroupId = -1;
+    repaint();
 }
 
 void PianoRollComponent::armGroupMove (int groupId, int occurrence, juce::Point<float> position)
@@ -4291,6 +4474,23 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
 
     if (auto* clip = hitTestSample (e.position); clip != nullptr)
     {
+        //-- Phase 73: a block of a CLOSED group has no edges to grab ----------
+        // The pointer must agree with the press: the press answers "the whole
+        // appearance", so an edge cursor here would promise a trim that will not
+        // happen. Cursor and behaviour have to be the same sentence.
+        if (isGroupLocked (clip->groupId))
+        {
+            if (hoveredSampleHandle)
+            {
+                hoveredSampleHandle   = false;
+                hoveredSampleHandleId = -1;
+                repaint();
+            }
+
+            setMouseCursor (juce::MouseCursor::PointingHandCursor);
+            return;
+        }
+
         const auto  handle = getSampleAutomationHandleBounds (*clip);
         const bool  overHandle = ! handle.isEmpty() && handle.contains (e.position);
 
@@ -4355,6 +4555,8 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
 
         if (! handle.isEmpty() && handle.contains (e.position))
             setMouseCursor (juce::MouseCursor::PointingHandCursor);
+        else if (isGroupLocked (hit->groupId))
+            setMouseCursor (juce::MouseCursor::PointingHandCursor);   // Phase 73: one object
         else if (e.position.x > bounds.getRight() - band || e.position.x < bounds.getX() + band)
             setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);   // either end trims
         else
@@ -5037,22 +5239,49 @@ void PianoRollComponent::drawGroupFrames (juce::Graphics& g)
                     continue;
 
                 const bool focused = isGroupFocused (i, group.getId(), which);
+                const bool editing = (group.getId() == editingGroupId);
                 const auto colour  = group.getColour();
 
-                g.setColour (colour.withAlpha (baseAlpha * (focused ? 0.85f : 0.34f)));
+                g.setColour (colour.withAlpha (baseAlpha * (editing ? 1.0f
+                                                                  : (focused ? 0.85f : 0.34f))));
 
                 // Half a pixel in: a 1px stroke on the exact edge is drawn ON the
                 // clip's own border and reads as "the clip got thicker" rather
                 // than "this is the group". Reduced by the stroke's own
                 // half-width, the two lines touch without merging — no gap, no
                 // double line.
-                const float stroke = focused ? ui::pf (1.4f) : ui::pf (1.0f);
+                const float stroke = editing ? ui::pf (1.8f)
+                                             : (focused ? ui::pf (1.4f) : ui::pf (1.0f));
                 auto box = content.reduced (stroke * 0.5f);
 
                 if (box.getWidth() <= 0.0f || box.getHeight() <= 0.0f)
                     box = content;      // one-pixel member: the frame is all there is
 
                 g.drawRoundedRectangle (box, ui::pf (4), stroke);
+
+                //-- Phase 73: the dashed ring -------------------------------------
+                // An open group gets a second, dashed frame just outside the
+                // solid one. The difference between "this is one object" and
+                // "you are inside it" is then a SHAPE, not a shade — a thicker
+                // line alone reads as "hovered", which is already taken.
+                //
+                // A ring rather than four corner brackets: the name tag sits on
+                // the frame's top-left corner and would hide exactly one of
+                // them, so the group that most needs the mark (a short one,
+                // whose pill covers most of its width) would lose it.
+                if (editing)
+                {
+                    const auto ring = box.expanded (ui::pf (3.0f));
+                    const float dashes[] { ui::pf (4.0f), ui::pf (3.5f) };
+                    const float thick = ui::pf (1.4f);
+
+                    g.setColour (colour.withAlpha (baseAlpha * 0.85f));
+
+                    g.drawDashedLine ({ ring.getTopLeft(),    ring.getTopRight() }, dashes, 2, thick);
+                    g.drawDashedLine ({ ring.getBottomLeft(), ring.getBottomRight() }, dashes, 2, thick);
+                    g.drawDashedLine ({ ring.getTopLeft(),    ring.getBottomLeft() }, dashes, 2, thick);
+                    g.drawDashedLine ({ ring.getTopRight(),   ring.getBottomRight() }, dashes, 2, thick);
+                }
             }
     }
 }
@@ -5083,6 +5312,12 @@ void PianoRollComponent::drawGroupLabels (juce::Graphics& g)
             const bool focused = isGroupFocused (i, group.getId(), which);
             const bool hovered = (hoveredGroupId == group.getId() && hoveredGroupLayer == i
                                     && hoveredGroupOccurrence == which);
+
+            // Phase 73: the open group's name tag is filled solid and ringed, so
+            // "which group am I inside" is answered by the label as well as by
+            // the corner brackets. Needed most when the group is small: the
+            // brackets of a two-note group are two pixels apart.
+            const bool editing = (group.getId() == editingGroupId);
             const auto colour  = group.getColour();
 
             const float alpha = onActive ? 1.0f : 0.55f;
@@ -5095,10 +5330,17 @@ void PianoRollComponent::drawGroupLabels (juce::Graphics& g)
 
             // Focused and hovered pills are filled; the rest are outlined so a
             // screen with six groups is not six shouting tabs.
-            if (focused || hovered)
+            if (editing || focused || hovered)
             {
-                g.setColour (colour.withAlpha (pillAlpha * (focused ? 0.92f : 0.75f)));
+                g.setColour (colour.withAlpha (pillAlpha * (editing ? 1.0f
+                                                                  : (focused ? 0.92f : 0.75f))));
                 g.fillRoundedRectangle (pill, ui::pf (4));
+
+                if (editing)
+                {
+                    g.setColour (theme::surface1.withAlpha (pillAlpha * 0.8f));
+                    g.drawRoundedRectangle (pill, ui::pf (4), ui::pf (1.2f));
+                }
             }
             else
             {
@@ -5110,8 +5352,8 @@ void PianoRollComponent::drawGroupLabels (juce::Graphics& g)
 
             const juce::String text = groupLabelText (*layer, group);
 
-            g.setColour (focused || hovered ? theme::surface1
-                                            : colour.withAlpha (pillAlpha));
+            g.setColour (editing || focused || hovered ? theme::surface1
+                                                       : colour.withAlpha (pillAlpha));
             g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
             g.drawText (text, pill.reduced (ui::pf (5), 0.0f).withTrimmedRight (ui::pf (13)),
                         juce::Justification::centredLeft, false);
@@ -6130,9 +6372,9 @@ void PianoRollComponent::dragAutomationPoint (NoteEvent& note, juce::Point<float
     repaint();
 }
 
-bool PianoRollComponent::handleAutomationMouseDown (const juce::MouseEvent& e, NoteEvent& note)
+bool PianoRollComponent::handleAutomationMouseDown (juce::Point<float> pos,
+                                                   juce::ModifierKeys mods, NoteEvent& note)
 {
-    const auto pos = e.position;
 
     if (getAutomationCloseArea (note).contains (pos))
     {
@@ -6142,7 +6384,7 @@ bool PianoRollComponent::handleAutomationMouseDown (const juce::MouseEvent& e, N
 
     if (getAutomationMenuArea (note).contains (pos))
     {
-        showModTargetMenu (note, e.getScreenPosition());
+        showModTargetMenu (note, localPointToGlobal (pos.roundToInt()));
         return true;
     }
 
@@ -6153,7 +6395,7 @@ bool PianoRollComponent::handleAutomationMouseDown (const juce::MouseEvent& e, N
 
     const int hit = findEnvelopePointAt (note, pos);
 
-    if (e.mods.isPopupMenu())
+    if (mods.isPopupMenu())
     {
         // Right-click removes a point; the curve always keeps two.
         if (hit >= 0)
@@ -6923,14 +7165,14 @@ void PianoRollComponent::showGroupTargetMenu (juce::Point<int> screenPosition)
     });
 }
 
-bool PianoRollComponent::handleGroupAutomationMouseDown (const juce::MouseEvent& e)
+bool PianoRollComponent::handleGroupAutomationMouseDown (juce::Point<float> pos,
+                                                        juce::ModifierKeys mods)
 {
     auto* group = getExpandedGroup();
 
     if (group == nullptr)
         return true;
 
-    const auto pos = e.position;
 
     if (getGroupCloseArea().contains (pos))
     {
@@ -6940,7 +7182,7 @@ bool PianoRollComponent::handleGroupAutomationMouseDown (const juce::MouseEvent&
 
     if (getGroupMenuArea().contains (pos))
     {
-        showGroupTargetMenu (e.getScreenPosition());
+        showGroupTargetMenu (localPointToGlobal (pos.roundToInt()));
         return true;
     }
 
@@ -6960,7 +7202,7 @@ bool PianoRollComponent::handleGroupAutomationMouseDown (const juce::MouseEvent&
 
     const int hit = findGroupCurvePointAt (pos);
 
-    if (e.mods.isPopupMenu())
+    if (mods.isPopupMenu())
     {
         // Right-click removes a point; the lane always keeps two.
         if (hit >= 0)
@@ -8778,7 +9020,8 @@ void PianoRollComponent::dragSampleCurvePoint (int layerIndex, int sampleId,
     repaint();
 }
 
-bool PianoRollComponent::handleSampleAutomationMouseDown (const juce::MouseEvent& e,
+bool PianoRollComponent::handleSampleAutomationMouseDown (juce::Point<float> pos,
+                                                          juce::ModifierKeys mods,
                                                           int layerIndex, int sampleId)
 {
     auto* layer = stack.getLayer (layerIndex);
@@ -8787,7 +9030,6 @@ bool PianoRollComponent::handleSampleAutomationMouseDown (const juce::MouseEvent
     if (sample == nullptr)
         return false;
 
-    const auto pos = e.position;
 
     if (getSampleCloseArea (layerIndex, sampleId).contains (pos))
     {
@@ -8800,7 +9042,7 @@ bool PianoRollComponent::handleSampleAutomationMouseDown (const juce::MouseEvent
     // anywhere on it opens the target list.
     if (getSampleTargetArea (layerIndex, sampleId).contains (pos))
     {
-        showSampleCurveMenu (layerIndex, sampleId, e.getScreenPosition());
+        showSampleCurveMenu (layerIndex, sampleId, localPointToGlobal (pos.roundToInt()));
         return true;
     }
 
@@ -8814,7 +9056,7 @@ bool PianoRollComponent::handleSampleAutomationMouseDown (const juce::MouseEvent
 
     const int hit = findSampleCurvePointAt (layerIndex, sampleId, pos);
 
-    if (e.mods.isPopupMenu())
+    if (mods.isPopupMenu())
     {
         // Right-click removes a point; the curve always keeps two.
         if (hit >= 0)
