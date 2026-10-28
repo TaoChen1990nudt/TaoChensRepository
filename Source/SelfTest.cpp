@@ -12301,6 +12301,137 @@ juce::String MainComponent::runSelfTest()
                  + utf8 ("（应为 1 / -1）"));
     }
 
+    //-- Phase 78: 双击采样块 = 打开它的包络框 -------------------------------
+    // 采样块一直只有右上角那个 12 px 的 chevron 能开出曲线框（P49）。块的身体
+    // 本身就在说"我是可以改形状的东西"，双击它是所有人第一反应；音符那边双击
+    // 打开的是包络检查器，同一个动词在两种东西上也该意思一致。
+    //
+    // 三条边界一起测，因为它们互相约束：
+    //   ① 块上压着音符时先回答音符（绘制顺序：drawSamples 之后才 drawNotes）；
+    //   ② 闭组里的块双击仍然是"让我进去"（P73），不是打开框；
+    //   ③ 进去之后再双击才是打开框。
+    {
+        LayerStack t78;
+        RackModel  r78;
+        PianoRollComponent roll (t78, r78);
+        roll.setSize (1200, 620);
+
+        t78.addLayer (utf8 ("底"), palette::layer1);       // 0，待会儿的 ghost
+        t78.addLayer (utf8 ("表"), palette::layer2);       // 1，活动层
+
+        auto* under = t78.getLayer (0);
+        auto* over  = t78.getLayer (1);
+
+        SampleEvent shape;
+        shape.name        = "P78";
+        shape.path        = "P78.wav";
+        shape.startBeat   = 0.0;
+        shape.lengthBeats = 4.0;
+        shape.pitch       = 60;
+        shape.laneSpan    = 4;
+
+        const int block = over->addSample (shape);
+
+        SampleEvent mate = shape;
+        mate.pitch       = 66;
+        mate.laneSpan    = 2;
+        const int partner = over->addSample (mate);
+
+        // 组里的两个块单独放高一点，免得和上面那两块撞像素。
+        SampleEvent inGroup = shape;
+        inGroup.pitch       = 72;
+        inGroup.laneSpan    = 2;
+        inGroup.startBeat   = 6.0;
+        const int g1 = over->addSample (inGroup);
+
+        SampleEvent inGroup2 = inGroup;
+        inGroup2.pitch       = 76;
+        inGroup2.startBeat   = 8.0;
+        const int g2 = over->addSample (inGroup2);
+
+        const int gid = over->addGroup (utf8 ("P78 组"), groupPalette::group1);
+        over->assignSamplesToGroup ({ g1, g2 }, gid);
+
+        const auto centreOfClip = [&] (int layerIndex, int id)
+        {
+            return roll.getSampleScreenBounds (layerIndex, id).getCentre();
+        };
+
+        //-- 1. 不分组、没人压着：双击打开它的框 -------------------------
+        int openedNote = -2;
+        roll.onNoteDoubleClicked = [&] (int, int noteId) { openedNote = noteId; };
+
+        roll.simulateDoubleClickForTest (centreOfClip (1, block));
+
+        check (utf8 ("双击采样块会打开它的包络框"),
+               roll.isSampleAutomationOpen() && roll.getExpandedSampleId() == block
+                 && openedNote == -2,
+               juce::String (roll.getExpandedSampleId()) + utf8 ("（应为 ") + juce::String (block) + "）");
+
+        //-- 1b. 连着双击两个块：同时只有一个框 --------------------------
+        // P49 的"一次只开一个浮窗"是三个租客（音符框、组框、块框）之间的约定，
+        // 双击是新的开门方式，所以这条约定要重新问一遍。
+        roll.simulateDoubleClickForTest (centreOfClip (1, partner));
+
+        check (utf8 ("连着双击另一个采样块，前一个框关掉，只剩现在这个"),
+               roll.getExpandedSampleId() == partner,
+               juce::String (roll.getExpandedSampleId()) + utf8 ("（应为 ") + juce::String (partner) + "）");
+
+        //-- 2. 块上压着音符：先回答音符 ---------------------------------
+        // 判据要挑一个**只在音符下有块**的像素：块的下半部分没有音符，那里
+        // 双击仍然是块的。所以音符放在块的中心，双击就用音符的矩形。
+        roll.closeSampleAutomation();
+
+        const int overNote = over->addNote ({ 0, 61, 1.0, 1.0, 0.9f });
+        const auto noteCentre = roll.getNoteScreenBounds (1, overNote).getCentre();
+
+        roll.simulateDoubleClickForTest (noteCentre);
+
+        check (utf8 ("采样块上压着音符时，双击改的是音符，不会打开块的框"),
+               openedNote == overNote && ! roll.isSampleAutomationOpen(),
+               juce::String (openedNote) + utf8 (" / 框 ")
+                 + (roll.isSampleAutomationOpen() ? utf8 ("开着") : utf8 ("关着"))
+                 + utf8 ("（应为 ") + juce::String (overNote) + utf8 (" / 关着）"));
+
+        //-- 3. 闭组里的块：双击是"让我进去"，不是打开框 ------------------
+        over->removeNote (overNote);      // 别让它的像素挡在下一条路上
+        roll.simulateDoubleClickForTest (centreOfClip (1, g1));
+
+        check (utf8 ("双击闭组里的采样块只进组，不会顺手把包络框推到你面前"),
+               roll.getEditingGroupId() == gid && ! roll.isSampleAutomationOpen(),
+               juce::String (roll.getEditingGroupId()) + utf8 (" / 框 ")
+                 + (roll.isSampleAutomationOpen() ? utf8 ("开着") : utf8 ("关着"))
+                 + utf8 ("（应为 ") + juce::String (gid) + utf8 (" / 关着）"));
+
+        //-- 4. 已经进去了：同一个双击现在才是打开框 ---------------------
+        roll.simulateDoubleClickForTest (centreOfClip (1, g1));
+
+        check (utf8 ("进了组之后再双击那个块，打开的是它的包络框"),
+               roll.getEditingGroupId() == gid && roll.getExpandedSampleId() == g1,
+               juce::String (roll.getExpandedSampleId()) + utf8 ("（应为 ") + juce::String (g1)
+                 + utf8 ("，组 ") + juce::String (roll.getEditingGroupId()) + "）");
+
+        //-- 5. ghost 采样块：换层 + 打开框 -------------------------------
+        // 和音符那条同构（P77）：跳过去之后，那个手势在那一层上会做的事也要
+        // 一起做，否则用户到了那儿还得再双击一次。
+        SampleEvent shadowClip = shape;
+        shadowClip.pitch       = 78;
+        shadowClip.laneSpan    = 2;
+        const int ghostBlock = under->addSample (shadowClip);
+
+        t78.setLayerVisible (0, true);      // 眼睛开着才有 ghost
+        t78.setActiveLayerIndex (1);        // 第 4 条没换层，这里显式设回来
+
+        roll.closeSampleAutomation();
+        roll.simulateDoubleClickForTest (centreOfClip (0, ghostBlock));
+
+        check (utf8 ("双击 ghost 采样块会换成它所在的图层，并打开它的包络框"),
+               t78.getActiveLayerIndex() == 0 && roll.getExpandedSampleId() == ghostBlock,
+               utf8 ("层 ") + juce::String (t78.getActiveLayerIndex())
+                 + utf8 (" / 框 ") + juce::String (roll.getExpandedSampleId())
+                 + utf8 ("（应为 0 / ") + juce::String (ghostBlock) + "）");
+    }
+
     //-- Phase 73: 编组要先双击进去，才能改里面的东西 -------------------------
     // 组是一个对象：点它就整块拖，像视频剪辑里的片段。把七个音符里的一个单独
     // 挪走是另一种意图，需要另一种手势——双击。在此之前，任何一次按下都得到

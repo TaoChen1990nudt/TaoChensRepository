@@ -3423,6 +3423,28 @@ void PianoRollComponent::handleDoubleClick (juce::Point<float> pos)
         return;
     }
 
+    //-- Phase 78: double click a block = open its curve box -----------------
+    // The chevron in the block's top-right corner already did this (Phase 49),
+    // but a 12 px button is a secret: the body of the block says "this is a
+    // shape you can edit", and double-clicking it is what everyone tries
+    // first. Same verb as double-clicking a note, which opens its envelope.
+    //
+    // After the note test, not before, because that is the painter's order:
+    // blocks go under the notes (drawSamples, then drawNotes). A note drawn
+    // over a block is what the pointer is looking at, so it answers first.
+    // Only where the block is the topmost thing does the double click reach
+    // it — which is exactly where it looks like it should.
+    //
+    // A grouped member never gets here while its group is closed: the branch
+    // above turns that double click into "let me inside" (P73), and opening a
+    // curve on the way in would drop an editor in front of the thing you asked
+    // to reach. Once inside the group the double click lands here.
+    if (auto* clip = hitTestSample (pos))
+    {
+        openSampleAutomation (stack.getActiveLayerIndex(), clip->id);
+        return;
+    }
+
     // The bracket and the name tag are the group too: double-clicking the pill
     // is what a user tries when they want "inside this thing".
     int occurrence = 0;
@@ -3478,6 +3500,13 @@ void PianoRollComponent::handleDoubleClick (juce::Point<float> pos)
                 else
                 {
                     setSampleSelection ({ clip->id });
+
+                    //-- Phase 78: and open its curve box --------------------
+                    // The half of the gesture that would have happened on that
+                    // sheet: an ungrouped block's double click opens its curve
+                    // editor (Phase 78), so the jump does the same instead of
+                    // just landing you there.
+                    openSampleAutomation (ghost.layerIndex, clip->id);
                 }
             }
         }

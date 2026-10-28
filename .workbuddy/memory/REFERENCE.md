@@ -280,6 +280,13 @@
   宿主侧 `fillStripAutomationItems` / `applyStripAutomationChoice` 决定"推子=level lane"。
 
 ## 编辑手势（P22 起）
+- **双击 = 打开**（P78）：音符双击开包络检查器（`onNoteDoubleClicked`），采样块双击开它的
+  曲线框（`openSampleAutomation`）。采样这块以前只有右上角 12 px 的 chevron（P49），双击是
+  同一件事的第二个入口，不是新功能。三条边界：①**顺序照绘制顺序**——`drawSamples` 在
+  `drawNotes` 之前，块画在音符下面，所以 `handleDoubleClick` 里采样开框那一问排在
+  `hitTestActiveLayer` **之后**；压在块上的音符先回答。②**闭组里的块不开框**：那一击仍是
+  「让我进去」（P73），进组之后再双击才开框。③ghost 块换层之后，非成员要连框一起开（P77 的
+  对称）。同时只开一个框由 `openSampleAutomation()` 里的 close 链保证。
 - **ghost 挡单击、不挡双击**（P77）：`getEditableNoteIdAt()` / 所有手势命中都只看活动层
   （ghost 点穿，P1/P20 不变）；`handleDoubleClick()` 末尾加一问 `hitTestGhost(pos)`，
   命中就 `setActiveLayerIndex()` 换层，再按 P74/P73 收尾——组里的成员 `selectGroup(gid, occ)`
