@@ -306,7 +306,17 @@ void PianoRollComponent::setPlayheadBeat (double beats)
     // is inside the window the user set up before the view was pushed away, that
     // window comes back. Without this the scroll bar was a one-way trip: the
     // playhead returned, the picture did not.
+    //
+    // Phase 64: ...but "comes home" has to mean it MOVED BACK. The window the
+    // push captured is the one the playhead was sitting in at that moment, so on
+    // the very next frame the playhead is still inside it: the hand-back fired
+    // immediately, put the scroll back where it started, the push fired again on
+    // the frame after, and the picture jumped 85% of the window back and forth at
+    // 60 fps. That was the flicker, and it started exactly where the push does —
+    // three quarters of the way across. A loop jump, a scrub and a seek all move
+    // the playhead backwards; the ordinary forward rollout never does.
     if (followScrolled && visible > 1.0
+         && beats < previous - 1.0e-9
          && beats >= userScrollBeats - 1.0e-9
          && beats <= userScrollBeats + visible + 1.0e-9)
     {

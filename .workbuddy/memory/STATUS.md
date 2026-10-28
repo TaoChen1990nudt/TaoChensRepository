@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-28 · 对应 **Phase 63**（剪贴板从「一个组」变成「一组出现」：选中几个组就贴回几个组）
+> 最后更新：2026-10-28 · 对应 **Phase 64**（播放头越过窗口 3/4 时钢琴窗每帧横跳的闪屏：把「归还」限定为回退才触发）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**。
 > 规则查 `MEMORY.md`，制度细节查 `REFERENCE.md`，踩过的坑查 `PITFALLS.md`。
 
@@ -18,10 +18,10 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 63**（剪贴板里躺的不是「一个组」，而是**一组出现**：`groupClips` 是 vector，每个 `GroupClip` 自带 `notes`/`clips`。复制时选区按 `(groupId, occurrence)` 切片，整处选中的切片成一个对象、其余留散音符/散块；粘贴按对象逐个走「复用原组 + 新增一处」，全部用**同一个** delta（`clipboardFirstBeat()`/`clipboardLastBeat()` 算一个锚点），所以两组的间距原样保留。判据从 `isWholeGroupSelected`（问整个选区，多组时永远 false）换成新的 `isWholeOccurrenceSelected`（只问这一处）——`collectTwinsForEdit` 也一并换了）· **Phase 62**（①同源编组：出现只拥有**位置**（`NoteGroup::occurrenceStarts`，物化后不再漂），成员/音高/长度/力度/包络/采样块的宽高曲线反向伸缩全部属于组，编辑一处由 `syncGroupShape()` 同步到所有兄弟出现；整处拖动或删除是「对这一份的决定」，兄弟不动；②复制「一处出现」不再退化成散音符（旧判据要求选中全组，两处出现的组永远不满足），散音符粘贴显式 `groupId = -1`，块的组身份不再被扒掉）· **Phase 61**（①缩放把视口拉宽到超过标尺时，**这一档**就加长，不再等下一档——`clampScroll()` 里增长判定改用夹过下界的 `jmax(0.0, scrollBeats) + visible`，缩放的锚点常在 beat 0 左边、原始 scroll 是负数，把需求算小了一整块；②缩回去时同一条路径回收，长度与滚动条滑块宽度都回到原位）· **Phase 60**（①编组栏的行可以点选——点行 = 选中该组，折叠只留给左侧小三角；②选中框改用 `cardlook::drawSelectionRing`，与采样/VST 音源卡同一份代码、同一个 `theme::accent`；③`trimTimelineToView()`：往右滚进空白会加长（P11 原有），滚回来把多出来的尾巴还回去、滚动条恢复原长）· **Phase 59**（①`selectedTrimEdgeAt` 要求指针在块内 + 取最近的那条边，修掉"多选拉伸只有最右那块有效"；②钢琴窗选中组时编组栏对应行按组色描边高亮，由 `PianoRollComponent::getSelectedGroups()` 派生、`GroupPanel::setSelectedGroups()` 镜像；③折叠行不再把 dB/声相文字画在组名同一个矩形里）· **Phase 58**（组从"一条内容"变成"一个定义 + 多次出现"：`groupId + groupOccurrence`；粘贴组 = 新增一处出现而不是往组里塞成员；「复制到后一小节」同样是新增出现、不再新建组；编组栏的组行可以直接拖到钢琴窗放一处；每处独立移动；选中块的边缘优先于命中拾取；播放跟随回退到用户视野）；P57 的组框零外扩与 P56 的多选拉伸等见日志 |
-| 自检 | **557 ALL PASSED / 0 FAIL，失败时退出码 1**（P63 咬测 3 处全部 FAIL 后还原：整处判据恒 false→11 条挂 / 粘贴只贴第一个对象→4 条挂 / 每个对象各算锚点→间距那条挂 20.00 与 20.00） |
+| 已完成阶段 | **Phase 64**（播放头越过窗口 3/4 时钢琴窗闪屏：`setPlayheadBeat` 的「推走」与「归还」两条分支判据重叠——推走时记下的 `userScrollBeats` 窗口**就含当前播放头**，下一帧立刻「归还」把视图撤回，再下一帧又推走，60fps 来回横跳 85% 窗口。归还现在要求 `beats < previous`（回退才算回家：loop 跳回 / scrub / seek），前进永不归还。咬测：去掉这一条 → 189 次跟随里 87 次回退）· **Phase 63**（剪贴板里躺的不是「一个组」，而是**一组出现**：`groupClips` 是 vector，每个 `GroupClip` 自带 `notes`/`clips`。复制时选区按 `(groupId, occurrence)` 切片，整处选中的切片成一个对象、其余留散音符/散块；粘贴按对象逐个走「复用原组 + 新增一处」，全部用**同一个** delta（`clipboardFirstBeat()`/`clipboardLastBeat()` 算一个锚点），所以两组的间距原样保留。判据从 `isWholeGroupSelected`（问整个选区，多组时永远 false）换成新的 `isWholeOccurrenceSelected`（只问这一处）——`collectTwinsForEdit` 也一并换了）· **Phase 62**（①同源编组：出现只拥有**位置**（`NoteGroup::occurrenceStarts`，物化后不再漂），成员/音高/长度/力度/包络/采样块的宽高曲线反向伸缩全部属于组，编辑一处由 `syncGroupShape()` 同步到所有兄弟出现；整处拖动或删除是「对这一份的决定」，兄弟不动；②复制「一处出现」不再退化成散音符（旧判据要求选中全组，两处出现的组永远不满足），散音符粘贴显式 `groupId = -1`，块的组身份不再被扒掉）· **Phase 61**（①缩放把视口拉宽到超过标尺时，**这一档**就加长，不再等下一档——`clampScroll()` 里增长判定改用夹过下界的 `jmax(0.0, scrollBeats) + visible`，缩放的锚点常在 beat 0 左边、原始 scroll 是负数，把需求算小了一整块；②缩回去时同一条路径回收，长度与滚动条滑块宽度都回到原位）· **Phase 60**（①编组栏的行可以点选——点行 = 选中该组，折叠只留给左侧小三角；②选中框改用 `cardlook::drawSelectionRing`，与采样/VST 音源卡同一份代码、同一个 `theme::accent`；③`trimTimelineToView()`：往右滚进空白会加长（P11 原有），滚回来把多出来的尾巴还回去、滚动条恢复原长）· **Phase 59**（①`selectedTrimEdgeAt` 要求指针在块内 + 取最近的那条边，修掉"多选拉伸只有最右那块有效"；②钢琴窗选中组时编组栏对应行按组色描边高亮，由 `PianoRollComponent::getSelectedGroups()` 派生、`GroupPanel::setSelectedGroups()` 镜像；③折叠行不再把 dB/声相文字画在组名同一个矩形里）· **Phase 58**（组从"一条内容"变成"一个定义 + 多次出现"：`groupId + groupOccurrence`；粘贴组 = 新增一处出现而不是往组里塞成员；「复制到后一小节」同样是新增出现、不再新建组；编组栏的组行可以直接拖到钢琴窗放一处；每处独立移动；选中块的边缘优先于命中拾取；播放跟随回退到用户视野）；P57 的组框零外扩与 P56 的多选拉伸等见日志 |
+| 自检 | **559 ALL PASSED / 0 FAIL，失败时退出码 1**（P64 咬测 1 处：去掉「回退才算回家」→ 189 次跟随里 87 次横跳。P63 咬测 3 处：整处判据恒 false→11 条挂 / 粘贴只贴第一个对象→4 条挂 / 每个对象各算锚点→间距那条挂 20.00 与 20.00） |
 | 编译 | 零 error 零 warning |
-| `formatVersion` | **25**（P63 只动运行时剪贴板，不涉工程文件。v24 的 `groupocc` 不变；v25 给 `<Group>` 加 `<Occurrence index start>`，只在出现有起点时写，老文件靠懒物化补） |
+| `formatVersion` | **25**（P64/P63 只动运行时视图与剪贴板，不涉工程文件。v24 的 `groupocc` 不变；v25 给 `<Group>` 加 `<Occurrence index start>`，只在出现有起点时写，老文件靠懒物化补） |
 | 可执行 | `build/AtomicDAW_artefacts/Release/AtomicDAW.exe` |
 | 技术栈 | JUCE 8.0.4（FetchContent）+ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + C++17 |
 | 源码规模 | `Source/` 下 70 个 .cpp/.h，分 Model / Audio / UI / Util / Media |
@@ -31,10 +31,14 @@
 **未定。** 功能排期等你给。P58 把组的模型改完了（定义 + 出现），P59 把多选拉伸的拾取收进
 块内、编组栏做成选区的镜像，P60 让编组行真正可点选（选中环与机架卡统一），P61 把"标尺多长"这件事
 在缩放上也补齐了，P62 把组从"定义 + 多次出现"补成"一个形状 + 多个位置"（成员内容也同源了），
-P63 把剪贴板从"一个组"补成"一组出现"（选中几个就贴回几个），工程侧没有挂账。
+P63 把剪贴板从"一个组"补成"一组出现"（选中几个就贴回几个），P64 修掉播放跟随的横跳，工程侧没有挂账。
 - **剪贴板的形状**（P63 定下的语义）：`groupClips` 每个元素 = 一处完整出现，自带成员；
   `noteClip`/`sampleClip` 只装**不属于任何整处**的散音符/散块。别再往这两条里塞整处成员——
   那份数据是粘贴时"一组内容被写进两个组"的来源。
+- **播放跟随的「推走」和「归还」是一对互斥的条件，改一个必看另一个**（P64-A）：
+  推走 = 播放头越过窗口 75%；归还 = 播放头回到 `userScrollBeats` 那个窗口内。
+  推走时播放头**就在**那个窗口内（那是它被抓拍的地方），所以归还必须再加「回退」
+  （`beats < previous`）才不会每帧来回。
 - **"整处选中"有两个判据，别用错**：`isWholeGroupSelected(gid, includeSamples, occ)` 问的是
   **整个选区**（"这个组是不是选了全部"），多组一起选时永远 false；`isWholeOccurrenceSelected(gid, occ)`
   只问**这一处**。凡是要按对象处理的地方（复制、连带删除、同步）用后者。

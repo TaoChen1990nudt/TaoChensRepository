@@ -11109,6 +11109,65 @@ juce::String MainComponent::runSelfTest()
                  + (reloadedError.isEmpty() ? juce::String() : " · " + reloadedError));
     }
 
+    //-- Phase 64: the playhead follower must not oscillate -------------------
+    {
+        LayerStack t64;
+        RackModel  r64;
+        PianoRollComponent roll (t64, r64);
+        roll.setSize (1200, 520);
+        t64.addLayer (utf8 ("P64 跟随"), palette::layer1);
+        roll.setPlayheadBeat (0.0);
+        roll.setTransportActive (true);
+
+        const double visible = roll.getVisibleBeats();
+
+        double lastScroll = roll.getScrollBeats();
+        int    jumps      = 0;
+        int    backwards  = 0;
+        double biggest    = 0.0;
+
+        // 120 BPM at 60 fps is about 0.033 beat per frame — the same cadence the
+        // transport timer drives this with.
+        for (double b = 0.033; b <= 220.0; b += 0.033)
+        {
+            roll.setPlayheadBeat (b);
+
+            const double now = roll.getScrollBeats();
+
+            if (! juce::approximatelyEqual (now, lastScroll))
+            {
+                ++jumps;
+
+                if (now < lastScroll - 1.0e-9)
+                    ++backwards;
+
+                biggest = juce::jmax (biggest, std::abs (now - lastScroll));
+                lastScroll = now;
+            }
+        }
+
+        // The bug this pins: the push fires at 3/4 of the window, then the
+        // hand-back sees the playhead still inside the window it just captured
+        // and undoes it on the next frame — 60 times a second, 85% of the window
+        // each way. "Backwards" is that oscillation.
+        check (utf8 ("播放头越过窗口 3/4 后视图只向前跟，不再每帧横跳"),
+               backwards == 0 && jumps < 40,
+               juce::String (jumps) + utf8 (" 次跟随，回退 ") + juce::String (backwards)
+                 + utf8 (" 次，最大 ") + juce::String (biggest, 1)
+                 + utf8 (" 拍（窗口 ") + juce::String (visible, 1) + utf8 (" 拍）"));
+
+        // ...and the hand-back still does its own job: a loop jump or a rewind
+        // that puts the playhead back where the user was looking returns the
+        // window. Suppressing the oscillation must not suppress this.
+        const double pushed = roll.getScrollBeats();
+
+        roll.setPlayheadBeat (0.0);
+
+        check (utf8 ("播放头跳回原窗口时，视图仍然归还"),
+               std::abs (roll.getScrollBeats()) < 1.0e-6,
+               juce::String (pushed, 1) + utf8 (" -> ") + juce::String (roll.getScrollBeats(), 1));
+    }
+
     //-- Phase 63: N objects in, N objects out ---------------------------------
     {
         LayerStack t63;
