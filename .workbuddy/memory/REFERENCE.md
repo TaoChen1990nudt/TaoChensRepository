@@ -280,6 +280,12 @@
   宿主侧 `fillStripAutomationItems` / `applyStripAutomationChoice` 决定"推子=level lane"。
 
 ## 编辑手势（P22 起）
+- **按下归谁：已选中的块优先于"画在最上面的"**（P75）：`clipEdgeAt()` 在四条边都没
+  命中之后，再倒序遍历一次已选中的块，点在谁的矩形里就回 `(那块, none)`。
+  `none` 是"抓住了块、没抓住边"，`handlePress` 因此保留选区并 `armSampleMove()`。
+  没有这一步时，两块叠在同一拍同一行（粘贴叠到自己身上是最常见的来历）的按下会落到
+  上面那块**没被选中**的，选择被 `setSampleSelection()` 换掉，多选只剩一个动。
+  它只对"已经在选区里"的块生效，所以"点一个没选中的块 = 只选它"没有被改掉。
 - **框选 = 命中 + 组扩散，Shift/Ctrl 是"加"**（P74）：`simulateMarquee` 先 `hitsInMarquee()`
   再 `expandToWholeOccurrences()` 再写选择。`marqueeAdditive` 在 `mouseDown` 的空白分支就记下
   （松手时修饰键早就抬起来了），加选时旧选择**排在前面**，列表顺序才不会每次都重排；
@@ -315,6 +321,12 @@
   它的头带对左方一切成立 → 返回"右块的头"→ 拖头被 source offset 夹住 → 什么都没动。
   命中之后按**距离最近**的边定 tail/head（`toTail <= toHead`），平局让最上层赢（严格小于）。
   它不是"多选专用"：单块也走这条路，只是以前恰好被 `hitTestSample` 的包含判定兜住了。
+- **多选变高：全部写完再同步，不是写一块同步一块**（P75）：`applySampleSpan()` 的
+  组同步由 `propagate` 参数控制，`applySampleSpanDrag()` 传 false，循环里只写各自的
+  绝对值（快照 + delta），最后对涉及的每个 `(groupId, occurrence)` 各 `syncGroupShape()`
+  一次。边写边同步的写法在两处出现**形状本来不一致**时（老工程、撤销回来的快照）会
+  轮流把对方当模板：第一块的同步改掉第二块的当前值，第二块再拿自己的快照加 delta 写回，
+  最后停在指针没指过的那个高度。自检：`60+5 / 60+7`（错）对 `60+5 / 60+5`（对）。
 - **多选拉伸只算一次 delta**（P56 起）：`applySampleTrimDrag(primary, wanted, fromTail, siblings)`
   先按主块算出实际 delta（最小长度 / 源偏移会吃掉一部分），再把**同一个 delta** 按各自限位套给
   兄弟块。所以抓哪一块的边都等价——这也是 P59 那条拾取 bug 表现为"按了没反应"而不是
@@ -326,6 +338,10 @@
   （首次推走时 `if (!followScrolled) userScrollBeats = scrollBeats`）。
 
 ## 编组
+- **组编辑态下，组框里的空白就是空白**（P75）：`getGroupFrameAt()` 命中之后，只有
+  `frameGroup != editingGroupId` 才 `armGroupMove()`；编辑中的那个组要**落下去走 marquee**
+  ——那一击于是清空选择（`mouseDown` 的空分支本来就这么做），单击不动指针时选择保持清空。
+  以前组框把这一击整个吃掉，"在组里取消选择"变成了"重新选中整组并起拖"。
 - **选中一个成员就是选中整组**（P74）：选择是"就是这些东西"的那句话，不是"我点到的那一个"。
   三个入口把成员扩成整次出现，一个都不许漏——
   点击走 `armGroupMove()`（它本来就会 `selectGroup()`），框选走

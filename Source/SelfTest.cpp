@@ -11576,6 +11576,343 @@ juce::String MainComponent::runSelfTest()
                showSpan (dd0) + " / " + showSpan (dd1) + utf8 ("（应为 70+4 / 70+4）"));
     }
 
+    //-- Phase 75: 组里多选几块，上下拖要一起动 ------------------------------
+    // 单选时每个块只看自己，怎么算都"对"；多选时一次手势要落成同一件事，
+    // 这才是会出问题的地方——一处 clamp 吃到一点 delta，其余块就各走各的。
+    {
+        LayerStack t75;
+        RackModel  r75;
+        PianoRollComponent roll (t75, r75);
+        roll.setSize (1200, 620);
+
+        t75.addLayer (utf8 ("P75 高度"), palette::layer1);
+        auto* layer = t75.getLayer (0);
+
+        const auto makeBlock = [layer] (const char* name, double start, int pitch, int span)
+        {
+            SampleEvent clip;
+            clip.name        = name;
+            clip.startBeat   = start;
+            clip.lengthBeats = 4.0;
+            clip.pitch       = pitch;
+            clip.laneSpan    = span;
+            return layer->addSample (clip);
+        };
+
+        const auto rowCentreY = [] (juce::Rectangle<float> b, int topPitch, int span, int lane)
+        {
+            const float laneH = b.getHeight() / (float) juce::jmax (1, span);
+            return b.getY() + (float) (topPitch - lane) * laneH + laneH * 0.5f;
+        };
+
+        const auto showSpan = [] (const SampleEvent* c)
+        {
+            return c == nullptr ? juce::String ("-")
+                                : juce::String (c->pitch) + "+" + juce::String (c->laneSpan);
+        };
+
+        //-- 1. 同一次出现里的三块，一起拖上边缘 ---------------------------
+        const int a = makeBlock ("75a", 1.0, 60, 2);
+        const int b = makeBlock ("75b", 6.0, 64, 2);
+        const int c = makeBlock ("75c", 11.0, 68, 3);
+
+        const int gid = layer->addGroup (utf8 ("P75 组"), groupPalette::group1);
+        layer->assignSamplesToGroup ({ a, b, c }, gid);
+
+        roll.setSampleSelection ({ a, b, c });
+
+        const auto rectA = roll.getSampleScreenBounds (0, a);
+        roll.simulateSampleSpanDrag (a, rowCentreY (rectA, 61, 2, 64), true);
+
+        const auto* ra = layer->findSample (a);
+        const auto* rb = layer->findSample (b);
+        const auto* rc = layer->findSample (c);
+
+        check (utf8 ("组里选中三块一起拖上边缘，三块长同样多"),
+               ra != nullptr && rb != nullptr && rc != nullptr
+                 && ra->laneSpan == 5 && rb->laneSpan == 5 && rc->laneSpan == 6,
+               showSpan (ra) + " / " + showSpan (rb) + " / " + showSpan (rc)
+                 + utf8 ("（应为 60+5 / 64+5 / 68+6）"));
+
+        //-- 3. 走完整手势：先按上边缘，再拖 -------------------------------
+        // 上面的钩子拿"此刻"当起点；鼠标路径拿"按下时"的快照当起点。多选时
+        // 这两者会分家——一次应用里前面的块已经被改过，后面的块还在看旧值。
+        // 需求说的就是"组编辑内部"：没双击进去之前，按下会被回答成"整个组"。
+        roll.enterGroupEdit (gid);
+        roll.setSampleSelection ({ a, b, c });
+
+        const auto rectA2 = roll.getSampleScreenBounds (0, a);
+        // 靠左、贴顶：离上边 2 px、离左边 4 px，最近的那条边是上边；
+        // 放正中间会撞上块的曲线把手（它就在顶部中央）。
+        const juce::Point<float> topEdgeA { rectA2.getX() + ui::pf (4.0f),
+                                            rectA2.getY() + ui::pf (2.0f) };
+
+        const auto probe = roll.getBlockEdgeAtForTest (topEdgeA);
+        const bool armed = roll.simulateSpanDragFromPress (topEdgeA,
+                                                           rowCentreY (rectA2, 64, 5, 66));
+
+        const auto* pa = layer->findSample (a);
+        const auto* pb = layer->findSample (b);
+        const auto* pc = layer->findSample (c);
+
+        check (utf8 ("按下上边缘再拖（真实手势），三块仍然长一样多"),
+               armed && pa != nullptr && pb != nullptr && pc != nullptr
+                 && pa->laneSpan == 7 && pb->laneSpan == 7 && pc->laneSpan == 8,
+               (armed ? juce::String ("armed ") : juce::String ("not armed "))
+                 + juce::String (probe.first) + ":" + juce::String (probe.second) + " "
+                 + showSpan (pa) + " / " + showSpan (pb) + " / " + showSpan (pc)
+                 + utf8 ("（应为 60+7 / 64+7 / 68+8）"));
+
+        //-- 2. 同一次出现里的三块，一起拖下边缘 ---------------------------
+        // 上下两条边走的是两套算式（上边固定底行、下边固定顶行），一套对不代表
+        // 另一套对。
+        {
+            LayerStack t2;
+            RackModel  r2;
+            PianoRollComponent roll2 (t2, r2);
+            roll2.setSize (1200, 620);
+
+            t2.addLayer (utf8 ("P75 下边"), palette::layer1);
+            auto* l2 = t2.getLayer (0);
+
+            const auto block2 = [l2] (const char* name, double start, int pitch, int span)
+            {
+                SampleEvent clip;
+                clip.name        = name;
+                clip.startBeat   = start;
+                clip.lengthBeats = 4.0;
+                clip.pitch       = pitch;
+                clip.laneSpan    = span;
+                return l2->addSample (clip);
+            };
+
+            const int m0 = block2 ("m0", 1.0, 60, 2);
+            const int m1 = block2 ("m1", 6.0, 64, 2);
+            const int m2 = block2 ("m2", 11.0, 68, 3);
+
+            const int gm = l2->addGroup (utf8 ("P75 下边组"), groupPalette::group3);
+            l2->assignSamplesToGroup ({ m0, m1, m2 }, gm);
+
+            roll2.enterGroupEdit (gm);
+            roll2.setSampleSelection ({ m0, m1, m2 });
+
+            const auto rectM = roll2.getSampleScreenBounds (0, m0);
+            const juce::Point<float> bottomEdgeM { rectM.getX() + ui::pf (4.0f),
+                                                   rectM.getBottom() - ui::pf (2.0f) };
+
+            roll2.simulateSpanDragFromPress (bottomEdgeM, rowCentreY (rectM, 61, 2, 58));
+
+            const auto* rm0 = l2->findSample (m0);
+            const auto* rm1 = l2->findSample (m1);
+            const auto* rm2 = l2->findSample (m2);
+
+            check (utf8 ("组里选中三块一起拖下边缘，三块向下长同样多"),
+                   rm0 != nullptr && rm1 != nullptr && rm2 != nullptr
+                     && rm0->pitch == 58 && rm0->laneSpan == 4
+                     && rm1->pitch == 62 && rm1->laneSpan == 4
+                     && rm2->pitch == 66 && rm2->laneSpan == 5,
+                   showSpan (rm0) + " / " + showSpan (rm1) + " / " + showSpan (rm2)
+                     + utf8 ("（应为 58+4 / 62+4 / 66+5）"));
+        }
+
+        //-- 3. 按在已选中块的中间：这一按是它的，不是压在它上面那块的 ------
+        // 两块叠在同一拍同一行（复制粘贴叠到自己身上就是最常见的来历）时，
+        // 命中测试答的是"画在最上面的"，而那不是用户选中的那一块。选择被
+        // 改成它，多选就只剩一个块跟着动——这就是"有时候不同步"。
+        {
+            LayerStack t2b;
+            RackModel  r2b;
+            PianoRollComponent roll2b (t2b, r2b);
+            roll2b.setSize (1200, 620);
+
+            t2b.addLayer (utf8 ("P75 叠块"), palette::layer1);
+            auto* l2b = t2b.getLayer (0);
+
+            const auto block2b = [l2b] (const char* name, double start, int pitch, int span)
+            {
+                SampleEvent clip;
+                clip.name        = name;
+                clip.startBeat   = start;
+                clip.lengthBeats = 4.0;
+                clip.pitch       = pitch;
+                clip.laneSpan    = span;
+                return l2b->addSample (clip);
+            };
+
+            // under 先加（画在下面），over 后加（画在上面），位置完全一样。
+            const int under = block2b ("under", 1.0, 60, 2);
+            const int over  = block2b ("over",  1.0, 60, 2);
+            const int mate  = block2b ("mate",  8.0, 60, 2);
+
+            roll2b.setSampleSelection ({ under, mate });
+
+            const auto underRect = roll2b.getSampleScreenBounds (0, under);
+            roll2b.simulatePressForTest (underRect.getCentre());
+
+            check (utf8 ("按在已选中块的中间，选择不被压在它上面的那块顶掉，起拖的是整个选择"),
+                   over > 0
+                     && roll2b.isSampleSelected (under) && roll2b.isSampleSelected (mate)
+                     && ! roll2b.isSampleSelected (over)
+                     && roll2b.getClipDragCountForTest() == 2,
+                   juce::String (roll2b.isSampleSelected (under) ? "U" : "-")
+                     + juce::String (roll2b.isSampleSelected (mate) ? "M" : "-")
+                     + juce::String (roll2b.isSampleSelected (over) ? "O" : "-")
+                     + utf8 (" / 起拖 ") + juce::String (roll2b.getClipDragCountForTest())
+                     + utf8 (" 个（应为 UM- / 2）"));
+        }
+
+        //-- 4. 同一个组的两处出现，副本同时被选中 -------------------------
+        // 两处出现是同一个"形状"：谁被拖谁就是模板。两处都被选中时，delta 只能
+        // 加一次，而且加到各自按下时的形状上——否则主块被同步抄一遍、再被 delta
+        // 推一遍，副本就追不上了。
+        {
+            LayerStack t2;
+            RackModel  r2;
+            PianoRollComponent roll2 (t2, r2);
+            roll2.setSize (1200, 620);
+
+            t2.addLayer (utf8 ("P75 两处"), palette::layer1);
+            auto* l2 = t2.getLayer (0);
+
+            const auto block2 = [l2] (const char* name, double start, int pitch, int span)
+            {
+                SampleEvent clip;
+                clip.name        = name;
+                clip.startBeat   = start;
+                clip.lengthBeats = 4.0;
+                clip.pitch       = pitch;
+                clip.laneSpan    = span;
+                return l2->addSample (clip);
+            };
+
+            const int p0 = block2 ("p0", 1.0, 60, 2);
+            const int q0 = block2 ("q0", 60.0, 64, 2);
+            const int p1 = block2 ("p0", 41.0, 60, 2);
+            const int q1 = block2 ("q0", 100.0, 64, 2);
+
+            const int g2 = l2->addGroup (utf8 ("P75 两处组"), groupPalette::group2);
+            l2->assignSamplesToGroup ({ p0, q0 }, g2, 0);
+            l2->assignSamplesToGroup ({ p1, q1 }, g2, 1);
+            l2->setOccurrenceStart (g2, 1, 40.0);
+
+            // 两处各自的对应成员同时被选中。
+            roll2.setSampleSelection ({ p0, p1 });
+
+            const auto rectP = roll2.getSampleScreenBounds (0, p0);
+            roll2.simulateSampleSpanDrag (p0, rowCentreY (rectP, 61, 2, 64), true);
+
+            const auto* rp0 = l2->findSample (p0);
+            const auto* rp1 = l2->findSample (p1);
+            const auto* rq0 = l2->findSample (q0);
+            const auto* rq1 = l2->findSample (q1);
+
+            check (utf8 ("同一个组的两处副本同时选中，拖上边缘后两处高度仍然一样"),
+                   rp0 != nullptr && rp1 != nullptr && rq0 != nullptr && rq1 != nullptr
+                     && rp0->laneSpan == 5 && rp1->laneSpan == 5
+                     && rq0->laneSpan == 2 && rq1->laneSpan == 2,
+                   showSpan (rp0) + " / " + showSpan (rp1) + "  ·  "
+                     + showSpan (rq0) + " / " + showSpan (rq1)
+                     + utf8 ("（应为 60+5 / 60+5 · 64+2 / 64+2）"));
+        }
+
+        //-- 5. 两处出现的形状本来就不一致时，拖一次要收敛到"拖到哪儿" ------
+        // 老工程、撤销回来的快照都能造出这个状态。每写一块就同步一次的话，
+        // 第一块的副本先把第二块的当前值改掉，第二块再拿自己的快照加 delta 写
+        // 回去，两处轮流当模板——最后停在 7，而指针停在 5。
+        {
+            LayerStack t4;
+            RackModel  r4;
+            PianoRollComponent roll4 (t4, r4);
+            roll4.setSize (1200, 620);
+
+            t4.addLayer (utf8 ("P75 不同步"), palette::layer1);
+            auto* l4 = t4.getLayer (0);
+
+            const auto block4 = [l4] (const char* name, double start, int pitch, int span)
+            {
+                SampleEvent clip;
+                clip.name        = name;
+                clip.startBeat   = start;
+                clip.lengthBeats = 4.0;
+                clip.pitch       = pitch;
+                clip.laneSpan    = span;
+                return l4->addSample (clip);
+            };
+
+            const int u0 = block4 ("u0", 1.0, 60, 2);    // occ 0: 2 行
+            const int v0 = block4 ("v0", 6.0, 64, 3);
+            const int u1 = block4 ("u0", 41.0, 60, 4);   // occ 1: 4 行（不一致）
+            const int v1 = block4 ("v0", 46.0, 64, 5);
+
+            const int g4 = l4->addGroup (utf8 ("P75 不同步组"), groupPalette::group5);
+            l4->assignSamplesToGroup ({ u0, v0 }, g4, 0);
+            l4->assignSamplesToGroup ({ u1, v1 }, g4, 1);
+            l4->setOccurrenceStart (g4, 1, 40.0);
+
+            roll4.setSampleSelection ({ u0, u1 });
+
+            const auto rectU = roll4.getSampleScreenBounds (0, u0);
+            roll4.simulateSampleSpanDrag (u0, rowCentreY (rectU, 61, 2, 64), true);
+
+            const auto* ru0 = l4->findSample (u0);
+            const auto* ru1 = l4->findSample (u1);
+
+            check (utf8 ("两处形状本来不一致时，拖一次停在指针指着的那个高度，不是停在更远的那个"),
+                   ru0 != nullptr && ru1 != nullptr
+                     && ru0->laneSpan == 5 && ru1->laneSpan == 5,
+                   showSpan (ru0) + " / " + showSpan (ru1)
+                     + utf8 ("（应为 60+5 / 60+5）"));
+        }
+
+        //-- 6. 两处出现的成员数不一样时，多选拖拽仍然落到同一个高度 ------
+        // 这不是想象出来的状态：整处删除只影响那一处（P62），所以一个组的两
+        // 处出现本来就可能一个有 2 个成员、一个只有 1 个。组同步在这种情况
+        // 下会"多退少补"，如果它插在循环中间，后面的块就在拿旧值跟新模板比。
+        {
+            LayerStack t3;
+            RackModel  r3;
+            PianoRollComponent roll3 (t3, r3);
+            roll3.setSize (1200, 620);
+
+            t3.addLayer (utf8 ("P75 不等"), palette::layer1);
+            auto* l3 = t3.getLayer (0);
+
+            const auto block3 = [l3] (const char* name, double start, int pitch, int span)
+            {
+                SampleEvent clip;
+                clip.name        = name;
+                clip.startBeat   = start;
+                clip.lengthBeats = 4.0;
+                clip.pitch       = pitch;
+                clip.laneSpan    = span;
+                return l3->addSample (clip);
+            };
+
+            const int s0 = block3 ("s0", 1.0, 60, 2);
+            const int t0 = block3 ("t0", 6.0, 64, 2);
+            const int s1 = block3 ("s0", 41.0, 60, 2);   // 第二处只有 s0 这一个
+
+            const int g3 = l3->addGroup (utf8 ("P75 不等组"), groupPalette::group4);
+            l3->assignSamplesToGroup ({ s0, t0 }, g3, 0);
+            l3->assignSamplesToGroup ({ s1 }, g3, 1);
+            l3->setOccurrenceStart (g3, 1, 40.0);
+
+            roll3.setSampleSelection ({ s0, s1 });
+
+            const auto rectS = roll3.getSampleScreenBounds (0, s0);
+            roll3.simulateSampleSpanDrag (s0, rowCentreY (rectS, 61, 2, 64), true);
+
+            const auto* rs0 = l3->findSample (s0);
+            const auto* rs1 = l3->findSample (s1);
+
+            check (utf8 ("两处出现成员数不一样时，同时选中两处的块拖高度，两处高度仍然一样"),
+                   rs0 != nullptr && rs1 != nullptr
+                     && rs0->laneSpan == 5 && rs1->laneSpan == 5,
+                   showSpan (rs0) + " / " + showSpan (rs1)
+                     + utf8 ("（应为 60+5 / 60+5）"));
+        }
+    }
+
     //-- Phase 73: 编组要先双击进去，才能改里面的东西 -------------------------
     // 组是一个对象：点它就整块拖，像视频剪辑里的片段。把七个音符里的一个单独
     // 挪走是另一种意图，需要另一种手势——双击。在此之前，任何一次按下都得到
@@ -11664,7 +12001,31 @@ juce::String MainComponent::runSelfTest()
                  && roll.getEditingGroupId() < 0,
                showSel() + utf8 (" / 块 ") + (roll.isSampleSelected (clipId) ? "1" : "0"));
 
-        //-- 6. 组外一击就是离开 ------------------------------------------
+        //-- 6. Phase 75: 组内点空白 = 取消选择，不是又抓起整组 ----------
+        // 双击进去之后，组框里除了成员就是空白。以前这一击被组框接住，
+        // 变成"选中整组并起拖"——用户在组里想取消选择，结果反而全选了一遍。
+        roll.simulateDoubleClickForTest (centreOf (na));
+        roll.simulatePressForTest (centreOf (nb));
+
+        const bool hadSelection = roll.isNoteSelectedForTest (nb);
+
+        // 组框里、成员之外的一小块：na 在 beat 0..2，nb 在 6..8，
+        // 取 beat 4（组框内、两个成员之间）来点。
+        const float gapX = roll.getNoteScreenBounds (0, na).getRight()
+                             + (roll.getNoteScreenBounds (0, nb).getX()
+                                  - roll.getNoteScreenBounds (0, na).getRight()) * 0.5f;
+
+        roll.simulatePressForTest ({ gapX, centreOf (na).y });
+
+        check (utf8 ("进入组内编辑后，点组里的空白区域会取消选择，而不是重新抓住整组"),
+               hadSelection && roll.getEditingGroupId() == gid
+                 && roll.getSelection().empty() && roll.getSampleSelection().empty(),
+               juce::String ((int) roll.getSelection().size()) + utf8 (" 个音符 / 块 ")
+                 + juce::String ((int) roll.getSampleSelection().size()) + utf8 (" / 组 ")
+                 + juce::String (roll.getEditingGroupId())
+                 + utf8 ("（应为 0 个 / 0 / ") + juce::String (gid) + utf8 ("）"));
+
+        //-- 7. 组外一击就是离开 ------------------------------------------
         roll.simulateDoubleClickForTest (centreOf (na));
         const bool wasInside = roll.getEditingGroupId() == gid;
 
@@ -11675,7 +12036,7 @@ juce::String MainComponent::runSelfTest()
                  && roll.isNoteSelectedForTest (outside) && ! roll.isNoteSelectedForTest (na),
                showSel() + (wasInside ? utf8 ("（进去过）") : utf8 ("（没进去）")));
 
-        //-- 7. 连"抓住边缘改长度"也是进去之后才行 ------------------------
+        //-- 8. 连"抓住边缘改长度"也是进去之后才行 ------------------------
         // 选中了整组不等于抓住了整组：选中和起拖是两次写入，一个只选对了、
         // 却把单音符的缩放臂起来的实现，能骗过所有只看选择的断言。
         const auto tailOf = [&] (int id)

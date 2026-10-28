@@ -3289,8 +3289,16 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
 
         if (const int frameGroup = getGroupFrameAt (pos, &frameOccurrence); frameGroup >= 0)
         {
-            armGroupMove (frameGroup, frameOccurrence, pos);
-            return;
+            // Phase 75: inside the OPEN group the frame is not a handle — it is
+            // just the patch of canvas between the members. A click there has to
+            // mean what a click on empty canvas means everywhere else: nothing
+            // is selected. It falls through to the marquee below instead of
+            // arming a rigid move of a group the user is already inside.
+            if (frameGroup != editingGroupId)
+            {
+                armGroupMove (frameGroup, frameOccurrence, pos);
+                return;
+            }
         }
     }
 
@@ -8705,7 +8713,8 @@ int PianoRollComponent::maxLaneSpanFor (int pitch) const noexcept
     return juce::jlimit (1, SampleEvent::numPitchLanes, numPitches - pitch);
 }
 
-bool PianoRollComponent::applySampleSpan (const SampleEvent& origin, float wantedY, bool fromTop)
+bool PianoRollComponent::applySampleSpan (const SampleEvent& origin, float wantedY, bool fromTop,
+                                          bool propagate)
 {
     auto* active = stack.getActiveLayer();
 
@@ -8747,20 +8756,29 @@ bool PianoRollComponent::applySampleSpan (const SampleEvent& origin, float wante
     }
 
     // Phase 62/72: how many lanes a block covers is SHAPE, exactly like its
-    // width — so the other appearances of its group get the same height. Called
-    // on every move, the way applySampleTrim does.
-    syncShapeOfClip (origin.id);
+    // width — so the other appearances of its group get the same height.
+    //
+    // Phase 75: a selection-wide drag turns this off and syncs once at the end.
+    // Syncing per block inside the loop let the first block's copy overwrite the
+    // second block's CURRENT height, so the two took turns being the template and
+    // the result depended on which one the loop happened to visit last.
+    if (propagate)
+        syncShapeOfClip (origin.id);
+
     return true;
 }
 
 bool PianoRollComponent::applySampleSpanDrag (const SampleEvent& primary, float wantedY, bool fromTop,
                                               const std::vector<SampleEvent>& siblings)
 {
-    if (! applySampleSpan (primary, wantedY, fromTop))
+    // Phase 75: the primary is written first but NOT propagated — every block in
+    // this step is measured against the shape it had when the button went down,
+    // and a sync in the middle of the loop rewrites the ones it has not reached
+    // yet. That is the "sometimes" in "sometimes the blocks end up different":
+    // whichever the loop visits last becomes the template, and the ones before
+    // it are holding a height the template never had.
+    if (! applySampleSpan (primary, wantedY, fromTop, false))
         return false;
-
-    if (siblings.empty())
-        return true;
 
     auto* active = stack.getActiveLayer();
 
@@ -8779,30 +8797,68 @@ bool PianoRollComponent::applySampleSpanDrag (const SampleEvent& primary, float 
     const int delta = fromTop ? applied->topPitch() - primary.topPitch()
                               : applied->pitch - primary.pitch;
 
-    if (delta == 0)
-        return true;
-
-    for (const auto& sibling : siblings)
-    {
-        if (sibling.id == primary.id)
-            continue;
-
-        auto* target = active->findSample (sibling.id);
-
-        if (target == nullptr)
-            continue;
-
-        if (fromTop)
-            target->laneSpan = juce::jlimit (1, maxLaneSpanFor (sibling.pitch),
-                                             sibling.laneSpan + delta);
-        else
+    if (delta != 0)
+        for (const auto& sibling : siblings)
         {
-            target->pitch    = juce::jlimit (0, sibling.topPitch(), sibling.pitch + delta);
-            target->laneSpan = sibling.topPitch() - target->pitch + 1;
+            if (sibling.id == primary.id)
+                continue;
+
+            auto* target = active->findSample (sibling.id);
+
+            if (target == nullptr)
+                continue;
+
+            if (fromTop)
+                target->laneSpan = juce::jlimit (1, maxLaneSpanFor (sibling.pitch),
+                                                 sibling.laneSpan + delta);
+            else
+            {
+                target->pitch    = juce::jlimit (0, sibling.topPitch(), sibling.pitch + delta);
+                target->laneSpan = sibling.topPitch() - target->pitch + 1;
+            }
         }
 
-        syncShapeOfClip (sibling.id);
+    // One sync per group, after every block has its new height. The values agree
+    // by then, so it no longer matters which appearance is the source — which is
+    // the point: the result must not depend on the order of a loop.
+    std::vector<int> touchedIds;
+    touchedIds.push_back (primary.id);
+
+    for (const auto& sibling : siblings)
+        touchedIds.push_back (sibling.id);
+
+    for (const auto& entry : groupOccurrencesOf ({}, touchedIds))
+        active->syncGroupShape (entry.first, entry.second);
+
+    stack.notifyNotesChanged();
+    return true;
+}
+
+bool PianoRollComponent::simulateSpanDragFromPress (juce::Point<float> pressPos, float wantedY)
+{
+    // The real order: the press captures both origins, the drag applies one step
+    // against those snapshots. Driving it any other way proves nothing about a
+    // multi-selection, because a selection is only "several shapes" until
+    // something in the layer has already been rewritten by this same gesture.
+    handlePress (pressPos, {}, 1);
+
+    const bool fromTop = dragMode == DragMode::resizeSampleTop;
+
+    if (dragMode != DragMode::resizeSampleTop && dragMode != DragMode::resizeSampleBottom)
+    {
+        dragMode = DragMode::none;
+        return false;
     }
+
+    applySampleSpanDrag (dragSampleOriginal, wantedY, fromTop, dragSpanOriginals);
+    stack.notifyNotesChanged();
+
+    dragMode = DragMode::none;
+    dragOriginals.clear();
+    dragClipOriginals.clear();
+    dragTrimOriginals.clear();
+    dragSpanOriginals.clear();
+    dragSampleId = -1;
 
     return true;
 }
@@ -10146,7 +10202,29 @@ PianoRollComponent::clipEdgeAt (juce::Point<float> position) const
         bestDist = dist;
     }
 
-    return { bestId, bestEdge };
+    if (bestId >= 0)
+        return { bestId, bestEdge };
+
+    //-- Phase 75: a selected block still owns the press from its middle -----
+    // No band answered, so this pixel belongs to whichever block is DRAWN here —
+    // which is not necessarily one the user has selected. Two blocks stacked on
+    // the same beat and lane (a paste on top of itself is the usual way) made
+    // the press land on the stranger: the selection was rewritten to it and only
+    // that one moved, so a multi-selection "sometimes moved only one block".
+    //
+    // The answer is (id, none): the block is grabbed, no edge is. `handlePress`
+    // reads that as "keep the selection, arm a move", which is what the user
+    // meant by pressing the thing they had already selected.
+    for (auto it = samples.rbegin(); it != samples.rend(); ++it)
+    {
+        if (! isSampleSelected (it->id))
+            continue;
+
+        if (getSampleScreenBounds (index, it->id).contains (position))
+            return { it->id, ClipEdge::none };
+    }
+
+    return { -1, ClipEdge::none };
 }
 
 std::pair<int, bool> PianoRollComponent::selectedTrimEdgeAt (juce::Point<float> position) const

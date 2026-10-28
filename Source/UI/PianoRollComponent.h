@@ -732,6 +732,10 @@ public:
         the drag itself. */
     int  getDragOriginalCountForTest() const noexcept { return (int) dragOriginals.size(); }
 
+    /** Phase 75: how many BLOCKS the press armed for a move — the sample-side
+        twin of the line above, which only ever counts notes. */
+    int  getClipDragCountForTest() const noexcept { return (int) dragClipOriginals.size(); }
+
     bool pressArmedNoteResizeForTest() const noexcept
     {
         return dragMode == DragMode::resizeNote || dragMode == DragMode::resizeNoteLeft;
@@ -777,6 +781,13 @@ public:
         `applySampleSpanDrag` the mouse path calls, so the self-test cannot
         pass on arithmetic the real gesture does not use. */
     bool simulateSampleSpanDrag (int sampleId, float wantedY, bool fromTop = true);
+
+    /** Phase 75: the WHOLE gesture — press on the edge, then drag. The hook
+        above takes its origin from the block as it is NOW; the mouse path takes
+        it from a snapshot captured at the press, and the two only agree when
+        nothing has touched the block in between. Multi-selection is exactly
+        where that stops being true, so the test has to press. */
+    bool simulateSpanDragFromPress (juce::Point<float> pressPos, float wantedY);
 
     /** Phase 25: the group on the ACTIVE layer whose frame (the translucent
         bracket drawn around its members) contains this point, or -1. Notes are
@@ -1643,7 +1654,8 @@ private:
         (the block grows upward); otherwise the bottom lane follows the pointer
         and the top stays where the user sees it. Both snap to whole lanes,
         because that is the model: a block never straddles a lane boundary. */
-    bool applySampleSpan (const SampleEvent& origin, float wantedY, bool fromTop);
+    bool applySampleSpan (const SampleEvent& origin, float wantedY, bool fromTop,
+                          bool propagate = true);
 
     /** Phase 72: `applySampleSpan` for the whole selection — the primary block
         decides the delta, the others move by the same number of lanes, exactly
