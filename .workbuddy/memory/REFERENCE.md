@@ -182,7 +182,7 @@
 - **`PopupMenu` 的 id 空间是扁平的**，子菜单不占 id。新加一组 id 前先数一遍已用的区间
   （`10..13 / 20 / 30..41 / 200+n / 1000+ch / 9001 / 10000+`）。空白子菜单要给一条禁用项。
 
-## 钢琴窗的时间线长度（P11 增长 / P60 回收）
+## 钢琴窗的时间线长度（P11 增长 / P60 回收 / P61 缩放同档）
 - `timelineBeats` 是滚动的上界，`totalBeats = 64` 是最短长度，`beatChunk = 64` 是增长/回收的步长。
 - **增长**：`ensureTimelineExtendsTo(beats)`，每次最多四块，一次离谱的调用不会造出五小时的标尺。
 - **回收**（P60）：`trimTimelineToView()`，凡是 `clampScroll()` 或 `setScrollBeats()` 跑过都会问一遍
@@ -191,6 +191,12 @@
   结果同样按 `beatChunk` **向上取整**——落在非块边界上的长度会让下一格滚轮立刻再长一次，标尺会呼吸。
 - 不变量：**任意时刻 `timelineBeats == max(totalBeats, ceil(needed / beatChunk) * beatChunk)`**。
   滚进空白 → 长；滚回来 → 短，滚动条滑块宽度自己恢复到移动之前（用户 P60 的原话）。
+- **缩放（P61）也走 `clampScroll()`**，而且必须用**夹过下界**的 scroll 去问增长：
+  `wanted = jmax(0.0, scrollBeats) + visibleBeats`。缩放的锚点常在 beat 0 左边，`scrollBeats`
+  此刻是负数、两行后才被夹回 0；用原始负值求和会把需求算小，于是"这一档不涨、下一档才涨"，
+  中途右边一条没网格的死带。见 `PITFALLS.md` P61-A。
+- 缩放回缩时同一条路径回收：`visible` 变小 → `needed` 变小 → 长度回落到 `beatChunk` 的整数倍，
+  滑块宽度跟着恢复。**不需要**在 `setBeatWidthAround` 里另写一份。
 - 只回滚一半的典型 bug：`setPlayheadBeat` 的跟随分支直接写 `scrollBeats`（不经过这两个口子），
   它**故意不回收**——播放头还在那儿，标尺不该在它脚下缩。位置回滚由 P58 的 `userScrollBeats` 负责。
 

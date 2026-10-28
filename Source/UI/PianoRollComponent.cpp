@@ -910,8 +910,17 @@ void PianoRollComponent::clampScroll()
 
     const double visibleBeats = (double) area.getWidth() / beatWidth;
 
-    if (scrollBeats + visibleBeats > timelineBeats)
-        ensureTimelineExtendsTo (scrollBeats + visibleBeats);
+    // Phase 61: ask for the ruler the CLAMPED view needs. Zooming out pivots on a
+    // beat, so `scrollBeats` is very often negative here — the anchor sits left of
+    // beat 0 and the number is about to become 0 two lines down. The raw sum then
+    // under-reports: at 14.8 px/beat the view wanted 74.5 beats while -16.6 + 74.5
+    // = 57.9 said "64 is plenty". The roll only caught up on the NEXT notch, so
+    // every zoom-out that crossed the end of the ruler showed a dead strip on the
+    // right for one step.
+    const double wanted = juce::jmax (0.0, scrollBeats) + visibleBeats;
+
+    if (wanted > timelineBeats)
+        ensureTimelineExtendsTo (wanted);
 
     const double maxBeats = juce::jmax (0.0, timelineBeats - visibleBeats);
     scrollBeats = juce::jlimit (0.0, maxBeats, scrollBeats);

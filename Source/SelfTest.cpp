@@ -10902,7 +10902,67 @@ juce::String MainComponent::runSelfTest()
                juce::String (baseLength, 0) + utf8 (" -> ") + juce::String (grownLength, 0)
                  + utf8 (" -> ") + juce::String (backLength, 0) + utf8 (" beats，滑块宽 ")
                  + juce::String (baseThumb, 0) + utf8 (" -> ") + juce::String (grownThumb, 0)
-                 + utf8 (" -> ") + juce::String (backThumb, 0));
+                 + utf8 (" -> ")               + juce::String (backThumb, 0));
+    }
+
+    //-- Phase 61: zooming the viewport is another way the ruler gets asked ----
+    {
+        LayerStack t61; RackModel r61; PianoRollComponent roll (t61, r61);
+        roll.setSize (1200, 520);
+
+        t61.addLayer (utf8 ("P61 缩放"), palette::layer1);
+
+        NoteEvent n61;
+        n61.pitch = 60; n61.startBeat = 0.0; n61.lengthBeats = 2.0;
+        t61.getLayer (0)->addNote (n61);
+
+        roll.resetTimeline();
+
+        const double baseLength = roll.getTimelineBeats();
+        const float  baseThumb  = roll.getScrollThumbBounds().getWidth();
+
+        // Zoom out notch by notch: every notch must leave a ruler at least as wide
+        // as the window — the same notch, not the one after it. Zooming out pivots
+        // on a beat, so the anchored scroll is negative at the moment of the ask;
+        // the old test summed that negative scroll with the visible width, got a
+        // number smaller than the ruler, and said "no growth needed". The right
+        // edge therefore stayed dead until the next notch caught up.
+        int    shortNotches = 0;
+        double outLength    = baseLength;
+        juce::String trace;
+
+        for (int i = 0; i < 8; ++i)
+        {
+            roll.setBeatWidth (roll.getBeatWidth() / 1.8f);
+
+            const double visible = roll.getVisibleBeats();
+            const double length  = roll.getTimelineBeats();
+
+            if (visible > length + 1.0e-9)
+                ++shortNotches;
+
+            outLength = length;
+            trace += juce::String (visible, 0) + utf8 ("视/") + juce::String (length, 0)
+                       + utf8 ("长 ");
+        }
+
+        check ("Zooming out lengthens the roll on the same notch, not the next one",
+               shortNotches == 0 && outLength > baseLength,
+               juce::String (baseLength, 0) + utf8 (" -> ") + juce::String (outLength, 0)
+                 + utf8 (" beats；每档 ") + trace);
+
+        // Coming back in has to hand the beats over again. The zoom pivots on the
+        // middle of the view, so the scroll lands at 34.5 beats — still short of
+        // the 64 the project already had, which is the point: the ruler that grew
+        // for the wide view must not be kept once the wide view is gone.
+        roll.setBeatWidth (PianoRollComponent::defaultBeatWidth);
+
+        check ("Zooming back in gives the extra ruler back, thumb included",
+               std::abs (roll.getTimelineBeats() - baseLength) < 1.0e-9
+                 && std::abs (roll.getScrollThumbBounds().getWidth() - baseThumb) < 1.0f,
+               juce::String (outLength, 0) + utf8 (" -> ") + juce::String (roll.getTimelineBeats(), 0)
+                 + utf8 (" beats，滑块宽 ") + juce::String (baseThumb, 0)
+                 + utf8 (" -> ") + juce::String (roll.getScrollThumbBounds().getWidth(), 0));
     }
 
     // The summary MUST come after the last check. It used to sit mid-function
