@@ -1077,13 +1077,30 @@ public:
         return {};
     }
 
+    /** Phase 67: test hooks for scrubbing past the edge of the window.
+
+        A headless run cannot hold a mouse, and the whole point of the gesture is
+        a pointer position OUTSIDE the grid — so the fixture needs one scrub step
+        without a MouseEvent. The grid's own rectangle is already public
+        (`getGridBounds`), which is where those pixels come from. */
+    void simulateRulerScrubForTest (float screenX)
+    {
+        dragMode = DragMode::rulerScrub;
+        scrubRulerTo (screenX);
+        dragMode = DragMode::none;
+    }
+
+    /** Phase 67: where the head landed. "Pinned to the edge" is a comparison
+        between this and `getScrollBeats() + getVisibleBeats()`, so the test has
+        to be able to read it. */
+    double getPlayheadBeatForTest() const noexcept { return playheadBeat; }
+
     /** Phase 30: pixels of a block that actually carry audio — the waveform's
         own width at the current zoom. Zero when the file is missing.
 
         This is the number the drawing code uses, exposed so the self-test can
         prove the waveform is CUT by a trim and not rescaled: the count depends
-        on the file and the zoom, never on the block's length. */
-    int sampleWaveColumnCount (int sampleId) const;
+        on the file and the zoom, never on the block's length. */    int sampleWaveColumnCount (int sampleId) const;
 
     /** Phase 30: puts the block back to "the whole file, starting where the audio
         starts". Restores the start beat the head trim ate as well, so the audio
@@ -1273,6 +1290,15 @@ private:
     int    pitchAtScreenY (float y) const noexcept;
     float  screenXForBeat (double beat) const noexcept;
     double beatAtScreenX (float x) const noexcept;
+
+    /** Phase 67: one ruler-scrub step, in screen pixels.
+
+        Split out of mouseDown/mouseDrag because the interesting case is the
+        pointer OUTSIDE the grid: past an edge the window is dragged along and
+        the playhead stays pinned to the edge it is pushing on, so "scrub to bar
+        40" is one gesture instead of drop-scroll-drop. The self-test drives
+        exactly this function, so what it asserts is what the mouse runs. */
+    void scrubRulerTo (float screenX);
 
     juce::Rectangle<float> getNoteBounds (const NoteEvent&) const;
 

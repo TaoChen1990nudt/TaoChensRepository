@@ -11342,6 +11342,111 @@ juce::String MainComponent::runSelfTest()
                  + juce::String (widePill.getWidth(), 1) + utf8 (" px"));
     }
 
+    //-- Phase 67: scrubbing past the edge drags the window with it -----------
+    {
+        LayerStack t67;
+        RackModel  r67;
+        PianoRollComponent roll (t67, r67);
+        roll.setSize (1200, 520);
+        t67.addLayer (utf8 ("P67 拖拽"), palette::layer1);
+        roll.setPlayheadBeat (0.0);
+
+        // The host's wiring minus the engine: a locate comes back as a playhead
+        // move. That is the path the gesture has to survive — the roll is not
+        // the only thing that writes playheadBeat.
+        roll.onLocateRequested = [&roll] (double beat) { roll.setPlayheadBeat (beat); };
+
+        const auto   grid    = roll.getGridBounds();
+        const double visible = roll.getVisibleBeats();
+        const double parked  = roll.getScrollBeats();
+        const double startTimeline = roll.getTimelineBeats();
+
+        //-- 1. inside the window a scrub is still just a scrub ------------
+        // The new code must not turn every drag into a scroll: between the edges
+        // the pointer IS the playhead, and the picture stays put.
+        roll.simulateRulerScrubForTest (grid.getX() + grid.getWidth() * 0.5f);
+
+        const double insideScroll = roll.getScrollBeats();
+        const double insideHead   = roll.getPlayheadBeatForTest();
+
+        check (utf8 ("标尺拖拽落在窗口内：视口不动，播放头跟着指针走"),
+               std::abs (insideScroll - parked) < 1.0e-9
+                 && std::abs (insideHead - visible * 0.5) < 0.05,
+               utf8 ("视口 ") + juce::String (insideScroll, 2)
+                 + utf8 ("，播放头 ") + juce::String (insideHead, 2)
+                 + utf8 (" 拍（窗口 ") + juce::String (visible, 1) + utf8 (" 拍）"));
+
+        //-- 2. past the RIGHT edge the window is dragged along ------------
+        // Two and a half windows out, so this also has to GROW the ruler: clamped
+        // to the old length the head would stop at beat 64 while the pointer kept
+        // going, which is the bug this is here to prevent.
+        roll.simulateRulerScrubForTest (grid.getRight() + (float) (grid.getWidth() * 2.5));
+
+        const double rightScroll = roll.getScrollBeats();
+        const double rightHead   = roll.getPlayheadBeatForTest();
+
+        check (utf8 ("指针拖到右边界外：视口跟着右移，播放头钉在右边界"),
+               rightScroll > insideScroll + 1.0
+                 && rightHead > startTimeline + 1.0
+                 && std::abs (rightHead - (rightScroll + visible)) < 0.05
+                 && roll.getTimelineBeats() >= rightHead - 1.0e-6,
+               juce::String (insideScroll, 2) + utf8 (" -> ") + juce::String (rightScroll, 2)
+                 + utf8 ("，播放头 ") + juce::String (rightHead, 2)
+                 + utf8 ("，标尺 ") + juce::String (roll.getTimelineBeats(), 1) + utf8 (" 拍"));
+
+        //-- 3. ...and back out the LEFT edge, the same way ----------------
+        roll.simulateRulerScrubForTest (grid.getX() - 200.0f);
+
+        const double leftScroll = roll.getScrollBeats();
+        const double leftHead   = roll.getPlayheadBeatForTest();
+
+        check (utf8 ("指针拖到左边界外：视口跟着左移，播放头钉在左边界"),
+               leftScroll < rightScroll - 1.0
+                 && std::abs (leftHead - leftScroll) < 0.05,
+               juce::String (rightScroll, 2) + utf8 (" -> ") + juce::String (leftScroll, 2)
+                 + utf8 ("，播放头 ") + juce::String (leftHead, 2));
+
+        //-- 4. beat 0 is a wall, not a place to keep scrolling past -------
+        // The pointer can be dragged off the left side of the screen; the roll
+        // starts at 0 and so does the head. "排除 0 点" in Phase 66 was about the
+        // follower, and it holds here for the same reason: there is nothing to
+        // the left of the first beat.
+        roll.simulateRulerScrubForTest (grid.getX() - 5000.0f);
+
+        check (utf8 ("一直拖到 0 点左边：视口停在 0，播放头停在 0"),
+               std::abs (roll.getScrollBeats()) < 1.0e-9
+                 && std::abs (roll.getPlayheadBeatForTest()) < 1.0e-9,
+               juce::String (roll.getScrollBeats(), 2) + utf8 (" / ")
+                 + juce::String (roll.getPlayheadBeatForTest(), 2));
+    }
+
+    //-- Phase 67: while the button is down, the drag owns the window ----------
+    {
+        LayerStack t67b;
+        RackModel  r67b;
+        PianoRollComponent roll (t67b, r67b);
+        roll.setSize (1200, 520);
+        t67b.addLayer (utf8 ("P67 所有权"), palette::layer1);
+        roll.setPlayheadBeat (0.0);
+
+        // The transport keeps running during a scrub — a locate seeks, it does
+        // not stop. So the follower is still being asked to move the window
+        // while the mouse is asking for something else. This fixture is that
+        // collision: a locate at a beat far to the right, delivered mid-drag.
+        roll.onLocateRequested = [&roll] (double) { roll.setPlayheadBeat (200.0); };
+        roll.setTransportActive (true);
+
+        const auto   grid   = roll.getGridBounds();
+        const double parked = roll.getScrollBeats();
+
+        roll.simulateRulerScrubForTest (grid.getX() + grid.getWidth() * 0.5f);
+
+        check (utf8 ("拖拽播放头期间，播放跟随不抢视口"),
+               std::abs (roll.getScrollBeats() - parked) < 1.0e-9,
+               juce::String (parked, 2) + utf8 (" -> ")
+                 + juce::String (roll.getScrollBeats(), 2));
+    }
+
     //-- Phase 65: two selected groups drag together --------------------------
     {
         LayerStack t65;

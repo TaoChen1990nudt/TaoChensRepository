@@ -315,7 +315,14 @@ void PianoRollComponent::setPlayheadBeat (double beats)
     // 60 fps. That was the flicker, and it started exactly where the push does —
     // three quarters of the way across. A loop jump, a scrub and a seek all move
     // the playhead backwards; the ordinary forward rollout never does.
+    //
+    // Phase 67: and it stands aside while the ruler is being dragged. A scrub is
+    // the user moving the playhead by hand, so a hand-back would be two writers
+    // on the same number, one per mouse-move: the window would snap back to
+    // wherever the playback left it and the drag would have to push it out
+    // again. The gesture owns the view until the button comes up.
     if (followScrolled && visible > 1.0
+         && dragMode != DragMode::rulerScrub
          && beats < previous - 1.0e-9
          && beats >= userScrollBeats - 1.0e-9
          && beats <= userScrollBeats + visible + 1.0e-9)
@@ -359,7 +366,14 @@ void PianoRollComponent::setPlayheadBeat (double beats)
     // whatever the user was looking at, and the hand-back above already owns
     // that case — so the left edge only follows while the playhead is
     // genuinely somewhere past the start.
-    if (transportActive && visible > 1.0 && ! juce::approximatelyEqual (previous, beats))
+    //
+    // Phase 67: the follow also yields to a ruler drag, for the reason above —
+    // while the button is down, scrubRulerTo is the one deciding where the
+    // window sits. Everything else (playback, a loop jump, a seek from the
+    // top bar) still lands here.
+    if (transportActive && visible > 1.0
+         && dragMode != DragMode::rulerScrub
+         && ! juce::approximatelyEqual (previous, beats))
     {
         const double rightEdge = scrollBeats + visible;
         const bool   pastRight = beats > rightEdge + 1.0e-9;
@@ -906,6 +920,50 @@ float PianoRollComponent::screenXForBeat (double beat) const noexcept
 double PianoRollComponent::beatAtScreenX (float x) const noexcept
 {
     return scrollBeats + (double) (x - getGridArea().getX()) / beatWidth;
+}
+
+void PianoRollComponent::scrubRulerTo (float screenX)
+{
+    //-- Phase 67: the pointer may leave the window, and it takes the window --
+    // A ruler drag used to be clamped to what was on screen: the playhead went
+    // wherever the pointer's X mapped to, and once that X was past the edge the
+    // head sat off screen while the picture stood still. Scrubbing to bar 40 was
+    // therefore drop, wheel, drop, wheel. What a time axis should do is what the
+    // transport itself does at the edge (Phase 66) — carry the view along — so
+    // the two now share the same geometry:
+    //
+    //   past the right edge  ->  scroll so the beat lands ON that edge
+    //   past the left  edge  ->  scroll so the beat lands ON that edge
+    //
+    // Both spellings are "pin the playhead to the edge being pushed on", which
+    // is why they are two lines and not a mode. Inside the window neither fires,
+    // so an ordinary scrub still scrolls nothing.
+    const double raw     = beatAtScreenX (screenX);
+    const double visible = getVisibleBeats();
+
+    // Grow first, snap second. Clamping to the old length before the scroll ran
+    // would stop the head at the old end of the ruler with the pointer still
+    // moving — the extension is what "dragged past the end" means.
+    if (raw > timelineBeats)
+        ensureTimelineExtendsTo (raw);
+
+    const double beat = juce::jlimit (0.0, timelineBeats, snapEnabled ? snapBeat (raw) : raw);
+
+    if (visible > 1.0)
+    {
+        const double rightEdge = scrollBeats + visible;
+
+        // Judged on the SNAPPED beat, not on the pointer: with snapping on, the
+        // playhead is the thing the user watches, and pinning it half a cell off
+        // the edge so that the pointer can be exactly on it would be backwards.
+        if (beat > rightEdge + 1.0e-9)
+            setScrollBeats (beat - visible);
+        else if (beat < scrollBeats - 1.0e-9)
+            setScrollBeats (beat);
+    }
+
+    if (onLocateRequested != nullptr)
+        onLocateRequested (beat);
 }
 
 juce::Rectangle<float> PianoRollComponent::getNoteBounds (const NoteEvent& note) const
@@ -2526,11 +2584,9 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         dragMode = DragMode::rulerScrub;
         setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
 
-        if (onLocateRequested != nullptr)
-        {
-            const double beat = juce::jlimit (0.0, timelineBeats, beatAtScreenX (e.position.x));
-            onLocateRequested (snapEnabled ? snapBeat (beat) : beat);
-        }
+        // Phase 67: one function, so a click and a drag cannot disagree about
+        // where the playhead is.
+        scrubRulerTo (e.position.x);
 
         return;
     }
@@ -3642,12 +3698,10 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
         // Left-drag on the ruler is the transport: the playhead follows the
         // pointer, one locate per move. Snapping applies here exactly as it does
         // to a click, so a drag can still land on the 1/16 grid.
-        if (onLocateRequested != nullptr)
-        {
-            const double beat = juce::jlimit (0.0, timelineBeats, beatAtScreenX (e.position.x));
-            onLocateRequested (snapEnabled ? snapBeat (beat) : beat);
-        }
-
+        //
+        // Phase 67: and when the pointer is outside the grid, the window comes
+        // with it — see scrubRulerTo.
+        scrubRulerTo (e.position.x);
         return;
     }
 
