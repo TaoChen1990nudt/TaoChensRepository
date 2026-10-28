@@ -198,6 +198,12 @@ public:
     /** Fired on double-click over an editable (active layer) note. */
     std::function<void (int layerIndex, int noteId)> onNoteDoubleClicked;
 
+    /** Phase 78: fired on double-click over an editable sample block. The
+        block's own curve editor is a real window (SampleEnvelopePanel), so the
+        roll asks the host to open it instead of opening its own floating box —
+        the box stays the chevron's job. */
+    std::function<void (int layerIndex, int sampleId)> onSampleDoubleClicked;
+
     /** Fired on any mouse-down in the canvas, used to dismiss floating panels. */
     std::function<void()> onCanvasMouseDown;
 

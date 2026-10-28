@@ -425,16 +425,25 @@ MainComponent::MainComponent()
 
     // The inspector floats above everything and starts hidden.
     addChildComponent (envelopePanel);
+    addChildComponent (sampleEnvelopePanel);      // Phase 78
 
     pianoRoll.onNoteDoubleClicked = [this] (int layerIndex, int noteId)
     {
         openEnvelopePanel (layerIndex, noteId);
     };
 
+    // Phase 78: a block's double click asks for the same kind of window the
+    // note's does. Both live here, both start hidden.
+    pianoRoll.onSampleDoubleClicked = [this] (int layerIndex, int sampleId)
+    {
+        openSampleEnvelopePanel (layerIndex, sampleId);
+    };
+
     // Clicking the canvas dismisses the inspector, like any popover.
     pianoRoll.onCanvasMouseDown = [this]
     {
         envelopePanel.close();
+        sampleEnvelopePanel.close();
     };
 
     // The rack reads the engine through callbacks: numbers in, pixels out.
@@ -917,6 +926,7 @@ MainComponent::MainComponent()
         republish();
         automationWindow.repaint();
         envelopePanel.repaint();
+        sampleEnvelopePanel.repaint();
     };
 
     // Phase 18: one snap switch for both editors, and the ruler as a locator.
@@ -963,6 +973,7 @@ MainComponent::MainComponent()
     // typing keyboard needs.
     pianoRoll.addKeyListener (&typingForwarder);
     envelopePanel.addKeyListener (&typingForwarder);
+    sampleEnvelopePanel.addKeyListener (&typingForwarder);
 
     refreshLiveTarget();
 
@@ -1170,6 +1181,7 @@ void MainComponent::restoreState (const juce::String& xml)
     bpmField.setBpm (bpmValue, false);
 
     envelopePanel.close();
+    sampleEnvelopePanel.close();
     pianoRoll.closeNoteAutomation();
     republish();
 
@@ -1818,6 +1830,7 @@ juce::Image MainComponent::createAutomationStackSnapshot (int width, int height)
     auto image = envelopePanel.createComponentSnapshot (envelopePanel.getLocalBounds(), true);
 
     envelopePanel.close();
+    sampleEnvelopePanel.close();
 
     //-- Hand it all back ----------------------------------------------------
     volumeLane.loadPoints (savedVolumePoints);
@@ -2039,6 +2052,7 @@ void MainComponent::buildSession (bool withEmptyLayer)
     const juce::ScopedValueSetter<bool> noSweep (suspendSamplerPrune, true);
 
     envelopePanel.close();
+    sampleEnvelopePanel.close();
     pianoRoll.closeNoteAutomation();
     closeMixerWindow();
 
@@ -5586,6 +5600,7 @@ void MainComponent::mouseDown (const juce::MouseEvent& e)
 
     // Clicking the backdrop dismisses the note inspector.
     envelopePanel.close();
+    sampleEnvelopePanel.close();
 }
 
 void MainComponent::mouseMove (const juce::MouseEvent& e)
@@ -6270,6 +6285,7 @@ bool MainComponent::loadProjectFromFile (const juce::File& file, juce::String& e
     pianoRoll.resetTimeline();
 
     envelopePanel.close();
+    sampleEnvelopePanel.close();
     layerPanel.setPlayheadBeat (-1.0);
     rackPanel.setPlayheadBeat (-1.0);
 
@@ -7060,6 +7076,50 @@ void MainComponent::openEnvelopePanel (int layerIndex, int noteId)
 
     envelopePanel.setBounds (x, y, w, h);
     envelopePanel.toFront (true);
+}
+
+void MainComponent::openSampleEnvelopePanel (int layerIndex, int sampleId)
+{
+    auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr || layer->findSample (sampleId) == nullptr)
+        return;
+
+    sampleEnvelopePanel.openFor (layerIndex, sampleId);
+
+    // Same placement rule as the note inspector: beside the block, then clamped
+    // inside the window. A stacked clip that sits near the edge is the common
+    // case here, so the flip-to-the-other-side branch earns its keep.
+    auto blockArea = pianoRoll.getSampleScreenBounds (layerIndex, sampleId)
+                       .getSmallestIntegerContainer();
+
+    if (blockArea.isEmpty())
+        blockArea = juce::Rectangle<int> (pianoRoll.getX() + pianoRoll.getWidth() / 2,
+                                          pianoRoll.getY() + pianoRoll.getHeight() / 2, 1, 1);
+    else
+        blockArea += pianoRoll.getPosition();
+
+    const int w = SampleEnvelopePanel::panelWidth;
+    const int h = SampleEnvelopePanel::panelHeight;
+
+    int x = blockArea.getRight() + 16;
+
+    if (x + w > getWidth() - 12)
+        x = blockArea.getX() - w - 16;
+
+    if (x < LayerPanel::panelWidth + 12)
+        x = LayerPanel::panelWidth + 12;
+
+    int y = blockArea.getBottom() + 12;
+
+    if (y + h > getHeight() - 12)
+        y = blockArea.getY() - h - 12;
+
+    y = juce::jlimit (topBarBounds.getBottom() + 12,
+                      juce::jmax (topBarBounds.getBottom() + 12, getHeight() - h - 12), y);
+
+    sampleEnvelopePanel.setBounds (x, y, w, h);
+    sampleEnvelopePanel.toFront (true);
 }
 
 void MainComponent::openDemoEnvelopePanel()

@@ -59,6 +59,7 @@ target_sources(AtomicDAW PRIVATE
     Source/UI/NoteEnvelopePanel.cpp
     Source/UI/PianoRollComponent.cpp
     Source/UI/RackPanel.cpp
+    Source/UI/SampleEnvelopePanel.cpp
     Source/UI/SettingsWindow.cpp)
 
 target_include_directories(AtomicDAW PRIVATE Source)

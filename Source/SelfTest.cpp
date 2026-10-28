@@ -12301,15 +12301,13 @@ juce::String MainComponent::runSelfTest()
                  + utf8 ("（应为 1 / -1）"));
     }
 
-    //-- Phase 78: 双击采样块 = 打开它的包络框 -------------------------------
-    // 采样块一直只有右上角那个 12 px 的 chevron 能开出曲线框（P49）。块的身体
-    // 本身就在说"我是可以改形状的东西"，双击它是所有人第一反应；音符那边双击
-    // 打开的是包络检查器，同一个动词在两种东西上也该意思一致。
+    //-- Phase 78: 双击采样块 = 打开它的包络窗 -------------------------------
+    // 采样块的曲线一直只有右上角那个 12 px 的 chevron 能开（P49 的内联框）。
+    // 双击要的是另一种东西：和音符那边同款的面板窗口——说清楚"这是哪个块、
+    // 哪条曲线、去哪"，并且有地方画形状。
     //
-    // 三条边界一起测，因为它们互相约束：
-    //   ① 块上压着音符时先回答音符（绘制顺序：drawSamples 之后才 drawNotes）；
-    //   ② 闭组里的块双击仍然是"让我进去"（P73），不是打开框；
-    //   ③ 进去之后再双击才是打开框。
+    // 这一段只测手势那一半：双击有没有把「哪个块的窗」问对人，以及三条边界
+    // （音符优先、闭组先"进去"、ghost 换层）。窗口本身下一段单独测。
     {
         LayerStack t78;
         RackModel  r78;
@@ -12332,12 +12330,6 @@ juce::String MainComponent::runSelfTest()
 
         const int block = over->addSample (shape);
 
-        SampleEvent mate = shape;
-        mate.pitch       = 66;
-        mate.laneSpan    = 2;
-        const int partner = over->addSample (mate);
-
-        // 组里的两个块单独放高一点，免得和上面那两块撞像素。
         SampleEvent inGroup = shape;
         inGroup.pitch       = 72;
         inGroup.laneSpan    = 2;
@@ -12357,61 +12349,70 @@ juce::String MainComponent::runSelfTest()
             return roll.getSampleScreenBounds (layerIndex, id).getCentre();
         };
 
-        //-- 1. 不分组、没人压着：双击打开它的框 -------------------------
+        int openedLayer  = -2;
+        int openedSample = -2;
+
+        roll.onSampleDoubleClicked = [&] (int layerIndex, int sampleId)
+        {
+            openedLayer  = layerIndex;
+            openedSample = sampleId;
+        };
+
+        //-- 1. 不分组、没人压着：请宿主开窗 -----------------------------
+        roll.simulateDoubleClickForTest (centreOfClip (1, block));
+
+        check (utf8 ("双击采样块会把「哪个块的窗」问对人，并且不顺手开内联框"),
+               openedLayer == 1 && openedSample == block && ! roll.isSampleAutomationOpen(),
+               juce::String (openedLayer) + ":" + juce::String (openedSample)
+                 + utf8 (" / 内联框 ") + (roll.isSampleAutomationOpen() ? utf8 ("开着") : utf8 ("关着"))
+                 + utf8 ("（应为 1:") + juce::String (block) + utf8 (" / 关着）"));
+
+        //-- 2. 内联框开着时：窗口接管，内联框收掉 -----------------------
+        // 同一根曲线不能有两个编辑器同时说"我在编辑它"。chevron 的内联框
+        // 和这个窗口是同一件事的两档，开一档就得关另一档。
+        roll.openSampleAutomation (1, block);
+        openedLayer = openedSample = -2;
+        roll.simulateDoubleClickForTest (centreOfClip (1, block));
+
+        check (utf8 ("内联框开着时双击，窗口接手并先把内联框收掉"),
+               openedSample == block && ! roll.isSampleAutomationOpen(),
+               juce::String (openedSample) + utf8 (" / 内联框 ")
+                 + (roll.isSampleAutomationOpen() ? utf8 ("还开着") : utf8 ("关着"))
+                 + utf8 ("（应为 ") + juce::String (block) + utf8 (" / 关着）"));
+
+        //-- 3. 块上压着音符：先回答音符 ---------------------------------
+        const int overNote = over->addNote ({ 0, 61, 1.0, 1.0, 0.9f });
         int openedNote = -2;
         roll.onNoteDoubleClicked = [&] (int, int noteId) { openedNote = noteId; };
 
-        roll.simulateDoubleClickForTest (centreOfClip (1, block));
+        openedLayer = openedSample = -2;
+        roll.simulateDoubleClickForTest (roll.getNoteScreenBounds (1, overNote).getCentre());
 
-        check (utf8 ("双击采样块会打开它的包络框"),
-               roll.isSampleAutomationOpen() && roll.getExpandedSampleId() == block
-                 && openedNote == -2,
-               juce::String (roll.getExpandedSampleId()) + utf8 ("（应为 ") + juce::String (block) + "）");
+        check (utf8 ("采样块上压着音符时，双击改的是音符，不会打开块的窗"),
+               openedNote == overNote && openedSample == -2,
+               juce::String (openedNote) + ":" + juce::String (openedSample)
+                 + utf8 ("（应为 ") + juce::String (overNote) + utf8 (": -2）"));
 
-        //-- 1b. 连着双击两个块：同时只有一个框 --------------------------
-        // P49 的"一次只开一个浮窗"是三个租客（音符框、组框、块框）之间的约定，
-        // 双击是新的开门方式，所以这条约定要重新问一遍。
-        roll.simulateDoubleClickForTest (centreOfClip (1, partner));
-
-        check (utf8 ("连着双击另一个采样块，前一个框关掉，只剩现在这个"),
-               roll.getExpandedSampleId() == partner,
-               juce::String (roll.getExpandedSampleId()) + utf8 ("（应为 ") + juce::String (partner) + "）");
-
-        //-- 2. 块上压着音符：先回答音符 ---------------------------------
-        // 判据要挑一个**只在音符下有块**的像素：块的下半部分没有音符，那里
-        // 双击仍然是块的。所以音符放在块的中心，双击就用音符的矩形。
-        roll.closeSampleAutomation();
-
-        const int overNote = over->addNote ({ 0, 61, 1.0, 1.0, 0.9f });
-        const auto noteCentre = roll.getNoteScreenBounds (1, overNote).getCentre();
-
-        roll.simulateDoubleClickForTest (noteCentre);
-
-        check (utf8 ("采样块上压着音符时，双击改的是音符，不会打开块的框"),
-               openedNote == overNote && ! roll.isSampleAutomationOpen(),
-               juce::String (openedNote) + utf8 (" / 框 ")
-                 + (roll.isSampleAutomationOpen() ? utf8 ("开着") : utf8 ("关着"))
-                 + utf8 ("（应为 ") + juce::String (overNote) + utf8 (" / 关着）"));
-
-        //-- 3. 闭组里的块：双击是"让我进去"，不是打开框 ------------------
         over->removeNote (overNote);      // 别让它的像素挡在下一条路上
+
+        //-- 4. 闭组里的块：双击是"让我进去" -----------------------------
+        openedLayer = openedSample = -2;
         roll.simulateDoubleClickForTest (centreOfClip (1, g1));
 
-        check (utf8 ("双击闭组里的采样块只进组，不会顺手把包络框推到你面前"),
-               roll.getEditingGroupId() == gid && ! roll.isSampleAutomationOpen(),
-               juce::String (roll.getEditingGroupId()) + utf8 (" / 框 ")
-                 + (roll.isSampleAutomationOpen() ? utf8 ("开着") : utf8 ("关着"))
-                 + utf8 ("（应为 ") + juce::String (gid) + utf8 (" / 关着）"));
+        check (utf8 ("双击闭组里的采样块只进组，不会顺手把窗推到你面前"),
+               roll.getEditingGroupId() == gid && openedSample == -2,
+               juce::String (roll.getEditingGroupId()) + utf8 (" / 窗 ")
+                 + juce::String (openedSample) + utf8 ("（应为 ") + juce::String (gid) + " / -2）");
 
-        //-- 4. 已经进去了：同一个双击现在才是打开框 ---------------------
+        //-- 5. 已经进去了：同一个双击现在才是开窗 -----------------------
         roll.simulateDoubleClickForTest (centreOfClip (1, g1));
 
-        check (utf8 ("进了组之后再双击那个块，打开的是它的包络框"),
-               roll.getEditingGroupId() == gid && roll.getExpandedSampleId() == g1,
-               juce::String (roll.getExpandedSampleId()) + utf8 ("（应为 ") + juce::String (g1)
+        check (utf8 ("进了组之后再双击那个块，打开的是它的窗"),
+               roll.getEditingGroupId() == gid && openedSample == g1,
+               juce::String (openedSample) + utf8 ("（应为 ") + juce::String (g1)
                  + utf8 ("，组 ") + juce::String (roll.getEditingGroupId()) + "）");
 
-        //-- 5. ghost 采样块：换层 + 打开框 -------------------------------
+        //-- 6. ghost 块：换层 + 开窗 -----------------------------------
         // 和音符那条同构（P77）：跳过去之后，那个手势在那一层上会做的事也要
         // 一起做，否则用户到了那儿还得再双击一次。
         SampleEvent shadowClip = shape;
@@ -12420,16 +12421,96 @@ juce::String MainComponent::runSelfTest()
         const int ghostBlock = under->addSample (shadowClip);
 
         t78.setLayerVisible (0, true);      // 眼睛开着才有 ghost
-        t78.setActiveLayerIndex (1);        // 第 4 条没换层，这里显式设回来
+        t78.setActiveLayerIndex (1);        // 第 4 条已在组里，这里显式设回来
 
-        roll.closeSampleAutomation();
+        openedLayer = openedSample = -2;
         roll.simulateDoubleClickForTest (centreOfClip (0, ghostBlock));
 
-        check (utf8 ("双击 ghost 采样块会换成它所在的图层，并打开它的包络框"),
-               t78.getActiveLayerIndex() == 0 && roll.getExpandedSampleId() == ghostBlock,
+        check (utf8 ("双击 ghost 采样块会换成它所在的图层，并打开它的窗"),
+               t78.getActiveLayerIndex() == 0 && openedLayer == 0 && openedSample == ghostBlock,
                utf8 ("层 ") + juce::String (t78.getActiveLayerIndex())
-                 + utf8 (" / 框 ") + juce::String (roll.getExpandedSampleId())
-                 + utf8 ("（应为 0 / ") + juce::String (ghostBlock) + "）");
+                 + utf8 (" / 窗 ") + juce::String (openedLayer) + ":"
+                 + juce::String (openedSample)
+                 + utf8 ("（应为 0 / 0:") + juce::String (ghostBlock) + utf8 ("）"));
+    }
+
+    //-- Phase 78: 采样包络窗本身 ---------------------------------------------
+    // 窗口的判据不能是"画出来了"，只能是三件事：指着哪个块、编辑的是不是模型里
+    // 那条曲线（而不是副本）、模型变了之后还知不知道自己该关。
+    {
+        LayerStack t78b;
+        RackModel  r78b;
+        SampleEnvelopePanel panel (t78b, r78b);
+        panel.setSize (SampleEnvelopePanel::panelWidth, SampleEnvelopePanel::panelHeight);
+
+        t78b.addLayer (utf8 ("窗"), palette::layer1);
+        auto* layer = t78b.getLayer (0);
+
+        SampleEvent clip;
+        clip.name        = "P78b";
+        clip.path        = "P78b.wav";
+        clip.startBeat   = 2.0;
+        clip.lengthBeats = 4.0;
+        const int id = layer->addSample (clip);
+
+        auto* model = layer->findSample (id);
+
+        panel.openFor (0, id);
+
+        check (utf8 ("窗口打开后指着那个块，编辑器拿的是模型里那条音量曲线"),
+               panel.isOpen() && panel.getEditedSampleId() == id && panel.getEditedLayerIndex() == 0
+                 && panel.getEditor().getEnvelope() == &model->volumeCurve,
+               juce::String (panel.getEditedSampleId()) + utf8 ("（应为 ") + juce::String (id) + "）");
+
+        //-- 切到声相：写回模型，编辑器跟着换 ----------------------------
+        panel.setTargetOrdinal (1);
+
+        check (utf8 ("窗口切到声相：写回模型，编辑器改的也换成那条曲线"),
+               panel.getTargetOrdinal() == 1
+                 && model->automationTarget == SampleAutomationTarget::pan
+                 && panel.getEditor().getEnvelope() == &model->panCurve,
+               juce::String (panel.getTargetOrdinal()) + utf8 (" / 模型 ")
+                 + juce::String ((int) model->automationTarget) + utf8 ("（应为 1 / 1）"));
+
+        //-- 声相上的「直线」是中置，不是硬右 ---------------------------
+        // 两条曲线的中性点不一样（音量 1.0、声相 0.5）。一个"直线"按钮如果
+        // 只会写 1.0，在声相上就是硬右——按钮名字和结果对不上。
+        panel.applyPreset (2);
+
+        check (utf8 ("声相曲线上的「直线」落在 0.5 中置，不是 1.0 硬右"),
+               juce::approximatelyEqual (model->panCurve.valueAt (0.5f), 0.5f)
+                 && model->panCurve.isEnabled(),
+               juce::String (model->panCurve.valueAt (0.5f), 3)
+                 + (model->panCurve.isEnabled() ? utf8 (" / 启用") : utf8 (" / 停用"))
+                 + utf8 ("（应为 0.500 / 启用）"));
+
+        //-- 音量上的「渐弱」从 1 落到 0 ---------------------------------
+        panel.setTargetOrdinal (0);
+        panel.applyPreset (1);
+
+        check (utf8 ("音量曲线上的「渐弱」从 1 落到 0"),
+               model->volumeCurve.valueAt (0.0f) > 0.9f
+                 && model->volumeCurve.valueAt (1.0f) < 0.1f
+                 && model->volumeCurve.isEnabled(),
+               juce::String (model->volumeCurve.valueAt (0.0f), 2) + " -> "
+                 + juce::String (model->volumeCurve.valueAt (1.0f), 2));
+
+        //-- 换活动层：关 -----------------------------------------------
+        t78b.addLayer (utf8 ("别的层"), palette::layer2);   // 新层即活动层
+
+        check (utf8 ("换到别的图层时窗口自己关掉，不会留在看不见的块上"),
+               ! panel.isOpen(),
+               panel.isOpen() ? utf8 ("还开着") : utf8 ("已关"));
+
+        //-- 删块：关 ---------------------------------------------------
+        t78b.setActiveLayerIndex (0);
+        panel.openFor (0, id);
+        layer->removeSample (id);
+        t78b.notifyNotesChanged();
+
+        check (utf8 ("块被删掉后窗口自己关掉"),
+               ! panel.isOpen(),
+               panel.isOpen() ? utf8 ("还开着") : utf8 ("已关"));
     }
 
     //-- Phase 73: 编组要先双击进去，才能改里面的东西 -------------------------

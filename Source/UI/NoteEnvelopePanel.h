@@ -76,6 +76,22 @@ public:
     void setEnvelopeSource (std::function<NoteEnvelope*()> source);
     void setAccentColour (juce::Colour colour);
 
+    /** Phase 78: what to say when the source answers null. The note panel edits
+        notes; the sample panel runs the same editor over a clip's curve, and
+        "没有可编辑的音符" would be a lie in that window. */
+    void setEmptyText (juce::String text);
+
+    /** Phase 78: a one-word name for the curve being edited ("音量" / "声相"),
+        shown with its value at the middle. The note panel does not need it —
+        its legend already names every factor — but a clip's two curves look
+        alike and mean different things, so the box has to say which one it is. */
+    void setCaptionName (juce::String name);
+
+    /** Read-only view of the curve this editor is bound to. Nullable. The
+        self-test uses it to prove the editor edits the MODEL's curve and not a
+        copy — the one thing that cannot be checked by looking at pixels. */
+    NoteEnvelope* getEnvelope() const      { return resolve(); }
+
     /** Phase 36: the macro and group layers, already sampled onto this note's
         time base. The editor draws them as reference lines under the note's own
         curve and multiplies all three into one result line — through
@@ -117,6 +133,8 @@ private:
 
     std::function<NoteEnvelope*()> envelopeSource;
     juce::Colour accent = theme::accent;
+    juce::String emptyText;      // set in the constructor (utf8 lives in the .cpp)
+    juce::String captionName;    // empty = no caption pill
     double playheadProgress = -1.0;
     AutomationOverlay overlay;
 

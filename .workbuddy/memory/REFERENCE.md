@@ -280,13 +280,13 @@
   宿主侧 `fillStripAutomationItems` / `applyStripAutomationChoice` 决定"推子=level lane"。
 
 ## 编辑手势（P22 起）
-- **双击 = 打开**（P78）：音符双击开包络检查器（`onNoteDoubleClicked`），采样块双击开它的
-  曲线框（`openSampleAutomation`）。采样这块以前只有右上角 12 px 的 chevron（P49），双击是
-  同一件事的第二个入口，不是新功能。三条边界：①**顺序照绘制顺序**——`drawSamples` 在
-  `drawNotes` 之前，块画在音符下面，所以 `handleDoubleClick` 里采样开框那一问排在
-  `hitTestActiveLayer` **之后**；压在块上的音符先回答。②**闭组里的块不开框**：那一击仍是
-  「让我进去」（P73），进组之后再双击才开框。③ghost 块换层之后，非成员要连框一起开（P77 的
-  对称）。同时只开一个框由 `openSampleAutomation()` 里的 close 链保证。
+- **双击 = 打开**（P78）：音符双击开包络检查器（`onNoteDoubleClicked` → `NoteEnvelopePanel`），
+  采样块双击开它的包络窗（`onSampleDoubleClicked` → `SampleEnvelopePanel`）。采样这边有**两档**：
+  chevron（P49）开贴着块的内联窄条，用来"调一下就走"；双击开窗口，用来"这是什么、哪条曲线、去哪"。
+  开窗会先 `closeSampleAutomation()`，同一根曲线不留两个编辑器。三条边界：①**顺序照绘制顺序**——
+  `drawSamples` 在 `drawNotes` 之前，块画在音符下面，所以采样那一问排在 `hitTestActiveLayer` **之后**；
+  压在块上的音符先回答。②**闭组里的块不开窗**：那一击仍是「让我进去」（P73），进组之后再双击才开。
+  ③ghost 块换层之后，非成员要连窗一起开（P77 的对称）。
 - **ghost 挡单击、不挡双击**（P77）：`getEditableNoteIdAt()` / 所有手势命中都只看活动层
   （ghost 点穿，P1/P20 不变）；`handleDoubleClick()` 末尾加一问 `hitTestGhost(pos)`，
   命中就 `setActiveLayerIndex()` 换层，再按 P74/P73 收尾——组里的成员 `selectGroup(gid, occ)`
@@ -605,6 +605,17 @@
   两者都返回被换下来的旧实例 id，调用方接 `reconcilePlugins()` 收尸。
 - 替换后不用手动 republish：`AudioEngine` 自己是 rack 的 listener，`rackChanged()` → `republish()`。
   这条不成立时"换音源没声音变化"就会回来。
+
+## 采样包络窗（P78）
+- `SampleEnvelopePanel`，452×314，和 `NoteEnvelopePanel` 同尺寸同一套行距；浮动 child，
+  由 `MainComponent::openSampleEnvelopePanel()` 贴着块摆放再夹进窗口。
+- **曲线编辑复用 `EnvelopeEditor`**：`setEnvelopeSource` 每次 `sample->activeCurve()`，编辑的就是模型；
+  切「音量/声相」写的是 `SampleEvent::automationTarget`（P50 的字段，和内联框、工程文件共用）。
+- **两条曲线的中性点不同**：音量 1.0、声相 0.5。预设「直线」按目标给不同的平地值，
+  `setCaptionName` 在右上角报出是哪条 + 中点值。
+- 开窗即启用曲线（与内联框同一条规矩）；换层、块被删、工程加载都会自己关。
+- 输出行写 `outputSlotId`，由 `routing::resolveSample` 解释（不自己算路由）；badge 三态：
+  采样器 / 跟随图层 / 采样器失效。
 
 ## 采样音源（P27）
 - 拖入采样 → `RackModel::addSampler(...)` 长出 sampler 槽，块 `outputSlotId` 指向它；

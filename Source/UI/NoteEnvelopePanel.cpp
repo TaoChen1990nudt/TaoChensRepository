@@ -49,6 +49,19 @@ namespace
 EnvelopeEditor::EnvelopeEditor()
 {
     setMouseCursor (juce::MouseCursor::CrosshairCursor);
+    emptyText = utf8 ("没有可编辑的音符");
+}
+
+void EnvelopeEditor::setEmptyText (juce::String text)
+{
+    emptyText = std::move (text);
+    repaint();
+}
+
+void EnvelopeEditor::setCaptionName (juce::String name)
+{
+    captionName = std::move (name);
+    repaint();
 }
 
 void EnvelopeEditor::setEnvelopeSource (std::function<NoteEnvelope*()> source)
@@ -246,7 +259,7 @@ void EnvelopeEditor::paint (juce::Graphics& g)
     {
         g.setColour (kMuted.withAlpha (0.7f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (11.5f))));
-        g.drawText (utf8 ("没有可编辑的音符"), getLocalBounds(), juce::Justification::centred, false);
+        g.drawText (emptyText, getLocalBounds(), juce::Justification::centred, false);
         return;
     }
 
@@ -362,6 +375,34 @@ void EnvelopeEditor::paint (juce::Graphics& g)
 
         g.setColour (theme::record);
         g.fillEllipse (juce::Rectangle<float> (8.0f, 8.0f).withCentre ({ x, y }));
+    }
+
+    //-- Caption --------------------------------------------------------------
+    // Which curve this is, and where it sits in the middle. The note panel gets
+    // that answer from its three-factor legend; a clip has ONE curve in this box
+    // and still has to name it, because its two curves share a shape language
+    // and disagree about what 1.0 means.
+    if (! overlay.anyLive() && captionName.isNotEmpty())
+    {
+        const juce::String caption = captionName + " " + juce::String (envelope->valueAt (0.5f), 2);
+
+        const juce::Font captionFont (juce::FontOptions{}.withHeight (atomic::ui::sp (9.0f))
+                                                          .withStyle ("Bold"));
+        juce::GlyphArrangement measure;
+        measure.addLineOfText (captionFont, caption, 0.0f, 0.0f);
+        const float captionWidth = measure.getBoundingBox (0, -1, true).getWidth();
+
+        const juce::Rectangle<float> pill (curve.getRight() - captionWidth - atomic::ui::pf (12),
+                                           curve.getY() + atomic::ui::pf (2),
+                                           captionWidth + atomic::ui::pf (10),
+                                           atomic::ui::pf (14));
+
+        g.setColour (juce::Colours::black.withAlpha (0.55f));
+        g.fillRoundedRectangle (pill, atomic::ui::pf (3));
+
+        g.setColour (accent.withAlpha (0.95f));
+        g.setFont (captionFont);
+        g.drawText (caption, pill, juce::Justification::centred, false);
     }
 }
 

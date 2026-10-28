@@ -31,6 +31,7 @@
 #include "UI/MixerPanel.h"
 #include "UI/MixerWindow.h"
 #include "UI/NoteEnvelopePanel.h"
+#include "UI/SampleEnvelopePanel.h"
 #include "UI/PianoRollComponent.h"
 #include "UI/RackPanel.h"
 #include "UI/SettingsWindow.h"
@@ -173,6 +174,11 @@ public:
 
     /** Opens the inspector on the overridden demo note; used by --snapshot. */
     void openDemoEnvelopePanel();
+
+    /** Phase 78: opens the clip envelope window for a sample block. Positioned
+        beside the block, clamped inside the window — same reasoning as the note
+        panel above. */
+    void openSampleEnvelopePanel (int layerIndex, int sampleId);
 
     /** Parks the playhead somewhere visible; used by --snapshot. */
     void setDemoPlayheadBeats (double beats);
@@ -881,6 +887,7 @@ private:
     LayerPanel          layerPanel       { stack, rack };
     PianoRollComponent  pianoRoll        { stack, rack };
     NoteEnvelopePanel   envelopePanel    { stack, rack };
+    SampleEnvelopePanel sampleEnvelopePanel { stack, rack };   // Phase 78
     RackPanel           rackPanel        { rack };
     AutomationWindow    automationWindow { stack, rack, automation, mixer };
     MixerPanel          mixerPanel       { stack, rack, mixer };

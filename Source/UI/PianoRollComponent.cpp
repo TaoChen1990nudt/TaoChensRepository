@@ -3423,11 +3423,13 @@ void PianoRollComponent::handleDoubleClick (juce::Point<float> pos)
         return;
     }
 
-    //-- Phase 78: double click a block = open its curve box -----------------
-    // The chevron in the block's top-right corner already did this (Phase 49),
-    // but a 12 px button is a secret: the body of the block says "this is a
-    // shape you can edit", and double-clicking it is what everyone tries
-    // first. Same verb as double-clicking a note, which opens its envelope.
+    //-- Phase 78: double click a block = open its envelope window -----------
+    // The chevron in the block's top-right corner opens the inline curve box
+    // (Phase 49) — a strip for a quick tweak while arranging. A double click
+    // asks for the other thing: the note panel's twin, a window that says what
+    // this block is, which of its two curves you have, where it goes, and has
+    // room for the shape itself. Two editors for one curve, at two levels of
+    // commitment.
     //
     // After the note test, not before, because that is the painter's order:
     // blocks go under the notes (drawSamples, then drawNotes). A note drawn
@@ -3436,12 +3438,19 @@ void PianoRollComponent::handleDoubleClick (juce::Point<float> pos)
     // it — which is exactly where it looks like it should.
     //
     // A grouped member never gets here while its group is closed: the branch
-    // above turns that double click into "let me inside" (P73), and opening a
-    // curve on the way in would drop an editor in front of the thing you asked
+    // above turns that double click into "let me inside" (P73), and opening an
+    // editor on the way in would drop a window in front of the thing you asked
     // to reach. Once inside the group the double click lands here.
     if (auto* clip = hitTestSample (pos))
     {
-        openSampleAutomation (stack.getActiveLayerIndex(), clip->id);
+        // The inline box and the window show the same curve. Leaving both up
+        // would be two editors disagreeing about which one is authoritative, so
+        // opening the window shuts the strip first.
+        closeSampleAutomation();
+
+        if (onSampleDoubleClicked != nullptr)
+            onSampleDoubleClicked (stack.getActiveLayerIndex(), clip->id);
+
         return;
     }
 
@@ -3501,12 +3510,15 @@ void PianoRollComponent::handleDoubleClick (juce::Point<float> pos)
                 {
                     setSampleSelection ({ clip->id });
 
-                    //-- Phase 78: and open its curve box --------------------
+                    //-- Phase 78: and open its envelope window --------------
                     // The half of the gesture that would have happened on that
                     // sheet: an ungrouped block's double click opens its curve
-                    // editor (Phase 78), so the jump does the same instead of
-                    // just landing you there.
-                    openSampleAutomation (ghost.layerIndex, clip->id);
+                    // editor, so the jump does the same instead of just landing
+                    // you there.
+                    closeSampleAutomation();
+
+                    if (onSampleDoubleClicked != nullptr)
+                        onSampleDoubleClicked (ghost.layerIndex, clip->id);
                 }
             }
         }

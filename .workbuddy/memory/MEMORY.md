@@ -47,11 +47,12 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
    测这类行为别拿"会动的东西有几个"（`dragOriginals.size()`）当判据——多选时它当然有几个；
    要问「谁会被缩放」（`dragResizeNoteId`）。
 
-12. **双击 = 打开，顺序照绘制顺序**（P78）：音符双击开包络检查器，采样块双击开它的曲线框
-    （`openSampleAutomation`）。`handleDoubleClick()` 里采样开框那一问必须排在 `hitTestActiveLayer`
-    **之后**——`drawSamples` 先画、块在音符**下面**，压在块上的音符才是指针看着的东西。
-    闭组里的块那一击仍旧是「让我进去」（P73），进组后再双击才开框。
-
+12. **双击 = 打开，顺序照绘制顺序**（P78）：音符双击开包络窗，采样块双击开采样包络窗
+    （`onNoteDoubleClicked` / `onSampleDoubleClicked` → `NoteEnvelopePanel` / `SampleEnvelopePanel`）。
+    采样那块的两档要分清：chevron 开内联窄条（P49），双击开窗，开窗前先关内联框。
+    `handleDoubleClick()` 里采样那一问必须排在 `hitTestActiveLayer` **之后**——`drawSamples` 先画、
+    块在音符**下面**，压在块上的音符才是指针看着的东西。闭组里的块那一击仍旧是「让我进去」（P73），
+    进组后再双击才开窗。
 ## 目录
 - `Source/Model/` 数据与路由（LayerModel / RackModel / MixerModel / Routing / ProjectIO / Gain）
 - `Source/Audio/` 引擎与纯函数 DSP（PlaybackEngine / ClipStretch / 导出）
