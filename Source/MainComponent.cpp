@@ -652,6 +652,7 @@ MainComponent::MainComponent()
     pianoRoll.onSelectionChanged = [this]
     {
         updateRackRoutingFocus();
+        syncGroupPanelSelection();
     };
 
     //-- Phase 29: the grid's own way out of the spotlight --------------------
@@ -2766,6 +2767,16 @@ void MainComponent::reconcilePlugins()
                                                            == fx::Type::none;
                                          }),
                          insertWindows.end());
+}
+
+void MainComponent::syncGroupPanelSelection()
+{
+    std::vector<GroupPanel::RowRef> rows;
+
+    for (const auto& group : pianoRoll.getSelectedGroups())
+        rows.push_back ({ group.first, group.second });
+
+    groupPanel.setSelectedGroups (rows);
 }
 
 void MainComponent::updateRackRoutingFocus()

@@ -539,6 +539,17 @@ public:
         paste is a group cut in half. Two questions that look like one. */
     bool isWholeGroupSelected (int groupId, bool includeSamples = false, int occurrence = -1) const;
 
+    /** Phase 59: every group the selection currently covers as a whole, as
+        (layerIndex, groupId) pairs.
+
+        The panel on the right is a list of groups and the roll is where they get
+        selected, so the list needs to hear about it. It is derived from the
+        selection on demand — no second "which group is selected" flag to keep in
+        sync, which is how the roll and the panel would end up disagreeing. Any
+        ONE appearance being fully selected counts: selecting the chorus copy is
+        selecting that group. */
+    std::vector<std::pair<int, int>> getSelectedGroups() const;
+
     /** Selects every member of a group, so "drag the group" is just "drag the
         selection" — one drag implementation, two ways to fill it. */
     void selectGroup (int groupId, int occurrence = -1);

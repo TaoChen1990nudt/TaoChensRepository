@@ -1505,6 +1505,34 @@ bool PianoRollComponent::isWholeGroupSelected (int groupId, bool includeSamples,
     return true;
 }
 
+std::vector<std::pair<int, int>> PianoRollComponent::getSelectedGroups() const
+{
+    std::vector<std::pair<int, int>> groups;
+
+    const auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr)
+        return groups;
+
+    // The selection only ever holds ids of the ACTIVE layer (switching sheets
+    // clears it), so this is one layer's worth of groups, not the session's.
+    for (const auto& group : layer->getGroups())
+    {
+        for (int occurrence : layer->getGroupOccurrences (group.getId()))
+        {
+            // Blocks count: the user selects a group by clicking its label or by
+            // dragging it, and a group of samples has no notes to select.
+            if (isWholeGroupSelected (group.getId(), true, occurrence))
+            {
+                groups.push_back ({ stack.getActiveLayerIndex(), group.getId() });
+                break;
+            }
+        }
+    }
+
+    return groups;
+}
+
 void PianoRollComponent::selectGroup (int groupId, int occurrence)
 {
     for (int i = 0; i < stack.getNumLayers(); ++i)
@@ -8662,8 +8690,12 @@ std::pair<int, bool> PianoRollComponent::selectedTrimEdgeAt (juce::Point<float> 
     const float band     = ui::pf (kResizeHandleWidth);
     const auto& samples  = layer->getSamples();
 
+    int   bestId   = -1;
+    bool  bestTail = false;
+    float bestDist = 1.0e9f;
+
     // Topmost first, the order hitTestSample answers in: the block drawn last
-    // is the one under the pointer, so it is also the first whose band counts.
+    // is the one under the pointer, so ties go to it.
     for (auto it = samples.rbegin(); it != samples.rend(); ++it)
     {
         if (! isSampleSelected (it->id))
@@ -8671,17 +8703,39 @@ std::pair<int, bool> PianoRollComponent::selectedTrimEdgeAt (juce::Point<float> 
 
         const auto b = getSampleScreenBounds (index, it->id);
 
-        if (b.isEmpty() || position.y < b.getY() || position.y > b.getBottom())
+        //-- Phase 59: the pointer has to be INSIDE the block ---------------
+        // Without this test `x >= right - band` was true for every pixel to the
+        // RIGHT of a block, and `x <= left + band` for every pixel to its LEFT.
+        // So with three blocks selected, a press on the middle one's tail was
+        // answered by the next block's head (its head band reaches leftwards
+        // forever), and the trim then ran on a block whose head cannot move —
+        // the user saw "only the rightmost block trims, the others sometimes do
+        // nothing at all". The bands are for the inside of the edge; a pointer
+        // past the block is not aiming at that block.
+        if (b.isEmpty()
+              || position.y < b.getY() || position.y > b.getBottom()
+              || position.x < b.getX() || position.x > b.getRight())
             continue;
 
-        if (position.x >= b.getRight() - band)
-            return { it->id, true };
+        const float toTail = b.getRight() - position.x;
+        const float toHead = position.x - b.getX();
 
-        if (position.x <= b.getX() + band)
-            return { it->id, false };
+        // The NEARER edge wins. Two blocks that share a boundary both answer
+        // "in band" for the same pixel; picking by distance makes that pixel
+        // mean "the edge it is drawn on", not "whichever block came first".
+        const bool  tail = toTail <= toHead;
+        const float dist = tail ? toTail : toHead;
+
+        if (dist > band || dist >= bestDist)
+            continue;
+
+        bestId   = it->id;
+        bestTail = tail;
+        bestDist = dist;
     }
 
-    return { -1, false };
+    return bestId >= 0 ? std::pair<int, bool> { bestId, bestTail }
+                       : std::pair<int, bool> { -1, false };
 }
 
 int PianoRollComponent::getEditableSampleIdAt (juce::Point<float> position) const

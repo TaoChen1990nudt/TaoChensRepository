@@ -107,6 +107,33 @@ void GroupPanel::setFocusSlotId (int slotId)
     repaint();
 }
 
+void GroupPanel::setSelectedGroups (const std::vector<RowRef>& rows)
+{
+    // Cheap equality first: onSelectionChanged fires on every note click, and a
+    // repaint per click on a panel that did not change is a flicker waiting to
+    // be reported as a bug.
+    bool same = rows.size() == selectedRows.size();
+
+    for (size_t i = 0; same && i < rows.size(); ++i)
+        same = rows[i].layerIndex == selectedRows[i].layerIndex
+                 && rows[i].groupId == selectedRows[i].groupId;
+
+    if (same)
+        return;
+
+    selectedRows = rows;
+    repaint();
+}
+
+bool GroupPanel::isRowSelected (int layerIndex, int groupId) const
+{
+    for (const auto& ref : selectedRows)
+        if (ref.layerIndex == layerIndex && ref.groupId == groupId)
+            return true;
+
+    return false;
+}
+
 //==============================================================================
 int GroupPanel::getContentHeight() const
 {
@@ -270,6 +297,7 @@ void GroupPanel::drawRow (juce::Graphics& g, int rowIndex)
     const bool  collapsed = group->isCollapsed();
     const bool  hot = rowIndex == hoveredRow;
     const bool  focused = isGroupFocused (ref.layerIndex, ref.groupId);
+    const bool  selected = isRowSelected (ref.layerIndex, ref.groupId);
 
     const auto accent = group->getColour();
 
@@ -282,6 +310,22 @@ void GroupPanel::drawRow (juce::Graphics& g, int rowIndex)
     {
         g.setColour (kRowPlate);
         g.fillRect (bounds.reduced (ui::px (4), ui::px (2)));
+    }
+
+    //-- Phase 59: a row whose group is selected in the roll ------------------
+    // The roll owns the selection; this is its mirror, so "the group I am
+    // dragging in the piano roll" is findable in a list of twenty. A tint plus
+    // an outline, because the left bar below already means something else
+    // (the group feeds the spotlighted synth) and two marks may coincide.
+    if (selected)
+    {
+        const auto plate = bounds.reduced (ui::px (4), ui::px (2)).toFloat();
+
+        g.setColour (accent.withAlpha (0.15f));
+        g.fillRoundedRectangle (plate, ui::pf (3));
+
+        g.setColour (accent.withAlpha (0.6f));
+        g.drawRoundedRectangle (plate, ui::pf (3), 1.0f);
     }
 
     // A focused group gets a left edge in the synth's colour, matching what the
@@ -336,15 +380,12 @@ void GroupPanel::drawRow (juce::Graphics& g, int rowIndex)
 
     if (collapsed)
     {
-        // One line only — but the fader and the mount are the two things the
-        // list exists for, so they survive folding as readouts.
-        g.setColour (juce::Colours::white.withAlpha (0.34f));
-        g.setFont (plainFont (9.0f));
-        g.drawText (mixerlook::dbText (group->getLevelDb()) + " dB" + separatorDot()
-                      + mixerlook::panText (group->getPan()),
-                    juce::Rectangle<int> (ui::px (46), bounds.getY() + ui::px (4),
-                                          getWidth() - ui::px (46 + 60), ui::px (18)),
-                    juce::Justification::centredLeft, false);
+        // Phase 59: a folded row is its title and nothing else. The dB / pan
+        // readout used to be drawn here into the SAME rectangle the name uses,
+        // so every folded group showed a ghost of "0.0 dB · C" behind its name
+        // (the user: "折叠之后会在组名背后显示不相关的文字"). Folding means one
+        // line, and that line is the title; the fader and the mount come back
+        // with the row.
         return;
     }
 

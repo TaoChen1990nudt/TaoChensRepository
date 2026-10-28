@@ -10489,6 +10489,226 @@ juce::String MainComponent::runSelfTest()
         layer->removeSample (upperId);
     } ();
 
+    //-- Phase 59: the trim band belongs to the block it is drawn on ---------
+    // "选中多个采样拖动长度时只有最右边那个拖动才有效" was one line of arithmetic:
+    // `x >= right - band` has no left neighbour, so it was true for every pixel
+    // to the RIGHT of a block, and `x <= left + band` for every pixel to its
+    // LEFT. With three selected blocks a press on the middle one's tail was
+    // answered by the next block's head — whose head cannot move (its source
+    // offset clamps it), so the drag did nothing at all. The press has to be
+    // inside the block whose edge it claims.
+    [&]
+    {
+        LayerStack stack;
+        RackModel  rack;
+
+        stack.addLayer (utf8 ("拉伸"), palette::layer1);
+
+        auto* layer = stack.getLayer (0);
+
+        PianoRollComponent roll (stack, rack);
+        roll.setSize (1400, 620);
+        roll.setScrollBeats (0.0);
+
+        // Three adjacent blocks on one lane, so the middle one's tail IS the
+        // right one's head: the exact geometry that made the wrong block win.
+        const auto addBlock = [layer] (const char* name, double start, double length)
+        {
+            SampleEvent clip;
+            clip.name        = name;
+            clip.startBeat   = start;
+            clip.lengthBeats = length;
+            clip.pitch       = 60;
+            clip.laneSpan    = 2;
+            return layer->addSample (clip);
+        };
+
+        const int leftId  = addBlock ("left",  1.0, 2.0);
+        const int midId   = addBlock ("mid",   3.0, 2.0);
+        const int rightId = addBlock ("right", 5.0, 2.0);
+
+        roll.setSampleSelection ({ leftId, midId, rightId });
+
+        const auto leftRect  = roll.getSampleScreenBounds (0, leftId);
+        const auto midRect   = roll.getSampleScreenBounds (0, midId);
+        const auto rightRect = roll.getSampleScreenBounds (0, rightId);
+
+        const auto   grid     = roll.getGridBounds();
+        const double beatWide = (double) roll.getBeatWidth();
+
+        // Two density-scaled pixels inside the middle block's tail. Two, not
+        // zero: a pixel on the boundary belongs to the NEXT block, and a test
+        // that pressed exactly there would be testing the tie-break instead of
+        // the thing the user does.
+        const auto midTail = juce::Point<float> (midRect.getRight() - ui::pf (2.0f),
+                                                 midRect.getCentreY());
+        const auto leftHead = juce::Point<float> (leftRect.getX() + ui::pf (2.0f),
+                                                  leftRect.getCentreY());
+
+        const auto midGrab  = roll.getBlockGrabAtForTest (midTail);
+        const auto headGrab = roll.getBlockGrabAtForTest (leftHead);
+
+        check ("A press on the middle block's tail grabs the middle block",
+               ! midRect.isEmpty()
+                 && midGrab.first == midId && midGrab.second,
+               utf8 ("抓到 ") + juce::String (midGrab.first)
+                 + utf8 ("（应为 ") + juce::String (midId) + utf8 ("），尾部 ")
+                 + (midGrab.second ? "yes" : "no"));
+
+        check ("A press on the selection's head grabs the head, not the neighbour next to it",
+               headGrab.first == leftId && ! headGrab.second,
+               utf8 ("抓到 ") + juce::String (headGrab.first)
+                 + utf8 ("（应为 ") + juce::String (leftId) + utf8 ("）"));
+
+        // Past the last block there is no edge at all. The old band test said
+        // "the rightmost block's tail" for every pixel to its right, so this is
+        // the check that keeps the containment honest.
+        const auto pastEnd = roll.getBlockGrabAtForTest (
+            { rightRect.getRight() + ui::pf (40.0f), rightRect.getCentreY() });
+
+        check ("A press in the empty grid past a block grabs nothing",
+               pastEnd.first < 0,
+               utf8 ("抓到 ") + juce::String (pastEnd.first));
+
+        //-- one delta for the whole selection --------------------------------
+        // Pressing the middle block's tail must trim all three by the SAME
+        // amount — that is what "选中多个采样拖动长度" means. The delta is
+        // computed from the block the pointer owns and then applied to the rest,
+        // so the assertion compares all three against one number.
+        const double pressBeat = roll.getScrollBeats()
+                                   + (double) (midTail.x - grid.getX()) / beatWide;
+        const double wanted    = pressBeat - 1.0;          // drag a beat shorter
+        const double delta     = wanted - 5.0;             // the middle ends at beat 5
+
+        roll.simulateSampleTrim (midId, wanted, true);
+
+        const auto lengthOf = [layer] (int id)
+        {
+            const auto* clip = layer->findSample (id);
+            return clip != nullptr ? clip->lengthBeats : -1.0;
+        };
+
+        check ("Trimming from the middle block's tail trims the whole selection by one delta",
+               std::abs (lengthOf (leftId)  - (2.0 + delta)) < 1.0e-6
+                 && std::abs (lengthOf (midId)   - (2.0 + delta)) < 1.0e-6
+                 && std::abs (lengthOf (rightId) - (2.0 + delta)) < 1.0e-6
+                 && std::abs ((layer->findSample (rightId)->startBeat) - 5.0) < 1.0e-9,
+               juce::String (lengthOf (leftId), 3) + " / "
+                 + juce::String (lengthOf (midId), 3) + " / "
+                 + juce::String (lengthOf (rightId), 3)
+                 + utf8 ("（应 ") + juce::String (2.0 + delta, 3) + utf8 ("）"));
+
+        //-- the group list mirrors the roll's selection ----------------------
+        // The roll is where a group gets selected; the panel is where it is
+        // listed. "选中组时编组栏那行要高亮" is that mirror, and the mirror is
+        // derived from the selection rather than kept as a second flag — a flag
+        // is how the two views would drift apart.
+        NoteEvent note;
+        note.pitch       = 60;
+        note.startBeat   = 1.0;
+        note.lengthBeats = 1.0;
+        const int noteInGroup = layer->addNote (note);
+
+        note.pitch        = 62;
+        note.startBeat    = 2.0;
+        const int noteAlso  = layer->addNote (note);   // a second member, so "half" exists
+
+        note.pitch = 64;
+        const int noteAlone   = layer->addNote (note);
+
+        const int gid  = layer->addGroup (utf8 ("镜像组"), groupPalette::group3);
+        const int gid2 = layer->addGroup (utf8 ("邻居组"), groupPalette::group4);
+
+        layer->assignNotesToGroup ({ noteInGroup, noteAlso }, gid);
+        layer->assignNotesToGroup ({ noteAlone },             gid2);
+
+        roll.selectGroup (gid);
+
+        const auto selected = roll.getSelectedGroups();
+
+        GroupPanel panel (stack, rack);
+        panel.setSize (300, 400);
+
+        std::vector<GroupPanel::RowRef> panelRows;
+
+        for (const auto& pair : selected)
+            panelRows.push_back ({ pair.first, pair.second });
+
+        panel.setSelectedGroups (panelRows);
+
+        check ("Selecting a group in the roll lights its row in the group panel",
+               selected.size() == 1
+                 && selected.front().first == 0 && selected.front().second == gid
+                 && panel.getSelectedRowCount() == 1
+                 && panel.isRowSelected (0, gid)
+                 && ! panel.isRowSelected (0, gid2),
+               juce::String ((int) selected.size()) + utf8 (" 组，面板 ")
+                 + juce::String (panel.getSelectedRowCount()) + utf8 (" 行"));
+
+        // Half a group is not the group: one note out of a pair must not light
+        // the row, or every click on a member would claim "the whole group".
+        roll.setSelection ({ noteInGroup });
+
+        const auto partial = roll.getSelectedGroups();
+
+        panel.setSelectedGroups ({});
+
+        check ("A partial selection does not light the group's row",
+               partial.empty() && panel.getSelectedRowCount() == 0
+                 && ! panel.isRowSelected (0, gid),
+               juce::String ((int) partial.size()) + utf8 (" 组"));
+    } ();
+
+    //-- Phase 59: the wiring, on the real panel ---------------------------
+    // The check above proves the pieces; this one proves they are plugged in.
+    // A mirror that nobody pushes to looks exactly like no mirror at all, and
+    // the self-test's local panel would never notice.
+    [&]
+    {
+        auto* liveLayer = stack.getActiveLayer();
+
+        if (liveLayer == nullptr)
+            return;
+
+        const auto previousSelection = pianoRoll.getSelection();
+        const int  layerIndex        = stack.getActiveLayerIndex();
+
+        NoteEvent note;
+        note.pitch       = 72;
+        note.startBeat   = 0.0;
+        note.lengthBeats = 1.0;
+        const int a = liveLayer->addNote (note);
+        note.pitch  = 74;
+        const int b = liveLayer->addNote (note);
+
+        const int tempGroup = liveLayer->addGroup (utf8 ("镜像接线"), groupPalette::group5);
+        liveLayer->assignNotesToGroup ({ a, b }, tempGroup);
+
+        stack.notifyNotesChanged();
+
+        pianoRoll.selectGroup (tempGroup);
+
+        const bool lit = groupPanel.isRowSelected (layerIndex, tempGroup);
+
+        pianoRoll.setSelection ({ a });
+
+        const bool cleared = ! groupPanel.isRowSelected (layerIndex, tempGroup);
+
+        pianoRoll.setSelection (previousSelection);
+
+        liveLayer->assignNotesToGroup ({ a, b }, -1);
+        liveLayer->removeNote (a);
+        liveLayer->removeNote (b);
+        liveLayer->removeGroup (tempGroup);
+
+        stack.notifyNotesChanged();
+
+        check ("The real group panel follows the roll's selection",
+               lit && cleared,
+               utf8 ("选中时亮=") + (lit ? "yes" : "no")
+                 + utf8 ("，半选时灭=") + (cleared ? "yes" : "no"));
+    } ();
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

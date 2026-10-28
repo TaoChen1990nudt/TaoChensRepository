@@ -585,6 +585,11 @@ private:
     /** Highlights the synth the current note selection plays on. */
     void updateRackRoutingFocus();
 
+    /** Phase 59: pushes the roll's group selection into the group panel, so the
+        row for "the group I am dragging in the piano roll" is the one lit up in
+        a list of twenty. The roll owns the selection; the panel only mirrors it. */
+    void syncGroupPanelSelection();
+
     /** Phase 32: removes a rack slot AND the clips that were playing through it.
 
         The only way to delete a slot from the UI, because the two halves are

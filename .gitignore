@@ -5,5 +5,9 @@ build/
 tmp/
 .tmp/
 
+# 咬测产物：植入缺陷那一轮的出图与日志，还原后就没意义了
+docs/bite*.png
+docs/bite.log
+
 # 代码片段草稿（下划线开头的 .txt）
 Source/UI/_*.txt

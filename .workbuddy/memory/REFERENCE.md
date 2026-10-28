@@ -239,6 +239,16 @@
   与绘制顺序一致。两条一起才治好"选中几块拖长度有时失败"：以前抓到的是盖在上面的邻居，
   然后选区被改成邻居。自检走 `getBlockGrabAtForTest()`（顺序唯一），别只测 hitTestSample。
   `mouseMove` 里同步：`selectedTrimEdgeAt(pos).first >= 0` 就显示左右箭头光标。
+- **band 只在块内成立**（P59）：`selectedTrimEdgeAt` 现在要求 `left <= x <= right`，还要
+  `y` 在块内——少了第一半，`x >= right - band` 就是"块右边一切像素都算这块的尾巴"，
+  `x <= left + band` 对称地算"左边一切"。多选三块相邻时按中间的尾巴，倒序遍历先问右边那块，
+  它的头带对左方一切成立 → 返回"右块的头"→ 拖头被 source offset 夹住 → 什么都没动。
+  命中之后按**距离最近**的边定 tail/head（`toTail <= toHead`），平局让最上层赢（严格小于）。
+  它不是"多选专用"：单块也走这条路，只是以前恰好被 `hitTestSample` 的包含判定兜住了。
+- **多选拉伸只算一次 delta**（P56 起）：`applySampleTrimDrag(primary, wanted, fromTail, siblings)`
+  先按主块算出实际 delta（最小长度 / 源偏移会吃掉一部分），再把**同一个 delta** 按各自限位套给
+  兄弟块。所以抓哪一块的边都等价——这也是 P59 那条拾取 bug 表现为"按了没反应"而不是
+  "只有一块变长"的原因：主块选错，delta 算出来是 0。
 - **播放跟随后退**（P58）：跟随曾是单向的——播放头推出屏幕就跟着滚，退回来却不回原处。
   现在 `setScrollBeats` / `setBeatWidthAround`（用户自己滚）会 `noteUserScroll()` 记住
   `userScrollBeats`；`setPlayheadBeat` 开头先判断"播放头是否落回 `[userScrollBeats, +可见宽度]`"，
@@ -279,6 +289,16 @@
   填充色块画在成员之下（`drawGroupBands`），**描边画在成员之上**（`drawGroupFrames`，在
   `drawNotes` 之后），并向内缩半个线宽——线压在块自己的边框上，形成"组框即块的外框"。
   这是用户要的"组边框与采样边框之间不留距离"：挪线做不出来，只能同一条边、画在上层。
+- **编组栏是钢琴窗选区的镜像**（P59）：`PianoRollComponent::getSelectedGroups()` 返回
+  `(layerIndex, groupId)` 列表——每个组、每个**出现**问一次 `isWholeGroupSelected(gid, true, occ)`，
+  任一出现整体入选就算这个组被选中（选区只在激活图层，所以只需要看一层）。
+  主窗体 `onSelectionChanged` → `syncGroupPanelSelection()` → `GroupPanel::setSelectedGroups()`，
+  面板**没有**自己的 `selectedGroupId`（存一份就要在删除/撤销/切图层三处各自清理）。
+  绘制：`accent.withAlpha(0.15)` 圆角填充 + `0.6` 描边，**左竖条留给"喂给聚光灯音源"**——
+  两个标记可以同时出现，所以必须长得不一样。
+- **折叠行只写组名**（P59）：折叠分支以前把 `0.0 dB · C` 画在**和组名同一个矩形**里，于是每个
+  折叠组背后都有一行幽灵字。现在 `if (collapsed) return;`——折叠 = 一行，那一行是标题；
+  fader / 声相 / 挂载展开才有。
 - **整组判定有两个口径**（P56）：`isWholeGroupSelected(groupId, includeSamples)`。挂载音源用
   false（块没有振荡器可挂，只看音符），复制用 true（少一个块就是半个组）。默认值 false，
   所以老调用点的行为不变。

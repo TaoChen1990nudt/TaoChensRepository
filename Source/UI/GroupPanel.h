@@ -64,6 +64,20 @@ public:
     void setFocusSlotId (int slotId);
     int  getFocusSlotId() const noexcept { return focusSlotId; }
 
+    /** Phase 59: which rows the roll has selected.
+
+        The roll owns the selection; this panel only mirrors it, so the answer is
+        pushed in rather than asked for — the panel has no pointer to the roll
+        and should not grow one. Compared by (layerIndex, groupId), never by
+        pointer: the layer owns its groups in a vector, and any add/delete moves
+        them. */
+    void setSelectedGroups (const std::vector<RowRef>& rows);
+
+    /** Phase 59: is this group one of the mirror rows? Also the self-test's
+        window into the mirror — the paint alone cannot be read back. */
+    bool isRowSelected (int layerIndex, int groupId) const;
+    int  getSelectedRowCount() const noexcept { return (int) selectedRows.size(); }
+
     /** True when this group's notes reach the focused synth. The self-test
         reads it to prove the panel and the roll agree. */
     bool isGroupFocused (int layerIndex, int groupId) const;
@@ -143,6 +157,8 @@ private:
     bool foldOnRelease = false;
 
     int   focusSlotId = -1;
+
+    std::vector<RowRef> selectedRows;   // Phase 59: the roll's mirror
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GroupPanel)
 };
