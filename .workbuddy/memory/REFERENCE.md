@@ -280,6 +280,11 @@
   宿主侧 `fillStripAutomationItems` / `applyStripAutomationChoice` 决定"推子=level lane"。
 
 ## 编辑手势（P22 起）
+- **框选 = 命中 + 组扩散，Shift/Ctrl 是"加"**（P74）：`simulateMarquee` 先 `hitsInMarquee()`
+  再 `expandToWholeOccurrences()` 再写选择。`marqueeAdditive` 在 `mouseDown` 的空白分支就记下
+  （松手时修饰键早就抬起来了），加选时旧选择**排在前面**，列表顺序才不会每次都重排；
+  Shift 空扫不清空——"这里什么都没有"和"忘掉一切"是两件事。`simulateMarquee` 是松手时唯一
+  的入口，`mouseUp` 里两条路径都从这里走。
 - **多选拖动是刚体**：唯一实现 `clampMove()`，夹的是 **delta** 不是每个音符；吸附只作用在块上，
   锚 = 最左成员。成员含采样（`clips` 参数）。
 - **应用只有 `applyMove()`**：音符 + 已武装的采样一起走。
@@ -321,8 +326,18 @@
   （首次推走时 `if (!followScrolled) userScrollBeats = scrollBeats`）。
 
 ## 编组
+- **选中一个成员就是选中整组**（P74）：选择是"就是这些东西"的那句话，不是"我点到的那一个"。
+  三个入口把成员扩成整次出现，一个都不许漏——
+  点击走 `armGroupMove()`（它本来就会 `selectGroup()`），框选走
+  `expandToWholeOccurrences()`（`simulateMarquee` 里、写选择之前），Shift/Ctrl 加选走
+  `addOccurrenceToSelection()`（`armGroupMove(..., additive=true)`）。
+  漏了框选那次，框切到七个音符里的一个只回来一个，下一次 Delete 就从队形里撕掉一个成员——
+  而"不许撕队形"正是关闭状态存在的全部意义。
+  **扩散只写在手势层，绝不写进 `setMixedSelection()`**：底层写入必须保持精确集合，P62 的
+  "改一部分才同步形状"（`collectTwinsForEdit` 拿整处判据决定要不要复制给兄弟）全靠它。
+  `isGroupLocked(gid)` 是唯一闸门——打开编辑的组不扩散，那里成员就是对象。
 - **默认是对象，不是容器**（P73）：没进入编辑时，组里任何成员的按下都只回答"整个出现"——
-  `armGroupMove()` 选中整组并起拖，缩放带、橡皮、刻刀、右键盘菜单一并改道组菜单。
+  `armGroupMove()` 选中整组并起拖，缩放带、橡皮、刻刀、右键菜单一并改道组菜单。
   双击成员 / 组框 / 组名 pill 才 `enterGroupEdit(groupId)`，之后点谁选谁，可以单独移动、改长度、
   删除。双击空白 `exitGroupEdit()`；点到组外的成员（含别的组）当场退出。
 - **状态只有一个 `editingGroupId`**（P73）：组 id 全会话唯一（`groupIdCounter()` 静态），所以不另存
@@ -341,7 +356,10 @@
   组名 pill 长在左上角会吃掉一个，组越短越看不见。
 - **内联曲线框**：框的左右 = **组的起止拍**，`getGroupCurveBounds()` 水平零内边距；X 轴是组自身
   跨度、Y 轴 0..1。打开即 `setEnabled(true)`；**与音符内联框互斥**。
-- **组要能拖起来**：唯一入口 `armGroupMove(groupId, pos)`。两条路：点标签 `getGroupLabelAt`、
+- **组要能拖起来**：唯一入口 `armGroupMove(groupId, occurrence, pos, additive = false)`。
+  `additive` = Shift/Ctrl（`isAdditive(mods)`，与采样命中用同一对修饰键）：
+  整处还没在选区里就把**整处**加进去而不是替换掉——"选三个组"不能要三次单独的拖拽。
+  两条路：点标签 `getGroupLabelAt`、
   点框内空地 `getGroupFrameAt`（只认激活图层，排在音符命中之后、marquee 之前）。
   **P65：这一处若已经整处在选区里，就不调 `selectGroup()`** —— 多选后点其中一个组的标签，
   意思是"搬走我选的东西"，把选区缩成这一个组会让其余组在指针动起来的瞬间掉队。

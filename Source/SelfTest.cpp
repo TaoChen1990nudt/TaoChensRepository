@@ -11707,6 +11707,135 @@ juce::String MainComponent::runSelfTest()
                  + " / " + (openGrab ? utf8 ("开门对") : utf8 ("开门错")) + "）");
     }
 
+    //-- Phase 74: 选中一个成员，就是选中它所在的编组 --------------------------
+    // 选择是"就是这些东西"这句话。组是一个东西，所以框选切到一个成员，回来
+    // 的必须是整次出现——否则下一次 Delete 就从队形里撕掉一个成员，而这正是
+    // 关闭状态的存在意义。打开编辑的组例外：在它里面，成员就是那个对象。
+    {
+        LayerStack t74;
+        RackModel  r74;
+        PianoRollComponent roll (t74, r74);
+        roll.setSize (1200, 620);
+
+        t74.addLayer (utf8 ("P74 选择"), palette::layer1);
+        auto* layer = t74.getLayer (0);
+
+        const int na = layer->addNote ({ 0, 60, 0.0, 2.0, 0.9f });
+        const int nb = layer->addNote ({ 0, 64, 6.0, 2.0, 0.9f });
+
+        const int gid = layer->addGroup (utf8 ("P74 组"), groupPalette::group1);
+        layer->assignNotesToGroup ({ na, nb }, gid);
+
+        SampleEvent clip;
+        clip.name        = "p74";
+        clip.startBeat   = 12.0;
+        clip.lengthBeats = 2.0;
+        clip.pitch       = 70;
+        clip.laneSpan    = 2;
+
+        const int clipId = layer->addSample (clip);
+        layer->assignSamplesToGroup ({ clipId }, gid);
+
+        // 第二个组：行错开、拍重叠也行，行的不同就是不相交。
+        const int nc = layer->addNote ({ 0, 66, 1.0, 1.0, 0.9f });
+        const int nd = layer->addNote ({ 0, 67, 9.0, 1.0, 0.9f });
+
+        layer->assignNotesToGroup ({ nc, nd },
+                                   layer->addGroup (utf8 ("P74 二组"), groupPalette::group2));
+
+        // 组外的松散音符：扩散只在组里发生，它必须原样听命中。
+        const int loose = layer->addNote ({ 0, 52, 16.0, 2.0, 0.9f });
+
+        const auto showSel = [&] ()
+        {
+            const auto mark = [&] (int id) { return roll.isNoteSelectedForTest (id) ? "1" : "0"; };
+
+            return juce::String (mark (na)) + mark (nb) + mark (nc) + mark (nd)
+                     + mark (loose) + utf8 (" / 块 ") + (roll.isSampleSelected (clipId) ? "1" : "0")
+                     + utf8 (" / 组 ") + juce::String (roll.getEditingGroupId());
+        };
+
+        const auto bandOver = [&] (int id, float inset)
+        {
+            return roll.getNoteScreenBounds (0, id).reduced (inset);
+        };
+
+        //-- 1. 框选只切到一个音符，回来的是整个出现 ----------------------
+        roll.setSelection ({});
+        roll.simulateMarquee (bandOver (na, ui::pf (3.0f)));
+
+        check (utf8 ("框选切到组里一个音符，选中的是整个出现（含采样块）"),
+               roll.isNoteSelectedForTest (na) && roll.isNoteSelectedForTest (nb)
+                 && roll.isSampleSelected (clipId) && ! roll.isNoteSelectedForTest (loose),
+               showSel() + utf8 ("（应为 11000 / 块 1）"));
+
+        //-- 2. 框选只切到采样块的一角，回来同样是整组 --------------------
+        roll.setSelection ({});
+        roll.simulateMarquee (roll.getSampleScreenBounds (0, clipId)
+                                  .reduced (ui::pf (3.0f)).withTrimmedLeft (ui::pf (6.0f)));
+
+        check (utf8 ("框选切到组里采样块的一角，选中的同样是整个出现"),
+               roll.isSampleSelected (clipId) && roll.isNoteSelectedForTest (na)
+                 && roll.isNoteSelectedForTest (nb),
+               showSel() + utf8 ("（应为 11000 / 块 1）"));
+
+        //-- 3. 打开编辑的组不扩散：那里成员就是对象 ----------------------
+        roll.simulateDoubleClickForTest (roll.getNoteScreenBounds (0, na).getCentre());
+        const bool groupOpen = roll.getEditingGroupId() == gid;
+
+        roll.setSelection ({});
+        roll.simulateMarquee (bandOver (na, ui::pf (3.0f)));
+
+        const juce::String detail73 = showSel()
+                                        + utf8 ("（应为 10000 / 块 0 / 组 ")
+                                        + juce::String (gid);
+
+        check (utf8 ("进入组内编辑后，框选只选到框里的那个成员"),
+               groupOpen && roll.isNoteSelectedForTest (na)
+                 && ! roll.isNoteSelectedForTest (nb) && ! roll.isSampleSelected (clipId),
+               detail73);
+
+        roll.exitGroupEdit();
+
+        //-- 4. Shift 点另一组的成员：是加进选择，不是把选择换掉 ----------
+        roll.setSelection ({});
+        roll.simulatePressForTest (roll.getNoteScreenBounds (0, na).getCentre());
+
+        const bool firstGroup = roll.isNoteSelectedForTest (na) && roll.isNoteSelectedForTest (nb);
+
+        roll.simulatePressForTest (roll.getNoteScreenBounds (0, nc).getCentre(),
+                                   juce::ModifierKeys (juce::ModifierKeys::shiftModifier));
+
+        check (utf8 ("Shift 点另一个组的成员，前一组的成员留在选择里，新的一组整组加入"),
+               firstGroup && roll.isNoteSelectedForTest (nc) && roll.isNoteSelectedForTest (nd)
+                 && roll.isNoteSelectedForTest (na) && roll.isNoteSelectedForTest (nb)
+                 && roll.isSampleSelected (clipId),
+               showSel() + utf8 ("（应为 11110 / 块 1）"));
+
+        //-- 5. Shift 框选同样是"加" --------------------------------------
+        roll.setSelection ({});
+        roll.simulatePressForTest (roll.getNoteScreenBounds (0, na).getCentre());
+
+        roll.setMarqueeAdditiveForTest (true);
+        roll.simulateMarquee (bandOver (nc, ui::pf (3.0f)));
+        roll.setMarqueeAdditiveForTest (false);
+
+        const bool keptBoth = roll.isNoteSelectedForTest (na) && roll.isNoteSelectedForTest (nb)
+                                && roll.isNoteSelectedForTest (nc) && roll.isNoteSelectedForTest (nd)
+                                && roll.isSampleSelected (clipId);
+
+        // ...and a sweep that catches nothing must not throw that away either.
+        roll.setMarqueeAdditiveForTest (true);
+        roll.simulateMarquee ({ -4000.0f, -4000.0f, ui::pf (10.0f), ui::pf (10.0f) });
+        roll.setMarqueeAdditiveForTest (false);
+
+        check (utf8 ("Shift 框选把新的一组加进选择，空扫也不会把选择清空"),
+               keptBoth && roll.isNoteSelectedForTest (na) && roll.isNoteSelectedForTest (nb)
+                 && roll.isNoteSelectedForTest (nc) && roll.isNoteSelectedForTest (nd)
+                 && roll.isSampleSelected (clipId),
+               showSel() + utf8 ("（应为 11110 / 块 1）"));
+    }
+
     //-- Phase 64 / 66: the playhead follower must not oscillate ---------------
     {
         LayerStack t64;

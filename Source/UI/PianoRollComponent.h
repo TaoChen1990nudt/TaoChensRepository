@@ -1306,6 +1306,11 @@ public:
         rectangle. Returns true when it selected anything. */
     bool simulateMarquee (juce::Rectangle<float> marquee);
 
+    /** Phase 74: test hook — the modifier the press captured. The band is read
+        at the release, so a test that wants the additive sweep has to set the
+        very flag the press would have set. */
+    void setMarqueeAdditiveForTest (bool on) noexcept { marqueeAdditive = on; }
+
     /** Phase 31: test hook — one right-drag on the ruler, exactly as the mouse
         does it: capture the anchor from where the button went down, then apply
         the drag's own exponential step. The assertion is that the beat under
@@ -1512,8 +1517,28 @@ private:
     void captureGroupClips (int groupId, int occurrence = -1);
 
     /** Phase 25: select a group and arm a rigid move of it. The pill and the
-        frame both call this — one gesture, one implementation. */
-    void armGroupMove (int groupId, int occurrence, juce::Point<float> position);
+        frame both call this — one gesture, one implementation.
+
+        Phase 74: `additive` is Shift/Ctrl held down. It keeps the selection
+        that is already there and adds the whole appearance to it, because
+        "click a member and get its group" must not mean "and lose the group
+        you selected a moment ago". */
+    void armGroupMove (int groupId, int occurrence, juce::Point<float> position,
+                       bool additive = false);
+
+    /** Phase 74: widens a set of hit members to the appearances they belong to.
+
+        Selection is the gesture that says "these things", and a group is one
+        thing — a band that clips one of its seven notes has to come back with
+        seven, or the very next Delete removes a member out of formation and the
+        group's shape silently changes. Groups that are OPEN for editing are
+        left alone: inside them the member is the object. */
+    void expandToWholeOccurrences (std::vector<int>& noteIds,
+                                   std::vector<int>& sampleIds) const;
+
+    /** Phase 74: additive selection — the whole appearance joins what is
+        already selected (no-op when it is already in there whole). */
+    void addOccurrenceToSelection (int groupId, int occurrence);
 
     /** Phase 25: which captured note a resize drag acts on. */
     int resizeTargetId() const;
@@ -1921,6 +1946,11 @@ private:
         lined every tail up with the pointer. */
     int      dragResizeNoteId = -1;
     juce::Point<float> marqueeStart, marqueeCurrent;
+
+    /** Phase 74: Shift/Ctrl was held when the band started, so the sweep adds
+        to the selection instead of replacing it. Captured at the press because
+        the modifier is already back up by the time the release reads it. */
+    bool     marqueeAdditive = false;
 
     float  scrollY     = 0.0f;
     double scrollBeats = 0.0;

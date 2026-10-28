@@ -199,6 +199,14 @@ namespace
     }
 
     // Note naming lives in Util/Text.h so the panel and the roll agree.
+
+    /** Phase 74: "add to the selection" as the rest of the app spells it. Shift
+        and Ctrl both mean it here, the same pair the clip hit test accepts — a
+        group grab must not require a different modifier from a plain note. */
+    inline bool isAdditive (juce::ModifierKeys mods) noexcept
+    {
+        return mods.isShiftDown() || mods.isCommandDown();
+    }
 }
 
 //==============================================================================
@@ -1836,6 +1844,75 @@ void PianoRollComponent::selectGroup (int groupId, int occurrence)
     }
 }
 
+void PianoRollComponent::addOccurrenceToSelection (int groupId, int occurrence)
+{
+    const auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || groupId < 0)
+        return;
+
+    auto notes = selection;
+    auto clips = sampleSelection;
+
+    // Appended, not merged by group: the existing selection keeps its order (it
+    // is what the panels list) and only gains what it did not already hold.
+    for (int id : layer->getOccurrenceNoteIds (groupId, occurrence))
+        if (std::find (notes.begin(), notes.end(), id) == notes.end())
+            notes.push_back (id);
+
+    for (int id : layer->getOccurrenceSampleIds (groupId, occurrence))
+        if (std::find (clips.begin(), clips.end(), id) == clips.end())
+            clips.push_back (id);
+
+    setMixedSelection (std::move (notes), std::move (clips));
+}
+
+void PianoRollComponent::expandToWholeOccurrences (std::vector<int>& noteIds,
+                                                   std::vector<int>& sampleIds) const
+{
+    const auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr)
+        return;
+
+    // Collected from a SNAPSHOT of the hits, then widened: reading the two
+    // vectors while appending to them would walk the members just added.
+    std::vector<std::pair<int, int>> occurrences;
+
+    const auto collect = [&] (int groupId, int occurrence)
+    {
+        // An OPEN group is a container, not an object: inside it the member is
+        // exactly what the user aimed at, and widening would take the gesture
+        // back off them.
+        if (! isGroupLocked (groupId))
+            return;
+
+        const auto entry = std::make_pair (groupId, occurrence);
+
+        if (std::find (occurrences.begin(), occurrences.end(), entry) == occurrences.end())
+            occurrences.push_back (entry);
+    };
+
+    for (int id : noteIds)
+        if (const auto* n = layer->findNote (id))
+            collect (n->groupId, n->groupOccurrence);
+
+    for (int id : sampleIds)
+        if (const auto* c = layer->findSample (id))
+            collect (c->groupId, c->groupOccurrence);
+
+    for (const auto& entry : occurrences)
+    {
+        for (int id : layer->getOccurrenceNoteIds (entry.first, entry.second))
+            if (std::find (noteIds.begin(), noteIds.end(), id) == noteIds.end())
+                noteIds.push_back (id);
+
+        for (int id : layer->getOccurrenceSampleIds (entry.first, entry.second))
+            if (std::find (sampleIds.begin(), sampleIds.end(), id) == sampleIds.end())
+                sampleIds.push_back (id);
+    }
+}
+
 bool PianoRollComponent::ungroupSelection()
 {
     auto* layer = stack.getActiveLayer();
@@ -2835,7 +2912,7 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
             return;
         }
 
-        armGroupMove (groupId, labelOccurrence, pos);
+        armGroupMove (groupId, labelOccurrence, pos, isAdditive (mods));
         return;
     }
 
@@ -2863,7 +2940,8 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
                 return;
             }
 
-            armGroupMove (clipUnder->groupId, clipUnder->groupOccurrence, pos);
+            armGroupMove (clipUnder->groupId, clipUnder->groupOccurrence, pos,
+                          isAdditive (mods));
             return;
         }
 
@@ -3030,7 +3108,8 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
                                    member->groupOccurrence,
                                    localPointToGlobal (pos.roundToInt()));
                 else
-                    armGroupMove (member->groupId, member->groupOccurrence, pos);
+                    armGroupMove (member->groupId, member->groupOccurrence, pos,
+                                  isAdditive (mods));
 
                 return;
             }
@@ -3222,7 +3301,12 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
     // dismisses it.
     dismissSpotlight();
 
-    if (! mods.isShiftDown())
+    // Phase 74: Shift/Ctrl is "and also", for the band as well as for a click.
+    // It has to be remembered here — by the release the modifier is long gone,
+    // and a sweep that silently replaced the selection made Shift look broken.
+    marqueeAdditive = isAdditive (mods);
+
+    if (! marqueeAdditive)
     {
         selection.clear();
         sampleSelection.clear();     // Phase 28: clicking the grid lets go of both
@@ -3811,7 +3895,8 @@ void PianoRollComponent::exitGroupEdit()
     repaint();
 }
 
-void PianoRollComponent::armGroupMove (int groupId, int occurrence, juce::Point<float> position)
+void PianoRollComponent::armGroupMove (int groupId, int occurrence, juce::Point<float> position,
+                                       bool additive)
 {
     // Selecting is not moving: a group whose only gesture is "become the
     // selection" reads as broken the moment you try to drag it. So the same
@@ -3829,8 +3914,19 @@ void PianoRollComponent::armGroupMove (int groupId, int occurrence, juce::Point<
     // would drop the other groups on the floor at the moment the pointer moves.
     // "Select two groups, drag one" moves both; a click on a group that is not
     // part of the selection still narrows to it, exactly as before.
+    //
+    // Phase 74: Shift/Ctrl is the exception to that narrowing. It means "and
+    // also this one" everywhere else in the app, and a modifier that quietly
+    // threw the previous selection away would make "select three groups" cost
+    // three separate drags. The whole appearance joins, never a lone member —
+    // a member in the selection is its group in the selection.
     if (! isWholeOccurrenceSelected (groupId, occurrence))
-        selectGroup (groupId, occurrence);
+    {
+        if (additive)
+            addOccurrenceToSelection (groupId, occurrence);
+        else
+            selectGroup (groupId, occurrence);
+    }
 
     captureDragOriginals();
     captureGroupClips (groupId, occurrence);
@@ -4227,6 +4323,8 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent&)
         if (marquee.getWidth() > 3.0f || marquee.getHeight() > 3.0f)
             if (marqueeStart.getDistanceFrom (marqueeCurrent) > 0.0f)
                 simulateMarquee (marquee);
+
+        marqueeAdditive = false;      // the band is over; the next one decides again
     }
 
     dragMode = DragMode::none;
@@ -10547,8 +10645,39 @@ bool PianoRollComponent::simulateMarquee (juce::Rectangle<float> marquee)
 
     if (hits.first.empty() && hits.second.empty())
     {
-        setMixedSelection ({}, {});
+        // A sweep that catches nothing must not throw away what an additive one
+        // was adding to — that is the difference between "nothing here" and
+        // "forget everything".
+        if (! marqueeAdditive)
+            setMixedSelection ({}, {});
+
         return false;
+    }
+
+    // Phase 74: a band that clips ONE member has selected the GROUP. Without
+    // this, a sweep over a corner of a group left six-sevenths of it dark and
+    // the next Delete tore a member out of formation — the exact accident the
+    // closed group exists to prevent. Groups open for editing are untouched:
+    // there the member is the object the band was aimed at.
+    expandToWholeOccurrences (hits.first, hits.second);
+
+    if (marqueeAdditive)
+    {
+        // What was already selected leads, so a second sweep appends instead of
+        // reshuffling a list the panels are showing.
+        auto mergedNotes = selection;
+        auto mergedClips = sampleSelection;
+
+        for (int id : hits.first)
+            if (std::find (mergedNotes.begin(), mergedNotes.end(), id) == mergedNotes.end())
+                mergedNotes.push_back (id);
+
+        for (int id : hits.second)
+            if (std::find (mergedClips.begin(), mergedClips.end(), id) == mergedClips.end())
+                mergedClips.push_back (id);
+
+        hits.first  = std::move (mergedNotes);
+        hits.second = std::move (mergedClips);
     }
 
     setMixedSelection (std::move (hits.first), std::move (hits.second));
