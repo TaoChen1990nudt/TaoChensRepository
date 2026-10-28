@@ -466,6 +466,52 @@ public:
         "startBeat + delta" to get out of step. */
     void applyMove (const MoveClamp& move);
 
+    /** Phase 62: keeps each appearance's stored origin on the appearance when
+        the drag carries ALL of it. A whole appearance moving is a change of
+        position, not of shape; without this the next sync would read the move
+        as "the shape shifted inside its box" and drag every sibling along. */
+    void applyOccurrenceOriginsForMove (double movedBeats, Layer* layer);
+
+    /** Phase 62: the (group, appearance) pairs this drag carries WHOLE. */
+    std::vector<std::pair<int, int>> wholeGroupOccurrencesInDrag() const;
+
+    /** Phase 62: syncs the appearances this drag is reshaping (the ones it does
+        NOT carry whole). Called from `applyMove`, so the copies move with the
+        pointer rather than snapping in on mouse-up. */
+    bool syncDragShapes();
+
+    /** Phase 62: one member changed — bring its group's other appearances into
+        step with it. The edit sites that work on a single member (a tail drag,
+        an envelope handle, a clip's curve) call THIS, so none of them has to
+        remember the rule. */
+    bool syncShapeOfMember (int noteId);
+    bool syncShapeOfClip (int clipId);
+
+    /** Phase 62: the same, for a batch of members that were just edited. */
+    bool syncShapesOfMembers (const std::vector<int>& noteIds, const std::vector<int>& clipIds);
+
+    /** Phase 62: an edit inside one appearance is an edit of the SHAPE, so
+        every other appearance is rebuilt from it at its own place. Called at the
+        end of a gesture, after the members have landed where the user put them.
+
+        Skips appearances this drag carried whole (those only moved), and the
+        one-member case inside the model. Returns true when a sibling changed. */
+    bool syncGroupShapesAfterEdit (const std::vector<std::pair<int, int>>& touched);
+
+    /** Phase 62: the appearances touched by these member ids, for the callers
+        that have ids rather than a drag. */
+    std::vector<std::pair<int, int>> groupOccurrencesOf (const std::vector<int>& noteIds,
+                                                         const std::vector<int>& clipIds) const;
+
+    /** Phase 62: the twins that leave the group with the current selection —
+        deleted, or detached, depending on who asked.
+
+        An appearance the selection covers WHOLE contributes nothing: taking a
+        whole copy out is a decision about that copy, not about the shape. Half
+        an appearance is the shape, and the twin at the same ordinal leaves with
+        it. */
+    void collectTwinsForEdit (std::vector<int>& twinNotes, std::vector<int>& twinClips) const;
+
     /** Phase 27: test hook — arms and performs a rigid move of a group. */
     bool simulateGroupMove (int layerIndex, int groupId, double deltaBeats, int deltaPitch,
                             int occurrence = -1);
@@ -1539,6 +1585,11 @@ private:
         move and by a clip move — both go through clampMove() + applyMove(), so
         there is one rigid-move implementation and the two cases cannot drift. */
     std::vector<SampleEvent> dragClipOriginals;
+
+    /** Phase 62: how far the current drag has moved, measured from the
+        originals. `applyMove` receives a total, not a step, so the origins are
+        moved by the difference. */
+    double dragAppliedMoveBeats = 0.0;
 
     /** Phase 56: every selected block, captured when a resize band is grabbed.
 

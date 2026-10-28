@@ -574,6 +574,22 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                     if (group.getPluginAutomation().isEnabled()
                           || group.getPluginAutomation().getPoints().size() > 2)
                         writeLane (*groupXml, group.getPluginAutomation(), "plugin", false);
+
+                    // Phase 62 (v25): where each appearance sits. Written as
+                    // children rather than attributes because the set is open —
+                    // a song may repeat a group any number of times, and
+                    // "occurrence1start" style attributes would put a ceiling on
+                    // it for no reason.
+                    //
+                    // Only the ORIGIN is stored. The members are already on the
+                    // timeline with absolute beats; this number exists so that
+                    // deleting the earliest of them cannot move the appearance.
+                    for (const auto& entry : group.getOccurrenceStarts())
+                    {
+                        auto* occXml = groupXml->createNewChildElement ("Occurrence");
+                        occXml->setAttribute ("index", entry.first);
+                        occXml->setAttribute ("start", number (entry.second, 8));
+                    }
                 }
             }
 
@@ -919,6 +935,16 @@ bool fromXmlText (const juce::String& xmlText,
                     for (auto* autoXml = g->getFirstChildElement(); autoXml != nullptr;
                          autoXml = autoXml->getNextElement())
                     {
+                        // Phase 62 (v25): where an appearance sits. A project
+                        // written before this has none, and Layer::occurrenceStart
+                        // infers each one from its earliest member exactly once.
+                        if (autoXml->hasTagName ("Occurrence"))
+                        {
+                            group.setOccurrenceStart (juce::jmax (0, autoXml->getIntAttribute ("index", 0)),
+                                                      autoXml->getDoubleAttribute ("start", 0.0));
+                            continue;
+                        }
+
                         if (! autoXml->hasTagName ("Automation"))
                             continue;
 
@@ -1056,6 +1082,12 @@ bool fromXmlText (const juce::String& xmlText,
             layer->restoreNotes (std::move (notes));
             layer->restoreSamples (std::move (samples));
             layer->restoreGroups (std::move (groups));   // also repairs stale ids
+
+            // Phase 62: every appearance gets a stored origin now, while its
+            // members are all still there. A loaded song must not move the first
+            // time a group member is deleted.
+            layer->materialiseOccurrenceStarts();
+
             parsedLayers.push_back (std::move (layer));
         }
     }

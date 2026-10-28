@@ -280,6 +280,488 @@ std::vector<int> Layer::getGroupSampleIds (int groupId) const
     return ids;
 }
 
+//==============================================================================
+//  Phase 62: one shape, several places
+//==============================================================================
+bool NoteGroup::hasOccurrenceStart (int occurrence) const
+{
+    return occurrenceStarts.find (occurrence) != occurrenceStarts.end();
+}
+
+double NoteGroup::getOccurrenceStart (int occurrence) const
+{
+    const auto found = occurrenceStarts.find (occurrence);
+
+    return found != occurrenceStarts.end() ? found->second : 0.0;
+}
+
+void NoteGroup::setOccurrenceStart (int occurrence, double beat)
+{
+    occurrenceStarts[occurrence] = beat;
+}
+
+void NoteGroup::forgetOccurrenceStart (int occurrence)
+{
+    occurrenceStarts.erase (occurrence);
+}
+
+double Layer::occurrenceStart (int groupId, int occurrence)
+{
+    auto* group = findGroup (groupId);
+
+    if (group == nullptr)
+        return 0.0;
+
+    if (group->hasOccurrenceStart (occurrence))
+        return group->getOccurrenceStart (occurrence);
+
+    // Materialise from the members: this is the ONE moment a group built before
+    // Phase 62 (or a project written before it) has its position inferred. From
+    // here on the number is stored, so deleting the member that happens to be
+    // first cannot move the appearance.
+    double first = std::numeric_limits<double>::max();
+
+    for (const auto& n : notes)
+        if (n.groupId == groupId && n.groupOccurrence == occurrence)
+            first = juce::jmin (first, n.startBeat);
+
+    for (const auto& s : samples)
+        if (s.groupId == groupId && s.groupOccurrence == occurrence)
+            first = juce::jmin (first, s.startBeat);
+
+    if (first == std::numeric_limits<double>::max())
+        return 0.0;         // nothing to anchor; store nothing, invent nothing
+
+    group->setOccurrenceStart (occurrence, first);
+    return first;
+}
+
+void Layer::setOccurrenceStart (int groupId, int occurrence, double beat)
+{
+    if (auto* group = findGroup (groupId))
+        group->setOccurrenceStart (occurrence, beat);
+}
+
+void Layer::pruneOccurrenceStarts (int groupId)
+{
+    for (auto& group : groups)
+    {
+        if (groupId >= 0 && group.getId() != groupId)
+            continue;
+
+        const auto live = getGroupOccurrences (group.getId());
+
+        std::vector<int> stale;
+
+        for (const auto& entry : group.getOccurrenceStarts())
+            if (std::find (live.begin(), live.end(), entry.first) == live.end())
+                stale.push_back (entry.first);
+
+        for (int occurrence : stale)
+            group.forgetOccurrenceStart (occurrence);
+    }
+}
+
+void Layer::materialiseOccurrenceStarts()
+{
+    // Iterate by INDEX: occurrenceStart() writes into the group, and the list
+    // of appearances has to be read before that happens.
+    for (size_t i = 0; i < groups.size(); ++i)
+    {
+        const int groupId     = groups[i].getId();
+        const auto occurrences = getGroupOccurrences (groupId);
+
+        for (int occurrence : occurrences)
+            occurrenceStart (groupId, occurrence);      // stores it the first time
+    }
+}
+
+namespace
+{
+    /** Everything about a note that a sibling appearance has to copy. Position
+        is included because the caller passes the already-anchored start. */
+    bool sameNoteShape (const NoteEvent& a, const NoteEvent& b)
+    {
+        return a.pitch == b.pitch
+                && std::abs (a.startBeat - b.startBeat) < 1.0e-9
+                && std::abs (a.lengthBeats - b.lengthBeats) < 1.0e-9
+                && std::abs (a.velocity - b.velocity) < 1.0e-6f
+                && a.modTarget == b.modTarget
+                && a.modPluginParam == b.modPluginParam
+                && a.outputSlotOverride == b.outputSlotOverride
+                && a.envelope.isEnabled() == b.envelope.isEnabled()
+                && a.envelope.hasSameShapeAs (b.envelope);
+    }
+
+    bool sameClipShape (const SampleEvent& a, const SampleEvent& b)
+    {
+        return a.name == b.name
+                && a.path == b.path
+                && std::abs (a.startBeat - b.startBeat) < 1.0e-9
+                && std::abs (a.lengthBeats - b.lengthBeats) < 1.0e-9
+                && a.pitch == b.pitch
+                && a.laneSpan == b.laneSpan
+                && std::abs (a.gainDb - b.gainDb) < 1.0e-6f
+                && a.outputSlotId == b.outputSlotId
+                && a.reversed == b.reversed
+                && a.stretchMode == b.stretchMode
+                && a.pitchRangeSemitones == b.pitchRangeSemitones
+                && std::abs (a.sourceOffsetSeconds - b.sourceOffsetSeconds) < 1.0e-9
+                && a.automationTarget == b.automationTarget
+                && a.audio == b.audio
+                && a.volumeCurve.hasSameShapeAs (b.volumeCurve)
+                && a.panCurve.hasSameShapeAs (b.panCurve);
+    }
+
+    /** One order for every appearance of a group: start, then pitch, then id.
+
+        Two appearances of one group hold the same members, so the same
+        comparator puts the twin at the same ORDINAL in each — and ordinal is
+        all the pairing needs. Identical duplicates are interchangeable, so a
+        tie never has to be broken meaningfully. */
+    bool noteShapeLess (const NoteEvent& a, const NoteEvent& b)
+    {
+        if (std::abs (a.startBeat - b.startBeat) > 1.0e-9)
+            return a.startBeat < b.startBeat;
+
+        if (a.pitch != b.pitch)
+            return a.pitch < b.pitch;
+
+        return a.id < b.id;
+    }
+
+    bool clipShapeLess (const SampleEvent& a, const SampleEvent& b)
+    {
+        if (std::abs (a.startBeat - b.startBeat) > 1.0e-9)
+            return a.startBeat < b.startBeat;
+
+        if (a.pitch != b.pitch)
+            return a.pitch < b.pitch;
+
+        return a.id < b.id;
+    }
+}
+
+bool Layer::syncGroupShape (int groupId, int sourceOccurrence)
+{
+    if (findGroup (groupId) == nullptr)
+        return false;
+
+    const auto occurrences = getGroupOccurrences (groupId);
+
+    if (occurrences.size() < 2)
+        return false;               // one place is nothing to keep in step with
+
+    const double sourceStart = occurrenceStart (groupId, sourceOccurrence);
+
+    //-- The template: the source appearance, measured from its own origin ----
+    // Copies, not pointers: adding members below reallocates the vectors these
+    // would be pointing into.
+    std::vector<NoteEvent>   shapeNotes;
+    std::vector<SampleEvent> shapeClips;
+
+    for (const auto& n : notes)
+        if (n.groupId == groupId && n.groupOccurrence == sourceOccurrence)
+            shapeNotes.push_back (n);
+
+    for (const auto& s : samples)
+        if (s.groupId == groupId && s.groupOccurrence == sourceOccurrence)
+            shapeClips.push_back (s);
+
+    if (shapeNotes.empty() && shapeClips.empty())
+        return false;               // a wiped appearance is not a template
+
+    // One order for both sides: start, then pitch, then id. Two appearances of
+    // one group hold the same members, so the same comparator puts the twin at
+    // the same ordinal in each — which is all the pairing needs.
+    const auto noteLess = [] (const NoteEvent& a, const NoteEvent& b) { return noteShapeLess (a, b); };
+    const auto clipLess = [] (const SampleEvent& a, const SampleEvent& b) { return clipShapeLess (a, b); };
+
+    std::sort (shapeNotes.begin(), shapeNotes.end(), noteLess);
+    std::sort (shapeClips.begin(), shapeClips.end(), clipLess);
+
+    std::vector<double> noteRel;
+    std::vector<double> clipRel;
+
+    for (const auto& n : shapeNotes)
+        noteRel.push_back (n.startBeat - sourceStart);
+
+    for (const auto& s : shapeClips)
+        clipRel.push_back (s.startBeat - sourceStart);
+
+    bool changed = false;
+
+    for (int occurrence : occurrences)
+    {
+        if (occurrence == sourceOccurrence)
+            continue;
+
+        // The sibling's OWN origin. This is the whole of "位置独立": the shape
+        // arrives, the place stays.
+        const double anchor = occurrenceStart (groupId, occurrence);
+
+        auto existingNotes = getOccurrenceNoteIds (groupId, occurrence);
+        auto existingClips = getOccurrenceSampleIds (groupId, occurrence);
+
+        std::sort (existingNotes.begin(), existingNotes.end(),
+                   [this, &noteLess] (int a, int b)
+                   {
+                       const auto* na = findNote (a);
+                       const auto* nb = findNote (b);
+
+                       return (na != nullptr && nb != nullptr) ? noteLess (*na, *nb) : a < b;
+                   });
+
+        std::sort (existingClips.begin(), existingClips.end(),
+                   [this, &clipLess] (int a, int b)
+                   {
+                       const auto* sa = findSample (a);
+                       const auto* sb = findSample (b);
+
+                       return (sa != nullptr && sb != nullptr) ? clipLess (*sa, *sb) : a < b;
+                   });
+
+        //-- Notes -------------------------------------------------------------
+        const int noteCount = juce::jmax ((int) shapeNotes.size(), (int) existingNotes.size());
+
+        for (int i = 0; i < noteCount; ++i)
+        {
+            const bool fromTemplate = i < (int) shapeNotes.size();
+            const bool fromSibling  = i < (int) existingNotes.size();
+
+            if (! fromTemplate)
+            {
+                removeNote (existingNotes[(size_t) i]);
+                changed = true;
+                continue;
+            }
+
+            NoteEvent fresh = shapeNotes[(size_t) i];
+            fresh.startBeat       = anchor + noteRel[(size_t) i];
+            fresh.groupId         = groupId;
+            fresh.groupOccurrence = occurrence;
+
+            if (fromSibling)
+            {
+                auto* target = findNote (existingNotes[(size_t) i]);
+
+                if (target == nullptr)
+                    continue;
+
+                fresh.id = target->id;
+
+                if (! sameNoteShape (*target, fresh))
+                {
+                    *target = fresh;
+                    changed = true;
+                }
+            }
+            else
+            {
+                fresh.id = 0;
+
+                if (addNote (fresh) > 0)
+                    changed = true;
+            }
+        }
+
+        //-- Blocks ------------------------------------------------------------
+        const int clipCount = juce::jmax ((int) shapeClips.size(), (int) existingClips.size());
+
+        for (int i = 0; i < clipCount; ++i)
+        {
+            const bool fromTemplate = i < (int) shapeClips.size();
+            const bool fromSibling  = i < (int) existingClips.size();
+
+            if (! fromTemplate)
+            {
+                removeSample (existingClips[(size_t) i]);
+                changed = true;
+                continue;
+            }
+
+            SampleEvent fresh = shapeClips[(size_t) i];
+            fresh.startBeat       = anchor + clipRel[(size_t) i];
+            fresh.groupId         = groupId;
+            fresh.groupOccurrence = occurrence;
+
+            if (fromSibling)
+            {
+                auto* target = findSample (existingClips[(size_t) i]);
+
+                if (target == nullptr)
+                    continue;
+
+                const auto audio = fresh.audio;     // the buffer is shared, not owned
+                fresh.id = target->id;
+
+                if (! sameClipShape (*target, fresh))
+                {
+                    *target      = fresh;
+                    target->audio = audio;
+                    changed      = true;
+                }
+            }
+            else
+            {
+                fresh.id = 0;
+
+                if (addSample (fresh) > 0)
+                    changed = true;
+            }
+        }
+    }
+
+    if (changed)
+        pruneOccurrenceStarts (groupId);
+
+    return changed;
+}
+
+void Layer::collectTwinMembers (const std::vector<int>& noteIds,
+                                const std::vector<int>& clipIds,
+                                std::vector<int>& twinNotes,
+                                std::vector<int>& twinClips) const
+{
+    twinNotes.clear();
+    twinClips.clear();
+
+    // Group -> the ordinal each appearance stores its members at. Built once
+    // per group, because a multi-select of forty notes asks forty times.
+    struct Layout
+    {
+        std::vector<int> occurrences;
+        std::vector<std::vector<int>> notes;    // per occurrence, in member order
+        std::vector<std::vector<int>> clips;
+    };
+
+    std::map<int, Layout> layouts;
+
+    const auto buildLayout = [this] (int groupId)
+    {
+        Layout layout;
+        layout.occurrences = getGroupOccurrences (groupId);
+
+        for (int occurrence : layout.occurrences)
+        {
+            auto noteList = getOccurrenceNoteIds (groupId, occurrence);
+            std::sort (noteList.begin(), noteList.end(), [this] (int a, int b)
+            {
+                const auto* na = findNote (a);
+                const auto* nb = findNote (b);
+
+                return (na != nullptr && nb != nullptr) ? noteShapeLess (*na, *nb) : a < b;
+            });
+            layout.notes.push_back (std::move (noteList));
+
+            auto clipList = getOccurrenceSampleIds (groupId, occurrence);
+            std::sort (clipList.begin(), clipList.end(), [this] (int a, int b)
+            {
+                const auto* sa = findSample (a);
+                const auto* sb = findSample (b);
+
+                return (sa != nullptr && sb != nullptr) ? clipShapeLess (*sa, *sb) : a < b;
+            });
+            layout.clips.push_back (std::move (clipList));
+        }
+
+        return layout;
+    };
+
+    const auto twinsOf = [&] (int groupId, int occurrence, int ordinal, bool isNote)
+    {
+        auto found = layouts.find (groupId);
+
+        if (found == layouts.end())
+            found = layouts.emplace (groupId, buildLayout (groupId)).first;
+
+        const auto& layout = found->second;
+
+        if (layout.occurrences.size() < 2)
+            return;
+
+        const auto source = std::find (layout.occurrences.begin(), layout.occurrences.end(), occurrence);
+
+        if (source == layout.occurrences.end())
+            return;
+
+        const auto sourceIndex = (size_t) std::distance (layout.occurrences.begin(), source);
+
+        for (size_t i = 0; i < layout.occurrences.size(); ++i)
+        {
+            if (i == sourceIndex)
+                continue;
+
+            const auto& list = isNote ? layout.notes[i] : layout.clips[i];
+
+            if ((size_t) ordinal >= list.size())
+                continue;       // that appearance is already short; nothing to pair with
+
+            (isNote ? twinNotes : twinClips).push_back (list[(size_t) ordinal]);
+        }
+    };
+
+    for (int noteId : noteIds)
+    {
+        const auto* note = findNote (noteId);
+
+        if (note == nullptr || note->groupId < 0)
+            continue;
+
+        const int groupId    = note->groupId;
+        const int occurrence = note->groupOccurrence;
+
+        auto found = layouts.find (groupId);
+
+        if (found == layouts.end())
+            found = layouts.emplace (groupId, buildLayout (groupId)).first;
+
+        const auto& layout = found->second;
+        const auto source  = std::find (layout.occurrences.begin(), layout.occurrences.end(), occurrence);
+
+        if (source == layout.occurrences.end())
+            continue;
+
+        const auto& list = layout.notes[(size_t) std::distance (layout.occurrences.begin(), source)];
+        const auto  it   = std::find (list.begin(), list.end(), noteId);
+
+        if (it == list.end())
+            continue;
+
+        twinsOf (groupId, occurrence, (int) std::distance (list.begin(), it), true);
+    }
+
+    for (int clipId : clipIds)
+    {
+        const auto* clip = findSample (clipId);
+
+        if (clip == nullptr || clip->groupId < 0)
+            continue;
+
+        const int groupId    = clip->groupId;
+        const int occurrence = clip->groupOccurrence;
+
+        auto found = layouts.find (groupId);
+
+        if (found == layouts.end())
+            found = layouts.emplace (groupId, buildLayout (groupId)).first;
+
+        const auto& layout = found->second;
+        const auto source  = std::find (layout.occurrences.begin(), layout.occurrences.end(), occurrence);
+
+        if (source == layout.occurrences.end())
+            continue;
+
+        const auto& list = layout.clips[(size_t) std::distance (layout.occurrences.begin(), source)];
+        const auto  it   = std::find (list.begin(), list.end(), clipId);
+
+        if (it == list.end())
+            continue;
+
+        twinsOf (groupId, occurrence, (int) std::distance (list.begin(), it), false);
+    }
+}
+
 std::vector<int> Layer::getGroupNoteIds (int groupId) const
 {
     std::vector<int> ids;

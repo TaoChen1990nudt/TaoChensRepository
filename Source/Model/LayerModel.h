@@ -2,6 +2,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <array>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -482,6 +483,26 @@ public:
     AutomationLane&       getPluginAutomation() noexcept       { return automationFor (GroupAutomationTarget::plugin); }
     const AutomationLane& getPluginAutomation() const noexcept { return automationFor (GroupAutomationTarget::plugin); }
 
+    //-- Phase 62: where each appearance sits ---------------------------------
+    /** Start beat of one appearance, keyed by occurrence number.
+
+        The members keep ABSOLUTE beats, so "where this appearance sits" is
+        already implied by its earliest member — but implied is not the same as
+        STABLE. Delete that earliest member and the whole appearance would jump,
+        because "start" would silently become the next member. Every later sync
+        would then drag the appearance again. A stored origin is what makes
+        "one shape, two places" an equation that cannot drift.
+
+        Materialised on demand (Layer::occurrenceStart) so that groups built
+        before this existed, and projects written before it, answer with their
+        earliest member exactly once and never move again. */
+    const std::map<int, double>& getOccurrenceStarts() const noexcept { return occurrenceStarts; }
+
+    bool   hasOccurrenceStart (int occurrence) const;
+    double getOccurrenceStart (int occurrence) const;
+    void   setOccurrenceStart (int occurrence, double beat);
+    void   forgetOccurrenceStart (int occurrence);
+
 private:
     int          id = 0;
     juce::String name;
@@ -498,6 +519,11 @@ private:
         Disabled means "identity": 1.0 for level, 0.0 for pan, and for the
         plugin lane the parameter simply is not written at all. */
     std::array<AutomationLane, numGroupAutomationTargets> automationLanes;
+
+    /** Phase 62: occurrence number -> start beat of that appearance. Only
+        appearances that exist are meaningful; Layer::pruneOccurrenceStarts()
+        is what keeps it from outliving them. */
+    std::map<int, double> occurrenceStarts;
 
     JUCE_LEAK_DETECTOR (NoteGroup)
 };
@@ -658,6 +684,58 @@ public:
 
     std::vector<int> getOccurrenceNoteIds (int groupId, int occurrence) const;
     int countNotesInOccurrence (int groupId, int occurrence) const noexcept;
+
+    //-- Phase 62: one shape, several places ----------------------------------
+    /** Where appearance `occurrence` of this group sits, in beats.
+
+        Reads the stored origin, materialising it from the earliest member the
+        first time it is asked for. A group whose members were grouped before
+        Phase 62 (or a project written before it) therefore answers correctly
+        once and cannot drift afterwards — the answer is a number from then on,
+        not a lookup. */
+    double occurrenceStart (int groupId, int occurrence);
+
+    /** Moves the origin without touching a single member. The caller that
+        moves a whole appearance has to use this, or the next sync would treat
+        the move as a change of SHAPE and drag every other appearance with it. */
+    void setOccurrenceStart (int groupId, int occurrence, double beat);
+
+    /** Makes every OTHER appearance of this group match `source` — the same
+        members, pitches, lengths, velocities, curves and clip settings — while
+        each one stays where it is (its own stored origin).
+
+        This is what "同源" means in the model: an appearance owns its POSITION
+        and nothing else. Everything else about it is the group's, and editing
+        one appearance edits that. Returns true when at least one member was
+        added, removed or rewritten. */
+    bool syncGroupShape (int groupId, int sourceOccurrence);
+
+    /** Drops stored origins whose appearance no longer has any member. Called
+        wherever members are removed; a stale origin would otherwise be
+        inherited by the next appearance that takes the same number. */
+    void pruneOccurrenceStarts (int groupId = -1);
+
+    /** Stores an origin for every appearance that does not have one yet.
+
+        Run once after a project load. Without it the FIRST edit of a freshly
+        opened song could infer the origin from a member it is about to delete,
+        and the appearance would jump the moment its first note left — which is
+        precisely what "one shape, several places" must never do. */
+    void materialiseOccurrenceStarts();
+
+    /** The members that stand where these do, in every OTHER appearance.
+
+        This is the verb `syncGroupShape` cannot express: when a member LEAVES
+        (deleted, ungrouped), there is no shape left to copy it from — the source
+        may even be empty afterwards. Pairing is by ordinal in the shared member
+        order, read here while the originals still exist.
+
+        Members whose group has only one appearance contribute nothing, and so do
+        members with no group at all. */
+    void collectTwinMembers (const std::vector<int>& noteIds,
+                             const std::vector<int>& clipIds,
+                             std::vector<int>& twinNotes,
+                             std::vector<int>& twinClips) const;
 
     //-- Phase 27: clips as group members -------------------------------------
     /** A clip can be grouped with notes. It stays a clip: membership means

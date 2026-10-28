@@ -6949,7 +6949,7 @@ juce::String MainComponent::runSelfTest()
         // length, here clearly below 1 = slower than the file).
         pianoRoll.simulateSampleTrim (id, startBeat + exactBeats + 2.0, true);
 
-        check ("原速模式：尾巴可以拖过文件末尾（多出的宽度是静音）",
+        check (utf8 ("原速模式：尾巴可以拖过文件末尾（多出的宽度是静音）"),
                std::abs (clip->lengthBeats - (exactBeats + 2.0)) < 1.0e-9,
                juce::String (clip->lengthBeats, 4) + utf8(" / 文件 ")
                  + juce::String (exactBeats, 4));
@@ -6958,7 +6958,7 @@ juce::String MainComponent::runSelfTest()
 
         const double stretchedRatio = clip->stretchRatio (audio.getBpm());
 
-        check ("变速不变调：拉长后的块是真实的时间伸缩（比例 < 1）",
+        check (utf8 ("变速不变调：拉长后的块是真实的时间伸缩（比例 < 1）"),
                stretchedRatio > 0.0 && stretchedRatio < 1.0
                  && std::abs (stretchedRatio - exactBeats / (exactBeats + 2.0)) < 1.0e-9,
                juce::String (stretchedRatio, 4));
@@ -8947,7 +8947,7 @@ juce::String MainComponent::runSelfTest()
         if (auto* a = layer->findSample (cardA)) a->outputSlotId = slotId;
         if (auto* b = layer->findSample (cardB)) b->outputSlotId = slotId;
 
-        check ("A slot whose blocks all sit on 原速 reports that state",
+        check (utf8 ("A slot whose blocks all sit on 原速 reports that state"),
                samplerStretchStateFor (slotId) == (int) StretchMode::none,
                juce::String (samplerStretchStateFor (slotId)));
 
@@ -8956,7 +8956,7 @@ juce::String MainComponent::runSelfTest()
         const auto* writtenA = layer->findSample (cardA);
         const auto* writtenB = layer->findSample (cardB);
 
-        check ("Choosing 只变速不变调 on the card reaches every block of the slot",
+        check (utf8 ("Choosing 只变速不变调 on the card reaches every block of the slot"),
                writtenA != nullptr && writtenB != nullptr
                  && writtenA->stretchMode == StretchMode::tempo
                  && writtenB->stretchMode == StretchMode::tempo
@@ -8971,7 +8971,7 @@ juce::String MainComponent::runSelfTest()
         if (auto* a = layer->findSample (cardA))
             a->stretchMode = StretchMode::pitch;
 
-        check ("Two blocks on different modes read as 混合 (-1)",
+        check (utf8 ("Two blocks on different modes read as 混合 (-1)"),
                samplerStretchStateFor (slotId) == -1,
                juce::String (samplerStretchStateFor (slotId)));
 
@@ -9160,7 +9160,7 @@ juce::String MainComponent::runSelfTest()
                std::abs (wideOpen.pitch - 8.0) < 1.0e-9,
                juce::String (wideOpen.pitch, 3));
 
-        check ("The range belongs to 只变调 only",
+        check (utf8 ("The range belongs to 只变调 only"),
                std::abs (otherMode.pitch - 1.0) < 1.0e-9
                  && std::abs (otherMode.speed - 8.0) < 1.0e-9,
                "pitch " + juce::String (otherMode.pitch, 3));
@@ -9222,7 +9222,7 @@ juce::String MainComponent::runSelfTest()
         const auto stretchRect = rackPanel.getStretchBounds (cardIndex);
         const auto rangeRect   = rackPanel.getPitchRangeBounds (cardIndex);
 
-        check ("The 变调范围 chip appears in 只变调, left of the stretch chip",
+        check (utf8 ("The 变调范围 chip appears in 只变调, left of the stretch chip"),
                ! rangeRect.isEmpty() && cardRect.contains (rangeRect)
                  && rangeRect.getRight() <= stretchRect.getX()
                  && rangeRect.getY() == cardRect.getY() + ui::px (40),
@@ -9232,7 +9232,7 @@ juce::String MainComponent::runSelfTest()
 
         applySamplerStretchToSlot (slotId, StretchMode::tempo);
 
-        check ("...and is gone as soon as the mode is not 只变调",
+        check (utf8 ("...and is gone as soon as the mode is not 只变调"),
                rackPanel.getPitchRangeBounds (cardIndex).isEmpty(),
                "still there");
 
@@ -9826,7 +9826,7 @@ juce::String MainComponent::runSelfTest()
         const auto editItem = getMenuBarItemBounds (1);
         const auto toolItem = getMenuBarItemBounds (2);
 
-        check ("The menu bar has three titles, and the third is 工具",
+        check (utf8 ("The menu bar has three titles, and the third is 工具"),
                MainComponent::menuTitle (0) == utf8 ("文件")
                  && MainComponent::menuTitle (1) == utf8 ("编辑")
                  && MainComponent::menuTitle (2) == utf8 ("工具")
@@ -9878,7 +9878,7 @@ juce::String MainComponent::runSelfTest()
         const auto* knifeItem = slotsFor (tools, 25);
         const auto* pencilItem = slotsFor (tools, 21);
 
-        check ("The 工具 menu carries all nine strip buttons",
+        check (utf8 ("The 工具 menu carries all nine strip buttons"),
                tools.size() == 9 && tools.front().id == 21 && tools.back().id == 29,
                juce::String ((int) tools.size()) + " items");
 
@@ -9944,7 +9944,7 @@ juce::String MainComponent::runSelfTest()
         const auto loaded = readTools();
         const auto* loadedCopy = slotsFor (loaded, 26);
 
-        check ("...but a loaded 画笔状态 can be cleared with nothing selected",
+        check (utf8 ("...but a loaded 画笔状态 can be cleared with nothing selected"),
                loadedCopy != nullptr && loadedCopy->enabled
                  && loadedCopy->text.contains (utf8 ("清除"))
                  && pianoRoll.hasPencilState(),
@@ -10963,6 +10963,231 @@ juce::String MainComponent::runSelfTest()
                juce::String (outLength, 0) + utf8 (" -> ") + juce::String (roll.getTimelineBeats(), 0)
                  + utf8 (" beats，滑块宽 ") + juce::String (baseThumb, 0)
                  + utf8 (" -> ") + juce::String (roll.getScrollThumbBounds().getWidth(), 0));
+    }
+
+    //-- Phase 62: one shape, several places ---------------------------------
+    // A group is ONE shape in MANY places. What an appearance owns is where it
+    // sits; everything else — members, pitches, lengths, curves — belongs to the
+    // group, and editing one appearance edits the group.
+    {
+        LayerStack t62;
+        RackModel  r62;
+        PianoRollComponent roll (t62, r62);
+        roll.setSize (1200, 520);
+
+        t62.addLayer (utf8 ("P62 同源"), palette::layer1);
+
+        auto* layer = t62.getLayer (0);
+        const int gid = layer->addGroup (utf8 ("组 A"), groupPalette::group1);
+
+        NoteEvent seed;
+        seed.pitch       = 60;
+        seed.lengthBeats = 1.0;
+
+        seed.startBeat = 0.0;
+        const int a0 = layer->addNote (seed);
+
+        seed.startBeat = 1.0;
+        seed.pitch     = 62;
+        const int a1 = layer->addNote (seed);
+
+        layer->assignNotesToGroup ({ a0, a1 }, gid, 0);
+        layer->setOccurrenceStart (gid, 0, 0.0);
+
+        seed.startBeat = 8.0;
+        seed.pitch     = 60;
+        const int b0 = layer->addNote (seed);
+
+        seed.startBeat = 9.0;
+        seed.pitch     = 62;
+        const int b1 = layer->addNote (seed);
+
+        layer->assignNotesToGroup ({ b0, b1 }, gid, 1);
+        layer->setOccurrenceStart (gid, 1, 8.0);
+
+        //-- 1. editing one member edits the group ---------------------------
+        roll.setSelection ({ a0 });
+        roll.simulateNoteResize (a0, 1.5, true);      // tail of a0 -> 1.5
+
+        const auto* twinB0 = layer->findNote (b0);
+        const auto* twinB1 = layer->findNote (b1);
+
+        check (utf8 ("同源：改一处音符的长度，另一处的对应音符同时变长，位置不动"),
+               twinB0 != nullptr && twinB1 != nullptr
+                 && std::abs (twinB0->lengthBeats - 1.5) < 1.0e-9
+                 && std::abs (twinB0->startBeat - 8.0) < 1.0e-9
+                 && std::abs (twinB1->lengthBeats - 1.0) < 1.0e-9,
+               utf8 ("第二处：") + juce::String (twinB0 != nullptr ? twinB0->lengthBeats : -1.0, 3)
+                 + utf8 (" 拍 @") + juce::String (twinB0 != nullptr ? twinB0->startBeat : -1.0, 3));
+
+        //-- 2. a member that leaves the shape leaves it everywhere ----------
+        roll.setSelection ({ a1 });
+        roll.deleteSelectedNotes();
+
+        check (utf8 ("同源：删掉一处里的一个音符，另一处对应的那个也没了，别的还在"),
+               layer->findNote (b1) == nullptr
+                 && layer->countNotesInOccurrence (gid, 0) == 1
+                 && layer->countNotesInOccurrence (gid, 1) == 1
+                 && layer->findNote (b0) != nullptr,
+               juce::String (layer->countNotesInOccurrence (gid, 0)) + utf8 (" / ")
+                 + juce::String (layer->countNotesInOccurrence (gid, 1)) + utf8 (" 个成员"));
+
+        //-- 3. moving a whole appearance is a change of POSITION -------------
+        roll.simulateGroupMove (0, gid, 2.0, 0, 1);   // the second copy -> beat 10
+
+        const auto* movedB0 = layer->findNote (b0);
+        const auto* keptA0  = layer->findNote (a0);
+
+        const bool movedOnlyOne = movedB0 != nullptr && keptA0 != nullptr
+                                    && std::abs (movedB0->startBeat - 10.0) < 1.0e-9
+                                    && std::abs (keptA0->startBeat - 0.0) < 1.0e-9
+                                    && std::abs (layer->occurrenceStart (gid, 1) - 10.0) < 1.0e-9;
+
+        // ...and the shape is still shared afterwards: resizing the moved copy
+        // reaches the one that stayed, at ITS own place.
+        roll.setSelection ({ b0 });
+        roll.simulateNoteResize (b0, 12.25, true);
+
+        keptA0 = layer->findNote (a0);
+
+        check (utf8 ("整处拖动只动自己，形状仍然同源（各按自己的起点对齐）"),
+               movedOnlyOne && keptA0 != nullptr
+                 && std::abs (keptA0->lengthBeats - 2.25) < 1.0e-9
+                 && std::abs (keptA0->startBeat - 0.0) < 1.0e-9,
+               utf8 ("第二处起 ") + juce::String (movedB0 != nullptr ? movedB0->startBeat : -1.0, 2)
+                 + utf8 ("，第一处长度 ") + juce::String (keptA0 != nullptr ? keptA0->lengthBeats : -1.0, 2));
+
+        //-- 4. the blocks are members too -----------------------------------
+        SampleEvent block;
+        block.name        = "blk";
+        block.lengthBeats = 2.0;
+        block.pitch       = 40;
+        block.laneSpan    = 1;
+
+        block.startBeat = 0.0;
+        const int clipA = layer->addSample (block);
+        layer->assignSamplesToGroup ({ clipA }, gid, 0);
+
+        block.startBeat = 10.0;
+        const int clipB = layer->addSample (block);
+        layer->assignSamplesToGroup ({ clipB }, gid, 1);
+
+        roll.simulateSampleTrim (clipA, 1.5, true);       // tail of the first block -> 1.5
+
+        const auto* twinClip = layer->findSample (clipB);
+
+        check (utf8 ("同源：采样块的宽度一起变，块的位置各在各处"),
+               twinClip != nullptr
+                 && std::abs (twinClip->lengthBeats - 1.5) < 1.0e-9
+                 && std::abs (twinClip->startBeat - 10.0) < 1.0e-9,
+               utf8 ("第二处的块：") + juce::String (twinClip != nullptr ? twinClip->lengthBeats : -1.0, 2)
+                 + utf8 (" 拍 @") + juce::String (twinClip != nullptr ? twinClip->startBeat : -1.0, 2));
+
+        //-- 5. the origins survive the file ---------------------------------
+        const auto savedXml = project::toXmlText (t62, r62, 120.0);
+
+        LayerStack reloadedStack;
+        RackModel  reloadedRack;
+        double     reloadedBpm = 0.0;
+        juce::String reloadedError;
+
+        const bool reloaded = project::fromXmlText (savedXml, reloadedStack, reloadedRack,
+                                                    reloadedBpm, reloadedError);
+
+        double origin0 = -1.0, origin1 = -1.0;
+
+        if (auto* reloadedLayer = reloadedStack.getLayer (0))
+            if (reloadedLayer->findGroup (gid) != nullptr)
+            {
+                origin0 = reloadedLayer->occurrenceStart (gid, 0);
+                origin1 = reloadedLayer->occurrenceStart (gid, 1);
+            }
+
+        check (utf8 ("每处出现的位置跟着文件走，读回来还是 0 和 10"),
+               reloaded && std::abs (origin0 - 0.0) < 1.0e-9 && std::abs (origin1 - 10.0) < 1.0e-9,
+               juce::String (origin0, 2) + utf8 (" / ") + juce::String (origin1, 2)
+                 + (reloadedError.isEmpty() ? juce::String() : " · " + reloadedError));
+    }
+
+    //-- Phase 62: copy/paste must never ungroup -------------------------------
+    {
+        LayerStack t62p;
+        RackModel  r62p;
+        PianoRollComponent roll (t62p, r62p);
+        roll.setSize (1200, 520);
+
+        t62p.addLayer (utf8 ("P62 粘贴"), palette::layer1);
+
+        auto* layer = t62p.getLayer (0);
+        const int gid = layer->addGroup (utf8 ("组 B"), groupPalette::group1);
+
+        NoteEvent seed;
+        seed.pitch       = 60;
+        seed.lengthBeats = 1.0;
+
+        seed.startBeat = 0.0;
+        const int c0 = layer->addNote (seed);
+        seed.startBeat = 1.0;
+        const int c1 = layer->addNote (seed);
+
+        layer->assignNotesToGroup ({ c0, c1 }, gid, 0);
+        layer->setOccurrenceStart (gid, 0, 0.0);
+
+        seed.startBeat = 8.0;
+        const int d0 = layer->addNote (seed);
+        seed.startBeat = 9.0;
+        const int d1 = layer->addNote (seed);
+
+        layer->assignNotesToGroup ({ d0, d1 }, gid, 1);
+        layer->setOccurrenceStart (gid, 1, 8.0);
+
+        //-- 1. copying ONE appearance of a reused group copies THE GROUP -----
+        // The old whole-group test asked for "every member of the group", which
+        // a two-place group never satisfies from one place — so the copy fell
+        // through to the loose-note path. That is the "有时候" in "粘贴有时候会
+        // 取消编组": it depended on how many places the group already had.
+        roll.setPlayheadBeat (20.0);
+        roll.setSelection ({ c0, c1 });
+        roll.copySelectionToClipboards();
+        roll.pasteEditClipboard();
+
+        const auto occurrences = layer->getGroupOccurrences (gid);
+
+        check (utf8 ("复制「一处出现」再粘贴 = 这一组的第三处，原处不被塞进新音符"),
+               occurrences.size() == 3
+                 && layer->countNotesInOccurrence (gid, 0) == 2
+                 && layer->countNotesInOccurrence (gid, occurrences.back()) == 2,
+               juce::String ((int) occurrences.size()) + utf8 (" 处；第一处 ")
+                 + juce::String (layer->countNotesInOccurrence (gid, 0)) + utf8 (" 个成员"));
+
+        //-- 2. a loose copy of a member stays loose -------------------------
+        roll.setSelection ({ c0 });
+        roll.copySelectionToClipboards();
+        roll.setPlayheadBeat (32.0);
+        roll.pasteEditClipboard();
+
+        int looseAtPaste = 0;
+
+        for (const auto& note : layer->getNotes())
+            if (note.groupId < 0 && std::abs (note.startBeat - 32.0) < 1.0e-9)
+                ++looseAtPaste;
+
+        check (utf8 ("复制组里的单个音符再粘贴，落地的是散音符，不会悄悄回到原组"),
+               looseAtPaste == 1 && layer->countNotesInOccurrence (gid, 0) == 2,
+               juce::String (looseAtPaste) + utf8 (" 个散音符，第一处仍有 ")
+                 + juce::String (layer->countNotesInOccurrence (gid, 0)) + utf8 (" 个"));
+
+        //-- 3. deleting a whole appearance deletes only that appearance -----
+        roll.setSelection ({ d0, d1 });
+        roll.deleteSelectedNotes();
+
+        const auto afterDelete = layer->getGroupOccurrences (gid);
+
+        check (utf8 ("整处删除只删这一处，别处原样留着"),
+               std::find (afterDelete.begin(), afterDelete.end(), 1) == afterDelete.end()
+                 && layer->countNotesInOccurrence (gid, 0) == 2,
+               juce::String ((int) afterDelete.size()) + utf8 (" 处；第一处 ")
+                 + juce::String (layer->countNotesInOccurrence (gid, 0)) + utf8 (" 个成员"));
     }
 
     // The summary MUST come after the last check. It used to sit mid-function

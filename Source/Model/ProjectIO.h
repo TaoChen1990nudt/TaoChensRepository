@@ -191,8 +191,19 @@ namespace project
       * `<Note>` and `<Sample>` gain `groupocc` — which appearance of that
         group this member belongs to. Written only when non-zero, so a project
         that never reused a group keeps every line it had in v23, and an older
-        reader sees exactly what it always saw. */
-inline constexpr int formatVersion = 24;
+        reader sees exactly what it always saw.
+
+    v25 (Phase 62): the appearances of a group share one shape.
+
+      * `<Group>` gains `<Occurrence index="n" start="beat"/>` children — where
+        each appearance sits. Written only for appearances that have one, so a
+        group placed once keeps the exact `<Group>` element it had in v24.
+
+        Only the ORIGIN travels. The members are on the timeline with absolute
+        beats, and a v24 file (no `<Occurrence>`) reads perfectly: the first
+        time the origin is needed it is inferred from the earliest member and
+        stored, so no project moves on load. */
+inline constexpr int formatVersion = 25;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";

@@ -302,6 +302,26 @@
   **所有粘贴入口必须转发**：`pasteNotesFromClipboard()` 开头见 `groupClip.valid` 就转给组路径，
   否则它会以"散音符"的身份粘一遍，块留在剪贴板上（P56 的 bug 以另一种形式回来）。
   复用路径**不重放曲线的平移**：绝对时间的点留在原处，"同一个组"就是同一条曲线。
+- **组 = 一个形状 + 多个位置**（P62）：出现拥有的是**位置**，其余（成员、音高、长度、力度、
+  包络、采样块的宽/高/曲线/反向/伸缩模式）都是**组的**，改一处就是改组。
+  - **位置是真的存下来的数**：`NoteGroup::occurrenceStarts`（occurrence → 起始拍）。
+    只按"最早成员"推导不够——删掉那个成员，位置就会跟着走，之后每次同步都把这一处拖一次。
+    所以 `Layer::occurrenceStart()` 第一次被问到时物化并保存，此后永不自动变；
+    `setOccurrenceStart()` 只在**整处移动**时用。
+  - **同源判据 = "整处 / 局部"**：整处动（拖、删）= 对这一份的决定，兄弟不动；
+    动一部分 = 形状变了，兄弟跟着变。`wholeGroupOccurrencesInDrag()` / `isWholeGroupSelected(gid, true, occ)`
+    是同一个问题的两个入口。
+  - **形状同步** `Layer::syncGroupShape(gid, source)`：按成员序（start, pitch, id）配对，
+    把源出现的相对位置 + 全部属性写进每个兄弟出现，锚点是兄弟自己的起点。多退少补。
+  - **离开形状**（删/取消编组）没有模板可抄，用 `Layer::collectTwinMembers()`：在原件还在时
+    按序号配对，返回兄弟出现里对应的成员，由调用方删除或解组。判据同上：整处选中就跳过。
+  - 同步挂在**编辑动作本身**，不挂在 mouseUp：`applyMove`（拖动/整组动）、`applyNoteResize`、
+    `dragAutomationPoint`、采样曲线/trim/刀切/反向/伸缩模式/高度。mouseUp 那份是兜底，
+    对内联框那种"没有拖动"的编辑尤其重要。
+  - 建组（`groupSelection`）、粘贴/放一处（`insertGroupMembers`）、读工程（`materialiseOccurrenceStarts`）
+    三处**必须把起点钉住**，否则第一次编辑就会用"删完之后的最早成员"当锚点。
+  - `formatVersion` 24 → **25**：`<Group>` 下加 `<Occurrence index="n" start="beat"/>`，
+    只在出现有起点时写。老文件没有这些元素，靠懒物化补上，打开即正确、不会移动。
 - **组框就是成员框，零外力扩展**（P57）：`groupFrameOf()` 返回 `getGroupContentBounds()` 本身，
   不再 `expanded(3px)`；绘制、命中（`getGroupFrameAt`）、自检读的是**同一个函数**。
   填充色块画在成员之下（`drawGroupBands`），**描边画在成员之上**（`drawGroupFrames`，在

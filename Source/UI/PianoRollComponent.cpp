@@ -1416,6 +1416,11 @@ int PianoRollComponent::groupSelection()
     // only thing missing was a way to say it without finding an existing group.
     layer->assignSamplesToGroup (sampleSelection, groupId);
 
+    // Phase 62: pin where this appearance sits NOW, while "the earliest member"
+    // still means what it says. Deriving it later would let the first deleted
+    // note take the whole appearance with it.
+    layer->occurrenceStart (groupId, 0);
+
     // Re-grouping may have emptied the group these notes came from. Prune it
     // here as well as on delete: an empty group is a row in the automation
     // window that nobody can find in the roll.
@@ -1644,24 +1649,45 @@ bool PianoRollComponent::ungroupSelection()
 
     bool changed = false;
 
-    for (int id : selection)
-        if (auto* note = layer->findNote (id); note != nullptr && note->groupId >= 0)
-        {
-            note->groupId         = -1;
-            note->groupOccurrence = 0;      // Phase 58: leave no stale appearance
-            changed = true;
-        }
+    // Phase 62: taking a member out of the shape takes its twin out too, or the
+    // next edit would read the difference as "this member was deleted" and
+    // remove it from the other appearance behind the user's back.
+    std::vector<int> twinNotes, twinClips;
+    collectTwinsForEdit (twinNotes, twinClips);
 
-    // Phase 35: Shift+G on a mixed selection has to take the blocks out too, or
-    // the group would still exist — held open by members the user just asked to
-    // leave, and still counted in its bracket.
-    for (int id : sampleSelection)
-        if (auto* clip = layer->findSample (id); clip != nullptr && clip->groupId >= 0)
+    const auto detach = [layer, &changed] (int id, bool isNote)
+    {
+        if (isNote)
+        {
+            if (auto* note = layer->findNote (id); note != nullptr && note->groupId >= 0)
+            {
+                note->groupId         = -1;
+                note->groupOccurrence = 0;      // Phase 58: leave no stale appearance
+                changed = true;
+            }
+        }
+        else if (auto* clip = layer->findSample (id); clip != nullptr && clip->groupId >= 0)
         {
             clip->groupId         = -1;
             clip->groupOccurrence = 0;
             changed = true;
         }
+    };
+
+    for (int id : selection)
+        detach (id, true);
+
+    for (int id : twinNotes)
+        detach (id, true);
+
+    // Phase 35: Shift+G on a mixed selection has to take the blocks out too, or
+    // the group would still exist — held open by members the user just asked to
+    // leave, and still counted in its bracket.
+    for (int id : sampleSelection)
+        detach (id, false);
+
+    for (int id : twinClips)
+        detach (id, false);
 
     if (changed)
     {
@@ -2043,6 +2069,11 @@ void PianoRollComponent::pruneEmptyGroups()
 
             layer->removeGroup (groupId);
         }
+
+        // Phase 62: an appearance that just lost its last member must not leave
+        // its origin behind — the next appearance to take that number would
+        // inherit a position that was never its own.
+        layer->pruneOccurrenceStarts();
     }
 }
 
@@ -3076,6 +3107,7 @@ void PianoRollComponent::captureDragOriginals()
 {
     dragOriginals.clear();
     dragClipOriginals.clear();
+    dragAppliedMoveBeats = 0.0;      // Phase 62: a new gesture measures from zero
 
     auto* active = stack.getActiveLayer();
 
@@ -3134,6 +3166,214 @@ void PianoRollComponent::applyMove (const MoveClamp& move)
 
             ensureTimelineExtendsTo (clip->endBeat());
         }
+
+    applyOccurrenceOriginsForMove (move.beats, active);
+
+    // ...and the shape half, live: dragging one member of an appearance is an
+    // edit of the group, so the other appearances move with the pointer instead
+    // of snapping into place on mouse-up.
+    syncDragShapes();
+}
+
+bool PianoRollComponent::syncDragShapes()
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || (dragOriginals.empty() && dragClipOriginals.empty()))
+        return false;
+
+    std::vector<int> noteIds, clipIds;
+
+    for (const auto& note : dragOriginals)
+        noteIds.push_back (note.id);
+
+    for (const auto& clip : dragClipOriginals)
+        clipIds.push_back (clip.id);
+
+    const auto whole    = wholeGroupOccurrencesInDrag();
+    const auto touched  = groupOccurrencesOf (noteIds, clipIds);
+
+    bool changed = false;
+
+    for (const auto& entry : touched)
+    {
+        // A carry of the whole appearance is a change of position, not of shape.
+        if (std::find (whole.begin(), whole.end(), entry) != whole.end())
+            continue;
+
+        changed = layer->syncGroupShape (entry.first, entry.second) || changed;
+    }
+
+    if (changed)
+        stack.notifyNotesChanged();
+
+    return changed;
+}
+
+void PianoRollComponent::applyOccurrenceOriginsForMove (double movedBeats, Layer* layer)
+{
+    // `move.beats` is measured from the ORIGINALS, not from the last mouse-move,
+    // so the origin has to be moved by the difference — adding the whole delta
+    // on every mouse-move would walk the appearance off the timeline.
+    const double step = movedBeats - dragAppliedMoveBeats;
+
+    dragAppliedMoveBeats = movedBeats;
+
+    if (layer == nullptr || std::abs (step) < 1.0e-12)
+        return;
+
+    //-- Only an appearance carried WHOLE keeps its shape ---------------------
+    // Dragging all of it is a change of POSITION: the origin travels with it and
+    // the shape (member offsets from that origin) is untouched. Dragging part of
+    // it is a change of SHAPE, which is Phase 62's other half — the siblings get
+    // rebuilt from it at the end of the gesture, and this origin must stay put
+    // so that "the shape moved inside its own box" is what gets copied.
+    for (const auto& entry : wholeGroupOccurrencesInDrag())
+    {
+        const double origin = layer->occurrenceStart (entry.first, entry.second);
+        layer->setOccurrenceStart (entry.first, entry.second, origin + step);
+    }
+}
+
+std::vector<std::pair<int, int>> PianoRollComponent::wholeGroupOccurrencesInDrag() const
+{
+    std::vector<std::pair<int, int>> whole;
+
+    const auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr)
+        return whole;
+
+    const auto addIfWhole = [&] (int groupId, int occurrence)
+    {
+        if (groupId < 0)
+            return;
+
+        int carried = 0;
+
+        for (const auto& note : dragOriginals)
+            if (note.groupId == groupId && note.groupOccurrence == occurrence)
+                ++carried;
+
+        for (const auto& clip : dragClipOriginals)
+            if (clip.groupId == groupId && clip.groupOccurrence == occurrence)
+                ++carried;
+
+        const int members = layer->countNotesInOccurrence (groupId, occurrence)
+                              + layer->countSamplesInOccurrence (groupId, occurrence);
+
+        if (members > 0 && carried == members
+              && std::find (whole.begin(), whole.end(),
+                            std::make_pair (groupId, occurrence)) == whole.end())
+            whole.push_back ({ groupId, occurrence });
+    };
+
+    for (const auto& note : dragOriginals)
+        addIfWhole (note.groupId, note.groupOccurrence);
+
+    for (const auto& clip : dragClipOriginals)
+        addIfWhole (clip.groupId, clip.groupOccurrence);
+
+    return whole;
+}
+
+std::vector<std::pair<int, int>> PianoRollComponent::groupOccurrencesOf (const std::vector<int>& noteIds,
+                                                                        const std::vector<int>& clipIds) const
+{
+    std::vector<std::pair<int, int>> occurrences;
+
+    const auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr)
+        return occurrences;
+
+    const auto add = [&occurrences] (int groupId, int occurrence)
+    {
+        if (groupId < 0)
+            return;
+
+        const auto entry = std::make_pair (groupId, occurrence);
+
+        if (std::find (occurrences.begin(), occurrences.end(), entry) == occurrences.end())
+            occurrences.push_back (entry);
+    };
+
+    for (int id : noteIds)
+        if (const auto* note = layer->findNote (id))
+            add (note->groupId, note->groupOccurrence);
+
+    for (int id : clipIds)
+        if (const auto* clip = layer->findSample (id))
+            add (clip->groupId, clip->groupOccurrence);
+
+    return occurrences;
+}
+
+bool PianoRollComponent::syncGroupShapesAfterEdit (const std::vector<std::pair<int, int>>& touched)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || touched.empty())
+        return false;
+
+    bool changed = false;
+
+    for (const auto& entry : touched)
+        changed = layer->syncGroupShape (entry.first, entry.second) || changed;
+
+    if (changed)
+        stack.notifyNotesChanged();
+
+    return changed;
+}
+
+void PianoRollComponent::collectTwinsForEdit (std::vector<int>& twinNotes,
+                                              std::vector<int>& twinClips) const
+{
+    twinNotes.clear();
+    twinClips.clear();
+
+    const auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr)
+        return;
+
+    for (const auto& entry : groupOccurrencesOf (selection, sampleSelection))
+    {
+        const int groupId    = entry.first;
+        const int occurrence = entry.second;
+
+        // An appearance the selection carries WHOLE is a per-copy decision:
+        // deleting the chorus copy must not delete the verse. Only a PART of an
+        // appearance is a change of shape.
+        if (isWholeGroupSelected (groupId, true, occurrence))
+            continue;
+
+        // Ask per appearance: `collectTwinMembers` pairs by ordinal, and the
+        // ordinal only means something inside one appearance.
+        std::vector<int> sourceNotes, sourceClips;
+
+        for (int id : selection)
+            if (const auto* note = layer->findNote (id); note != nullptr
+                  && note->groupId == groupId && note->groupOccurrence == occurrence)
+                sourceNotes.push_back (id);
+
+        for (int id : sampleSelection)
+            if (const auto* clip = layer->findSample (id); clip != nullptr
+                  && clip->groupId == groupId && clip->groupOccurrence == occurrence)
+                sourceClips.push_back (id);
+
+        std::vector<int> twinsOfNotes, twinsOfClips;
+        layer->collectTwinMembers (sourceNotes, sourceClips, twinsOfNotes, twinsOfClips);
+
+        for (int id : twinsOfNotes)
+            if (std::find (twinNotes.begin(), twinNotes.end(), id) == twinNotes.end())
+                twinNotes.push_back (id);
+
+        for (int id : twinsOfClips)
+            if (std::find (twinClips.begin(), twinClips.end(), id) == twinClips.end())
+                twinClips.push_back (id);
+    }
 }
 
 bool PianoRollComponent::simulateGroupMove (int layerIndex, int groupId,
@@ -3232,6 +3472,7 @@ bool PianoRollComponent::applyNoteResize (const NoteEvent& origin, double wanted
         // the floor is a grid step, not zero: a note that can be shrunk to
         // nothing is a note you can lose with a twitch.
         note->lengthBeats = juce::jmax (gridDivision, wantedBeat - origin.startBeat);
+        syncShapeOfMember (origin.id);
         return true;
     }
 
@@ -3244,6 +3485,57 @@ bool PianoRollComponent::applyNoteResize (const NoteEvent& origin, double wanted
 
     note->startBeat   = newStart;
     note->lengthBeats = juce::jmax (gridDivision, end - newStart);
+    syncShapeOfMember (origin.id);
+    return true;
+}
+
+bool PianoRollComponent::syncShapeOfMember (int noteId)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr)
+        return false;
+
+    const auto* note = layer->findNote (noteId);
+
+    if (note == nullptr || note->groupId < 0)
+        return false;
+
+    const int groupId = note->groupId;
+    const int occurrence = note->groupOccurrence;
+
+    if (! layer->syncGroupShape (groupId, occurrence))
+        return false;
+
+    stack.notifyNotesChanged();
+    return true;
+}
+
+bool PianoRollComponent::syncShapesOfMembers (const std::vector<int>& noteIds,
+                                             const std::vector<int>& clipIds)
+{
+    return syncGroupShapesAfterEdit (groupOccurrencesOf (noteIds, clipIds));
+}
+
+bool PianoRollComponent::syncShapeOfClip (int clipId)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr)
+        return false;
+
+    const auto* clip = layer->findSample (clipId);
+
+    if (clip == nullptr || clip->groupId < 0)
+        return false;
+
+    const int groupId = clip->groupId;
+    const int occurrence = clip->groupOccurrence;
+
+    if (! layer->syncGroupShape (groupId, occurrence))
+        return false;
+
+    stack.notifyNotesChanged();
     return true;
 }
 
@@ -3484,6 +3776,29 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent&)
     const bool wasGroupCurveDrag = dragMode == DragMode::groupAutomationPoint;
     const bool wasSampleCurveDrag = dragMode == DragMode::sampleCurvePoint;
 
+    //-- Phase 62: what this gesture touched, read while it is still here -----
+    // A drag that changes a group member changes the group's SHAPE, and every
+    // other appearance of that group has to follow. Collected before the state
+    // below is cleared, and applied before the gesture ends so the edit is one
+    // undo step instead of two.
+    std::vector<int> touchedNotes, touchedClips;
+
+    for (const auto& note : dragOriginals)
+        touchedNotes.push_back (note.id);
+
+    for (const auto& clip : dragClipOriginals)
+        touchedClips.push_back (clip.id);
+
+    // The inline boxes edit ONE member without arming a drag: a note's envelope
+    // handle and a clip's volume/pan handle are both shape, both have to travel.
+    if (expandedNoteId >= 0)
+        touchedNotes.push_back (expandedNoteId);
+
+    if (expandedSampleId >= 0)
+        touchedClips.push_back (expandedSampleId);
+
+    const auto touchedOccurrences = groupOccurrencesOf (touchedNotes, touchedClips);
+
     if (dragMode == DragMode::marquee)
     {
         auto marquee = juce::Rectangle<float> (marqueeStart, marqueeCurrent).getSmallestIntegerContainer().toFloat();
@@ -3505,6 +3820,9 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent&)
 
     if (wasGroupCurveDrag || wasSampleCurveDrag)
         stack.notifyNotesChanged();     // the whole drag, as one history step
+
+    // Phase 62: and the shape edit lands on every other appearance of the group.
+    syncGroupShapesAfterEdit (touchedOccurrences);
 
     // The ruler borrows the vertical-resize pointer while it is being dragged;
     // letting the tool take it back is the only way out of that state.
@@ -5558,6 +5876,9 @@ void PianoRollComponent::dragAutomationPoint (NoteEvent& note, juce::Point<float
 
     note.envelope.movePoint (dragEnvelopePoint, t, v);
 
+    // Phase 62: same rule for a note's own curve — one shape, every place.
+    syncShapeOfMember (note.id);
+
     if (onNoteEdited != nullptr)
         onNoteEdited();
 
@@ -7030,7 +7351,15 @@ bool PianoRollComponent::copyNotesToClipboard()
     // its contents" is asking not to happen.
     const int groupId = getSelectedGroupId();
 
-    if (groupId >= 0 && isWholeGroupSelected (groupId, true))
+    // Phase 62: ...and it is ONE APPEARANCE that gets copied, which the old
+    // "every member of the group" test could not see. Copying the chorus copy
+    // of a group that also stands at the verse failed that test, fell through to
+    // the loose-note path, and the paste then dropped the blocks ungrouped and
+    // let the notes re-join the source appearance. "有时候粘贴会取消编组" — the
+    // sometimes was "this group has more than one place on the timeline".
+    const int occurrence = getSelectedGroupOccurrence();
+
+    if (groupId >= 0 && isWholeGroupSelected (groupId, true, occurrence))
     {
         if (const auto* group = active->findGroup (groupId))
         {
@@ -7052,7 +7381,7 @@ bool PianoRollComponent::copyNotesToClipboard()
                     start = 0.0;
             }
 
-            groupClip = captureGroupClip (*group, start);
+            groupClip = captureGroupClip (*group, start, occurrence);
 
             // The blocks come along. `copySelectionToClipboards` fills them a
             // moment later anyway, but a group copy that depended on the CALLER
@@ -7201,6 +7530,21 @@ void PianoRollComponent::insertGroupMembers (Layer& layer, int groupId, int occu
                                              std::vector<int>& newNotes,
                                              std::vector<int>& newClips)
 {
+    // Phase 62: where this appearance sits, measured on the members that are
+    // about to land. Stored before anything can be deleted, because from now on
+    // the origin is what "same shape, other place" is measured from — deriving
+    // it later would follow the earliest surviving member and drift.
+    double origin = std::numeric_limits<double>::max();
+
+    for (const auto& note : notes)
+        origin = juce::jmin (origin, juce::jmax (0.0, note.startBeat + delta));
+
+    for (const auto& clip : clips)
+        origin = juce::jmin (origin, juce::jmax (0.0, clip.startBeat + delta));
+
+    if (origin < std::numeric_limits<double>::max())
+        layer.setOccurrenceStart (groupId, occurrence, origin);
+
     for (auto note : notes)
     {
         note.startBeat       = juce::jmax (0.0, note.startBeat + delta);
@@ -7281,15 +7625,19 @@ bool PianoRollComponent::pasteNotesFromClipboard()
     const double delta = anchor - noteClipFirstBeat;
 
     // Loose notes only: a group clipboard returned above, so there is no group
-    // to hand these to (Phase 57). A note that was copied AS PART OF a group
-    // still carries no membership of its own — `noteClip` holds the notes, and
-    // the group they belong to lives in `groupClip`.
+    // to hand these to (Phase 57). Phase 62: and they must ARRIVE loose — the
+    // NoteEvent they were copied from still carries its groupId, and pasting it
+    // unchanged would quietly drop the copy back into the appearance the user
+    // copied it out of (one bracket around two stretches, which is the thing
+    // Phase 58 exists to stop).
     std::vector<int> newIds;
 
     for (auto note : noteClip)
     {
-        note.startBeat = juce::jmax (0.0, note.startBeat + delta);
-        note.id        = 0;
+        note.startBeat       = juce::jmax (0.0, note.startBeat + delta);
+        note.id              = 0;
+        note.groupId         = -1;
+        note.groupOccurrence = 0;
 
         const int newId = active->addNote (note);
 
@@ -7498,6 +7846,9 @@ bool PianoRollComponent::applySampleTrim (const SampleEvent& origin, double want
     }
 
     ensureTimelineExtendsTo (clip->endBeat());
+
+    // Phase 62: a block's width, window and curves are the group's shape too.
+    syncShapeOfClip (origin.id);
     return true;
 }
 
@@ -7797,6 +8148,9 @@ void PianoRollComponent::dragSampleCurvePoint (int layerIndex, int sampleId,
                                   (inner.getBottom() - position.y) / juce::jmax (1.0f, inner.getHeight()));
 
     sample->activeCurve().movePoint (dragSampleCurveIndex, t, v);
+
+    // Phase 62: a clip's volume/pan curve is the group's shape, so it travels.
+    syncShapeOfClip (sample->id);
 
     // Live sound, no undo: onNoteEdited republishes the schedule only; the
     // history step is written once, in mouseUp, like the group box's drag.
@@ -8504,6 +8858,10 @@ int PianoRollComponent::splitSamplesAt (const std::vector<int>& ids, double at)
     if (split == 0)
         return 0;
 
+    // Phase 62: same as the note cut — one member became two, everywhere.
+    std::vector<int> cutClipIds (ids.begin(), ids.end());
+    syncShapesOfMembers ({}, cutClipIds);
+
     ensureTimelineExtendsTo (at);
     setSampleSelection (newSelection);
     stack.notifyNotesChanged();
@@ -8562,6 +8920,11 @@ int PianoRollComponent::splitNotesAt (const std::vector<int>& ids, double at)
     if (split == 0)
         return 0;
 
+    // Phase 62: a cut replaces one member with two — a change of shape, so the
+    // other appearances get the same cut.
+    std::vector<int> cutIds (ids.begin(), ids.end());
+    syncShapesOfMembers (cutIds, {});
+
     setSelection (newSelection);
     stack.notifyNotesChanged();
     repaint();
@@ -8588,6 +8951,9 @@ int PianoRollComponent::toggleSelectedSampleReverse()
 
     if (changed == 0)
         return 0;
+
+    // Phase 62: "this block plays backwards" is part of the shape.
+    syncShapesOfMembers ({}, ids);
 
     stack.notifyNotesChanged();
     repaint();
@@ -8635,7 +9001,10 @@ void PianoRollComponent::setSampleStretchMode (int sampleId, StretchMode mode)
         return;
 
     if (auto* clip = layer->findSample (sampleId))
+    {
         clip->stretchMode = mode;
+        syncShapeOfClip (sampleId);      // Phase 62: the shape, not this copy
+    }
 }
 
 int PianoRollComponent::setSelectedSampleStretchMode (StretchMode mode)
@@ -8662,6 +9031,9 @@ int PianoRollComponent::setSelectedSampleStretchMode (StretchMode mode)
             clip->stretchMode = mode;
             ++changed;
         }
+
+    if (changed > 0)
+        syncShapesOfMembers ({}, ids);   // Phase 62: one shape, every place
 
     return changed;
 }
@@ -8843,7 +9215,14 @@ bool PianoRollComponent::deleteSelectedSamples()
     if (active == nullptr || sampleSelection.empty())
         return false;
 
+    // Phase 62: a block that leaves the shape leaves it in every appearance.
+    std::vector<int> twinNotes, twinClips;
+    collectTwinsForEdit (twinNotes, twinClips);
+
     for (int id : sampleSelection)
+        active->removeSample (id);
+
+    for (int id : twinClips)
         active->removeSample (id);
 
     const int removed = (int) sampleSelection.size();
@@ -9147,7 +9526,15 @@ bool PianoRollComponent::deleteSelectedNotes()
 
     const int removed = (int) selection.size();
 
+    // Phase 62: a note that leaves the shape leaves it in every appearance.
+    // Collected first — the pairing needs the members that are about to go.
+    std::vector<int> twinNotes, twinClips;
+    collectTwinsForEdit (twinNotes, twinClips);
+
     for (int id : selection)
+        active->removeNote (id);
+
+    for (int id : twinNotes)
         active->removeNote (id);
 
     selection.clear();
@@ -10571,9 +10958,15 @@ void PianoRollComponent::showSampleMenu (int sampleId, juce::Point<int> screenPo
                 target->startBeat = safe->snapEnabled ? safe->snapBeat (target->startBeat)
                                                       : target->startBeat;
             else if (result == 3)
+            {
                 target->laneSpan = juce::jlimit (1, SampleEvent::numPitchLanes, target->laneSpan + 1);
+                safe->syncShapeOfClip (sampleId);      // Phase 62: height is shape too
+            }
             else if (result == 4)
+            {
                 target->laneSpan = juce::jlimit (1, SampleEvent::numPitchLanes, target->laneSpan - 1);
+                safe->syncShapeOfClip (sampleId);
+            }
             else if (result == 7)
             {
                 // Phase 31: the whole selection, not the one block that was
