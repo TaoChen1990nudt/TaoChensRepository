@@ -11547,6 +11547,98 @@ juce::String MainComponent::runSelfTest()
                  + juce::String (roll.snapBeatForTest (2.3), 2));
     }
 
+    //-- Phase 69: the grid subdivides on the way in, down to 1/64 beat --------
+    {
+        LayerStack t69;
+        RackModel  r69;
+        PianoRollComponent roll (t69, r69);
+        roll.setSize (1200, 520);
+
+        t69.addLayer (utf8 ("P69 细网格"), palette::layer1);
+
+        // The ceiling is where a 1/64 beat is 12 px wide — the same 12 px a whole
+        // beat gets at the floor. Anything lower and the finest rung could never
+        // appear, which is the point of raising it from 180.
+        roll.setBeatWidth (5000.0f);                 // asks for far more than allowed
+
+        const float  ceiling  = roll.getBeatWidth();
+        const double fineStep = roll.visibleGridStep();
+
+        std::vector<double> fineLines;
+        roll.collectGridLines (0.0, 1.0, fineLines);        // 65 lines: 0, 1/64 … 1
+
+        check (utf8 ("放大到上限时网格细分到 1/64 拍"),
+               std::abs (ceiling - PianoRollComponent::maxBeatWidth) < 0.01f
+                 && std::abs (fineStep - PianoRollComponent::finestGridStep) < 1.0e-9,
+               juce::String (ceiling, 1) + utf8 (" px/拍，步长 ")
+                 + juce::String (fineStep, 5) + utf8 (" 拍"));
+
+        check (utf8 ("1/64 拍档下 0…1 拍之间画 65 根线"),
+               (int) fineLines.size() == 65,
+               juce::String ((int) fineLines.size()) + utf8 (" 根线"));
+
+        // Snap follows the same step. 0.30 is 19.2 sixty-fourths → line 19
+        // (0.296875); on the 1/16-beat grid the same question answers 0.3125, so
+        // this one number tells the two rungs apart. (0.31 would not: both grids
+        // round it to 0.3125, which is how the first version of this case failed
+        // to bite.) 0.5 is line 32 exactly either way.
+        check (utf8 ("放大到 1/64 时吸附落在 1/64 的线上"),
+               std::abs (roll.snapBeatForTest (0.30) - 0.296875) < 1.0e-9
+                 && std::abs (roll.snapBeatForTest (0.5) - 0.5) < 1.0e-9,
+               juce::String (roll.snapBeatForTest (0.30), 5) + utf8 (" / ")
+                 + juce::String (roll.snapBeatForTest (0.5), 5));
+
+        // A note can now BE that short. Through `applyNoteResize`, i.e. the path
+        // a tail drag takes — asserting the constant alone would only test the
+        // floor twice.
+        auto* layer69 = t69.getLayer (0);
+
+        NoteEvent seed;
+        seed.pitch       = 60;
+        seed.startBeat   = 0.0;
+        seed.lengthBeats = 1.0;
+
+        const int note69 = layer69->addNote (seed);
+
+        roll.shrinkNoteTailForTest (note69, 0.015625);
+
+        const auto* shrunk = layer69->findNote (note69);
+
+        check (utf8 ("放大到 1/64 时音符尾巴能缩到 1/64 拍长"),
+               shrunk != nullptr && std::abs (shrunk->lengthBeats - 0.015625) < 1.0e-9,
+               juce::String (shrunk != nullptr ? shrunk->lengthBeats : -1.0, 5)
+                 + utf8 (" 拍"));
+
+        // ...and the rung below the ceiling is still the 1/16 beat, not a jump
+        // straight from 1/64 to the 1/16 note.
+        roll.setBeatWidth (150.0f);
+
+        std::vector<double> midLines;
+        roll.collectGridLines (0.0, 1.0, midLines);         // 17 lines: 0, 1/16 … 1
+
+        check (utf8 ("150 px/拍时网格停在 1/16 拍档"),
+               std::abs (roll.visibleGridStep() - 0.0625) < 1.0e-9
+                 && (int) midLines.size() == 17,
+               juce::String (roll.visibleGridStep(), 5) + utf8 (" 拍，")
+                 + juce::String ((int) midLines.size()) + utf8 (" 根线"));
+
+        // Four levels on screen at once must still read as four: the 1/64 line
+        // gets its own dimmer alpha instead of borrowing the 1/16's.
+        const float aBar  = PianoRollComponent::gridLineAlphaForTest (4.0);
+        const float aBeat = PianoRollComponent::gridLineAlphaForTest (1.0);
+        const float a16   = PianoRollComponent::gridLineAlphaForTest (0.25);
+        const float a64   = PianoRollComponent::gridLineAlphaForTest (0.015625);
+
+        check (utf8 ("1/64 的线比 1/16 的线更暗，四级层次都还在"),
+               std::abs (aBar  - 0.16f)  < 1.0e-6f
+                 && std::abs (aBeat - 0.075f) < 1.0e-6f
+                 && std::abs (a16   - 0.030f) < 1.0e-6f
+                 && std::abs (a64   - 0.018f) < 1.0e-6f,
+               juce::String (aBar, 3) + utf8 (" / ") + juce::String (aBeat, 3)
+                 + utf8 (" / ") + juce::String (a16, 3) + utf8 (" / ")
+                 + juce::String (a64, 3));
+    }
+
     //-- Phase 65: two selected groups drag together --------------------------
     {
         LayerStack t65;

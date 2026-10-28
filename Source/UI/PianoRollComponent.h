@@ -56,7 +56,12 @@ public:
         pixel width. */
     static constexpr float  defaultBeatWidth = 48.0f;
     static constexpr float  minBeatWidth     = 12.0f;
-    static constexpr float  maxBeatWidth     = 180.0f;
+    /** Phase 69: 768, not 180. The zoom range is now symmetric in what it can
+        SHOW: at the floor (12 px/beat) one beat is 12 px wide; at the ceiling
+        one 1/64 beat is 12 px wide. 12 × 64 = 768. Anything less and the finest
+        grid step would never have room to appear — a zoom limit that silently
+        caps the grid is a grid you cannot reach. */
+    static constexpr float  maxBeatWidth     = 768.0f;
     float beatWidth = defaultBeatWidth;
 
     float getBeatWidth() const noexcept { return beatWidth; }
@@ -85,14 +90,29 @@ public:
         Zoomed out far enough, a 1/16 line sits 3 px from its neighbour and the
         roll turns into grey texture at the same time as the snapping starts
         asking for positions a third of a pixel wide. The step therefore climbs
-        1/16 → beat → bar → 4 bars until the lines have room to breathe, and
-        everything that touches the grid — drawing and snapping alike — reads it
-        from here. A line you can snap to is always a line that is on screen.
+        1/64 beat → beat → bar → 4 bars until the lines have room to breathe,
+        and everything that touches the grid — drawing and snapping alike —
+        reads it from here. A line you can snap to is always a line that is on
+        screen.
+
+        Phase 69: it also descends. The ladder starts at `finestGridStep`
+        (1/64 beat) instead of at the 1/16 note, so zooming IN subdivides
+        instead of stopping: ×4 per rung all the way down.
 
         Public because it is `gridDivision`'s runtime half, and the standoff
         between "the grid" and "the zoom" is something a caller may need to ask
         about without painting. */
     double visibleGridStep() const noexcept;
+
+    /** Phase 69: the shortest note a drag may leave behind.
+
+        `gridDivision` used to be this floor, which was true while the grid
+        never went below the 1/16 note. Now that zooming in reaches 1/64 beat,
+        a floor of 0.25 would make the finest grid unreachable by the one
+        gesture that needs it: you can aim at a 1/64 line but every note snaps
+        back to a sixteenth. Zoomed out it stays at 0.25 — a minimum that grew
+        with the zoom would let the picture loosen what the model allows. */
+    double minimumNoteLength() const noexcept;
 
     /** Phase 68: every grid line in a beat range, in beats. The drawing code
         walks this list and so does the self-test, so "the thin lines were
@@ -106,6 +126,12 @@ public:
         own timeline in `beatChunk` steps as soon as you scroll past the end. */
     static constexpr double totalBeats    = 64.0;
     static constexpr double gridDivision  = 0.25;   // 1/16 in 4/4
+
+    /** Phase 69: the finest step the grid ever draws — 1/64 of a beat, four
+        steps below the 1/16 note. `gridDivision` stays the musical minimum
+        (the length a paste advances by, the floor an imported note is clamped
+        to); this is only about how far the view can zoom IN. */
+    static constexpr double finestGridStep = gridDivision / 16.0;
 
     //-- Phase 11: the timeline grows on demand ------------------------------
     /** How much is added each time the view runs off the end. 64 beats = 16 bars,
@@ -1125,6 +1151,24 @@ public:
         coarse grid still show its bars — with `index % 16` a step of one beat
         painted every bar as a beat. */
     static float gridLineAlphaForTest (double beat) { return gridLineAlpha (beat); }
+
+    /** Phase 69: shorten a note's tail through the SAME path a tail drag takes.
+
+        "The floor moved" is a claim about the gesture, so asserting the value of
+        `minimumNoteLength()` would be testing the constant twice. This builds
+        the origin from the note itself and calls `applyNoteResize`, which is
+        exactly what `mouseDrag` calls. */
+    bool shrinkNoteTailForTest (int noteId, double wantedEndBeat)
+    {
+        if (auto* layer = stack.getActiveLayer())
+            if (const auto* note = layer->findNote (noteId))
+            {
+                const NoteEvent origin = *note;
+                return applyNoteResize (origin, wantedEndBeat, true);
+            }
+
+        return false;
+    }
 
     /** Phase 30: pixels of a block that actually carry audio — the waveform's
         own width at the current zoom. Zero when the file is missing.

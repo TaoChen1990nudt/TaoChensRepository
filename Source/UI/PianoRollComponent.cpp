@@ -983,15 +983,26 @@ double PianoRollComponent::visibleGridStep() const noexcept
     // hairlines stop reading as separate lines and start reading as shading.
     const double minPixels = (double) ui::pf (5.0f);
 
-    double step = gridDivision;
+    double step = finestGridStep;
 
-    // ×4 each time: 1/16 → beat → bar → 4 bars. ×4 and not ×2 because the three
-    // levels the roll draws (subdivision / beat / bar) are already four apart,
-    // so a half step would land between two levels that are never drawn.
+    // ×4 each time, in both directions: 1/64 → 1/16 → beat → bar → 4 bars. ×4
+    // and not ×2 because the levels the roll draws are already four apart, so a
+    // half step would land between two levels that are never drawn. Starting at
+    // the finest rung rather than at the 1/16 means the zoom-in side is the
+    // same loop as the zoom-out side, and neither can forget the other.
     while (step * (double) beatWidth < minPixels && step < gridDivision * 1024.0)
         step *= 4.0;
 
     return step;
+}
+
+double PianoRollComponent::minimumNoteLength() const noexcept
+{
+    // Not `visibleGridStep()` alone: zoomed out that returns a beat or a bar,
+    // and letting the picture raise the floor would mean a note dragged at 12
+    // px/beat could never be shorter than a bar. The floor only ever moves DOWN
+    // from the musical minimum.
+    return juce::jmin (gridDivision, visibleGridStep());
 }
 
 float PianoRollComponent::gridLineAlpha (double beat) noexcept
@@ -1011,7 +1022,15 @@ float PianoRollComponent::gridLineAlpha (double beat) noexcept
     if (onUnit (beat, 1.0))                         // beat
         return 0.075f;
 
-    return 0.030f;                                  // subdivision
+    if (onUnit (beat, gridDivision))                // 1/16 note (1/4 beat)
+        return 0.030f;
+
+    // Phase 69: below the 1/16 there is now a fifth rung on the ladder, and it
+    // must not borrow the 1/16's alpha — at 768 px/beat the two are both on
+    // screen, and four levels of subdivision all drawn at 0.030 is the flat grey
+    // texture the step ladder exists to prevent. Faint, but present: it is what
+    // tells you a note is a 1/64 and not a 1/16.
+    return 0.018f;
 }
 
 void PianoRollComponent::collectGridLines (double fromBeat, double toBeat,
@@ -3653,8 +3672,10 @@ bool PianoRollComponent::applyNoteResize (const NoteEvent& origin, double wanted
     {
         // The head does not move, so this is one subtraction with a floor — and
         // the floor is a grid step, not zero: a note that can be shrunk to
-        // nothing is a note you can lose with a twitch.
-        note->lengthBeats = juce::jmax (gridDivision, wantedBeat - origin.startBeat);
+        // nothing is a note you can lose with a twitch. Phase 69: that step is
+        // the VISIBLE one when it is finer than the 1/16, so a 1/64 grid can
+        // produce a 1/64 note.
+        note->lengthBeats = juce::jmax (minimumNoteLength(), wantedBeat - origin.startBeat);
         syncShapeOfMember (origin.id);
         return true;
     }
@@ -3663,11 +3684,11 @@ bool PianoRollComponent::applyNoteResize (const NoteEvent& origin, double wanted
     // this start later" not also mean "make this end later".
     const double end      = origin.startBeat + origin.lengthBeats;
     const double newStart = juce::jlimit (0.0,
-                                          juce::jmax (0.0, end - gridDivision),
+                                          juce::jmax (0.0, end - minimumNoteLength()),
                                           wantedBeat);
 
     note->startBeat   = newStart;
-    note->lengthBeats = juce::jmax (gridDivision, end - newStart);
+    note->lengthBeats = juce::jmax (minimumNoteLength(), end - newStart);
     syncShapeOfMember (origin.id);
     return true;
 }
@@ -8173,7 +8194,9 @@ bool PianoRollComponent::applySampleTrim (const SampleEvent& origin, double want
     if (clip == nullptr)
         return false;
 
-    const double minLength = gridDivision;
+    // Phase 69: the same floor the note resize uses, so a sample block can be
+    // trimmed down to a 1/64 beat when the view is zoomed in that far.
+    const double minLength = minimumNoteLength();
 
     if (fromTail)
     {
