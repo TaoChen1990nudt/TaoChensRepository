@@ -270,6 +270,7 @@ void PianoRollComponent::layersChanged()
         dragMode = DragMode::none;
         dragOriginals.clear();
         dragClipOriginals.clear();
+        dragTrimOriginals.clear();
         hoveredNoteId = -1;
         notifySelectionChanged();
     }
@@ -1363,18 +1364,24 @@ int PianoRollComponent::getSelectedGroupId() const
     return groupId;
 }
 
-bool PianoRollComponent::isWholeGroupSelected (int groupId) const
+bool PianoRollComponent::isWholeGroupSelected (int groupId, bool includeSamples) const
 {
     const auto* layer = stack.getActiveLayer();
 
-    if (layer == nullptr || groupId < 0 || selection.empty())
+    if (layer == nullptr || groupId < 0)
         return false;
 
     // Every member has to be in the selection, and nothing else may be — a
     // selection that also holds a loose note is two actions, not one.
-    const int members = layer->countNotesInGroup (groupId);
+    const int notes   = layer->countNotesInGroup (groupId);
+    const int clips   = includeSamples ? layer->countSamplesInGroup (groupId) : 0;
+    const int members = notes + clips;
+    const int chosen  = (int) selection.size() + (includeSamples ? (int) sampleSelection.size() : 0);
 
-    if (members <= 0 || (int) selection.size() != members)
+    if (selection.empty() && (! includeSamples || sampleSelection.empty()))
+        return false;
+
+    if (members <= 0 || chosen != members)
         return false;
 
     for (int id : selection)
@@ -1384,6 +1391,11 @@ bool PianoRollComponent::isWholeGroupSelected (int groupId) const
         if (note == nullptr || note->groupId != groupId)
             return false;
     }
+
+    if (includeSamples)
+        for (int id : sampleSelection)
+            if (layer->getGroupIdOfSample (id) != groupId)
+                return false;
 
     return true;
 }
@@ -1771,14 +1783,14 @@ void PianoRollComponent::pruneEmptyGroups()
     }
 }
 
-void PianoRollComponent::showGroupMenu (int layerIndex, int groupId, juce::Point<int> screenPos)
+void PianoRollComponent::fillGroupMenu (juce::PopupMenu& menu, int layerIndex, int groupId) const
 {
     auto* layer = stack.getLayer (layerIndex);
 
     if (layer == nullptr)
         return;
 
-    auto* group = layer->findGroup (groupId);
+    const auto* group = layer->findGroup (groupId);
 
     if (group == nullptr)
         return;
@@ -1786,12 +1798,15 @@ void PianoRollComponent::showGroupMenu (int layerIndex, int groupId, juce::Point
     const int members = layer->countNotesInGroup (groupId);
     const int clips   = layer->countSamplesInGroup (groupId);   // Phase 27
 
-    juce::PopupMenu menu;
     menu.addSectionHeader (group->getName() + utf8 (" · ")
                              + juce::String (members) + utf8 (" 音符")
                              + (clips > 0 ? utf8 (" · ") + juce::String (clips) + utf8 (" 采样")
                                           : juce::String()));
     menu.addItem (1, utf8 ("选中整组"));
+    // Phase 56: the group as one object, moved one bar on. Not "复制" + "粘贴":
+    // that spends the clipboard and lands wherever the playhead is, and the
+    // point of this item is that the answer is already known.
+    menu.addItem (8, utf8 ("复制到后一小节"));
     menu.addItem (2, utf8 ("编组挂载音源…"));
     // Phase 20: two parameters, and the tick means "this curve already has a
     // row in the automation window", so the menu doubles as the index.
@@ -1811,6 +1826,16 @@ void PianoRollComponent::showGroupMenu (int layerIndex, int groupId, juce::Point
     menu.addItem (7, utf8 ("渲染为采样…"));
     menu.addSeparator();
     menu.addItem (5, utf8 ("解散编组（音符保留）"));
+}
+
+void PianoRollComponent::showGroupMenu (int layerIndex, int groupId, juce::Point<int> screenPos)
+{
+    juce::PopupMenu menu;
+    fillGroupMenu (menu, layerIndex, groupId);
+
+    // Nothing to show means the group went away between the click and here.
+    if (menu.getNumItems() == 0)
+        return;
 
     juce::Component::SafePointer<PianoRollComponent> safe (this);
 
@@ -1824,6 +1849,10 @@ void PianoRollComponent::showGroupMenu (int layerIndex, int groupId, juce::Point
                             switch (result)
                             {
                                 case 1: safe->selectGroup (groupId); break;
+
+                                case 8:
+                                    safe->duplicateGroupToNextBar (layerIndex, groupId);
+                                    break;
 
                                 case 2:
                                     if (safe->onGroupMountRequested != nullptr)
@@ -2336,15 +2365,27 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         const bool  onTail = e.position.x > bounds.getRight() - band;
         const bool  onHead = ! onTail && e.position.x < bounds.getX() + band;
 
-        // Phase 28/29: only the grabbed block resizes (same rule as notes, P25);
-        // anything else arms a RIGID move of the whole selection, clips and
-        // notes together.
+        // Phase 28/29: a grab on a block's edge is a trim of the SELECTION
+        // (Phase 56 widened it from "the grabbed block only"); a grab anywhere
+        // else arms a RIGID move of the whole selection, clips and notes
+        // together.
         if ((onTail || onHead) && isSampleSelected (clipId))
         {
             dragSampleId       = clipId;
             dragSampleOriginal = *clip;
             dragAnchorBeat     = beatAtScreenX (e.position.x);
             dragMode           = onTail ? DragMode::resizeSample : DragMode::resizeSampleLeft;
+
+            // Phase 56: the trim is a selection-wide edit. Capture the other
+            // blocks now, while they are still the shapes the user sees; the
+            // drag then applies one delta to all of them.
+            dragTrimOriginals.clear();
+
+            if (sampleSelection.size() > 1)
+                if (auto* activeLayer = stack.getActiveLayer())
+                    for (int id : sampleSelection)
+                        if (const auto* other = activeLayer->findSample (id))
+                            dragTrimOriginals.push_back (*other);
         }
         else
         {
@@ -3084,8 +3125,9 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
             // moves, and the block would jump when you switched sides.
             const double rawX   = beatAtScreenX (e.position.x);
             const double wanted = snapEnabled ? snapBeat (rawX) : rawX;
+            const bool   fromTail = dragMode == DragMode::resizeSample;
 
-            applySampleTrim (dragSampleOriginal, wanted, dragMode == DragMode::resizeSample);
+            applySampleTrimDrag (dragSampleOriginal, wanted, fromTail, dragTrimOriginals);
 
             stack.notifyNotesChanged();
             break;
@@ -3139,6 +3181,7 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent&)
     dragMode = DragMode::none;
     dragOriginals.clear();
     dragClipOriginals.clear();     // Phase 28: armed by a clip move as well
+    dragTrimOriginals.clear();     // Phase 56: armed by a clip trim as well
     dragResizeNoteId = -1;
     dragEnvelopePoint = -1;
     dragSampleId = -1;
@@ -6523,11 +6566,36 @@ void PianoRollComponent::timerCallback()
 //==============================================================================
 //  Phase 22: the note clipboard
 //==============================================================================
+namespace
+{
+    /** " · 3 个音符 · 2 个采样" — never a count of zero, because the numbers are
+        what tell the user whether this clipboard is going to paste a group or a
+        handful of notes. */
+    juce::String membersDescription (int notes, int clips)
+    {
+        juce::String out;
+
+        if (notes > 0)
+            out = utf8 (" · ") + juce::String (notes) + utf8 (" 个音符");
+
+        if (clips > 0)
+            out += utf8 (" · ") + juce::String (clips) + utf8 (" 个采样");
+
+        return out;
+    }
+}
+
 bool PianoRollComponent::copyNotesToClipboard()
 {
     auto* active = stack.getActiveLayer();
 
-    if (active == nullptr || selection.empty())
+    if (active == nullptr)
+        return false;
+
+    // Phase 56: a group can be made of blocks alone (Phase 27). "Nothing
+    // selected" therefore means BOTH lists are empty — the note list alone is
+    // not the question any more.
+    if (selection.empty() && sampleSelection.empty())
         return false;
 
     noteClip.clear();
@@ -6546,42 +6614,65 @@ bool PianoRollComponent::copyNotesToClipboard()
     }
 
     if (noteClip.empty())
-    {
         noteClipFirstBeat = 0.0;
-        return false;
-    }
 
     //-- Phase 24: a whole group is copied as an OBJECT ----------------------
     // The alternative — copying the members and letting the paste attach them
     // to the same group id — produces one bigger group, not a copy: membership
     // lives on the note, so the two halves would share the mount and the curve.
+    //
+    // Phase 56: "whole" now counts the group's BLOCKS too. Copying a group
+    // whose members are notes and blocks used to qualify on the notes alone,
+    // and the paste then dropped the blocks loose on the timeline — a group
+    // that arrived cut in half, which is exactly what "paste the group, not
+    // its contents" is asking not to happen.
     const int groupId = getSelectedGroupId();
 
-    if (groupId >= 0 && isWholeGroupSelected (groupId))
+    if (groupId >= 0 && isWholeGroupSelected (groupId, true))
     {
         if (const auto* group = active->findGroup (groupId))
         {
-            groupClip.valid        = true;
-            groupClip.name         = group->getName();
-            groupClip.colour       = group->getColour();
-            groupClip.outputSlotId = group->getOutputSlotId();
-            groupClip.levelDb      = group->getLevelDb();
-            groupClip.pan          = group->getPan();
-            groupClip.pluginParam  = group->getPluginParam();
-            groupClip.startBeat    = noteClipFirstBeat;
+            // The group's own start is what its curves are absolute to. With no
+            // notes to read it from, the earliest block answers — otherwise a
+            // block-only group would paste its curve at beat 0 and the shape
+            // would stay behind when the copy moved.
+            double start = noteClipFirstBeat;
 
-            for (int i = 0; i < numGroupAutomationTargets; ++i)
+            if (noteClip.empty())
             {
-                const auto target = (GroupAutomationTarget) i;
-                groupClip.lanes[(size_t) i]  = group->automationFor (target);
-                groupClip.laneOn[(size_t) i] = group->automationFor (target).isEnabled();
+                start = std::numeric_limits<double>::max();
+
+                for (int id : sampleSelection)
+                    if (const auto* clip = active->findSample (id))
+                        start = juce::jmin (start, clip->startBeat);
+
+                if (start == std::numeric_limits<double>::max())
+                    start = 0.0;
             }
 
+            groupClip = captureGroupClip (*group, start);
+
+            // The blocks come along. `copySelectionToClipboards` fills them a
+            // moment later anyway, but a group copy that depended on the CALLER
+            // remembering to run the second pass is a group copy that pastes
+            // without its audio the first time somebody calls this directly.
+            sampleClip.clear();
+
+            for (const auto& clip : active->getSamples())
+                if (isSampleSelected (clip.id))
+                    sampleClip.push_back (clip);
+
+            samplePasteNextBeat     = -1.0;     // the paste owns the anchor now
+            samplePastePlayheadSeen = -2.0;
+
             flashStatus (utf8 ("已复制 ") + group->getName()
-                           + utf8 (" · ") + juce::String ((int) noteClip.size()) + utf8 (" 个音符"));
+                           + membersDescription ((int) noteClip.size(), (int) sampleSelection.size()));
             return true;
         }
     }
+
+    if (noteClip.empty())
+        return false;
 
     flashStatus (utf8 ("已复制 ") + juce::String ((int) noteClip.size()) + utf8 (" 个音符"));
     return true;
@@ -6597,10 +6688,28 @@ bool PianoRollComponent::cutNotesToClipboard()
     if (active == nullptr)
         return false;
 
+    // Phase 56: copying a GROUP now puts its blocks on the clipboard too, so a
+    // cut of that group has to take them off the timeline as well — otherwise
+    // "cut a group" leaves its audio behind and the paste creates a second copy
+    // of blocks nobody moved. Read before the notes go: the ids are the ones
+    // the model still knows.
+    std::vector<int> cutClipIds;
+
+    if (groupClip.valid)
+        for (const auto& clip : sampleClip)
+            cutClipIds.push_back (clip.id);
+
     for (int id : selection)
         active->removeNote (id);
 
+    for (int id : cutClipIds)
+        active->removeSample (id);
+
     selection.clear();
+
+    if (! cutClipIds.empty())
+        sampleSelection.clear();
+
     hoveredNoteId = -1;
     notifySelectionChanged();
     pruneEmptyGroups();
@@ -6609,6 +6718,120 @@ bool PianoRollComponent::cutNotesToClipboard()
     flashStatus ((groupClip.valid ? utf8 ("已剪切 ") + groupClip.name
                                  : utf8 ("已剪切 ") + juce::String ((int) noteClip.size()) + utf8 (" 个音符")));
     return true;
+}
+
+PianoRollComponent::GroupClip PianoRollComponent::captureGroupClip (const NoteGroup& group,
+                                                                     double startBeat) const
+{
+    GroupClip clip;
+
+    clip.valid        = true;
+    clip.name         = group.getName();
+    clip.colour       = group.getColour();
+    clip.outputSlotId = group.getOutputSlotId();
+    clip.levelDb      = group.getLevelDb();
+    clip.pan          = group.getPan();
+    clip.pluginParam  = group.getPluginParam();
+    clip.startBeat    = startBeat;
+
+    for (int i = 0; i < numGroupAutomationTargets; ++i)
+    {
+        const auto target = (GroupAutomationTarget) i;
+        clip.lanes[(size_t) i]  = group.automationFor (target);
+        clip.laneOn[(size_t) i] = group.automationFor (target).isEnabled();
+    }
+
+    return clip;
+}
+
+int PianoRollComponent::addGroupCopy (Layer& layer, const GroupClip& source, double deltaBeats)
+{
+    if (! source.valid)
+        return -1;
+
+    // Created before the members so they can be born inside it: a note whose
+    // groupId points at a group that does not exist yet would be repaired to
+    // "ungrouped" by the model, and the copy would paste as loose notes.
+    const int newId = layer.addGroup (uniqueGroupName (layer, source.name), source.colour);
+
+    auto* copy = layer.findGroup (newId);
+
+    if (copy == nullptr)
+        return -1;
+
+    copy->setOutputSlotId (source.outputSlotId);
+    copy->setLevelDb (source.levelDb);
+    copy->setPan (source.pan);
+    copy->setPluginParam (source.pluginParam);
+    copy->setCollapsed (false);
+
+    for (int i = 0; i < numGroupAutomationTargets; ++i)
+    {
+        auto& lane = copy->automationFor ((GroupAutomationTarget) i);
+
+        // A group lane is ABSOLUTE time, so a copy that lands later has to move
+        // its curve with it — otherwise pasting four bars later would keep the
+        // shape at the old beats and the notes would arrive at a flat line.
+        auto points = source.lanes[(size_t) i].getPoints();
+
+        for (auto& point : points)
+            point.beat = juce::jmax (0.0, point.beat + deltaBeats);
+
+        lane.loadPoints (std::move (points));
+        lane.setEnabled (source.laneOn[(size_t) i]);
+    }
+
+    return newId;
+}
+
+void PianoRollComponent::insertGroupMembers (Layer& layer, int groupId, double delta,
+                                             const std::vector<NoteEvent>& notes,
+                                             const std::vector<SampleEvent>& clips,
+                                             std::vector<int>& newNotes,
+                                             std::vector<int>& newClips)
+{
+    for (auto note : notes)
+    {
+        note.startBeat = juce::jmax (0.0, note.startBeat + delta);
+        note.id        = 0;
+        note.groupId   = groupId;
+
+        if (const int newId = layer.addNote (note); newId > 0)
+            newNotes.push_back (newId);
+    }
+
+    for (auto clip : clips)
+    {
+        clip.startBeat = juce::jmax (0.0, clip.startBeat + delta);
+        clip.id        = 0;
+
+        // Phase 56: a pasted block belongs to the COPY of the group it came
+        // from. Not the source id (that would make one bigger group), and not
+        // -1 (that was the bug: a group with blocks in it pasted as a group
+        // plus loose audio beside it).
+        clip.groupId   = groupId;
+
+        ensureClipSlot (clip);
+
+        if (const int newId = layer.addSample (std::move (clip)); newId > 0)
+        {
+            newClips.push_back (newId);
+
+            if (const auto* created = layer.findSample (newId))
+                ensureTimelineExtendsTo (created->endBeat());
+        }
+    }
+}
+
+void PianoRollComponent::ensureClipSlot (SampleEvent& clip)
+{
+    // Phase 33: a CUT takes its sampler with it — the sweep runs the moment the
+    // last block leaves, so the slot a clipboard holds may be gone by the time
+    // it is pasted. Re-registering the file is what makes cut-then-paste a move
+    // instead of a block pointed at nothing (which would quietly play the
+    // layer's instrument instead of the sample).
+    if (clip.outputSlotId >= 0 && rack.findSlot (clip.outputSlotId) == nullptr && clip.audio != nullptr)
+        clip.outputSlotId = rack.addSampler (clip.audio, clip.path, clip.name);
 }
 
 bool PianoRollComponent::pasteNotesFromClipboard()
@@ -6635,45 +6858,7 @@ bool PianoRollComponent::pasteNotesFromClipboard()
     const double delta = anchor - noteClipFirstBeat;
 
     //-- Phase 24: a copied group becomes a SECOND group ---------------------
-    // Created before the notes so they can be born inside it: a note whose
-    // groupId points at a group that does not exist yet would be repaired to
-    // "ungrouped" by the model, and the copy would paste as loose notes.
-    int newGroupId = -1;
-
-    if (groupClip.valid)
-    {
-        newGroupId = active->addGroup (uniqueGroupName (*active, groupClip.name), groupClip.colour);
-
-        if (auto* copy = active->findGroup (newGroupId))
-        {
-            copy->setOutputSlotId (groupClip.outputSlotId);
-            copy->setLevelDb (groupClip.levelDb);
-            copy->setPan (groupClip.pan);
-            copy->setPluginParam (groupClip.pluginParam);
-            copy->setCollapsed (false);
-
-            for (int i = 0; i < numGroupAutomationTargets; ++i)
-            {
-                auto& lane = copy->automationFor ((GroupAutomationTarget) i);
-
-                // A group lane is ABSOLUTE time, so a copy that lands later has
-                // to move its curve with it — otherwise pasting four bars later
-                // would keep the shape at the old beats and the notes would
-                // arrive at a flat line.
-                auto points = groupClip.lanes[(size_t) i].getPoints();
-
-                for (auto& point : points)
-                    point.beat = juce::jmax (0.0, point.beat + delta);
-
-                lane.loadPoints (std::move (points));
-                lane.setEnabled (groupClip.laneOn[(size_t) i]);
-            }
-        }
-        else
-        {
-            newGroupId = -1;
-        }
-    }
+    const int newGroupId = addGroupCopy (*active, groupClip, delta);
 
     std::vector<int> newIds;
 
@@ -6709,6 +6894,64 @@ bool PianoRollComponent::pasteNotesFromClipboard()
     {
         flashStatus (utf8 ("已粘贴 ") + juce::String ((int) newIds.size()) + utf8 (" 个音符"));
     }
+
+    repaint();
+    return true;
+}
+
+bool PianoRollComponent::pasteGroupFromClipboard()
+{
+    auto* active = stack.getActiveLayer();
+
+    if (active == nullptr || ! groupClip.valid)
+        return false;
+
+    //-- The anchor ----------------------------------------------------------
+    // A group is ONE object, so it gets one anchor — the clipboard's own start,
+    // not "wherever the notes start". A block-only group has no notes to read a
+    // start from, and a group whose notes begin later than its first block
+    // would otherwise paste shifted by that difference.
+    const double sourceFirst = groupClip.startBeat;
+
+    double sourceEnd = noteClipEndBeat;
+
+    for (const auto& clip : sampleClip)
+        sourceEnd = juce::jmax (sourceEnd, clip.endBeat());
+
+    double anchor = playheadBeat >= 0.0 ? playheadBeat : sourceFirst;
+
+    if (snapEnabled)
+        anchor = snapBeat (anchor);
+
+    if (std::abs (anchor - sourceFirst) < 1.0e-9)
+        anchor = sourceFirst + juce::jmax (gridDivision, sourceEnd - sourceFirst);
+
+    const double delta = anchor - sourceFirst;
+
+    const int newGroupId = addGroupCopy (*active, groupClip, delta);
+
+    if (newGroupId < 0)
+        return false;
+
+    std::vector<int> newNotes;
+    std::vector<int> newClips;
+
+    insertGroupMembers (*active, newGroupId, delta, noteClip, sampleClip, newNotes, newClips);
+
+    if (newNotes.empty() && newClips.empty())
+    {
+        active->removeGroup (newGroupId);       // nothing landed; do not leave a bracket
+        return false;
+    }
+
+    ensureTimelineExtendsTo (anchor + juce::jmax (gridDivision, sourceEnd - sourceFirst) + 4.0);
+    setMixedSelection (newNotes, newClips);
+    stack.notifyNotesChanged();
+
+    const auto* pasted = active->findGroup (newGroupId);
+
+    flashStatus (utf8 ("已粘贴 ") + (pasted != nullptr ? pasted->getName() : juce::String())
+                   + membersDescription ((int) newNotes.size(), (int) newClips.size()));
 
     repaint();
     return true;
@@ -6816,6 +7059,53 @@ bool PianoRollComponent::applySampleTrim (const SampleEvent& origin, double want
     }
 
     ensureTimelineExtendsTo (clip->endBeat());
+    return true;
+}
+
+bool PianoRollComponent::applySampleTrimDrag (const SampleEvent& primary, double wantedBeat, bool fromTail,
+                                              const std::vector<SampleEvent>& siblings)
+{
+    if (! applySampleTrim (primary, wantedBeat, fromTail))
+        return false;
+
+    if (siblings.empty())
+        return true;
+
+    auto* active = stack.getActiveLayer();
+
+    if (active == nullptr)
+        return true;
+
+    // The delta comes back from the block the pointer owns, NOT from
+    // `wantedBeat`: the minimum length and (at the head) the source offset can
+    // eat part of the drag. A sibling moved by the raw delta would then part
+    // company with the block being dragged — which is exactly how "trim the
+    // selection" turns into "one block snapped shut, the others somewhere
+    // else".
+    const auto* applied = active->findSample (primary.id);
+
+    if (applied == nullptr)
+        return true;
+
+    const double delta = fromTail ? applied->endBeat() - primary.endBeat()
+                                  : applied->startBeat - primary.startBeat;
+
+    if (std::abs (delta) <= 1.0e-12)
+        return true;
+
+    for (const auto& sibling : siblings)
+    {
+        if (sibling.id == primary.id)
+            continue;
+
+        // Each sibling is clamped by its OWN limits (its own source offset at
+        // the head, the minimum length at either end), which is why this calls
+        // the same trim rather than adding `delta` to a field.
+        applySampleTrim (sibling,
+                         fromTail ? sibling.endBeat() + delta : sibling.startBeat + delta,
+                         fromTail);
+    }
+
     return true;
 }
 
@@ -7951,7 +8241,19 @@ bool PianoRollComponent::simulateSampleTrim (int sampleId, double wantedBeat, bo
 
     const SampleEvent origin = *clip;        // the drag works from a snapshot too
 
-    if (! applySampleTrim (origin, wantedBeat, fromTail))
+    // Phase 56: the hook has to go through the same "one delta for the whole
+    // selection" path the pointer does, or it would be testing a trim that no
+    // longer exists. Grabbing a selected block's edge means the selection is
+    // the gesture.
+    std::vector<SampleEvent> siblings;
+
+    if (isSampleSelected (sampleId) && sampleSelection.size() > 1)
+        for (int id : sampleSelection)
+            if (id != sampleId)
+                if (const auto* other = active->findSample (id))
+                    siblings.push_back (*other);
+
+    if (! applySampleTrimDrag (origin, wantedBeat, fromTail, siblings))
         return false;
 
     stack.notifyNotesChanged();
@@ -8467,6 +8769,101 @@ bool PianoRollComponent::simulateRulerZoom (float anchorX, float totalDy)
     return true;
 }
 
+bool PianoRollComponent::duplicateGroupToNextBar (int layerIndex, int groupId)
+{
+    // The selection this command writes is the ACTIVE layer's, so a group on
+    // another sheet has to bring that sheet forward first — otherwise the copy
+    // lands on one layer and the highlight on another.
+    if (stack.getActiveLayerIndex() != layerIndex)
+        stack.setActiveLayerIndex (layerIndex);
+
+    auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr)
+        return false;
+
+    const auto* group = layer->findGroup (groupId);
+
+    if (group == nullptr)
+        return false;
+
+    // Read once: adding the copy reallocates the group list, so `group` must
+    // not be dereferenced after that (P53's dangling-pointer lesson, one
+    // container over).
+    const juce::String groupName = group->getName();
+    const GroupClip    source    = captureGroupClip (*group, 0.0);
+
+    std::vector<NoteEvent>    notes;
+    std::vector<SampleEvent>  clips;
+    double first = std::numeric_limits<double>::max();
+    double last  = 0.0;
+
+    for (const auto& note : layer->getNotes())
+        if (note.groupId == groupId)
+        {
+            notes.push_back (note);
+            first = juce::jmin (first, note.startBeat);
+            last  = juce::jmax (last, note.endBeat());
+        }
+
+    for (const auto& clip : layer->getSamples())
+        if (clip.groupId == groupId)
+        {
+            clips.push_back (clip);
+            first = juce::jmin (first, clip.startBeat);
+            last  = juce::jmax (last, clip.endBeat());
+        }
+
+    if (notes.empty() && clips.empty())
+        return false;
+
+    if (first == std::numeric_limits<double>::max())
+        first = 0.0;
+
+    //-- Where the copy goes ------------------------------------------------
+    // "复制到后一小节" is the next BAR LINE, not "start + 4 beats" — the two are
+    // the same only for a group that starts on a bar line, and a copy that
+    // lands on the source is not a copy. If the group is longer than the gap,
+    // the next line after its own end is used instead, so the two never
+    // overlap.
+    double target = nextBarLineAfter (first, gridDivision);
+
+    if (target < last - 1.0e-9)
+        target = barLineAtOrAfter (last);
+
+    const double delta = target - first;
+
+    GroupClip moved = source;
+    moved.startBeat = first;
+
+    const int copyId = addGroupCopy (*layer, moved, delta);
+
+    if (copyId < 0)
+        return false;
+
+    std::vector<int> newNotes;
+    std::vector<int> newClips;
+
+    insertGroupMembers (*layer, copyId, delta, notes, clips, newNotes, newClips);
+
+    if (newNotes.empty() && newClips.empty())
+    {
+        layer->removeGroup (copyId);
+        return false;
+    }
+
+    ensureTimelineExtendsTo (last + delta + beatsPerBar);
+    setMixedSelection (newNotes, newClips);
+    stack.notifyNotesChanged();
+
+    flashStatus (utf8 ("已复制 ") + groupName + membersDescription ((int) newNotes.size(), (int) newClips.size())
+                   + utf8 (" 到第 ") + juce::String ((int) std::floor (target / beatsPerBar) + 1)
+                   + utf8 (" 小节"));
+
+    repaint();
+    return true;
+}
+
 std::vector<int> PianoRollComponent::duplicateSelectedSamples (double offsetBeats)
 {
     auto* active = stack.getActiveLayer();
@@ -8635,14 +9032,9 @@ bool PianoRollComponent::pasteSamplesFromClipboard()
         // not part of the shape the original group describes.
         clip.groupId   = -1;
 
-        // Phase 33: a CUT takes its sampler with it — the sweep runs the moment
-        // the last block leaves, so the slot a clipboard holds may be gone by
-        // the time it is pasted. Re-registering the file is what makes
-        // cut-then-paste a move instead of a block pointed at nothing (which
-        // would quietly play the layer's instrument instead of the sample).
-        if (clip.outputSlotId >= 0 && rack.findSlot (clip.outputSlotId) == nullptr
-             && clip.audio != nullptr)
-            clip.outputSlotId = rack.addSampler (clip.audio, clip.path, clip.name);
+        // Phase 33 (one implementation, Phase 56): a CUT takes its sampler with
+        // it, so the slot this clipboard holds may already be gone.
+        ensureClipSlot (clip);
 
         const int newId = active->addSample (std::move (clip));
 
@@ -8681,7 +9073,12 @@ void PianoRollComponent::copySelectionToClipboards()
     // selected is EMPTIED. That is the whole point: a paste must not resurrect
     // the clips from a copy three actions ago just because this time only notes
     // happened to be selected.
-    if (! selection.empty())
+    //
+    // Phase 56: the notes pass also runs when only blocks are selected, because
+    // that is how a block-only group gets recognised as a group. The check was
+    // `! selection.empty()`, which made such a selection "no selection" here and
+    // wiped the group clipboard right before the blocks pass filled the other.
+    if (! selection.empty() || ! sampleSelection.empty())
         copyNotesToClipboard();
     else
     {
@@ -8703,6 +9100,14 @@ void PianoRollComponent::copySelectionToClipboards()
 
 bool PianoRollComponent::pasteEditClipboard()
 {
+    //-- Phase 56: a copied group pastes as ONE object -----------------------
+    // Not "the notes, then the blocks": two passes mean two anchors and two
+    // halves that do not know about each other — the notes landed in a new
+    // group and the blocks landed beside it, ungrouped. A group is one thing,
+    // so the paste is one transaction.
+    if (groupClip.valid)
+        return pasteGroupFromClipboard();
+
     const bool haveNotes = canPasteNotes();
     const bool haveClips = canPasteSamples();
 

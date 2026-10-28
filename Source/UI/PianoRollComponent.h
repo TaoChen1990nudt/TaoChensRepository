@@ -343,6 +343,20 @@ public:
     bool canPasteNotes() const noexcept { return ! noteClip.empty(); }
     int  getNoteClipboardSize() const noexcept { return (int) noteClip.size(); }
 
+    /** Phase 56: paste a copied GROUP as one object — its notes AND its blocks,
+        inside one new group.
+
+        Separate from pasteNotesFromClipboard because "the group" and "the notes
+        in it" need different anchors and different member lists. The paste
+        entry point routes here whenever the clipboard holds a group, so the
+        two-pass result (a new group plus loose audio beside it) cannot come
+        back. */
+    bool pasteGroupFromClipboard();
+
+    /** Phase 56: the block-only group. Its members have no notes to read a
+        start beat from, and its clipboard needs the same object treatment. */
+    bool isSampleOnlyGroupClipboard() const noexcept { return groupClip.valid && noteClip.empty(); }
+
     /** Phase 24: was the last copy a whole group (so a paste makes a second
         group) rather than a handful of notes? The self-test reads it; the edit
         menu's status line uses it to say which one happened. */
@@ -501,8 +515,13 @@ public:
         when only one of its eight notes is selected is precisely what makes
         "change this one note's synth, leave the rest alone" impossible — and
         copy/paste keys off the same question, because copying a group has to
-        copy the group rather than its members. */
-    bool isWholeGroupSelected (int groupId) const;
+        copy the group rather than its members.
+
+        `includeSamples` is the split between those two callers, and it is not a
+        convenience: mounting a group only cares about the notes (a block has no
+        oscillator to mount), while COPYING has to take the blocks with it or the
+        paste is a group cut in half. Two questions that look like one. */
+    bool isWholeGroupSelected (int groupId, bool includeSamples = false) const;
 
     /** Selects every member of a group, so "drag the group" is just "drag the
         selection" — one drag implementation, two ways to fill it. */
@@ -738,11 +757,61 @@ public:
         一小节" means. Selects the copies. */
     std::vector<int> duplicateSelectedSamples (double offsetBeats = -1.0);
 
+    /** Phase 56: copy a whole group to the next bar line — the group's context
+        menu item. Not a clipboard gesture: the user's clipboard is theirs, and
+        this command must not spend it. Selects the copy. */
+    bool duplicateGroupToNextBar (int layerIndex, int groupId);
+
+    /** Phase 56: the group menu's items, built by a function the self-test can
+        call. `showMenuAsync` is a modal popup — a headless run can never see
+        what it would have contained, so the contents are stated separately
+        from the showing (the same split the menu bar already uses). */
+    void fillGroupMenu (juce::PopupMenu& menu, int layerIndex, int groupId) const;
+
     bool copySamplesToClipboard();
     bool cutSamplesToClipboard();
     bool pasteSamplesFromClipboard();
     bool canPasteSamples() const noexcept { return ! sampleClip.empty(); }
     int  getSampleClipboardSize() const noexcept { return (int) sampleClip.size(); }
+
+    /** Phase 56: creates the second copy of the clipboard's group — name,
+        colour, mount, level, pan and every automation lane shifted by `deltaBeats`
+        — and returns its id, or -1 when the clipboard holds no group.
+
+        One implementation because a group copy happens in two places now: the
+        paste, and "复制到后一小节" on a group. Two copies of this block would be
+        two chances for the pasted group to lose a curve. */
+    /** Phase 24/56: a group as a clipboard object. Declared up here (at its real
+        access level, hence the temporary switch) because the paste/duplicate
+        declarations below take and return it; the definition sits with the rest
+        of the clipboard plumbing further down. */
+private:
+    struct GroupClip;
+public:
+
+    int addGroupCopy (Layer& layer, const GroupClip& source, double deltaBeats);
+
+    /** Phase 56: a group's state as a clipboard object, curves included. The
+        paste and "复制到后一小节" both need it, and the two must agree about
+        which beat the curves are absolute to. */
+    GroupClip captureGroupClip (const NoteGroup& group, double startBeat) const;
+
+    /** Phase 56: clones a group's members into `groupId`, shifted by `delta`.
+
+        Both the paste and the duplicate come through here: a pasted block has
+        to belong to the NEW group (not the source's id, and not -1), and that
+        one line is the difference between "a group arrived" and "a group plus
+        some loose audio beside it". */
+    void insertGroupMembers (Layer& layer, int groupId, double delta,
+                             const std::vector<NoteEvent>& notes,
+                             const std::vector<SampleEvent>& clips,
+                             std::vector<int>& newNotes,
+                             std::vector<int>& newClips);
+
+    /** Phase 56: a clipboard block may name a sampler that a CUT has already
+        swept away; re-registering the file keeps paste a move, not a block
+        pointed at nothing. */
+    void ensureClipSlot (SampleEvent& clip);
 
     //-- Phase 29: the edit commands, over a possibly MIXED selection ---------
     /** Fills both clipboards from one gesture: notes into `noteClip`, clips into
@@ -1170,6 +1239,18 @@ private:
         not also mean "make it end later". */
     bool applySampleTrim (const SampleEvent& origin, double wantedBeat, bool fromTail);
 
+    /** Phase 56: one trim GESTURE — the grabbed block, then every other
+        selected block by the same delta.
+
+        `siblings` are the other blocks' shapes as they were when the edge was
+        grabbed; the delta is read back from the primary after applySampleTrim
+        has clamped it, so a sibling never moves further than the block the
+        pointer is holding. The drag and the test hook both come through here,
+        because "one delta for the whole selection" is the rule, not the
+        pointer's implementation detail. */
+    bool applySampleTrimDrag (const SampleEvent& primary, double wantedBeat, bool fromTail,
+                              const std::vector<SampleEvent>& siblings);
+
     /** Phase 28: arms a rigid move of the selected clips. Same clampMove() /
         applyMove() pair the group drag uses — a second "startBeat + delta"
         would be a second place for the clamp to disagree with the sound. */
@@ -1217,6 +1298,7 @@ private:
     juce::Rectangle<float> getGroupContentBounds (const Layer&, const NoteGroup&) const;
 
     void showGroupMenu (int layerIndex, int groupId, juce::Point<int> screenPos);
+
     /** Right-click anywhere else in the grid: group actions for the current
         selection, disabled when there is nothing they could act on. */
     void showCanvasMenu (juce::Point<int> screenPos);
@@ -1365,6 +1447,15 @@ private:
         move and by a clip move — both go through clampMove() + applyMove(), so
         there is one rigid-move implementation and the two cases cannot drift. */
     std::vector<SampleEvent> dragClipOriginals;
+
+    /** Phase 56: every selected block, captured when a resize band is grabbed.
+
+        `dragSampleOriginal` is the one whose edge the pointer owns — it decides
+        how far the whole selection stretches. This list holds the others, so a
+        multi-block trim can move every edge by the SAME delta instead of lining
+        every tail up with the pointer (the P25 mistake, in blocks this time).
+        Empty unless a trim started on a multi-block selection. */
+    std::vector<SampleEvent> dragTrimOriginals;
 
     DragMode dragMode        = DragMode::none;
     double   dragAnchorBeat  = 0.0;

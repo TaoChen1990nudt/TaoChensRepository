@@ -24,6 +24,14 @@
 - UI 寻址一律 `(layerIndex, noteId)` 或稳定 id，禁止缓存 `NoteEvent*` / `Layer*`。
 - 图层共用一套 content 空间（128 pitch × N beat）；只有激活图层的音符可命中。
 
+## 小节（P56：`beatsPerBar` 在 `Util/SharedRules.h`）
+- 4 拍一小节，**只有一处常量** `beatsPerBar`。标尺的小节编号、`nextBarLineAfter()`、
+  `barLineAtOrAfter()` 都读它。视图里原来写着字面量 4.0。
+- `nextBarLineAfter(beat, grid)`：先按网格吸一下再找**严格更晚**的小节线——
+  "下一小节"是标尺画的那条线，不是 beat + 4。
+- `barLineAtOrAfter(beat)`：不早于 `beat` 的第一条小节线。别看名字像，它和上面那个是
+  两个问题：一个"我要往后走"，一个"我从这儿开始放"。
+
 ## 路由（唯一实现 `Model/Routing.h`）
 - `routing::resolve()`：**note.outputSlotOverride > group.outputSlotId > layer.outputSlotId >
   第一个乐器槽**。UI 高亮、聚光灯、引擎全调它；另写三段判断，显示和听到就是两套话。
@@ -230,7 +238,17 @@
 - **组要能拖起来**：唯一入口 `armGroupMove(groupId, pos)`。两条路：点标签 `getGroupLabelAt`、
   点框内空地 `getGroupFrameAt`（只认激活图层，排在音符命中之后、marquee 之前）。
 - **采样是组成员**：成员计数/`getGroupContentBounds`/组拖动/`pruneEmptyGroups` 都要同时看
-  notes 和 samples。组复制粘贴暂不带采样（已知边界）。
+  notes 和 samples。**P56 起复制粘贴也带采样**：整组（音符 + 块）被选中才算"整组"，
+  `pasteEditClipboard()` 见到 `groupClip.valid` 直接走 `pasteGroupFromClipboard()` —— 一个锚点、
+  一次事务，块与新音符同属**新组**。以前是两趟（音符建组、采样各粘各的），结果是"组 + 旁边
+  散着的音频"。`cutNotesToClipboard()` 也必须把块一起从时间线上删掉，否则剪切→粘贴会复制出
+  一份没被搬走的音频。
+- **整组判定有两个口径**（P56）：`isWholeGroupSelected(groupId, includeSamples)`。挂载音源用
+  false（块没有振荡器可挂，只看音符），复制用 true（少一个块就是半个组）。默认值 false，
+  所以老调用点的行为不变。
+- **组的"复制到后一小节"**（P56）：`duplicateGroupToNextBar(layerIndex, groupId)`，走模型直接克隆，
+  **不经过剪贴板**（用户的剪贴板是他的）。目标 = `nextBarLineAfter(起点)`；若仍压在源上，
+  改用 `barLineAtOrAfter(源结束)`——长组不会自己盖住自己。菜单项放在"选中整组"下面。
 - **P35：组是一个 trim，成员可以是两种东西**。`NoteGroup` 只存 levelDb / pan / muted，
   **成员列表不存**——`groupId` 在音符和采样块自己身上，所有"组里有几个""组里是谁"都是扫出来的。
   这仍是唯一模型：删除成员不会留下悬挂 id。
@@ -402,6 +420,11 @@
   Delete / Ctrl+C / Ctrl+D 一律"两类一起"，不留"你指哪个"的暗选择。
 - **拖动只有一份实现**：`captureEditOriginals()`（音符+采样）→ `clampMove()` + `applyMove()`。
   `DragMode::moveSample` 已删除；块拖动走 `moveNote` 分支。
+- **拉伸是选区级的**（P56）：抓住选中块的一条边 → `applySampleTrimDrag(主块, 目标, 边, 兄弟原件)`，
+  先按现有规则摆好主块，**再把实际 delta 读回来**应用给兄弟（尾：`length += delta`；
+  头：`start += delta`，终点钉住）。不要用鼠标算的 delta：最小长度和 offset 会把主块夹住，
+  兄弟就会超前。每个兄弟走的是同一个 `applySampleTrim`，各自的 offset/最小长度仍然生效。
+  早先只有被抓住的那块动（P25 的规则照搬到块上），多选时看着像"只改了一个"。
 - **块是窗口不是拷贝**：`sourceOffsetSeconds` 是文件内起点；左端拉伸同时改 `startBeat` 与
   offset（同样的秒数），音频留在原时间位置；右端拉伸只改 `lengthBeats`。
 - **尾部无上限（P51）**：右端想拖多长拖多长（见"采样伸缩"节）；左 ≥ offset 允许的距离

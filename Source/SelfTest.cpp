@@ -9889,7 +9889,7 @@ juce::String MainComponent::runSelfTest()
         const auto* armedGroup   = slotsFor (withSelection, 27);
         const auto* armedCopy    = slotsFor (withSelection, 26);
 
-        check ("编组/解组 and 复制状态 grey out with nothing selected, like the strip",
+        check (utf8 ("编组/解组") + " and " + utf8 ("复制状态") + " grey out with nothing selected, like the strip",
                bareGroup != nullptr && bareUngroup != nullptr && bareCopy != nullptr
                  && armedGroup != nullptr && armedCopy != nullptr
                  && ! bareGroup->enabled && ! bareUngroup->enabled
@@ -9940,6 +9940,292 @@ juce::String MainComponent::runSelfTest()
                    "short " + juce::String (shortScroll) + " / now "
                      + juce::String (localPanel.getScrollY()) + " / excess "
                      + juce::String (excess));
+        }
+
+        //-- Phase 56: a trim is a selection edit, a group is one object -------
+        // Local models: this block adds blocks, groups and copies, and the shared
+        // fixtures would have to be unwound item by item afterwards.
+        {
+            LayerStack t;
+            RackModel  r;
+
+            t.addLayer (utf8 ("P56"), palette::layer1);
+
+            auto* sheet = t.getLayer (0);
+
+            const auto p56Source = loadSampleFile (phase27B);
+            const int  slot      = r.addSampler (p56Source.buffer, phase27B.getFullPathName(), "P56");
+
+            const auto makeClip = [&] (double start, double length)
+            {
+                SampleEvent clip;
+                clip.name         = "P56";
+                clip.path         = phase27B.getFullPathName();
+                clip.audio        = p56Source.buffer;
+                clip.startBeat    = start;
+                clip.lengthBeats  = length;
+                clip.pitch        = 72;
+                clip.laneSpan     = 2;
+                clip.outputSlotId = slot;
+                return sheet->addSample (clip);
+            };
+
+            PianoRollComponent roll (t, r);
+            roll.setSize (1200, 520);
+
+            const auto lengthOf = [sheet] (int id)
+            {
+                const auto* clip = sheet->findSample (id);
+                return clip != nullptr ? clip->lengthBeats : -1.0;
+            };
+
+            const auto startOf = [sheet] (int id)
+            {
+                const auto* clip = sheet->findSample (id);
+                return clip != nullptr ? clip->startBeat : -1.0;
+            };
+
+            const auto endOf = [sheet] (int id)
+            {
+                const auto* clip = sheet->findSample (id);
+                return clip != nullptr ? clip->endBeat() : -1.0;
+            };
+
+            const int c1 = makeClip (0.0, 2.0);
+            const int c2 = makeClip (6.0, 3.0);
+            const int c3 = makeClip (12.0, 1.0);
+
+            roll.setSampleSelection ({ c1, c2, c3 });
+
+            //-- 1. grabbing one tail stretches the whole selection -----------
+            // The delta, not the pointer: 2 + 3 + 1 becomes 4 + 5 + 3, each block
+            // keeping its own length difference.
+            const bool trimmed = roll.simulateSampleTrim (c1, 4.0, true);
+
+            check ("Trimming one block in a multi-selection stretches all of them",
+                   trimmed
+                     && std::abs (lengthOf (c1) - 4.0) < 1.0e-6
+                     && std::abs (lengthOf (c2) - 5.0) < 1.0e-6
+                     && std::abs (lengthOf (c3) - 3.0) < 1.0e-6,
+                   juce::String (lengthOf (c1), 2) + " / " + juce::String (lengthOf (c2), 2)
+                     + " / " + juce::String (lengthOf (c3), 2));
+
+            //-- 2. grabbing a head moves every start, ends stay put ----------
+            const double endBefore = endOf (c2);
+
+            const bool headTrimmed = roll.simulateSampleTrim (c2, 7.0, false);
+
+            check ("...and a head trim moves every start by that delta, ends pinned",
+                   headTrimmed
+                     && std::abs (startOf (c1) - 1.0) < 1.0e-6
+                     && std::abs (startOf (c2) - 7.0) < 1.0e-6
+                     && std::abs (startOf (c3) - 13.0) < 1.0e-6
+                     && std::abs (endOf (c1) - 4.0) < 1.0e-6
+                     && std::abs (endOf (c2) - endBefore) < 1.0e-6
+                     && std::abs (endOf (c3) - 15.0) < 1.0e-6,
+                   juce::String (startOf (c1), 2) + " / " + juce::String (startOf (c2), 2)
+                     + " / " + juce::String (startOf (c3), 2));
+
+            //-- 3. a group with a block in it pastes as ONE group -------------
+            NoteEvent note;
+            note.pitch        = 60;
+            note.startBeat    = 20.0;
+            note.lengthBeats  = 1.0;
+            const int n1 = sheet->addNote (note);
+
+            note.pitch     = 64;
+            note.startBeat = 21.0;
+            const int n2 = sheet->addNote (note);
+
+            const int gid = sheet->addGroup (utf8 ("P56 组"), groupPalette::group2);
+            sheet->assignNotesToGroup ({ n1, n2 }, gid);
+            sheet->assignSamplesToGroup ({ c1 }, gid);
+
+            roll.selectGroup (gid);
+
+            roll.copySelectionToClipboards();       // the real Ctrl+C path
+            const bool asGroup = roll.isGroupClipboard();
+            const int  groupsBefore = (int) sheet->getGroups().size();
+
+            const bool pastedGroup = roll.pasteEditClipboard();
+            const int  groupsAfter = (int) sheet->getGroups().size();
+
+            const NoteGroup* copy = nullptr;
+
+            for (const auto& g : sheet->getGroups())
+                if (g.getId() != gid)
+                    copy = &g;
+
+            check ("A group with a block in it pastes ONE new group, block included",
+                   asGroup && pastedGroup
+                     && groupsAfter == groupsBefore + 1
+                     && copy != nullptr
+                     && sheet->countNotesInGroup (copy->getId()) == 2
+                     && sheet->countSamplesInGroup (copy->getId()) == 1
+                     && sheet->countNotesInGroup (gid) == 2
+                     && sheet->countSamplesInGroup (gid) == 1,
+                   juce::String (groupsBefore) + " -> " + juce::String (groupsAfter)
+                     + utf8 ("，副本 ") + (copy != nullptr ? juce::String ((int) sheet->countNotesInGroup (copy->getId()))
+                                                           + utf8 (" 音符 / ")
+                                                           + juce::String ((int) sheet->countSamplesInGroup (copy->getId()))
+                                                           + utf8 (" 采样")
+                                                         : juce::String ("none")));
+
+            check ("The pasted group is what ends up selected",
+                   (int) roll.getSelection().size() == 2
+                     && (int) roll.getSampleSelection().size() == 1,
+                   juce::String ((int) roll.getSelection().size()) + " notes / "
+                     + juce::String ((int) roll.getSampleSelection().size()) + " clips");
+
+            //-- 4. a group made of blocks ALONE pastes as a group ------------
+            const int c4   = makeClip (40.0, 2.0);
+            const int gid2 = sheet->addGroup (utf8 ("P56 采样组"), groupPalette::group3);
+            sheet->assignSamplesToGroup ({ c4 }, gid2);
+
+            roll.selectGroup (gid2);
+
+            roll.copySelectionToClipboards();
+            const bool clipsOnly = roll.isGroupClipboard() && roll.isSampleOnlyGroupClipboard();
+            const int  before2     = (int) sheet->getGroups().size();
+
+            const bool pastedClips = roll.pasteEditClipboard();
+            const int  after2      = (int) sheet->getGroups().size();
+
+            const NoteGroup* clipCopy = nullptr;
+
+            for (const auto& g : sheet->getGroups())
+                if (g.getId() != gid && g.getId() != gid2
+                     && sheet->countNotesInGroup (g.getId()) == 0
+                     && sheet->countSamplesInGroup (g.getId()) == 1)
+                    clipCopy = &g;
+
+            check ("A group of blocks alone also pastes as a group",
+                   clipsOnly && pastedClips && after2 == before2 + 1
+                     && clipCopy != nullptr,
+                   juce::String (before2) + " -> " + juce::String (after2)
+                     + (clipCopy != nullptr ? utf8 ("，有副本") : utf8 ("，无副本")));
+
+            //-- 4b. cutting that group takes its block with it ----------------
+            // The block went into the clipboard as part of the group, so a cut
+            // that removed only the notes would paste back a duplicate of audio
+            // that never left the timeline.
+            {
+                const int c5 = makeClip (60.0, 2.0);
+
+                NoteEvent cutNote;
+                cutNote.pitch       = 55;
+                cutNote.startBeat   = 60.0;
+                cutNote.lengthBeats = 1.0;
+                const int cn = sheet->addNote (cutNote);
+
+                const int gidCut = sheet->addGroup (utf8 ("P56 剪切组"), groupPalette::group1);
+                sheet->assignNotesToGroup ({ cn }, gidCut);
+                sheet->assignSamplesToGroup ({ c5 }, gidCut);
+
+                roll.selectGroup (gidCut);
+                const bool cutOk = roll.cutNotesToClipboard();
+
+                const bool gone = sheet->findNote (cn) == nullptr
+                                    && sheet->findSample (c5) == nullptr;
+
+                const bool backOk = roll.pasteEditClipboard();
+
+                const NoteGroup* restored = nullptr;
+
+                for (const auto& g : sheet->getGroups())
+                    if (g.getId() != gid && g.getId() != gid2 && g.getId() != gidCut
+                         && sheet->countNotesInGroup (g.getId()) == 1
+                         && sheet->countSamplesInGroup (g.getId()) == 1)
+                        restored = &g;
+
+                check ("Cutting a group takes its block off the timeline, and the paste brings both back",
+                       cutOk && gone && backOk && restored != nullptr,
+                       juce::String ((int) cutOk) + " / " + juce::String ((int) gone) + " / "
+                         + juce::String ((int) backOk) + " / "
+                         + (restored != nullptr ? utf8 ("回了组") : utf8 ("没有组")));
+            }
+
+            //-- 5. 复制到后一小节 lands on the next BAR LINE -----------------
+            NoteEvent barNote;
+            barNote.pitch       = 48;
+            barNote.startBeat   = 0.0;
+            barNote.lengthBeats = 1.0;
+            const int b1 = sheet->addNote (barNote);
+
+            const int gid3 = sheet->addGroup (utf8 ("P56 小节"), groupPalette::group4);
+            sheet->assignNotesToGroup ({ b1 }, gid3);
+
+            const bool moved = roll.duplicateGroupToNextBar (0, gid3);
+
+            const auto soleNoteStartInNewGroup = [&] (std::initializer_list<int> known)
+            {
+                double found = -1.0;
+
+                for (const auto& g : sheet->getGroups())
+                {
+                    bool skip = false;
+
+                    for (int id : known)
+                        skip = skip || g.getId() == id;
+
+                    if (skip || sheet->countNotesInGroup (g.getId()) != 1)
+                        continue;
+
+                    for (int id : sheet->getGroupNoteIds (g.getId()))
+                        if (const auto* n = sheet->findNote (id))
+                            found = n->startBeat;
+                }
+
+                return found;
+            };
+
+            const double copyAt = soleNoteStartInNewGroup ({ gid, gid2, gid3 });
+
+            check (utf8 ("复制到后一小节") + " puts the copy on the bar line after a group that starts on one",
+                   moved && std::abs (copyAt - 4.0) < 1.0e-6,
+                   juce::String (copyAt, 2));
+
+            //-- 6. a group that starts off the grid, and is longer than a bar -
+            NoteEvent longNote;
+            longNote.pitch       = 50;
+            longNote.startBeat   = 2.0;
+            longNote.lengthBeats = 6.0;
+            const int b2 = sheet->addNote (longNote);
+
+            const int gid4 = sheet->addGroup (utf8 ("P56 长组"), groupPalette::group5);
+            sheet->assignNotesToGroup ({ b2 }, gid4);
+
+            roll.duplicateGroupToNextBar (0, gid4);
+
+            const double copyAt2 = soleNoteStartInNewGroup ({ gid, gid2, gid3, gid4 });
+
+            // 2.0 + "next bar" would be 4.0, which is inside the source (2..8) —
+            // the copy goes to 8.0 instead, so the two never overlap.
+            check ("...and a group that runs past the next bar lands clear of itself",
+                   std::abs (copyAt2 - 8.0) < 1.0e-6,
+                   juce::String (copyAt2, 2));
+
+            //-- 7. the menu actually offers it -------------------------------
+            juce::PopupMenu menu;
+            roll.fillGroupMenu (menu, 0, gid3);
+
+            bool   offersNextBar = false;
+            juce::String itemTexts;
+
+            for (juce::PopupMenu::MenuItemIterator it (menu); it.next();)
+            {
+                const auto& item = it.getItem();
+
+                if (item.isSeparator)
+                    continue;
+
+                itemTexts += item.text + " | ";
+
+                if (item.text.contains (utf8 ("复制到后一小节")))
+                    offersNextBar = true;
+            }
+
+            check ("The group's context menu offers " + utf8 ("复制到后一小节"), offersNextBar, itemTexts);
         }
 
         //-- cleanup -----------------------------------------------------------

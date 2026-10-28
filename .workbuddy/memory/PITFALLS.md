@@ -737,3 +737,35 @@ P54 的选区标记刻意画成虚线、画在卡内，怕用户把"我选了这
 
 headless 快照运行结束时缓冲区没机会刷出去，`std::cout` 打的调试行在重定向日志里看不见；
 `std::cerr` 是无缓冲的。别据此判断"代码没跑到"。
+
+## P56-A：组粘贴分两趟 = 组被切成两半
+
+`pasteEditClipboard()` 原来是"先粘音符（建新组）、再粘采样"，而 `pasteSamplesFromClipboard`
+里写着 `clip.groupId = -1`（P33 的规矩：粘贴的块不继承源组）。两条规矩各自都对，合起来就是：
+**含采样的组粘贴后，音符在新组里，采样散在组外**。用户看到的就是"组被打散了"。
+
+修法是让"整组"成为一个事务：`pasteGroupFromClipboard()` 一个锚点、一次建组、两类成员都写
+`newGroupId`。判据是"剪贴板里是不是整组"（`groupClip.valid`），不是"两类剪贴板都非空"。
+
+教训：两个正确的局部规则可以在组合处产生一个错误的整体行为。判据要落在"用户以为的那个对象"
+上（组），而不是"我手上有哪些列表"。
+
+## P56-B：自检断言的文本里裸写中文 → 日志乱码
+
+`utf8()` 是唯一入口（MEMORY 硬规则 1）。写成 `check ("复制到后一小节 puts ...", ...)`（中文在
+普通字面量里）会把 UTF-8 字节再编码一次，日志里显示成 `å¤å¶å°åä¸å°è`。参数里的中文
+（如 `utf8("...")`）没问题，**第一参数（检查名）最容易漏**。
+
+## P56-C：`snap(beat - 1e-9)` 会把 1e-9 吃掉
+
+想表达"严格晚于 4.0"而写 `nextBarLineAfter (last - 1e-9) → snap ×round` 是无效的：
+`round((4 - 1e-9) / 0.25) = 16` → 又回到 4.0，于是"下一小节"跳到 8.0。要"不早于结束"就直接
+用 `ceil`：`barLineAtOrAfter(beat) = ceil(beat / beatsPerBar - 1e-9) * beatsPerBar`。
+一个用 `floor+1`（严格晚于），一个用 `ceil`（不早于）——别用一个函数加 epsilon 去模拟另一个。
+
+## P56-D：`GroupClip` 是私有嵌套类型，声明要放在用它之前
+
+`addGroupCopy(Layer&, const GroupClip&, double)` 写在 public 区，而 `GroupClip` 的定义在文件
+后部（private）→ 报 "缺少类型说明符"。解决：在使用点之前写 `private: struct GroupClip; public:`
+（前向声明必须与定义同访问级别，否则 MSVC 报 C4240）。cpp 里的返回类型要写全
+`PianoRollComponent::GroupClip`。
