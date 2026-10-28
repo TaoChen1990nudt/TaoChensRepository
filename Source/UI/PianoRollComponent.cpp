@@ -1545,21 +1545,23 @@ int PianoRollComponent::getGroupFrameAt (juce::Point<float> position) const
 {
     // Only the active layer: a ghost group is not editable, and a click on one
     // that picked the group up would drag notes the user cannot even select.
-    const auto* layer = stack.getActiveLayer();
+    const int  activeIndex = stack.getActiveLayerIndex();
+    const auto* layer      = stack.getLayer (activeIndex);
 
     if (layer == nullptr)
         return -1;
 
     for (const auto& group : layer->getGroups())
     {
-        const auto content = getGroupContentBounds (*layer, group);
+        // Phase 57: the same box the frame is drawn with (groupFrameOf), so the
+        // pointer agrees with the line — the old 3px expansion would have the
+        // group grabbed from outside its own border.
+        const auto content = groupFrameOf (activeIndex, group.getId());
 
         if (content.isEmpty())
             continue;
 
-        // Same expansion the frame is drawn with, so what looks like the
-        // group's edge is the group's edge for the pointer too.
-        if (content.expanded (ui::pf (3), ui::pf (3)).contains (position))
+        if (content.contains (position))
             return group.getId();
     }
 
@@ -3681,6 +3683,7 @@ void PianoRollComponent::paint (juce::Graphics& g)
         drawGroupBands (g);       // Phase 16: a frame around each group
         drawSamples (g);          // Phase 17: audio blocks sit under the notes
         drawNotes (g);
+        drawGroupFrames (g);      // Phase 57: the frame's outline, ON the members
         drawGroupLabels (g);      // ... and their name pills in front
         drawFocusHighlights (g);  // the focused synth's notes, on top of all
         drawSpotlightExitChip (g); // Phase 29: and the way back out of the veil
@@ -4099,20 +4102,65 @@ void PianoRollComponent::drawGroupBands (juce::Graphics& g)
 
         for (const auto& group : layer->getGroups())
         {
-            const auto content = getGroupContentBounds (*layer, group);
+            // groupFrameOf, not getGroupContentBounds: the box the self-test
+            // reads and the box that is painted have to be the same call, or
+            // "the frame sits on the block" becomes a claim about a function
+            // nobody draws with.
+            const auto content = groupFrameOf (i, group.getId());
 
             if (content.isEmpty())
                 continue;
 
             const bool focused = isGroupFocused (i, group.getId());
             const auto colour  = group.getColour();
-            const auto frame   = content.expanded (ui::pf (3), ui::pf (3));
+
+            // Phase 57: the band is the members' box, not the members' box plus
+            // a margin — see drawGroupFrames for the outline that shares it.
+            const auto frame   = content;
 
             g.setColour (colour.withAlpha (baseAlpha * (focused ? 0.10f : 0.05f)));
             g.fillRoundedRectangle (frame, ui::pf (4));
+        }
+    }
+}
+
+void PianoRollComponent::drawGroupFrames (juce::Graphics& g)
+{
+    const int activeIndex = stack.getActiveLayerIndex();
+
+    for (int i = 0; i < stack.getNumLayers(); ++i)
+    {
+        auto* layer = stack.getLayer (i);
+
+        if (! isLayerShown (i) || layer->getGroups().empty())
+            continue;
+
+        const bool  onActive = (i == activeIndex);
+        const float baseAlpha = onActive ? 1.0f : ghostAlphaValue + 0.25f;
+
+        for (const auto& group : layer->getGroups())
+        {
+            const auto content = groupFrameOf (i, group.getId());
+
+            if (content.isEmpty())
+                continue;
+
+            const bool focused = isGroupFocused (i, group.getId());
+            const auto colour  = group.getColour();
 
             g.setColour (colour.withAlpha (baseAlpha * (focused ? 0.85f : 0.34f)));
-            g.drawRoundedRectangle (frame, ui::pf (4), focused ? ui::pf (1.4) : ui::pf (1.0));
+
+            // Half a pixel in: a 1px stroke on the exact edge is drawn ON the
+            // clip's own border and reads as "the clip got thicker" rather than
+            // "this is the group". Reduced by the stroke's own half-width, the
+            // two lines touch without merging — no gap, no double line.
+            const float stroke = focused ? ui::pf (1.4f) : ui::pf (1.0f);
+            auto box = content.reduced (stroke * 0.5f);
+
+            if (box.getWidth() <= 0.0f || box.getHeight() <= 0.0f)
+                box = content;      // one-pixel member: the frame is all there is
+
+            g.drawRoundedRectangle (box, ui::pf (4), stroke);
         }
     }
 }
@@ -6617,9 +6665,13 @@ bool PianoRollComponent::copyNotesToClipboard()
         noteClipFirstBeat = 0.0;
 
     //-- Phase 24: a whole group is copied as an OBJECT ----------------------
-    // The alternative — copying the members and letting the paste attach them
-    // to the same group id — produces one bigger group, not a copy: membership
-    // lives on the note, so the two halves would share the mount and the curve.
+    // The clipboard holds the group's own state (name, colour, mount, trim,
+    // curves) instead of sixty notes that happen to share an id.
+    //
+    // Phase 57: "one bigger group" is now the POINT, not the accident it was
+    // once avoided as. A paste reuses the source group, so copying a group and
+    // pasting it a bar later gives that group a second appearance — which is
+    // what the user asked for: one name, one trim, one mount, two places.
     //
     // Phase 56: "whole" now counts the group's BLOCKS too. Copying a group
     // whose members are notes and blocks used to qualify on the notes alone,
@@ -6725,8 +6777,9 @@ PianoRollComponent::GroupClip PianoRollComponent::captureGroupClip (const NoteGr
 {
     GroupClip clip;
 
-    clip.valid        = true;
-    clip.name         = group.getName();
+    clip.valid         = true;
+    clip.sourceGroupId = group.getId();
+    clip.name          = group.getName();
     clip.colour       = group.getColour();
     clip.outputSlotId = group.getOutputSlotId();
     clip.levelDb      = group.getLevelDb();
@@ -6752,6 +6805,11 @@ int PianoRollComponent::addGroupCopy (Layer& layer, const GroupClip& source, dou
     // Created before the members so they can be born inside it: a note whose
     // groupId points at a group that does not exist yet would be repaired to
     // "ungrouped" by the model, and the copy would paste as loose notes.
+    //
+    // Phase 57: a PASTE no longer comes through here when the source group is
+    // still alive (it reuses that group instead). This is now the branch for
+    // "the source is gone" — a cut swept it away, or the paste landed on
+    // another sheet — plus the deliberate copy that "复制到后一小节" makes.
     const int newId = layer.addGroup (uniqueGroupName (layer, source.name), source.colour);
 
     auto* copy = layer.findGroup (newId);
@@ -6805,10 +6863,11 @@ void PianoRollComponent::insertGroupMembers (Layer& layer, int groupId, double d
         clip.startBeat = juce::jmax (0.0, clip.startBeat + delta);
         clip.id        = 0;
 
-        // Phase 56: a pasted block belongs to the COPY of the group it came
-        // from. Not the source id (that would make one bigger group), and not
-        // -1 (that was the bug: a group with blocks in it pasted as a group
-        // plus loose audio beside it).
+        // Phase 56: a pasted block belongs to the group the paste targets, never
+        // -1 — that was the bug: a group with blocks in it pasted as a group
+        // plus loose audio beside it. Phase 57 made that target usually the
+        // SOURCE group itself (a paste reuses it), which is why the id is a
+        // parameter and not a decision made here.
         clip.groupId   = groupId;
 
         ensureClipSlot (clip);
@@ -6838,7 +6897,17 @@ bool PianoRollComponent::pasteNotesFromClipboard()
 {
     auto* active = stack.getActiveLayer();
 
-    if (active == nullptr || noteClip.empty())
+    if (active == nullptr)
+        return false;
+
+    // Phase 57: a group on the clipboard is ONE object with ONE paste, so every
+    // entry point goes through pasteGroupFromClipboard. This function used to
+    // mint a second group for it — the very thing the user asked to stop — and
+    // two paths deciding "does a paste create a group" is how they drift.
+    if (groupClip.valid)
+        return pasteGroupFromClipboard();
+
+    if (noteClip.empty())
         return false;
 
     // Paste at the playhead when there is one — that is the only landmark on
@@ -6857,18 +6926,16 @@ bool PianoRollComponent::pasteNotesFromClipboard()
     // its offset, so the block arrives with its internal timing intact.
     const double delta = anchor - noteClipFirstBeat;
 
-    //-- Phase 24: a copied group becomes a SECOND group ---------------------
-    const int newGroupId = addGroupCopy (*active, groupClip, delta);
-
+    // Loose notes only: a group clipboard returned above, so there is no group
+    // to hand these to (Phase 57). A note that was copied AS PART OF a group
+    // still carries no membership of its own — `noteClip` holds the notes, and
+    // the group they belong to lives in `groupClip`.
     std::vector<int> newIds;
 
     for (auto note : noteClip)
     {
         note.startBeat = juce::jmax (0.0, note.startBeat + delta);
         note.id        = 0;
-
-        if (newGroupId >= 0)
-            note.groupId = newGroupId;
 
         const int newId = active->addNote (note);
 
@@ -6883,17 +6950,7 @@ bool PianoRollComponent::pasteNotesFromClipboard()
     setSelection (newIds);
     stack.notifyNotesChanged();
 
-    if (newGroupId >= 0)
-    {
-        const auto* pasted = active->findGroup (newGroupId);
-
-        flashStatus (utf8 ("已粘贴 ") + (pasted != nullptr ? pasted->getName() : juce::String())
-                       + utf8 (" · ") + juce::String ((int) newIds.size()) + utf8 (" 个音符"));
-    }
-    else
-    {
-        flashStatus (utf8 ("已粘贴 ") + juce::String ((int) newIds.size()) + utf8 (" 个音符"));
-    }
+    flashStatus (utf8 ("已粘贴 ") + juce::String ((int) newIds.size()) + utf8 (" 个音符"));
 
     repaint();
     return true;
@@ -6928,7 +6985,22 @@ bool PianoRollComponent::pasteGroupFromClipboard()
 
     const double delta = anchor - sourceFirst;
 
-    const int newGroupId = addGroupCopy (*active, groupClip, delta);
+    //-- Phase 57: a paste reuses the group it was copied from ----------------
+    // It used to mint a SECOND group ("Synth A 2"), so copying a group and
+    // pasting it a bar later split the very thing the user copied into two rows
+    // of the group list — two names, two trims to keep in sync, two mounts.
+    // The clipboard now carries the source id and the paste lends the new
+    // members to that same group: the copy IS the group, in a second place.
+    //
+    // The id is re-checked rather than trusted. Cut-then-paste sweeps the
+    // emptied group away, and a paste on another sheet cannot resolve an id
+    // from this one; in both cases the members still have to arrive inside
+    // SOME group, so one is built from the clipboard's own name and colour.
+    const bool reused = groupClip.sourceGroupId >= 0
+                          && active->findGroup (groupClip.sourceGroupId) != nullptr;
+
+    const int newGroupId = reused ? groupClip.sourceGroupId
+                                  : addGroupCopy (*active, groupClip, delta);
 
     if (newGroupId < 0)
         return false;
@@ -6940,7 +7012,11 @@ bool PianoRollComponent::pasteGroupFromClipboard()
 
     if (newNotes.empty() && newClips.empty())
     {
-        active->removeGroup (newGroupId);       // nothing landed; do not leave a bracket
+        // Only a group this paste CREATED may be thrown away — the reused one
+        // was here before the paste and is not ours to delete.
+        if (! reused)
+            active->removeGroup (newGroupId);   // nothing landed; do not leave a bracket
+
         return false;
     }
 

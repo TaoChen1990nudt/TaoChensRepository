@@ -769,3 +769,31 @@ headless 快照运行结束时缓冲区没机会刷出去，`std::cout` 打的�
 后部（private）→ 报 "缺少类型说明符"。解决：在使用点之前写 `private: struct GroupClip; public:`
 （前向声明必须与定义同访问级别，否则 MSVC 报 C4240）。cpp 里的返回类型要写全
 `PianoRollComponent::GroupClip`。
+
+## P57-A：组框的 3px 外扩是画出来的间隙，靠"挪线"消不掉
+
+用户报"组的边框与采样的边框之间留了距离"。那个距离不是间距属性，是 `content.expanded(3px)`
+——外扩原本是为了让组线不被成员盖住（组框画在成员**之下**，不外扩就被块的填充吃掉）。
+
+所以修法不是把 3px 改小，而是**换层次**：填充继续画在成员之下（`drawGroupBands`），
+描边单独画在成员**之上**（`drawGroupFrames`，`drawNotes` 之后），几何用 `content` 本身、
+向内缩半个线宽。线压在块自己的边框上，"不留距离"才真的能画出来。
+
+附带教训：`groupFrameOf`、`drawGroupFrames`、`getGroupFrameAt` 必须调**同一个函数**。
+自检读的是 `groupFrameOf`，如果绘制另写一份 `content.expanded()`，断言永远绿而画面永远错。
+咬测就是把 `expanded(3)` 加回去，看那条"零间隙"断言变红（frame 103.8 vs block 96）。
+
+## P57-B：粘贴复用组后，"失败就删组"的清理会删掉别人的组
+
+`pasteGroupFromClipboard()` 原来在"什么都没粘上"时 `active->removeGroup(newGroupId)`。
+一旦粘贴改成一件事"复用源组"，这句就成了"粘贴失败顺手删掉用户的组"。清理必须是
+**只删这次新建的**：`if (! reused) removeGroup(...)`。凡是复用型 API，清理路径都要先问
+"这个东西是我造的吗"。
+
+## P57-C：两条粘贴入口 = 两套语义
+
+`pasteNotesFromClipboard()` 曾经独立处理"组剪贴板"（建新组），`pasteEditClipboard()` 走
+`pasteGroupFromClipboard()`。P57 改语义时只改一处，另一处就会把块留在剪贴板上（音符进去了、
+采样没进去）。现在 `pasteNotesFromClipboard()` 开头 `if (groupClip.valid) return pasteGroupFromClipboard();`
+——一个动词一个实现。自检也因此刻意用**旧入口**粘一次，否则"转发被删"这个缺陷没有任何断言会红
+（咬测验证：删转发行 → "组内现 4 音符 / 1 采样" 两条 FAIL）。

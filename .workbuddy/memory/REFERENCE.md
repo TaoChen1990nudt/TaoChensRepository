@@ -240,9 +240,21 @@
 - **采样是组成员**：成员计数/`getGroupContentBounds`/组拖动/`pruneEmptyGroups` 都要同时看
   notes 和 samples。**P56 起复制粘贴也带采样**：整组（音符 + 块）被选中才算"整组"，
   `pasteEditClipboard()` 见到 `groupClip.valid` 直接走 `pasteGroupFromClipboard()` —— 一个锚点、
-  一次事务，块与新音符同属**新组**。以前是两趟（音符建组、采样各粘各的），结果是"组 + 旁边
-  散着的音频"。`cutNotesToClipboard()` 也必须把块一起从时间线上删掉，否则剪切→粘贴会复制出
-  一份没被搬走的音频。
+  一次事务。以前是两趟（音符建组、采样各粘各的），结果是"组 + 旁边散着的音频"。
+  `cutNotesToClipboard()` 也必须把块一起从时间线上删掉，否则剪切→粘贴会复制出一份没被搬走的音频。
+- **粘贴复用源组，不新建**（P57）：`GroupClip::sourceGroupId` 记住来源，粘贴时若该组仍在
+  当前图层就**直接往里加成员**（同一 name / trim / 挂载 / 曲线，组里出现第二处内容）；
+  只有源组不在（剪切榨干了它、或粘贴到另一图层）才新建一个同色同名的组。判据是
+  `active->findGroup(sourceGroupId) != nullptr`，不是"我手上有哪些列表"。
+  **所有粘贴入口必须转发**：`pasteNotesFromClipboard()` 开头见 `groupClip.valid` 就转给组路径，
+  否则它会以"散音符"的身份粘一遍，块留在剪贴板上（P56 的 bug 以另一种形式回来）。
+  复用路径**不重放自动化曲线**（绝对时间，点仍留在原位置）；只有新建组时才按 delta 平移。
+  `duplicateGroupToNextBar()` 仍新建组——那是"再来一份"，不是"这个组又多了一处"。
+- **组框就是成员框，零外力扩展**（P57）：`groupFrameOf()` 返回 `getGroupContentBounds()` 本身，
+  不再 `expanded(3px)`；绘制、命中（`getGroupFrameAt`）、自检读的是**同一个函数**。
+  填充色块画在成员之下（`drawGroupBands`），**描边画在成员之上**（`drawGroupFrames`，在
+  `drawNotes` 之后），并向内缩半个线宽——线压在块自己的边框上，形成"组框即块的外框"。
+  这是用户要的"组边框与采样边框之间不留距离"：挪线做不出来，只能同一条边、画在上层。
 - **整组判定有两个口径**（P56）：`isWholeGroupSelected(groupId, includeSamples)`。挂载音源用
   false（块没有振荡器可挂，只看音符），复制用 true（少一个块就是半个组）。默认值 false，
   所以老调用点的行为不变。

@@ -3990,36 +3990,6 @@ juce::String MainComponent::runSelfTest()
         const bool groupish = roll.isGroupClipboard();
         const int  before   = (int) layer->getGroups().size();
 
-        const bool pasted = roll.pasteNotesFromClipboard();
-        const int  after  = (int) layer->getGroups().size();
-
-        const NoteGroup* copy = nullptr;
-
-        for (const auto& candidate : layer->getGroups())
-            if (candidate.getId() != groupId)
-                copy = &candidate;
-
-        const bool shiftedCurve = copy != nullptr
-                                    && copy->getLevelAutomation().getPoints().size() >= 2
-                                    && std::abs (copy->getLevelAutomation().getPoints().front().beat - 3.0) < 1.0e-6;
-
-        check ("Copying a group pastes a second group, not its notes",
-               copied && groupish && pasted && after == before + 1 && copy != nullptr
-                 && copy->getName() != originalName
-                 && copy->getOutputSlotId() == slotB
-                 && std::abs (copy->getLevelDb() + 6.0f) < 1.0e-4f
-                 && copy->getLevelAutomation().isEnabled()
-                 && layer->countNotesInGroup (groupId) == 3
-                 && layer->countNotesInGroup (copy->getId()) == 3,
-               juce::String (before) + " -> " + juce::String (after) + " groups, copy = "
-                 + (copy != nullptr ? copy->getName() : juce::String ("none")));
-
-        check ("A pasted group's absolute-beat curve moves with it",
-               shiftedCurve,
-               copy != nullptr && ! copy->getLevelAutomation().getPoints().empty()
-                 ? "first point at beat " + juce::String (copy->getLevelAutomation().getPoints().front().beat, 2)
-                 : juce::String ("no curve on the copy"));
-
         //-- Phase 24: the box's grid is the roll's grid, and it snaps --------
         roll.openGroupAutomation (0, groupId, 0);
 
@@ -4057,6 +4027,73 @@ juce::String MainComponent::runSelfTest()
                "1.37 -> " + juce::String (snapped, 2)
                  + ", past the end -> " + juce::String (clamped, 2)
                  + ", snap off -> " + juce::String (raw, 2));
+
+        //-- Phase 57: a paste goes BACK into the group it was copied from -----
+        // It used to mint "复制组 2": one copy of a group became two rows in the
+        // group list, two trims to keep in sync, two mounts, two curves. The
+        // paste now lends its members to the source group and nothing is made.
+        const bool pasted     = roll.pasteNotesFromClipboard();
+        const int  after      = (int) layer->getGroups().size();
+        const auto* sameGroup = layer->findGroup (groupId);
+
+        check ("Pasting a copied group reuses that group instead of minting one",
+               copied && groupish && pasted
+                 && after == before
+                 && sameGroup != nullptr
+                 && sameGroup->getName() == originalName
+                 && sameGroup->getOutputSlotId() == slotB
+                 && std::abs (sameGroup->getLevelDb() + 6.0f) < 1.0e-4f
+                 && sameGroup->getLevelAutomation().isEnabled()
+                 && layer->countNotesInGroup (groupId) == 6,
+               juce::String (before) + " -> " + juce::String (after) + utf8 (" 组，组内 ")
+                 + juce::String ((int) layer->countNotesInGroup (groupId)) + utf8 (" 个音符"));
+
+        //-- Phase 57: the verb that still IS a copy carries its curves --------
+        // "复制到后一小节" is now the only one that builds a new group, so the
+        // "absolute-beat lanes travel with their members" promise is checked on
+        // it. A group lane is absolute time: a copy that lands later has to move
+        // its points by the same delta, or the notes arrive under a flat line.
+        const int groupsBeforeDup = (int) layer->getGroups().size();
+
+        const double srcFirst = [layer, groupId]
+        {
+            double first = std::numeric_limits<double>::max();
+
+            for (const auto& note : layer->getNotes())
+                if (note.groupId == groupId)
+                    first = juce::jmin (first, note.startBeat);
+
+            return first == std::numeric_limits<double>::max() ? 0.0 : first;
+        } ();
+
+        const bool duped = roll.duplicateGroupToNextBar (0, groupId);
+
+        const NoteGroup* fresh = nullptr;
+
+        for (const auto& candidate : layer->getGroups())
+            if (candidate.getId() != groupId)
+                fresh = &candidate;
+
+        double dstFirst = -1.0;
+
+        if (fresh != nullptr)
+            for (int id : layer->getGroupNoteIds (fresh->getId()))
+                if (const auto* note = layer->findNote (id))
+                    dstFirst = dstFirst < 0.0 ? note->startBeat : juce::jmin (dstFirst, note->startBeat);
+
+        const double dupDelta = fresh != nullptr ? dstFirst - srcFirst : 0.0;
+
+        const bool shiftedCurve = fresh != nullptr
+                                    && fresh->getLevelAutomation().getPoints().size() >= 2
+                                    && std::abs (fresh->getLevelAutomation().getPoints().front().beat
+                                                   - dupDelta) < 1.0e-6;
+
+        check ("A newly built copy still carries its absolute-beat curves",
+               duped && (int) layer->getGroups().size() == groupsBeforeDup + 1 && shiftedCurve,
+               fresh != nullptr && ! fresh->getLevelAutomation().getPoints().empty()
+                 ? utf8 ("副本起点 ") + juce::String (dupDelta, 2) + utf8 ("，曲线首点 ")
+                     + juce::String (fresh->getLevelAutomation().getPoints().front().beat, 2)
+                 : juce::String (utf8 ("没有副本曲线")));
     } ();
 
     //-- Phase 25: the group is an object, and resizing is per note -----------
@@ -10047,29 +10084,28 @@ juce::String MainComponent::runSelfTest()
             const bool asGroup = roll.isGroupClipboard();
             const int  groupsBefore = (int) sheet->getGroups().size();
 
-            const bool pastedGroup = roll.pasteEditClipboard();
+            // Deliberately the OLD entry point: it used to be the one that
+            // minted a second group, and Phase 57 made it hand a group
+            // clipboard over to pasteGroupFromClipboard. A test that only ever
+            // calls pasteEditClipboard would not notice that forwarding going
+            // away — the blocks would quietly stay on the clipboard.
+            const bool pastedGroup = roll.pasteNotesFromClipboard();
             const int  groupsAfter = (int) sheet->getGroups().size();
 
-            const NoteGroup* copy = nullptr;
-
-            for (const auto& g : sheet->getGroups())
-                if (g.getId() != gid)
-                    copy = &g;
-
-            check ("A group with a block in it pastes ONE new group, block included",
+            // Phase 57: no second group — the members land back in `gid`, so
+            // the group now exists in two places with one name, one trim and
+            // one mount. This is the line the user asked for; counting groups
+            // is how it is visible.
+            check ("A group with a block in it pastes into that same group, block included",
                    asGroup && pastedGroup
-                     && groupsAfter == groupsBefore + 1
-                     && copy != nullptr
-                     && sheet->countNotesInGroup (copy->getId()) == 2
-                     && sheet->countSamplesInGroup (copy->getId()) == 1
-                     && sheet->countNotesInGroup (gid) == 2
-                     && sheet->countSamplesInGroup (gid) == 1,
+                     && groupsAfter == groupsBefore
+                     && sheet->findGroup (gid) != nullptr
+                     && sheet->countNotesInGroup (gid) == 4
+                     && sheet->countSamplesInGroup (gid) == 2,
                    juce::String (groupsBefore) + " -> " + juce::String (groupsAfter)
-                     + utf8 ("，副本 ") + (copy != nullptr ? juce::String ((int) sheet->countNotesInGroup (copy->getId()))
-                                                           + utf8 (" 音符 / ")
-                                                           + juce::String ((int) sheet->countSamplesInGroup (copy->getId()))
-                                                           + utf8 (" 采样")
-                                                         : juce::String ("none")));
+                     + utf8 ("，组内现 ")
+                     + juce::String ((int) sheet->countNotesInGroup (gid)) + utf8 (" 音符 / ")
+                     + juce::String ((int) sheet->countSamplesInGroup (gid)) + utf8 (" 采样"));
 
             check ("The pasted group is what ends up selected",
                    (int) roll.getSelection().size() == 2
@@ -10082,6 +10118,30 @@ juce::String MainComponent::runSelfTest()
             const int gid2 = sheet->addGroup (utf8 ("P56 采样组"), groupPalette::group3);
             sheet->assignSamplesToGroup ({ c4 }, gid2);
 
+            //-- 4a. Phase 57: the frame sits ON the block, not 3px off it -----
+            // The gap the user can see between a group's border and a block's
+            // border was the frame's 3px expansion. Frame and member box are now
+            // one rectangle, so all four edges are compared — "contains" would
+            // pass just as happily with the old gap in place.
+            {
+                // Both rectangles are culled against the visible grid, so the
+                // block has to be on screen before they can be compared.
+                roll.setScrollBeats (38.0);
+
+                const auto frame = roll.groupFrameOf (0, gid2);
+                const auto box   = roll.getSampleScreenBounds (0, c4);
+
+                const bool sameEdges = ! frame.isEmpty() && ! box.isEmpty()
+                                         && std::abs (frame.getX() - box.getX()) < 0.01f
+                                         && std::abs (frame.getY() - box.getY()) < 0.01f
+                                         && std::abs (frame.getRight() - box.getRight()) < 0.01f
+                                         && std::abs (frame.getBottom() - box.getBottom()) < 0.01f;
+
+                check ("A group's frame leaves no gap around its block",
+                       sameEdges,
+                       "frame " + frame.toString() + " block " + box.toString());
+            }
+
             roll.selectGroup (gid2);
 
             roll.copySelectionToClipboards();
@@ -10091,19 +10151,14 @@ juce::String MainComponent::runSelfTest()
             const bool pastedClips = roll.pasteEditClipboard();
             const int  after2      = (int) sheet->getGroups().size();
 
-            const NoteGroup* clipCopy = nullptr;
-
-            for (const auto& g : sheet->getGroups())
-                if (g.getId() != gid && g.getId() != gid2
-                     && sheet->countNotesInGroup (g.getId()) == 0
-                     && sheet->countSamplesInGroup (g.getId()) == 1)
-                    clipCopy = &g;
-
-            check ("A group of blocks alone also pastes as a group",
-                   clipsOnly && pastedClips && after2 == before2 + 1
-                     && clipCopy != nullptr,
+            check ("A group of blocks alone also pastes into itself",
+                   clipsOnly && pastedClips
+                     && after2 == before2
+                     && sheet->countNotesInGroup (gid2) == 0
+                     && sheet->countSamplesInGroup (gid2) == 2,
                    juce::String (before2) + " -> " + juce::String (after2)
-                     + (clipCopy != nullptr ? utf8 ("，有副本") : utf8 ("，无副本")));
+                     + utf8 ("，组内 ")
+                     + juce::String ((int) sheet->countSamplesInGroup (gid2)) + utf8 (" 个采样"));
 
             //-- 4b. cutting that group takes its block with it ----------------
             // The block went into the clipboard as part of the group, so a cut

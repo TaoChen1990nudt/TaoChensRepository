@@ -344,20 +344,23 @@ public:
     int  getNoteClipboardSize() const noexcept { return (int) noteClip.size(); }
 
     /** Phase 56: paste a copied GROUP as one object — its notes AND its blocks,
-        inside one new group.
+        inside one group.
 
         Separate from pasteNotesFromClipboard because "the group" and "the notes
         in it" need different anchors and different member lists. The paste
         entry point routes here whenever the clipboard holds a group, so the
         two-pass result (a new group plus loose audio beside it) cannot come
-        back. */
+        back.
+
+        Phase 57: the group it lands in is the one that was copied, whenever
+        that group still exists — see pasteGroupFromClipboard's own note. */
     bool pasteGroupFromClipboard();
 
     /** Phase 56: the block-only group. Its members have no notes to read a
         start beat from, and its clipboard needs the same object treatment. */
     bool isSampleOnlyGroupClipboard() const noexcept { return groupClip.valid && noteClip.empty(); }
 
-    /** Phase 24: was the last copy a whole group (so a paste makes a second
+    /** Phase 24: was the last copy a whole group (so a paste lands back in that
         group) rather than a handful of notes? The self-test reads it; the edit
         menu's status line uses it to say which one happened. */
     bool isGroupClipboard() const noexcept { return groupClip.valid; }
@@ -1280,8 +1283,18 @@ private:
                    float alpha, bool selected, bool hovered, double progress);
 
     //-- Phase 16: group marks and the focused-synth spotlight ----------------
-    /** Behind the notes: a tinted band plus a bracket around every group. */
+    /** Behind the notes: the tinted band filling the group's box. */
     void drawGroupBands (juce::Graphics&);
+
+    /** Phase 57: the group's outline, drawn AFTER the notes and blocks.
+
+        It used to be drawn before them and pushed 3px outwards so the line
+        would not disappear under the members. That 3px is the gap the user can
+        see between a group's border and a clip's border, and "no gap" cannot
+        be faked by moving the line — it has to be drawn on the same edge, on
+        top. Same geometry as the band, so there is still one box. */
+    void drawGroupFrames (juce::Graphics&);
+
     /** Above the notes: the clickable name pill of every group. */
     void drawGroupLabels (juce::Graphics&);
     /** Above everything: a ring in the synth's colour around every note that
@@ -1610,6 +1623,16 @@ private:
     struct GroupClip
     {
         bool         valid       = false;
+
+        /** Phase 57: which group this clipboard came from.
+
+            A paste reuses it instead of manufacturing a second group, so the
+            id has to travel with the clipboard. It is a WISH, not a promise:
+            the paste re-checks it against the layer, because the source group
+            may have been cut away (or the paste may land on another sheet)
+            between the copy and the paste. */
+        int          sourceGroupId = -1;
+
         juce::String name;
         juce::Colour colour      { groupPalette::group1 };
         int          outputSlotId = -1;
