@@ -199,9 +199,15 @@ void AudioEngine::setPluginHost (PluginHost* host)
         host->setPlayConfig (playback.getSampleRate(), 512);
 }
 
+void AudioEngine::setTempoModel (TempoModel* tempoModelToUse)
+{
+    tempoModel = tempoModelToUse;
+    republish();
+}
+
 void AudioEngine::republish()
 {
-    playback.publishSchedule (stack, rack, bpm, PlaybackEngine::timelineBeats, mixer);
+    playback.publishSchedule (stack, rack, bpm, PlaybackEngine::timelineBeats, mixer, tempoModel);
 }
 
 //==============================================================================
@@ -294,8 +300,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         // Still playing out the tail of what the user just paused or stopped.
         // renderWindow does not touch the transport, so Stop can rewind to zero
         // immediately while the last few milliseconds ring out cleanly.
-        playback.renderWindow (fadeOutBeats.load (std::memory_order_relaxed)
-                                 * playback.getSecondsPerBeat(),
+        playback.renderWindow (playback.secondsAtBeat (fadeOutBeats.load (std::memory_order_relaxed)),
                                numSamples, output, nullptr);
     }
 

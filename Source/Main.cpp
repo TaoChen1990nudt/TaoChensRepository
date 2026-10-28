@@ -88,13 +88,25 @@ namespace
         // it lands on the word it is renaming.
         component.openDemoRename();
 
+        // P80: the tempo curve has no card and no row anywhere else, so the
+        // still is the only place the row itself can be checked.
+        component.openDemoTempoAutomation();
+
         pngFile.getParentDirectory().createDirectory();
+
+        // The snapshot REPLACES the file. `createOutputStream` left the previous
+        // image in place and appended the new one after it (a stale 18-image
+        // pile was what the eye was reading while the code was right), so the
+        // file is removed first: one run, one image.
+        pngFile.deleteFile();
 
         if (auto stream = pngFile.createOutputStream())
         {
             juce::PNGImageFormat png;
             png.writeImageToStream (component.createComponentSnapshot (component.getLocalBounds(), true), *stream);
         }
+
+
 
         // Phase 8: the console lives in its own desktop window now, which a
         // headless run cannot photograph. So the *panel* is rendered on its own

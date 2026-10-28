@@ -7,6 +7,7 @@
 #include "HardwareRack.h"
 #include "LayerModel.h"
 #include "MixerModel.h"
+#include "TempoModel.h"
 
 namespace atomic
 {
@@ -213,7 +214,8 @@ inline constexpr const char* fileExtension = ".atomic";
     tests) do not have to build them. */
 juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double bpm,
                         const MixerModel* mixer = nullptr,
-                        const AutomationModel* automation = nullptr);
+                        const AutomationModel* automation = nullptr,
+                        const TempoModel* tempo = nullptr);
 
 /** Parses a document produced by toXmlText(). Returns false with `error` set
     when the document is not a usable project; the targets are then untouched. */
@@ -222,20 +224,23 @@ bool fromXmlText (const juce::String& xmlText,
                   double& bpm, juce::String& error,
                   MixerModel* mixer = nullptr,
                   AutomationModel* automation = nullptr,
-                  PluginHost* plugins = nullptr);
+                  PluginHost* plugins = nullptr,
+                  TempoModel* tempo = nullptr);
 
 bool save (const juce::File& file,
            const LayerStack& stack, const RackModel& rack, double bpm,
            juce::String& error,
            const MixerModel* mixer = nullptr,
-           const AutomationModel* automation = nullptr);
+           const AutomationModel* automation = nullptr,
+           const TempoModel* tempo = nullptr);
 
 bool load (const juce::File& file,
            LayerStack& stack, RackModel& rack,
            double& bpm, juce::String& error,
            MixerModel* mixer = nullptr,
            AutomationModel* automation = nullptr,
-           PluginHost* plugins = nullptr);
+           PluginHost* plugins = nullptr,
+           TempoModel* tempo = nullptr);
 
 } // namespace project
 

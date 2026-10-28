@@ -14144,6 +14144,283 @@ juce::String MainComponent::runSelfTest()
                       : juce::String (utf8 ("块没了"))));
     }
 
+    //-- P80: 工程速度自动化 -----------------------------------------------
+    // 速度一旦会变，"一拍几秒"就不再是一个数：它是 1/tempo 在拍上的积分。
+    // 这一段要证三件事：积分对（用独立的中点法验算，不是把实现里的公式再抄
+    // 一遍）、播放真按它走、曲线能存回工程文件。
+    {
+        //-- A. 图本身：平坦与渐变 ----------------------------------------
+        const auto flatMap = TempoMap::flat (120.0);
+
+        check (utf8 ("平坦 120 BPM：8 拍正好 4 秒，4 秒正好 8 拍"),
+               std::abs (flatMap.secondsAtBeat (8.0) - 4.0) < 1.0e-12
+                 && std::abs (flatMap.beatAtSeconds (4.0) - 8.0) < 1.0e-12,
+               juce::String (flatMap.secondsAtBeat (8.0), 6) + utf8 (" s / ")
+                 + juce::String (flatMap.beatAtSeconds (4.0), 6) + utf8 (" 拍"));
+
+        TempoMap ramp;
+        ramp.setPoints ({ { 0.0, 120.0 }, { 16.0, 60.0 } });
+
+        // 中点数够多之后，中点法的误差远超 1e-6 看不出来；用它当"独立证人"
+        auto numericSeconds = [] (const TempoMap& map, double toBeat, int steps)
+        {
+            double sum = 0.0;
+            const double h = toBeat / (double) steps;
+
+            for (int i = 0; i < steps; ++i)
+                sum += 60.0 / map.bpmAtBeat (((double) i + 0.5) * h) * h;
+
+            return sum;
+        };
+
+        const double rampEnd = ramp.secondsAtBeat (16.0);
+
+        check (utf8 ("渐慢图的积分与数值积算一致（16 拍 120->60 约 11.09 秒）"),
+               std::abs (rampEnd - numericSeconds (ramp, 16.0, 200000)) < 1.0e-6
+                 && std::abs (rampEnd - 11.0903548889) < 1.0e-6,
+               juce::String (rampEnd, 6) + utf8 (" s（数值 ")
+                 + juce::String (numericSeconds (ramp, 16.0, 200000), 6) + utf8 ("）"));
+
+        // 中点 8 拍处 tempo 是 90：慢下来之后每一拍都比 0.5 秒长
+        check (utf8 ("渐慢到中途，8 拍已经比 4 秒长（4.603 秒）"),
+               std::abs (ramp.secondsAtBeat (8.0) - 4.6029131592) < 1.0e-6
+                 && ramp.secondsAtBeat (8.0) > 4.0,
+               juce::String (ramp.secondsAtBeat (8.0), 6) + utf8 (" s"));
+
+        // 往返：秒->拍->秒必须回到原处，否则音符起点会和播放头错开
+        double worstRoundTrip = 0.0;
+
+        for (double b : { 0.0, 3.7, 8.0, 12.5, 16.0, 24.0, 40.0 })
+            worstRoundTrip = juce::jmax (worstRoundTrip,
+                                         std::abs (ramp.beatAtSeconds (ramp.secondsAtBeat (b)) - b));
+
+        check (utf8 ("拍/秒两个方向互为反函数（含曲线两端之外的外推）"),
+               worstRoundTrip < 1.0e-9,
+               juce::String (worstRoundTrip, 12));
+
+        //-- B. 模型：0..1 的曲线怎么变成 BPM ------------------------------
+        TempoModel tm;
+
+        check (utf8 ("刚建好的速度模型：曲线平在 120，自动化是关的"),
+               ! tm.isAutomated()
+                 && tm.buildMap (120.0, 64.0).isFlat()
+                 && std::abs (tm.getAutomation().valueAtBeat (32.0) - 0.5f) < 1.0e-6f,
+               juce::String (tm.getAutomation().valueAtBeat (32.0), 3));
+
+        tm.setAutomated (true);
+
+        check (utf8 ("打开自动化但没画：速度还是 120（曲线上那个 0.5 就是 120）"),
+               tm.buildMap (120.0, 64.0).isFlat()
+                 && std::abs (tm.buildMap (120.0, 64.0).bpmAtBeat (0.0) - 120.0) < 1.0e-9,
+               juce::String (tm.buildMap (120.0, 64.0).bpmAtBeat (0.0), 3));
+
+        auto& lane80 = tm.getAutomation();
+        lane80.resetFlat (0.0f, 64.0);                 // {0, 0} .. {64, 0}
+        lane80.addPoint (8.0, 0.5f, 64.0);             // 插进中间，索引 1
+        lane80.movePoint (2, 64.0, 1.0f, 64.0);        // 尾端那个 -> 240（索引 2）
+
+        const auto rampMap = tm.buildMap (120.0, 64.0);
+
+        check (utf8 ("曲线 0/0.5/1 对应 60/120/240 BPM（v=0.5 就是工程默认）"),
+               std::abs (rampMap.bpmAtBeat (0.0) - 60.0) < 1.0e-9
+                 && std::abs (rampMap.bpmAtBeat (8.0) - 120.0) < 1.0e-9
+                 && std::abs (rampMap.bpmAtBeat (64.0) - 240.0) < 1.0e-9,
+               juce::String (rampMap.bpmAtBeat (0.0), 1) + " / "
+                 + juce::String (rampMap.bpmAtBeat (8.0), 1) + " / "
+                 + juce::String (rampMap.bpmAtBeat (64.0), 1));
+
+        //-- C. 发布：音符起点、走带位置、一秒走几拍 -----------------------
+        LayerStack t80;
+        RackModel  r80;
+        r80.addSynth();
+
+        t80.addLayer (utf8 ("层"), palette::layer1);
+        t80.getLayer (0)->addNote ({ 801, 60, 8.0, 1.0, 0.9f });
+
+        PlaybackEngine engine80;
+        engine80.setSampleRate (48000.0);
+        engine80.publishSchedule (t80, r80, 120.0, 0.0, nullptr, &tm);
+
+        {
+            auto schedule = engine80.getSchedule();
+            const double expected = rampMap.secondsAtBeat (8.0);
+
+            check (utf8 ("音符起奏秒数走速度图，不再乘一个常数"),
+                   schedule != nullptr && ! schedule->notes.empty()
+                     && std::abs (schedule->notes.front().startSeconds - expected) < 1.0e-9
+                     && std::abs (expected - 8.0 * 0.5) > 1.0,
+                   juce::String (schedule != nullptr && ! schedule->notes.empty()
+                                   ? schedule->notes.front().startSeconds : -1.0, 4)
+                     + utf8 (" s（平坦 120 会是 4.0）"));
+        }
+
+        engine80.setPositionBeats (8.0);
+
+        check (utf8 ("走带位置按图换算成秒（8 拍 = 图上的秒数）"),
+               std::abs (engine80.getPosition() - rampMap.secondsAtBeat (8.0)) < 1.0e-9,
+               juce::String (engine80.getPosition(), 4) + utf8 (" s"));
+
+        // 一秒音频走几拍：这条才是"音频真的变快了"，上面两条只是账算得对
+        auto beatsInOneSecond = [] (float curveValue)
+        {
+            TempoModel speed;
+            speed.getAutomation().resetFlat (curveValue, 64.0);
+            speed.setAutomated (true);
+
+            RackModel  rack81;
+            LayerStack stack81;
+            rack81.addSynth();
+            stack81.addLayer (utf8 ("层"), palette::layer1);
+
+            PlaybackEngine e;
+            e.setSampleRate (48000.0);
+            e.publishSchedule (stack81, rack81, 120.0, 0.0, nullptr, &speed);
+            e.setPositionBeats (0.0);
+
+            juce::AudioBuffer<float> oneSecond (2, 48000);
+            e.renderNextBlock (oneSecond, 48000);
+            return e.getPositionBeats();
+        };
+
+        // 渐快时"一秒走几拍"没有闭式解，只有"秒数对应的那一拍"：这一步量的
+        // 是走带推进（按段的积分）与图的积分是不是同一条曲线。
+        {
+            TempoModel ramp;
+            ramp.getAutomation().resetFlat (tempo::valueForBpm (60.0), 64.0);
+            ramp.getAutomation().addPoint (32.0, tempo::valueForBpm (240.0), 64.0);
+            ramp.getAutomation().movePoint (2, 64.0, tempo::valueForBpm (240.0), 64.0);
+            ramp.setAutomated (true);
+
+            RackModel  rackR;
+            LayerStack stackR;
+            rackR.addSynth();
+            stackR.addLayer (utf8 ("层"), palette::layer1);
+
+            PlaybackEngine e;
+            e.setSampleRate (48000.0);
+            e.publishSchedule (stackR, rackR, 120.0, 0.0, nullptr, &ramp);
+            e.setPositionBeats (0.0);
+
+            // 真按 512 的块推：整秒一块会把"段首速度"的误差放大 100 倍，
+            // 量的就成了欧拉步长而不是这条规则。
+            juce::AudioBuffer<float> block (2, 512);
+
+            for (int done = 0; done < 48000; done += 512)
+                e.renderNextBlock (block, juce::jmin (512, 48000 - done));
+
+            const double travelled = e.getPositionBeats();
+            const auto   map       = ramp.buildMap (120.0, 64.0);
+
+            // 一秒之后走了多少拍，没有简单公式；但"图上这一拍正是 1.0 秒"是
+            // 判据：走带推进出来的位置反算回去必须落回一秒。允许一点点误差，
+            // 因为推进是按段用段首速度线性推的（一拍内的二次项）。
+            check (utf8 ("渐快时走带推进与图的积分是同一条曲线（一秒 = 图上 1.0 秒）"),
+                   juce::isPositiveAndBelow ((int) travelled, 65)
+                     && std::abs (map.secondsAtBeat (travelled) - 1.0) < 0.004,
+                   juce::String (travelled, 4) + utf8 (" 拍 -> ")
+                     + juce::String (map.secondsAtBeat (travelled), 5) + utf8 (" s"));
+        }
+
+        check (utf8 ("一秒音频：240 BPM 走 4 拍，60 BPM 走 1 拍（曲线真的驱动了走带）"),
+               std::abs (beatsInOneSecond (1.0f) - 4.0) < 1.0e-6
+                 && std::abs (beatsInOneSecond (0.0f) - 1.0) < 1.0e-6,
+               juce::String (beatsInOneSecond (1.0f), 4) + " / "
+                 + juce::String (beatsInOneSecond (0.0f), 4));
+
+        //-- D. 入口：速度框右键加一行，加两次还是一条 ----------------------
+        MainComponent host;
+
+        host.showTempoAutomation();
+        host.showTempoAutomation();
+
+        check (utf8 ("速度自动化行加两次也只有一条（同一条曲线不重复开行）"),
+               host.hasTempoAutomationTrack()
+                 && std::count_if (host.getAutomationTracks().begin(),
+                                   host.getAutomationTracks().end(),
+                                   [] (const AutomationTrack& t)
+                                   { return t.owner == AutomationOwner::tempo; }) == 1,
+               juce::String (host.getAutomationTracks().size()) + utf8 (" 条轨道"));
+
+        // 窗口要真的能认出这一行：只有轨道列表里有它、而 resolve() 不认这个
+        // 所有者时，行会画成一条空线——截图上和"没有这一行"完全一样。
+        check (utf8 ("速度行在窗口里解析成“工程速度 / 速度”，不是一条空线"),
+               host.getAutomationWindowForTest().getRowNameForTest (0)
+                 == utf8 ("工程速度") + " / " + utf8 ("速度"),
+               host.getAutomationWindowForTest().getRowNameForTest (0));
+
+        //-- E. 工程文件：曲线存得住，老文件读回默认 -----------------------
+        {
+            LayerStack t82;
+            RackModel  r82;
+            t82.addLayer (utf8 ("层"), palette::layer1);
+
+            TempoModel saved;
+            saved.getAutomation().resetFlat (0.0f, 64.0);
+            saved.getAutomation().addPoint (16.0, 0.75f, 64.0);
+            saved.setAutomated (true);
+
+            const juce::String xml = project::toXmlText (t82, r82, 97.5, nullptr, nullptr, &saved);
+
+            LayerStack t83;
+            RackModel  r83;
+            TempoModel reloaded;
+            double bpm83 = 0.0;
+            juce::String error83;
+
+            const bool ok83 = project::fromXmlText (xml, t83, r83, bpm83, error83,
+                                                    nullptr, nullptr, nullptr, &reloaded);
+
+            check (utf8 ("速度曲线随工程存盘：开关和形状都回来了"),
+                   ok83
+                     && reloaded.isAutomated()
+                     && std::abs (reloaded.getAutomation().valueAtBeat (16.0) - 0.75f) < 1.0e-6f
+                     && std::abs (reloaded.getAutomation().valueAtBeat (0.0)) < 1.0e-6f
+                     && std::abs (bpm83 - 97.5) < 1.0e-6,
+                   error83.isNotEmpty() ? error83
+                                        : juce::String (reloaded.getAutomation().valueAtBeat (16.0), 3)
+                                            + utf8 (" / 手动 ") + juce::String (bpm83, 1));
+
+            // 老文件（v25 的写法：根本没有 <TempoAutomation>）读进一个已经开了
+            // 自动化的会话：必须是"回到默认"，而不是"上一个工程的速度图接着用"。
+            const juce::String oldXml = project::toXmlText (t82, r82, 120.0);
+
+            LayerStack t84;
+            RackModel  r84;
+            double bpm84 = 0.0;
+            juce::String error84;
+
+            const bool ok84 = project::fromXmlText (oldXml, t84, r84, bpm84, error84,
+                                                    nullptr, nullptr, nullptr, &reloaded);
+
+            check (utf8 ("老工程里没有速度自动化：读回来是默认的平坦 120，不是上一个工程的图"),
+                   ok84
+                     && ! reloaded.isAutomated()
+                     && reloaded.buildMap (120.0, 64.0).isFlat()
+                     && std::abs (reloaded.buildMap (120.0, 64.0).bpmAtBeat (32.0) - 120.0) < 1.0e-9,
+                   error84.isNotEmpty() ? error84
+                                        : juce::String (reloaded.buildMap (120.0, 64.0).bpmAtBeat (32.0), 2));
+        }
+
+        //-- F. 撤销：速度图是一个人改的一句话 ------------------------------
+        host.showTempoAutomation();
+        host.commitHistory();
+
+        const int track80 = host.getAutomationModel().findTrackId (AutomationOwner::tempo, 0, 0);
+        juce::ignoreUnused (track80);
+
+        host.getTempoModel().getAutomation().resetFlat (0.0f, 64.0);
+        host.getTempoModel().getAutomation().addPoint (32.0, 1.0f, 64.0);
+        host.getTempoModel().setAutomated (true);
+        host.commitHistory();
+        host.undo();
+
+        check (utf8 ("撤销把速度曲线和它的开关一起还回去"),
+               ! host.getTempoModel().isAutomated()
+                 && std::abs (host.getTempoModel().getAutomation().valueAtBeat (32.0) - 0.5f) < 1.0e-6f,
+               juce::String (host.getTempoModel().getAutomation().valueAtBeat (32.0), 3)
+                 + (host.getTempoModel().isAutomated() ? utf8 (" 还开着") : utf8 (" 关着")));
+    }
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

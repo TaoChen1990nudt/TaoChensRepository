@@ -29,6 +29,16 @@ public:
 
     std::function<void (double)> onBpmChanged;
 
+    /** Phase 80: the right-click menu's second verb. The field does not own the
+        automation (it does not even know a curve exists), it only asks the host
+        to put the tempo row where the user can see it. */
+    std::function<void()> onShowTempoAutomation;
+
+    /** Whether the host currently has a tempo row in the automation window. Used
+        only to tick the menu item; the field never infers it. */
+    void setTempoAutomationShown (bool shown) noexcept { tempoAutomationShown = shown; }
+    bool isTempoAutomationShown() const noexcept       { return tempoAutomationShown; }
+
     static constexpr double minBpm = 30.0;
     static constexpr double maxBpm = 300.0;
 
@@ -72,6 +82,11 @@ private:
     bool   dragMoved    = false;
     bool   editing      = false;
 
+    /** Phase 80: the id the extra menu item reports back. Well clear of 9001
+        (复位) and of the small numbers a sub-menu owns. */
+    static constexpr int tempoAutomationMenuId = 9101;
+
+    bool tempoAutomationShown = false;
     bool hover       = false;
     bool hoverUp     = false;
     bool hoverDown   = false;

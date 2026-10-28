@@ -423,6 +423,10 @@ MainComponent::MainComponent()
     bpmField.setBpm (audio.getBpm(), false);
     bpmField.onBpmChanged = [this] (double newBpm) { setBpm (newBpm); };
 
+    // Phase 80: the tempo curve's only entry point is the field the user already
+    // points at. The field asks; the host does the adding.
+    bpmField.onShowTempoAutomation = [this] { showTempoAutomation(); };
+
     // The inspector floats above everything and starts hidden.
     addChildComponent (envelopePanel);
     addChildComponent (sampleEnvelopePanel);      // Phase 78
@@ -470,6 +474,10 @@ MainComponent::MainComponent()
     // The mixer owns the channel inserts and the master strip, so the engine
     // needs it before the first schedule is published.
     audio.setMixerModel (&mixer);
+
+    // Phase 80: the tempo curve reaches the transport through the engine, the
+    // same way the mixer does. Attached before the first publish below.
+    audio.setTempoModel (&tempo);
 
     // Phase 9: the engine reaches plugin instances through this host. It is a
     // plain pointer, not an owner — the host is a member above it.
@@ -1019,7 +1027,7 @@ MainComponent::~MainComponent()
 //==============================================================================
 juce::String MainComponent::captureState() const
 {
-    return project::toXmlText (stack, rack, audio.getBpm(), &mixer, &automation);
+    return project::toXmlText (stack, rack, audio.getBpm(), &mixer, &automation, &tempo);
 }
 
 void MainComponent::modelChanged()
@@ -1181,7 +1189,7 @@ void MainComponent::restoreState (const juce::String& xml)
     double bpmValue = audio.getBpm();
     juce::String error;
 
-    if (! project::fromXmlText (xml, stack, rack, bpmValue, error, &mixer, &automation, &plugins))
+    if (! project::fromXmlText (xml, stack, rack, bpmValue, error, &mixer, &automation, &plugins, &tempo))
         return;
 
     setBpm (bpmValue);
@@ -3777,7 +3785,15 @@ void MainComponent::mixerChanged()
     reconcilePlugins();
     modelChanged();
 }
-void MainComponent::automationTracksChanged()   { modelChanged(); }
+void MainComponent::automationTracksChanged()
+{
+    // Phase 80: the BPM field's menu ticks on whether a tempo row exists, and
+    // the row can also be DELETED — from the window, not from here. So the tick
+    // is refreshed wherever the track list changes, never inferred by the field.
+    bpmField.setTempoAutomationShown (hasTempoAutomationTrack());
+
+    modelChanged();
+}
 
 //==============================================================================
 bool MainComponent::startAudio()
@@ -3885,6 +3901,30 @@ void MainComponent::setBpm (double newBpm)
     pianoRoll.setBpm (audio.getBpm());
 
     repaint (topBarBounds);
+}
+
+bool MainComponent::hasTempoAutomationTrack() const
+{
+    return automation.contains (AutomationOwner::tempo, 0, 0);
+}
+
+void MainComponent::showTempoAutomation()
+{
+    // ownerId and target are both meaningless for this owner (there is one
+    // curve), and addTrack's dedupe means asking twice selects the row that is
+    // already there instead of adding a second one that edits the same curve.
+    const int trackId = automation.addTrack (AutomationOwner::tempo, 0, 0);
+
+    if (trackId <= 0)
+        return;                       // the track list is full
+
+    // A row appended below the fold is the same as no row at all — the same
+    // reason the rack scrolls to the curve it just created.
+    automationWindow.revealTrack (trackId);
+    automationWindow.repaint();
+
+    // No need to tick the menu item here: addTrack notified, and
+    // automationTracksChanged() is where that tick comes from.
 }
 
 void MainComponent::timerCallback()
@@ -4144,7 +4184,7 @@ void MainComponent::buildDemoContent()
     // Publish explicitly instead of relying on the last notify to have covered
     // everything. Building the demo mutates notes without notifying, so this is
     // the one guaranteed "the engine now knows what exists" point.
-    audio.getPlayback().publishSchedule (stack, rack, audio.getBpm(), 0.0, &mixer);
+    audio.getPlayback().publishSchedule (stack, rack, audio.getBpm(), 0.0, &mixer, &tempo);
 }
 
 //==============================================================================
@@ -4293,7 +4333,7 @@ void MainComponent::applyDemoMixState()
 //==============================================================================
 void MainComponent::republish()
 {
-    audio.getPlayback().publishSchedule (stack, rack, audio.getBpm(), 0.0, &mixer);
+    audio.getPlayback().publishSchedule (stack, rack, audio.getBpm(), 0.0, &mixer, &tempo);
     automationWindow.repaint();
     mixerPanel.repaint();
 }
@@ -6237,7 +6277,7 @@ juce::File MainComponent::getProjectDirectory()
 
 bool MainComponent::saveProjectToFile (const juce::File& file, juce::String& error)
 {
-    if (! project::save (file, stack, rack, audio.getBpm(), error, &mixer, &automation))
+    if (! project::save (file, stack, rack, audio.getBpm(), error, &mixer, &automation, &tempo))
         return false;
 
     currentProject = file;
@@ -6269,7 +6309,7 @@ bool MainComponent::loadProjectFromFile (const juce::File& file, juce::String& e
 
     {
         const juce::ScopedValueSetter<bool> noSweep (suspendSamplerPrune, true);
-        loaded = project::load (file, stack, rack, newBpm, error, &mixer, &automation, &plugins);
+        loaded = project::load (file, stack, rack, newBpm, error, &mixer, &automation, &plugins, &tempo);
     }
 
     if (! loaded)
@@ -6363,7 +6403,7 @@ double MainComponent::getContentSeconds() const
     if (schedule == nullptr)
         return 0.0;
 
-    return juce::jmax (0.0, schedule->contentBeats) * schedule->secondsPerBeat;
+    return schedule->tempo.secondsAtBeat (juce::jmax (0.0, schedule->contentBeats));
 }
 
 //==============================================================================
@@ -7127,6 +7167,42 @@ void MainComponent::openSampleEnvelopePanel (int layerIndex, int sampleId)
 
     sampleEnvelopePanel.setBounds (x, y, w, h);
     sampleEnvelopePanel.toFront (true);
+}
+
+void MainComponent::openDemoTempoAutomation()
+{
+    showTempoAutomation();
+
+    // To the TOP of the list: a project-level row appended as the seventh one
+    // sits below the fold in a 312 px pane, and the screenshot has to show the
+    // row, not the fact that it exists.
+    const int tempoTrackId = automation.findTrackId (AutomationOwner::tempo, 0, 0);
+
+    if (tempoTrackId > 0)
+    {
+        automation.moveTrack (tempoTrackId, -automation.getNumTracks());
+
+        // The list was scrolled to the bottom to reveal the row when it was
+        // appended, and a reorder does not move the scroll with it — without
+        // this second reveal the row it just moved would be the one cut off.
+        automationWindow.revealTrack (tempoTrackId);
+    }
+
+    constexpr double len = timeline::defaultLengthBeats;
+    auto& lane = tempo.getAutomation();
+
+    // 90 BPM to start, 120 a little later, 132 at the crest, easing back to 96 —
+    // a shape with a middle, a crest and a tail, so the row shows curvature
+    // rather than one straight line. The beats sit inside the first two bars on
+    // purpose: the lane scrolls with the piano roll, whose snapshot is zoomed to
+    // roughly nine beats, and a crest at beat 32 is a crest nobody can see.
+    lane.resetFlat (tempo::valueForBpm (90.0), len);                 // {0,90} .. {64,90}
+    lane.addPoint (2.0, tempo::valueForBpm (120.0), len);            // 索引 1
+    lane.addPoint (4.0, tempo::valueForBpm (132.0), len);            // 索引 2
+    lane.movePoint (3, len, tempo::valueForBpm (96.0), len);         // 尾巴（索引 3）
+
+    tempo.setAutomated (true);
+    republish();
 }
 
 void MainComponent::openDemoRename()

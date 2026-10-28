@@ -334,32 +334,65 @@ void PlaybackEngine::setPositionBeats (double beats)
 double PlaybackEngine::getSecondsPerBeat() const
 {
     if (auto current = getSchedule())
-        return current->secondsPerBeat;
+        return current->tempo.secondsPerBeatAt (getPositionBeats());
 
     return 60.0 / defaultBpm;
 }
 
+double PlaybackEngine::secondsAtBeat (double beat) const
+{
+    if (auto current = getSchedule())
+        return current->tempo.secondsAtBeat (beat);
+
+    return beat * (60.0 / defaultBpm);
+}
+
+double PlaybackEngine::beatAtSeconds (double seconds) const
+{
+    if (auto current = getSchedule())
+        return current->tempo.beatAtSeconds (seconds);
+
+    return seconds / (60.0 / defaultBpm);
+}
+
 double PlaybackEngine::getPosition() const
 {
-    return getPositionBeats() * getSecondsPerBeat();
+    // The playhead is a BEAT; seconds are the map's reading of it. During an
+    // accelerando this is not `beats * anything` — it is the integral.
+    if (auto current = getSchedule())
+        return current->tempo.secondsAtBeat (getPositionBeats());
+
+    return getPositionBeats() * (60.0 / defaultBpm);
 }
 
 void PlaybackEngine::setPosition (double seconds)
 {
-    setPositionBeats (seconds / juce::jmax (1.0e-6, getSecondsPerBeat()));
+    if (auto current = getSchedule())
+    {
+        setPositionBeats (current->tempo.beatAtSeconds (seconds));
+        return;
+    }
+
+    setPositionBeats (seconds / (60.0 / defaultBpm));
 }
 
 //==============================================================================
 void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& rack,
                                       double bpm, double requestedLengthBeats,
-                                      const MixerModel* mixer)
+                                      const MixerModel* mixer, const TempoModel* tempoModel)
 {
     auto fresh = std::make_shared<PublishedSchedule>();
 
-    const double tempo          = juce::jlimit (10.0, 400.0, bpm);
-    const double secondsPerBeat = 60.0 / tempo;
+    // The tempo map is built FIRST, on this thread, so the audio thread only
+    // ever evaluates it. Every beat-stamped number below goes through it, which
+    // is the whole reason the schedule carries one instead of a scalar.
+    //
+    // `bpm` stays the manual value: it is what a project without tempo
+    // automation plays at, and what the map says when the lane is off.
+    fresh->tempo = tempoModel != nullptr ? tempoModel->buildMap (bpm, requestedLengthBeats)
+                                         : TempoMap::flat (bpm);
 
-    fresh->secondsPerBeat = secondsPerBeat;
+    const TempoMap& map = fresh->tempo;
 
     //-- Solo is resolved ONCE, here ------------------------------------------
     // The audio thread gets booleans, not flags. Two independent solo groups:
@@ -643,9 +676,9 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             scheduled.pitch        = note.pitch;
             scheduled.layerIndex   = layerIndex;
             scheduled.noteId       = note.id;
-            scheduled.startSeconds = note.startBeat * secondsPerBeat;
+            scheduled.startSeconds = map.secondsAtBeat (note.startBeat);
             scheduled.endSeconds   = juce::jmax (scheduled.startSeconds + 0.01,
-                                                 note.endBeat() * secondsPerBeat);
+                                                 map.secondsAtBeat (note.endBeat()));
             scheduled.envelope     = note.envelope;      // snapshot by value
             scheduled.overridden   = route.overridden;
             scheduled.modTarget    = note.modTarget;
@@ -727,9 +760,17 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             scheduled.slotId       = res.slotId;
             scheduled.layerIndex   = layerIndex;
             scheduled.clipId       = clip.id;
-            scheduled.startSeconds = clip.startBeat * secondsPerBeat;
+            scheduled.startSeconds = map.secondsAtBeat (clip.startBeat);
             scheduled.endSeconds   = juce::jmax (scheduled.startSeconds + 0.01,
-                                                 clip.endBeat() * secondsPerBeat);
+                                                 map.secondsAtBeat (clip.endBeat()));
+
+            // How long this block lasts on the wall clock. Not `lengthBeats *
+            // one number`: a block that spans an accelerando is shorter than
+            // its beats suggest, and the stretch ratio below is measured
+            // against real seconds.
+            const double blockSeconds = juce::jmax (1.0e-4,
+                                                    map.secondsBetween (clip.startBeat,
+                                                                        clip.endBeat()));
             scheduled.gain         = gain::fromDb (clip.gainDb);
             scheduled.audio        = res.audio;
 
@@ -746,9 +787,6 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             // interpolate and is left as unity rather than half-published.
             if (clip.volumeCurve.isEnabled())
             {
-                const double blockSeconds = juce::jmax (1.0e-6,
-                                                        clip.lengthBeats * secondsPerBeat);
-
                 for (const auto& p : clip.volumeCurve.getPoints())
                     scheduled.gainCurve.push_back ({ (double) p.time * blockSeconds, p.value });
 
@@ -761,9 +799,6 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             // curve, and neither curve has to know what a beat is.
             if (clip.panCurve.isEnabled())
             {
-                const double blockSeconds = juce::jmax (1.0e-6,
-                                                        clip.lengthBeats * secondsPerBeat);
-
                 for (const auto& p : clip.panCurve.getPoints())
                     scheduled.panCurve.push_back ({ (double) p.time * blockSeconds,
                                                     juce::jlimit (0.0f, 1.0f, p.value) });
@@ -782,7 +817,7 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             // head trim moves the window without changing how much audio is
             // squeezed into it, and a ratio that moved with it would detune the
             // block every time its left edge was nudged.
-            const double windowSeconds = juce::jmax (1.0e-4, clip.lengthBeats * secondsPerBeat);
+            const double windowSeconds = blockSeconds;
             const double naturalSeconds = juce::jmax (0.0, res.audio->lengthSeconds()
                                                             - scheduled.sourceOffsetSeconds);
 
@@ -935,10 +970,13 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
         mixScratch.setSize (2, numSamples, false, false, false);
 
     const int    numChannels = output.getNumChannels();
-    const double spb         = juce::jmax (1.0e-4, current.secondsPerBeat);
     const double blockEnd    = startSeconds + (double) numSamples / sampleRate;
-    const double startBeat   = startSeconds / spb;
-    const double endBeat     = blockEnd / spb;
+    // Seconds in, beats out: the renderer is driven in seconds (that is what an
+    // audio device hands out) while the curves are stamped in beats. With a
+    // tempo map these two are no longer a multiplication apart, and asking the
+    // map is the only way to keep a note's onset sample-exact after a ritardando.
+    const double startBeat   = current.tempo.beatAtSeconds (startSeconds);
+    const double endBeat     = current.tempo.beatAtSeconds (blockEnd);
 
     //-- Hosted plugins: one try-lock for the whole block ---------------------
     // Held across every plugin call so an instance cannot be destroyed between
@@ -1575,7 +1613,7 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
     // Phase 18: the fader value is the START of the block and the curve gives
     // the END of it, so the block is ramped instead of stepped. A 1024-sample
     // step on a moving master fader is audible as zipper noise on a fade.
-    const double masterEndBeat = startBeat + (double) numSamples / sampleRate / spb;
+    const double masterEndBeat = endBeat;
 
     // Phase 43: the master's mute lane is a GATE on the same fade, read at both
     // ends of the block like the level curve above — so switching it off mid
@@ -1665,9 +1703,8 @@ void PlaybackEngine::renderHostedInstruments (const PublishedSchedule& current, 
     if (pluginHost == nullptr || numSamples <= 0)
         return;
 
-    const double spb       = juce::jmax (1.0e-4, current.secondsPerBeat);
-    const double startBeat = startSeconds / spb;
-    const double endBeat   = (startSeconds + (double) numSamples / sampleRate) / spb;
+    const double startBeat = current.tempo.beatAtSeconds (startSeconds);
+    const double endBeat   = current.tempo.beatAtSeconds (startSeconds + (double) numSamples / sampleRate);
 
     // Never hand a plugin more samples than its prepared scratch can hold.
     const int chunkMax = juce::jmax (1, juce::jmin (pluginHost->getRenderBlockSize(),
@@ -1781,7 +1818,7 @@ void PlaybackEngine::renderHostedInstruments (const PublishedSchedule& current, 
                         for (const auto& mix : current.groups)
                             if (mix.groupId == note.groupId && mix.levelAutomated)
                                 velocity *= automationValueAt (mix.levelPoints,
-                                                               note.startSeconds / current.secondsPerBeat);
+                                                               current.tempo.beatAtSeconds (note.startSeconds));
 
                     pluginMidi.addEvent (juce::MidiMessage::noteOn (1, note.pitch,
                                                                     juce::jlimit (0.0f, 1.0f, velocity)),
@@ -1822,8 +1859,8 @@ void PlaybackEngine::renderHostedInstruments (const PublishedSchedule& current, 
             // before it is processed, so the parameter and the notes it shapes
             // belong to the same chunk.
             applyHostedParamAutomation (*plugin, current, slot.pluginId,
-                                        (startSeconds + (double) chunkStart / sampleRate) / spb,
-                                        (startSeconds + (double) (chunkStart + chunkLen) / sampleRate) / spb);
+                                        current.tempo.beatAtSeconds (startSeconds + (double) chunkStart / sampleRate),
+                                        current.tempo.beatAtSeconds (startSeconds + (double) (chunkStart + chunkLen) / sampleRate));
 
             juce::AudioBuffer<float> view (pluginBuffer.getArrayOfWritePointers(),
                                            pluginChannels, 0, chunkLen);
@@ -2049,8 +2086,7 @@ void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numS
 
     output.clear();
 
-    const double spb  = juce::jmax (1.0e-4, current->secondsPerBeat);
-    const double beatsPerSample = 1.0 / (sampleRate * spb);
+    const TempoMap& map = current->tempo;
     const double length = juce::jmax (1.0, current->lengthBeats);
 
     double posBeats = positionBeats.load (std::memory_order_relaxed);
@@ -2061,7 +2097,9 @@ void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numS
     // Published before rendering: the UI extrapolates from this pair, so it
     // must not point at a block that has not been produced yet.
     blockStartBeats.store (posBeats, std::memory_order_relaxed);
-    blockBeats.store ((double) numSamples * beatsPerSample, std::memory_order_relaxed);
+    blockBeats.store ((double) numSamples / (sampleRate
+                                               * juce::jmax (1.0e-4, map.secondsPerBeatAt (posBeats))),
+                      std::memory_order_relaxed);
     blockStartTimeMs.store (juce::Time::getMillisecondCounterHiRes(), std::memory_order_relaxed);
 
     // Phase 70: reuse the one member instead of building a fresh set of vectors
@@ -2075,6 +2113,13 @@ void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numS
 
     while (remaining > 0)
     {
+        // Phase 80: the tempo is re-read every segment, not once per block. An
+        // automated tempo changes while the block is being rendered, and a
+        // beatsPerSample taken at the block's start would make the playhead
+        // crawl through an accelerando at the previous bar's speed.
+        const double beatsPerSample = 1.0 / (sampleRate
+                                              * juce::jmax (1.0e-4, map.secondsPerBeatAt (posBeats)));
+
         // How many of the remaining samples fall before the loop point. A block
         // that straddles the end of the timeline is split rather than truncated:
         // otherwise every lap would swallow up to one buffer of audio.
@@ -2089,7 +2134,7 @@ void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numS
         juce::AudioBuffer<float> slice (output.getArrayOfWritePointers(),
                                         output.getNumChannels(), offset, segment);
 
-        renderInto (*current, posBeats * spb, segment, slice, &stats);
+        renderInto (*current, map.secondsAtBeat (posBeats), segment, slice, &stats);
 
         offset    += segment;
         remaining -= segment;

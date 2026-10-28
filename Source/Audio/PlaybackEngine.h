@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "Model/AutomationLane.h"
+#include "Model/TempoModel.h"
 #include "Model/HardwareRack.h"
 #include "Model/LayerModel.h"
 #include "Model/MixerModel.h"
@@ -465,13 +466,20 @@ struct PublishedSchedule
         stop at the content: a 63-beat song should not bounce a silent 64th. */
     double contentBeats = 0.0;
 
-    /** Wall-clock length of one beat *for this schedule*. Everything that
-        converts between beats and seconds uses this one number, so a tempo
-        change can never leave the playhead pointing at a different moment
-        than the notes it is supposed to be crossing. */
-    double secondsPerBeat = 0.5;
+    /** Phase 80: beat <-> second conversion FOR THIS SCHEDULE.
 
-    double lengthSeconds() const noexcept { return lengthBeats * secondsPerBeat; }
+        It used to be one `double secondsPerBeat`, which is exactly right until
+        the tempo moves — and then it is the source of every wrong answer at
+        once: note starts, clip lengths, the playhead, the loop point. A map
+        replaces it and keeps the same promise the single number made ("one
+        authority for beat-to-second"), now for a tempo that changes.
+
+        A project without tempo automation still gets a flat map, so the
+        arithmetic degenerates to the old multiplication.
+    */
+    TempoMap tempo;
+
+    double lengthSeconds() const noexcept { return tempo.secondsAtBeat (lengthBeats); }
 
     /** Master strip, frozen. `gain` already folds in the master mute. */
     std::array<fx::Settings, fx::ChainState::maxSlots> masterInserts;
@@ -606,7 +614,8 @@ public:
         shorter than the project grid". */
     void publishSchedule (const LayerStack& stack, const RackModel& rack,
                           double bpm, double requestedLengthBeats = 0.0,
-                          const MixerModel* mixer = nullptr);
+                          const MixerModel* mixer = nullptr,
+                          const TempoModel* tempoModel = nullptr);
 
     std::shared_ptr<const PublishedSchedule> getSchedule() const;
 
@@ -642,11 +651,19 @@ public:
     void   setPositionBeats (double beats);
     double getPositionBeats() const noexcept { return positionBeats.load (std::memory_order_relaxed); }
 
-    /** Seconds are always derived from the current tempo, never stored. */
+    /** Seconds are always derived from the current tempo map, never stored. */
     double getPosition() const;
     void   setPosition (double seconds);
 
+    /** Seconds per beat AT THE PLAYHEAD. Ask it twice during an accelerando and
+        you get two different answers — that is the point of Phase 80. */
     double getSecondsPerBeat() const;
+
+    /** Beat <-> second through the published map, for callers that need to place
+        some OTHER beat (a tail, a marker, an export end) on the wall clock.
+        Falls back to the default tempo before the first schedule exists. */
+    double secondsAtBeat (double beat) const;
+    double beatAtSeconds (double seconds) const;
     double getLengthBeats() const noexcept   { return lengthBeats.load (std::memory_order_relaxed); }
     double getLengthSeconds() const noexcept { return lengthSeconds.load (std::memory_order_relaxed); }
 

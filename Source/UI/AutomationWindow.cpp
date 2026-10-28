@@ -35,9 +35,10 @@ namespace
 //==============================================================================
 AutomationWindow::AutomationWindow (LayerStack& layerStack, RackModel& rackToUse,
                                     AutomationModel& automationModelToUse,
-                                    MixerModel& mixerModelToUse)
+                                    MixerModel& mixerModelToUse,
+                                    TempoModel& tempoModelToUse)
     : stack (layerStack), rack (rackToUse), automation (automationModelToUse),
-      mixer (mixerModelToUse)
+      mixer (mixerModelToUse), tempo (tempoModelToUse)
 {
     stack.addListener (this);
     rack.addListener (this);
@@ -70,6 +71,22 @@ AutomationWindow::Resolved AutomationWindow::resolve (const AutomationTrack& tra
         resolved.parameter = target == 1 ? utf8 ("主声相")
                            : target == 2 ? utf8 ("主静音")
                                          : utf8 ("主音量");
+    }
+    else if (track.owner == AutomationOwner::tempo)
+    {
+        // One project, one tempo curve, so no lookup and no target: `ownerId`
+        // and `target` are both meaningless here and are ignored rather than
+        // validated, exactly like the master's `ownerId`.
+        resolved.lane      = &tempo.getAutomation();
+        resolved.name      = utf8 ("工程速度");
+        // Not a layer's or group's identity colour on purpose: a tempo row is
+        // not a thing in the stack, and borrowing violet would make it read as
+        // one more layer at a glance.
+        resolved.colour    = theme::accent;
+        // Short on purpose: the list column is 74 design units wide and
+        // "速度 60–240 BPM" gets clipped mid-number there. The range is drawn on
+        // the canvas instead (drawTrackRow), where there is room for it.
+        resolved.parameter = utf8 ("速度");
     }
     else if (track.owner == AutomationOwner::layer)
     {
@@ -343,6 +360,8 @@ void AutomationWindow::revealTrack (int trackId)
 //==============================================================================
 void AutomationWindow::automationTracksChanged()
 {
+    std::cout << "TRACKS-CHANGED win=" << (void*) this << " model=" << (void*) &automation
+              << " tracks=" << automation.getNumTracks() << std::endl;
     clampScroll();
     repaint();
 }
@@ -734,6 +753,22 @@ void AutomationWindow::drawTrackRow (juce::Graphics& g, int index,
     // Mid line, so "0.5" has a reference.
     g.setColour (juce::Colours::white.withAlpha (0.05f));
     g.drawHorizontalLine ((int) row.getCentreY(), row.getX(), row.getRight());
+
+    // Phase 80: a tempo lane's vertical axis is BPM, not 0..1, and nothing else
+    // on screen says so. The scale goes on the canvas because the list column is
+    // too narrow to hold it (it clipped "速度 60–240 BPM" to "速度 60–24").
+    if (track.owner == AutomationOwner::tempo)
+    {
+        g.setColour (juce::Colours::white.withAlpha (0.32f));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
+        // Clamped to the WINDOW's right edge, not the row's: the row spans the
+        // whole timeline (64 beats), most of which is scrolled out of view, so a
+        // right-aligned label on the row lands off-screen and gets clipped.
+        g.drawText (utf8 ("60 / 120 / 240 BPM"),
+                    row.withTrimmedTop (ui::px (2))
+                       .withRight ((float) getWidth() - (float) ui::px (8)),
+                    juce::Justification::topRight, false);
+    }
 
     if (resolved.lane == nullptr || resolved.lane->getPoints().empty())
         return;

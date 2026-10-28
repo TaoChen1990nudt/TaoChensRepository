@@ -323,7 +323,8 @@ namespace
 
 //==============================================================================
 juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double bpm,
-                        const MixerModel* mixer, const AutomationModel* automation)
+                        const MixerModel* mixer, const AutomationModel* automation,
+                        const TempoModel* tempo)
 {
     juce::XmlElement root ("AtomicDAW");
     root.setAttribute ("version", formatVersion);
@@ -477,6 +478,26 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
         writeLane (*masterAutoXml, mixer->automationFor (2), "mute", false);
     }
 
+    //-- Tempo automation (Phase 80) ----------------------------------------
+    // A sibling of the track list, NOT a child of `<Mixer>`: tempo is not a
+    // signal path, so "reset the mixer" (and anything else that rewrites that
+    // element) must not take the tempo map with it.
+    //
+    // `enabled` is written separately from the points, like every other lane,
+    // so "automation off, curve kept" survives a save.
+    if (tempo != nullptr)
+    {
+        auto* tempoXml = root.createNewChildElement ("TempoAutomation");
+        tempoXml->setAttribute ("enabled", (int) tempo->getAutomation().isEnabled());
+
+        for (const auto& point : tempo->getAutomation().getPoints())
+        {
+            auto* p = tempoXml->createNewChildElement ("Point");
+            p->setAttribute ("beat", number (point.beat, 8));
+            p->setAttribute ("value", number (point.value));
+        }
+    }
+
     //-- Automation window ---------------------------------------------------
     if (automation != nullptr)
     {
@@ -489,7 +510,8 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
             trackXml->setAttribute ("owner", track.owner == AutomationOwner::layer ? "layer"
                                              : track.owner == AutomationOwner::group ? "group"
                                              : track.owner == AutomationOwner::master ? "master"
-                                                                                      : "slot");
+                                             : track.owner == AutomationOwner::tempo ? "tempo"
+                                                                                     : "slot");
             trackXml->setAttribute ("ownerId", track.ownerId);
             trackXml->setAttribute ("target", track.target);
         }
@@ -736,7 +758,8 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
 bool fromXmlText (const juce::String& xmlText,
                   LayerStack& stack, RackModel& rack,
                   double& bpm, juce::String& error,
-                  MixerModel* mixer, AutomationModel* automation, PluginHost* plugins)
+                  MixerModel* mixer, AutomationModel* automation, PluginHost* plugins,
+                  TempoModel* tempo)
 {
     error.clear();
 
@@ -790,6 +813,14 @@ bool fromXmlText (const juce::String& xmlText,
     // points, which are staged and applied at commit time like everything else.
     AutomationLane scratchLane;
     std::vector<AutomationTrack> parsedTracks;
+
+    // Phase 80: the tempo lane, staged with everything else. `haveTempo` says
+    // whether the file said anything at all — a v25 file does not, and "the file
+    // is silent" must mean "back to the default curve", not "keep whatever the
+    // previously open project had".
+    std::vector<AutomationPoint> parsedTempoPoints;
+    bool parsedTempoOn  = false;
+    bool haveTempo      = false;
 
     if (auto* rackXml = root->getChildByName ("Rack"))
     {
@@ -1208,15 +1239,33 @@ bool fromXmlText (const juce::String& xmlText,
             track.owner   = ownerText == "slot"  ? AutomationOwner::slot
                           : ownerText == "group" ? AutomationOwner::group
                           : ownerText == "master" ? AutomationOwner::master
+                          : ownerText == "tempo" ? AutomationOwner::tempo
                                                  : AutomationOwner::layer;
 
             track.ownerId = child->getIntAttribute ("ownerId", 0);
             track.target  = child->getIntAttribute ("target", 0);
 
-            // Every owner has a positive id except the master bus, which is
-            // singular and therefore always id 0.
-            if (track.owner == AutomationOwner::master || track.ownerId > 0)
+            // Every owner has a positive id except the two that are singular —
+            // the master bus and the project tempo — which are always id 0.
+            if (track.owner == AutomationOwner::master
+                || track.owner == AutomationOwner::tempo
+                || track.ownerId > 0)
                 parsedTracks.push_back (track);
+        }
+    }
+
+    if (auto* tempoXml = root->getChildByName ("TempoAutomation"))
+    {
+        haveTempo = true;
+        parsedTempoOn = tempoXml->getBoolAttribute ("enabled", false);
+
+        for (auto* child = tempoXml->getFirstChildElement(); child != nullptr; child = child->getNextElement())
+        {
+            if (! child->hasTagName ("Point"))
+                continue;
+
+            parsedTempoPoints.push_back ({ child->getDoubleAttribute ("beat", 0.0),
+                                           (float) child->getDoubleAttribute ("value", 0.5) });
         }
     }
 
@@ -1271,13 +1320,30 @@ bool fromXmlText (const juce::String& xmlText,
     if (automation != nullptr)
         automation->restoreTracks (std::move (parsedTracks));
 
+    if (tempo != nullptr)
+    {
+        // A file with no `<TempoAutomation>` is a v25 project: reset rather than
+        // keep the previous session's curve, so opening an old song cannot leave
+        // a tempo map from a different song driving the transport.
+        if (haveTempo)
+        {
+            tempo->getAutomation().loadPoints (std::move (parsedTempoPoints));
+            tempo->getAutomation().setEnabled (parsedTempoOn);
+        }
+        else
+        {
+            tempo->resetToDefault (timeline::defaultLengthBeats);
+        }
+    }
+
     return true;
 }
 
 //==============================================================================
 bool save (const juce::File& file,
            const LayerStack& stack, const RackModel& rack, double bpm,
-           juce::String& error, const MixerModel* mixer, const AutomationModel* automation)
+           juce::String& error, const MixerModel* mixer, const AutomationModel* automation,
+           const TempoModel* tempo)
 {
     error.clear();
 
@@ -1285,7 +1351,7 @@ bool save (const juce::File& file,
 
     // replaceWithText with asUnicode = false writes UTF-8 without a BOM, which
     // is exactly what the XML header in the document declares.
-    if (! file.replaceWithText (toXmlText (stack, rack, bpm, mixer, automation)))
+    if (! file.replaceWithText (toXmlText (stack, rack, bpm, mixer, automation, tempo)))
     {
         error = juce::String::fromUTF8 (u8"无法写入 ") + file.getFullPathName();
         return false;
@@ -1297,7 +1363,8 @@ bool save (const juce::File& file,
 bool load (const juce::File& file,
            LayerStack& stack, RackModel& rack,
            double& bpm, juce::String& error,
-           MixerModel* mixer, AutomationModel* automation, PluginHost* plugins)
+           MixerModel* mixer, AutomationModel* automation, PluginHost* plugins,
+           TempoModel* tempo)
 {
     error.clear();
 
@@ -1308,7 +1375,7 @@ bool load (const juce::File& file,
     }
 
     return fromXmlText (file.loadFileAsString(), stack, rack, bpm, error,
-                        mixer, automation, plugins);
+                        mixer, automation, plugins, tempo);
 }
 
 } // namespace project

@@ -187,6 +187,30 @@ public:
         is not showing. So the host does it, once, for every sheet. */
     void renameSynthSlot (int slotId, const juce::String& newName);
 
+    //-- Phase 80: tempo automation -------------------------------------------
+    /** Puts the tempo curve in the automation window and scrolls to it. The one
+        entry point, called from the BPM field's right-click menu and from the
+        headless demo; asking twice selects the existing row rather than adding a
+        second one (AutomationModel::addTrack's own rule). */
+    void showTempoAutomation();
+
+    /** True when the window has a tempo row — what the menu item ticks on. */
+    bool hasTempoAutomationTrack() const;
+
+    /** Phase 80: the tempo curve, for the self-test (it is the only handle on a
+        model that the UI reads only through the window). */
+    TempoModel& getTempoModel() noexcept { return tempo; }
+
+    /** Phase 80: the track list and the model behind it, for the self-test. The
+        window owns the drawing; these are the two things a check needs to ask
+        "is there a tempo row, and which curve does it resolve to". */
+    AutomationModel& getAutomationModel() noexcept { return automation; }
+    AutomationWindow& getAutomationWindowForTest() noexcept { return automationWindow; }
+    const std::vector<AutomationTrack>& getAutomationTracks() const
+    {
+        return automation.getTracks();
+    }
+
     /** Parks the playhead somewhere visible; used by --snapshot. */
     void setDemoPlayheadBeats (double beats);
 
@@ -194,6 +218,11 @@ public:
         A rename box is the whole feature and it only exists while a gesture is
         in progress, so a still frame is the only way to show it. */
     void openDemoRename();
+
+    /** Phase 80: puts a drawn tempo curve in the automation window and switches
+        it on, so the screenshot shows the row — the one part of this feature
+        that has no representation anywhere else. */
+    void openDemoTempoAutomation();
 
     /** Opens the roll's inline automation box on a long demo note, so the
         screenshot shows the box and its parameter menu. */
@@ -899,6 +928,11 @@ private:
     PluginHost          plugins;
     AutomationModel     automation;
     MixerModel          mixer;
+
+    /** Phase 80: the project's tempo curve. Declared before the engine and the
+        automation window because both point at it. */
+    TempoModel          tempo;
+
     AudioEngine         audio { stack, rack };
 
     LayerPanel          layerPanel       { stack, rack };
@@ -906,7 +940,7 @@ private:
     NoteEnvelopePanel   envelopePanel    { stack, rack };
     SampleEnvelopePanel sampleEnvelopePanel { stack, rack };   // Phase 78
     RackPanel           rackPanel        { rack };
-    AutomationWindow    automationWindow { stack, rack, automation, mixer };
+    AutomationWindow    automationWindow { stack, rack, automation, mixer, tempo };
     MixerPanel          mixerPanel       { stack, rack, mixer };
     BpmField            bpmField;
 

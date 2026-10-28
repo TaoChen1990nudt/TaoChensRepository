@@ -22,7 +22,14 @@ enum class AutomationOwner
     /** Phase 18: the master bus. There is exactly one, so `ownerId` is always 0
         — the field stays because every track carries one and a special case in
         the track list would be worse than a constant. */
-    master
+    master,
+    /** Phase 80: the project's tempo. Also one-of-a-kind, also `ownerId` 0.
+
+        A separate owner rather than a fourth lane on `master`, because tempo is
+        not a signal path: "reset the mixer" must not erase a tempo map, and a
+        row labelled "主输出 · 速度" would be a row that lies about what it
+        drives. `target` is always 0 — there is one tempo curve, not a list. */
+    tempo
 };
 
 //==============================================================================

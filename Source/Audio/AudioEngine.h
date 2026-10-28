@@ -6,6 +6,7 @@
 
 #include "Audio/PlaybackEngine.h"
 #include "Model/HardwareRack.h"
+#include "Model/TempoModel.h"
 #include "Model/LayerModel.h"
 #include "Model/MixerModel.h"
 
@@ -106,6 +107,11 @@ public:
         fixed master trim), which is what the routing tests rely on. */
     void setMixerModel (MixerModel* mixerModel);
 
+    /** Phase 80: attaches the project's tempo automation. Optional exactly like
+        the mixer — without it the transport runs at `bpm` and nothing else,
+        which is what the routing and envelope tests rely on. */
+    void setTempoModel (TempoModel* tempoModelToUse);
+
     /** The session's VST3 host. Not owned. Optional in exactly the same way as
         the mixer: without it nothing can host a plugin. */
     void setPluginHost (PluginHost* host);
@@ -133,6 +139,7 @@ private:
     LayerStack& stack;
     RackModel&  rack;
     MixerModel* mixer = nullptr;
+    TempoModel* tempoModel = nullptr;
 
     juce::AudioDeviceManager deviceManager;
     PlaybackEngine           playback;

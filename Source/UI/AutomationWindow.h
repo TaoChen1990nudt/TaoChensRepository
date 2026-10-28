@@ -12,6 +12,7 @@
 #include "Model/HardwareRack.h"
 #include "Model/LayerModel.h"
 #include "Model/MixerModel.h"
+#include "Model/TempoModel.h"
 
 namespace atomic
 {
@@ -63,7 +64,8 @@ public:
     static constexpr int resizeZone   = ui::px (6);
 
     AutomationWindow (LayerStack& layerStack, RackModel& rackToUse,
-                      AutomationModel& automationModelToUse, MixerModel& mixerModelToUse);
+                      AutomationModel& automationModelToUse, MixerModel& mixerModelToUse,
+                      TempoModel& tempoModelToUse);
     ~AutomationWindow() override;
 
     /** Fired after any edit that the audio engine must hear about. */
@@ -96,6 +98,16 @@ public:
 
     /** Total height of every row, which is what the scroll clamps against. */
     int  getContentHeight() const;
+
+    /** Phase 80: the label a row resolves to, for the self-test. A row whose
+        owner cannot be resolved draws as an empty line, which is exactly the
+        defect a screenshot cannot tell apart from "no row at all". */
+    juce::String getRowNameForTest (int index) const
+    {
+        const auto resolved = resolveTrackAt (index);
+        return resolved.name.isNotEmpty() ? resolved.name + " / " + resolved.parameter
+                                          : juce::String();
+    }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -163,6 +175,9 @@ private:
     RackModel&         rack;
     AutomationModel&   automation;
     MixerModel&        mixer;
+    /** Phase 80: the tempo lane lives here, not in the mixer, so the window needs
+        it handed in like the mixer is. */
+    TempoModel&        tempo;
 
     double lengthBeats   = timeline::defaultLengthBeats;
     double pixelsPerBeat = 48.0;

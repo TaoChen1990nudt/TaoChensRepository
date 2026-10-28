@@ -41,6 +41,8 @@ target_sources(AtomicDAW PRIVATE
     Source/Media/SampleLibrary.cpp
     Source/Model/AutomationLane.cpp
     Source/Model/AutomationModel.cpp
+    Source/Model/TempoMap.cpp
+    Source/Model/TempoModel.cpp
     Source/Model/HardwareRack.cpp
     Source/Model/LayerModel.cpp
     Source/Model/MixerModel.cpp

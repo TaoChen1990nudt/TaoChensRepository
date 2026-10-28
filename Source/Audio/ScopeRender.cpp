@@ -24,7 +24,6 @@ ExtractResult extract (const PublishedSchedule& full, const Scope& scope)
     out.schedule.notes.clear();
     out.schedule.clips.clear();
 
-    const double secondsPerBeat = juce::jmax (1.0e-9, full.secondsPerBeat);
 
     double first = 0.0;
     double last  = 0.0;
@@ -93,7 +92,7 @@ ExtractResult extract (const PublishedSchedule& full, const Scope& scope)
     // The end, expressed in the unit renderToFile measures duration in. It
     // stays absolute: the render's duration is `contentSeconds - startSeconds`,
     // which is exactly "from the first kept row to the last".
-    out.schedule.contentBeats = last / secondsPerBeat;
+    out.schedule.contentBeats = out.schedule.tempo.beatAtSeconds (last);
 
     return out;
 }

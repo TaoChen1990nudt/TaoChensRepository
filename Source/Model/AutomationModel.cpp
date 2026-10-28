@@ -12,10 +12,12 @@ int AutomationModel::addTrack (AutomationOwner owner, int ownerId, int target)
         return existing;
     }
 
-    // The master bus is the one owner whose id is legitimately 0: there is
-    // exactly one of it, so it needs no identity.
+    // The master bus and the project tempo are the owners whose id is
+    // legitimately 0 — there is exactly one of each, so neither needs identity.
     if ((int) tracks.size() >= maxTracks
-         || (owner != AutomationOwner::master && ownerId <= 0))
+         || (owner != AutomationOwner::master
+             && owner != AutomationOwner::tempo
+             && ownerId <= 0))
         return -1;
 
     AutomationTrack track;

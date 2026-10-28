@@ -177,6 +177,20 @@ void BpmField::mouseDown (const juce::MouseEvent& e)
                            {
                                applyBpm (defaultBpm, true);
                                repaint();
+                           },
+                           // Phase 80: the tempo curve has no card, no row and no
+                           // obvious owner in the UI, so the field the user is
+                           // already pointing at is where the offer belongs.
+                           [this] (juce::PopupMenu& menu)
+                           {
+                               menu.addItem (tempoAutomationMenuId,
+                                             utf8 ("显示速度自动化行"), true,
+                                             tempoAutomationShown);
+                           },
+                           [this] (int result)
+                           {
+                               if (result == tempoAutomationMenuId && onShowTempoAutomation != nullptr)
+                                   onShowTempoAutomation();
                            });
         return;
     }

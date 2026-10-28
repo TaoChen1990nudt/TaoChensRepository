@@ -155,7 +155,10 @@ ExportResult renderToFile (const juce::File& destination,
 
     // The content end, not the project grid: an export stops where the music
     // stops. A tiny tail keeps the very last release from being cut mid-sample.
-    const double contentSeconds = juce::jmax (0.0, schedule.contentBeats) * schedule.secondsPerBeat;
+    // Phase 80: the content end is a BEAT, and the wall-clock answer comes from
+    // the schedule's tempo map — an accelerando makes the last bar shorter, so
+    // `beats * one number` would export a tail of silence.
+    const double contentSeconds = schedule.tempo.secondsAtBeat (juce::jmax (0.0, schedule.contentBeats));
 
     startSeconds = juce::jlimit (0.0, juce::jmax (0.0, contentSeconds - 0.001), startSeconds);
 
