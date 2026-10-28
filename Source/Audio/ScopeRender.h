@@ -35,6 +35,10 @@ struct Scope
     Kind kind       = Kind::layer;
     int  layerIndex = -1;
     int  groupId    = -1;
+
+    /** Phase 58: -1 renders every appearance of the group (what "render the
+        group" has always meant); >= 0 renders just that copy. */
+    int  groupOccurrence = -1;
     std::vector<int> noteIds;
     std::vector<int> sampleIds;
 };

@@ -2,6 +2,7 @@
 
 #include "Model/Routing.h"
 #include "UI/MixerLook.h"
+#include "Util/SharedRules.h"
 #include "Util/Text.h"
 #include "Util/Theme.h"
 #include "Util/ValueMenu.h"
@@ -521,6 +522,8 @@ void GroupPanel::mouseDown (const juce::MouseEvent& e)
 
     dragRow  = row;
     dragPart = part;
+    dragMayStart  = false;      // every press re-decides; nothing is inherited
+    foldOnRelease = false;
 
     if (row < 0)
         return;
@@ -595,16 +598,22 @@ void GroupPanel::mouseDown (const juce::MouseEvent& e)
     switch (part)
     {
         case Part::collapse:
+            // The chevron is a control, not a handle: it folds on the spot and
+            // never starts a drag, because a 18 px box is not what you grab to
+            // move a group.
+            group->setCollapsed (! group->isCollapsed());
+            clampScroll();
+            stack.touchLayers();
+            break;
+
         case Part::body:
-            // Clicking the title toggles, which is what a fold is for; the
-            // controls below it are separate hit targets precisely so that
-            // hitting them does not fold the row.
-            if (part == Part::collapse || e.getPosition().getY() < getRowBounds (row).getY() + ui::px (26))
-            {
-                group->setCollapsed (! group->isCollapsed());
-                clampScroll();
-                stack.touchLayers();
-            }
+            // Phase 58: arm "drag this group onto the roll". The fold that used
+            // to happen here happens on release instead — see dragMayStart.
+            // A collapsed row is a 30 px title bar, so anywhere on it folds
+            // back open; an expanded one only folds from its title line.
+            dragMayStart  = true;
+            foldOnRelease = group->isCollapsed()
+                              || e.getPosition().getY() < getRowBounds (row).getY() + ui::px (26);
             break;
 
         case Part::volume:
@@ -632,6 +641,31 @@ void GroupPanel::mouseDown (const juce::MouseEvent& e)
 
 void GroupPanel::mouseDrag (const juce::MouseEvent& e)
 {
+    // Phase 58: a body drag LEAVES the panel — the roll answers it with another
+    // appearance of the same group. Checked before the fader guard because this
+    // gesture never set dragPart to a fader part.
+    if (dragMayStart && dragRow >= 0 && e.getDistanceFromDragStart() > ui::px (4))
+    {
+        dragMayStart  = false;
+        foldOnRelease = false;      // it was a drag, not a click
+
+        const auto rows = getRows();
+
+        if (juce::isPositiveAndBelow (dragRow, (int) rows.size()))
+        {
+            const auto ref = rows[(size_t) dragRow];
+
+            // The payload is text, so a group deleted mid-drag simply fails to
+            // resolve on the other end instead of danging a pointer.
+            if (auto* container = juce::DragAndDropContainer::findParentDragContainerFor (this))
+                if (! container->isDragAndDropActive())
+                    container->startDragging (groupDragDescription (ref.layerIndex, ref.groupId),
+                                              this, juce::ScaledImage(), false, nullptr, &e.source);
+        }
+
+        return;
+    }
+
     if (dragRow < 0 || (dragPart != Part::volume && dragPart != Part::pan))
         return;
 
@@ -653,6 +687,24 @@ void GroupPanel::mouseDrag (const juce::MouseEvent& e)
 
 void GroupPanel::mouseUp (const juce::MouseEvent&)
 {
+    // Phase 58: a body press that never became a drag is still a click, and a
+    // click on the title folds the row. Doing it here (not on press) is what
+    // lets the same press also be the start of a drag.
+    if (dragMayStart && foldOnRelease && dragRow >= 0)
+    {
+        const auto rows = getRows();
+
+        if (juce::isPositiveAndBelow (dragRow, (int) rows.size()))
+            if (auto* group = groupFor (rows[(size_t) dragRow]))
+            {
+                group->setCollapsed (! group->isCollapsed());
+                clampScroll();
+                stack.touchLayers();
+            }
+    }
+
+    dragMayStart  = false;
+    foldOnRelease = false;
     dragRow  = -1;
     dragPart = Part::none;
 }

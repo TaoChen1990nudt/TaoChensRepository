@@ -57,6 +57,11 @@ struct ScheduledNote
         two hundred notes does not carry two hundred copies of the same curve. */
     int    groupId      = -1;
 
+    /** Phase 58: which appearance of that group — only the renderer's "just
+        this copy" scope cares, but it has to survive publication or the scope
+        cannot tell the chorus copy from the verse one. */
+    int    groupOccurrence = 0;
+
     /** Phase 8: what the envelope drives, and — when it drives pitch — the
         integral it needs.
 
@@ -352,8 +357,12 @@ struct ScheduledClip
         The same field, the same meaning, the same lookup as ScheduledNote: the
         clip's fader, pan and mute come from the group's frozen `GroupMix`. It
         says NOTHING about routing — `slotId` above is the only answer to "what
-        plays this", and it was resolved without looking at the group. */
+        plays this", and it was resolved without looking at the group.
+
+        Phase 58: `groupOccurrence` says which appearance, for the renderer's
+        "just this copy" scope. It changes nothing about how the block sounds. */
     int    groupId      = -1;
+    int    groupOccurrence = 0;
 
     //-- Phase 29: where in the file ------------------------------------------
     /** Seconds into the source at `startSeconds`. The block is a window: after

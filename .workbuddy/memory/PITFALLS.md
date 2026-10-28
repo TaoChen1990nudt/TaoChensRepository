@@ -797,3 +797,69 @@ headless 快照运行结束时缓冲区没机会刷出去，`std::cout` 打的�
 采样没进去）。现在 `pasteNotesFromClipboard()` 开头 `if (groupClip.valid) return pasteGroupFromClipboard();`
 ——一个动词一个实现。自检也因此刻意用**旧入口**粘一次，否则"转发被删"这个缺陷没有任何断言会红
 （咬测验证：删转发行 → "组内现 4 音符 / 1 采样" 两条 FAIL）。
+
+## P58-A：`ui::pf(N)` 的像素值不能除以一个"裸 N"去算拍
+
+自检里把 drop 点定在 `grid.getX() + ui::pf (100)`，然后按 `scroll + 100 / beatWidth` 反算拍号
+——差了 **0.625 拍**。原因：`ui::pf(100)` 在 `ui::scale = 1.3` 下是 **130**，分子是缩放后的像素，
+分母却是没缩放的 100。断言打印 `新起点 2.708（应 2.083）`，看着像 snapping 的错，其实是量纲错。
+
+规则：凡是"像素 ↔ 拍"的换算，两边必须来自同一处。要么都用 `ui::pf()` 的值，要么都反算：
+```cpp
+const float offset = ui::pf (100);
+const double beat  = roll.getScrollBeats() + (double) offset / beatWidth;   // 同一个 offset
+```
+
+## P58-B：`check()` 的说明文字会在条件之前求值（MSVC 从右往左）
+
+咬测 payload 时打印出 `-> -1, -1`，而实际两个变量在条件里刚被写成 `(0, 7)`。
+`check (name, cond, detail)` 是一次函数调用，MSVC 的参数求值顺序是**从右到左**：`detail` 先算，
+此时 `payLayer` 还是初值 -1。诊断信息因此在"最需要它的时候"撒谎。
+
+规则：需要读取"条件里刚写过的变量"的说明文字，先把那个调用算到 bool 里：
+```cpp
+const bool parsed = groupDragTarget (payload, payLayer, payGroup);   // 先算
+check ("...", parsed && payLayer == 2, juce::String (payLayer));     // 文案才准
+```
+纯查询函数（`startOf(...)`、`getGroupOccurrences`）不受影响，它们无副作用。
+
+## P58-C：组的"出现"必须是一个数，不能靠"同组即同体"
+
+用户两条投诉是同一个根：粘贴把副本塞进**源组**，于是两处内容共用一个括号，拖哪处都一起动。
+只要模型里没有 `occurrence`，任何"复制一份"都只能落在"同组"这个筐里。
+
+凡是 `groupId >= 0` 的比较，现在都要问第二个问题：`groupOccurrence` 是不是这次要的那一处。
+P58 里踩到的具体点：`getGroupContentBounds`（框会把两处都框进去）、`captureGroupClips`
+（拖动抓到两处）、`drawGroupLabels`（只画一次标签）、`isWholeGroupSelected`（选择判断）。
+新增任何"遍历组员"的代码，先决定"全部出现"（`occurrence < 0`）还是"某一次"。
+
+## P58-D：拖动与折叠共用一个按下事件时，折叠必须延后到 mouseUp
+
+编组栏的行 body 既是"点一下折叠"，又是"拖出去放一处"。原实现在 `mouseDown` 里折叠，
+于是**每次拖走一个组，都会顺手把那一行折叠起来**。改成：按下只 `dragMayStart = true`，
+`mouseDrag` 超过 4px 就 `startDragging` 并清掉 `foldOnRelease`，`mouseUp` 里 `foldOnRelease`
+仍为真才折叠。折叠/展开是一个动作，判断它的地方只能有一个。
+
+## P58-E：`selectedTrimEdgeAt` 必须排在 `hitTestSample` 之前
+
+`hitTestSample` 只能回答**一个**块，而它按"最后添加 = 画在最上层"倒序遍历，所以指针下有重叠时
+它返回的是**盖在最上面的陌生人**。原来的 mouseDown 拿到它就直接改写选区，再按它算 trim band：
+"选中三块拖其中一块的尾巴"于是变成"拖了别人"，用户看到的就是"拉伸有时失败"。
+
+修法两层：①`hitTestSample` 本身改倒序（最上层优先，与绘制一致）；②按下时先问
+"这一像素是不是某个**已选中**块的边缘"（`selectedTrimEdgeAt`），是就以它为准，并且**不改选区**。
+自检断言必须走两步合一的口子（`getBlockGrabAtForTest`），只测 hitTestSample 会一路绿着穿过这个 bug。
+
+## P58-F：`docs/demo.atomic` 的组 id 会随自检建组次数变化，别把它当回归信号
+
+跑一次 `--snapshot`，`docs/demo.atomic` 里的 `<Group id="28">` 会变成 `27`，自动化轨的
+`ownerId` 同步跟着变。看着像"组 id 漂移"，其实是 `LayerModel.cpp` 里的
+`int& groupIdCounter()` ——**文件内静态、跨所有 `LayerStack` 共享**，只在 `addGroup` 自增、
+`restoreGroups` 用 `jmax` 抬升，**从不清零**。演示会话的组 id 因此取决于"本次进程里此前
+建过多少个组"，而自检的每个 fixture 都会建组。
+
+判据（P58 实测）：**连跑两次，第二次不再变** → 只是收敛到"自检建组次数"对应的值，不是 bug；
+如果每次跑都 -1，那才是真的在删组重建。P58 从 28→27 的原因是 `duplicateGroupToNextBar`
+不再 `addGroupCopy`，自检净少建了一个组。
+
+推论：不要把 `docs/demo.atomic` 的 id 当回归指标；要断言 id 就在自检里现场建工程断言。

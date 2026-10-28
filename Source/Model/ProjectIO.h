@@ -184,8 +184,15 @@ namespace project
 
       * `<Sample>` gains `pitchrange` (1..36 semitones), written only when it
         differs from the default 24 — a file that never touched the control
-        keeps the same `<Sample>` line it had in v22. */
-inline constexpr int formatVersion = 23;
+        keeps the same `<Sample>` line it had in v22.
+
+    v24 (Phase 58): a group can be placed more than once.
+
+      * `<Note>` and `<Sample>` gain `groupocc` — which appearance of that
+        group this member belongs to. Written only when non-zero, so a project
+        that never reused a group keeps every line it had in v23, and an older
+        reader sees exactly what it always saw. */
+inline constexpr int formatVersion = 24;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";

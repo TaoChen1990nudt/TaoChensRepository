@@ -272,13 +272,18 @@ public:
     int  getExpandedGroupLayerIndex() const noexcept { return expandedGroupLayerIndex; }
     int  getExpandedGroupTarget() const noexcept { return expandedGroupTarget; }
 
-    void openGroupAutomation (int layerIndex, int groupId, int target = 0);
+    /** `occurrence` picks WHICH appearance of the group the box surrounds
+        (Phase 58). All appearances share the one curve — that is what "the same
+        group" means — but each one gets a box over its own bars. */
+    void openGroupAutomation (int layerIndex, int groupId, int target = 0, int occurrence = 0);
     void closeGroupAutomation();
 
     /** Local-space geometry of the pill's handle and the box it opens. Empty
         when the group is not on a shown layer or has no notes in view. */
-    juce::Rectangle<float> getGroupAutomationHandleBounds (int layerIndex, int groupId) const;
-    juce::Rectangle<float> getGroupAutomationBoxBounds (int layerIndex, int groupId) const;
+    juce::Rectangle<float> getGroupAutomationHandleBounds (int layerIndex, int groupId,
+                                                          int occurrence = -1) const;
+    juce::Rectangle<float> getGroupAutomationBoxBounds (int layerIndex, int groupId,
+                                                        int occurrence = -1) const;
 
     /** The curve area inside the box: the box minus its bottom row, with NO
         horizontal padding. The curve's first and last pixels are the box's
@@ -457,12 +462,16 @@ public:
     void applyMove (const MoveClamp& move);
 
     /** Phase 27: test hook — arms and performs a rigid move of a group. */
-    bool simulateGroupMove (int layerIndex, int groupId, double deltaBeats, int deltaPitch);
+    bool simulateGroupMove (int layerIndex, int groupId, double deltaBeats, int deltaPitch,
+                            int occurrence = -1);
 
     /** Phase 27: the frame a group draws around its members, notes AND clips.
         Public so a test can assert "the clip is inside the bracket" without
         synthesising the paint pass. Empty when the group has no visible member. */
-    juce::Rectangle<float> groupFrameOf (int layerIndex, int groupId) const;
+    /** The frame of one appearance of a group (Phase 58), or of the whole group
+        when `occurrence` is -1. Same call the painting, the hit test and the
+        self-test make, so none of them can describe a different rectangle. */
+    juce::Rectangle<float> groupFrameOf (int layerIndex, int groupId, int occurrence = -1) const;
 
     /** Phase 24: the beat a group-curve point lands on.
 
@@ -511,6 +520,10 @@ public:
         empty or spans more than one group. */
     int  getSelectedGroupId() const;
 
+    /** Phase 58: WHICH appearance of that group the selection is, or -1 when
+        the selection is not inside one (a straddling or mixed selection). */
+    int  getSelectedGroupOccurrence() const;
+
     /** Phase 24: does the selection cover EVERY member of this group?
 
         The difference between "the group" and "a few notes out of the group"
@@ -524,18 +537,18 @@ public:
         convenience: mounting a group only cares about the notes (a block has no
         oscillator to mount), while COPYING has to take the blocks with it or the
         paste is a group cut in half. Two questions that look like one. */
-    bool isWholeGroupSelected (int groupId, bool includeSamples = false) const;
+    bool isWholeGroupSelected (int groupId, bool includeSamples = false, int occurrence = -1) const;
 
     /** Selects every member of a group, so "drag the group" is just "drag the
         selection" — one drag implementation, two ways to fill it. */
-    void selectGroup (int groupId);
+    void selectGroup (int groupId, int occurrence = -1);
 
     /** Detaches the selected notes from their group(s). The group entity stays
         as long as it still has members. Returns true when anything changed. */
     bool ungroupSelection();
 
     /** Dissolves a whole group: every member detaches, the id disappears. */
-    bool disbandGroup (int layerIndex, int groupId);
+    bool disbandGroup (int layerIndex, int groupId, int occurrence = -1);
 
     /** Mounts the selection's group on a synth (or detaches it when slotId < 0).
         A selection of ungrouped notes is ignored: mounting is a group action,
@@ -544,10 +557,12 @@ public:
 
     /** Local-space label of a group, which is also its click target. Empty when
         the group has no member on screen. */
-    juce::Rectangle<float> getGroupLabelBounds (int layerIndex, int groupId) const;
+    juce::Rectangle<float> getGroupLabelBounds (int layerIndex, int groupId,
+                                                int occurrence = -1) const;
 
-    /** The group whose label is under this point, or -1. */
-    int getGroupLabelAt (juce::Point<float> position) const;
+    /** The group whose label is under this point, or -1. `occurrence`, when
+        given, receives WHICH appearance of it (Phase 58). */
+    int getGroupLabelAt (juce::Point<float> position, int* occurrence = nullptr) const;
 
     /** Phase 25: test hook — one resize step of the gesture a drag would make,
         against the current selection. Exists because a synthetic MouseEvent
@@ -559,7 +574,7 @@ public:
         bracket drawn around its members) contains this point, or -1. Notes are
         hit-tested first, so this only answers for the empty part of the frame —
         which is exactly where a user grabs to move the group as one object. */
-    int getGroupFrameAt (juce::Point<float> position) const;
+    int getGroupFrameAt (juce::Point<float> position, int* occurrence = nullptr) const;
 
     /** Fired when a group disappears, so the host can drop its automation
         track. The model cannot do that itself: it does not own the window. */
@@ -584,6 +599,7 @@ public:
     {
         int layerIndex = -1;
         int groupId    = -1;                 // >= 0 for "this group"
+        int groupOccurrence = -1;            // Phase 58: -1 = every appearance
         bool wholeLayer = false;             // otherwise the id lists below
         std::vector<int> noteIds;            // only for the selection case
         std::vector<int> sampleIds;          // ditto — a mixed selection renders both
@@ -763,13 +779,27 @@ public:
     /** Phase 56: copy a whole group to the next bar line — the group's context
         menu item. Not a clipboard gesture: the user's clipboard is theirs, and
         this command must not spend it. Selects the copy. */
-    bool duplicateGroupToNextBar (int layerIndex, int groupId);
+    bool duplicateGroupToNextBar (int layerIndex, int groupId, int occurrence = -1);
+
+    /** Phase 58: "that group, here" — the group list's row dragged onto the
+        grid, and the one function both the drop and the self-test run.
+
+        It copies the members of the group's FIRST appearance to `atBeat` as a
+        new appearance of the same definition: same name, same colour, same
+        mount, same trims, same curves — one extra thing on the timeline, zero
+        extra rows in the group list. The first appearance is the template
+        because the row says "this group", not "wherever it last landed".
+
+        Returns false when the layer or group is gone, or the group has no
+        members — a drag that resolved to nothing must not invent a group. */
+    bool placeGroupAppearance (int layerIndex, int groupId, double atBeat);
 
     /** Phase 56: the group menu's items, built by a function the self-test can
         call. `showMenuAsync` is a modal popup — a headless run can never see
         what it would have contained, so the contents are stated separately
         from the showing (the same split the menu bar already uses). */
-    void fillGroupMenu (juce::PopupMenu& menu, int layerIndex, int groupId) const;
+    void fillGroupMenu (juce::PopupMenu& menu, int layerIndex, int groupId,
+                        int occurrence = -1) const;
 
     bool copySamplesToClipboard();
     bool cutSamplesToClipboard();
@@ -797,7 +827,7 @@ public:
     /** Phase 56: a group's state as a clipboard object, curves included. The
         paste and "复制到后一小节" both need it, and the two must agree about
         which beat the curves are absolute to. */
-    GroupClip captureGroupClip (const NoteGroup& group, double startBeat) const;
+    GroupClip captureGroupClip (const NoteGroup& group, double startBeat, int occurrence = -1) const;
 
     /** Phase 56: clones a group's members into `groupId`, shifted by `delta`.
 
@@ -805,7 +835,7 @@ public:
         to belong to the NEW group (not the source's id, and not -1), and that
         one line is the difference between "a group arrived" and "a group plus
         some loose audio beside it". */
-    void insertGroupMembers (Layer& layer, int groupId, double delta,
+    void insertGroupMembers (Layer& layer, int groupId, int occurrence, double delta,
                              const std::vector<NoteEvent>& notes,
                              const std::vector<SampleEvent>& clips,
                              std::vector<int>& newNotes,
@@ -865,6 +895,18 @@ public:
 
     /** Phase 50: test hook — the same reverse the menu item runs. */
     int simulateSampleReverse() { return toggleSelectedSampleReverse(); }
+
+    /** Phase 58: test hook — the block a press at `at` would grab, and whether
+        it would trim that block's tail.
+
+        It runs the same two steps the press path runs (the selected block's
+        edge first, the hit test second), because the bug the user reported —
+        "select blocks and drag the length, sometimes it fails" — was entirely
+        in that order: the hit test answered with a NEIGHBOUR drawn on top, and
+        the press then rewrote the selection to that neighbour. A test that
+        only called hitTestSample would have kept passing straight through the
+        bug. */
+    std::pair<int, bool> getBlockGrabAtForTest (juce::Point<float> at) const;
 
     /** Phase 53: test hook — the DROP itself, at a local point.
 
@@ -994,7 +1036,7 @@ public:
 
     /** True when a group's notes reach the focused synth, either through the
         group's own mount or through a note-level override inside it. */
-    bool isGroupFocused (int layerIndex, int groupId) const;
+    bool isGroupFocused (int layerIndex, int groupId, int occurrence = -1) const;
 
     /** Phase 29: the way out of the spotlight.
 
@@ -1128,11 +1170,11 @@ private:
     /** Phase 27: arms the group's clips for the same drag. Separate from
         captureDragOriginals because membership is stored in two places (on the
         note and on the clip) and the selection only ever holds note ids. */
-    void captureGroupClips (int groupId);
+    void captureGroupClips (int groupId, int occurrence = -1);
 
     /** Phase 25: select a group and arm a rigid move of it. The pill and the
         frame both call this — one gesture, one implementation. */
-    void armGroupMove (int groupId, juce::Point<float> position);
+    void armGroupMove (int groupId, int occurrence, juce::Point<float> position);
 
     /** Phase 25: which captured note a resize drag acts on. */
     int resizeTargetId() const;
@@ -1211,6 +1253,16 @@ private:
     /** The clip the mouse is over, on the active layer. */
     SampleEvent*       hitTestSample (juce::Point<float> position);
     const SampleEvent* hitTestSample (juce::Point<float> position) const;
+
+    /** Phase 58: is the pointer on the trim band of a block that is ALREADY
+        selected? Returns (id, isTail) or (-1, false).
+
+        The hit test can only answer with one block, and the pointer's own
+        reason for being there is not always that block: with two blocks
+        overlapping, the edge of the selected one may be covered by a stranger.
+        This asks the question the cursor is already drawing — "you are on a
+        trim band" — before the click is allowed to rewrite the selection. */
+    std::pair<int, bool> selectedTrimEdgeAt (juce::Point<float> position) const;
 
     /** Right-click on a clip: delete, duplicate, fit to source, trim. */
     void showSampleMenu (int sampleId, juce::Point<int> screenPos);
@@ -1307,10 +1359,15 @@ private:
     void drawSpotlightExitChip (juce::Graphics&);
 
     /** Bounding box of a group's visible members, local space, empty when none
-        are on screen. The single source of the band, the label and the hit box. */
-    juce::Rectangle<float> getGroupContentBounds (const Layer&, const NoteGroup&) const;
+        are on screen. The single source of the band, the label and the hit box.
 
-    void showGroupMenu (int layerIndex, int groupId, juce::Point<int> screenPos);
+        `occurrence` selects ONE appearance of the group (Phase 58); the default
+        -1 is the whole group, every appearance unioned — what a caller that
+        only has a group id means. */
+    juce::Rectangle<float> getGroupContentBounds (const Layer&, const NoteGroup&,
+                                                  int occurrence = -1) const;
+
+    void showGroupMenu (int layerIndex, int groupId, int occurrence, juce::Point<int> screenPos);
 
     /** Right-click anywhere else in the grid: group actions for the current
         selection, disabled when there is nothing they could act on. */
@@ -1383,7 +1440,7 @@ private:
 
     /** First and last beat covered by the group's members. Empty range when the
         group has no notes in this layer. */
-    juce::Range<double> getGroupBeatSpan (const Layer&, const NoteGroup&) const;
+    juce::Range<double> getGroupBeatSpan (const Layer&, const NoteGroup&, int occurrence = -1) const;
 
     AutomationLane&       groupLaneFor (NoteGroup&, int target);
     const AutomationLane& groupLaneFor (const NoteGroup&, int target) const;
@@ -1483,6 +1540,20 @@ private:
 
     float  scrollY     = 0.0f;
     double scrollBeats = 0.0;
+
+    /** Phase 58: the horizontal window the USER chose, kept intact while a
+        running transport pushes the view along.
+
+        Following the playhead used to be one-way: run to bar 40 and the view
+        lived there until it was dragged back by hand. So "put the playhead back
+        where I was" left the scroll bar somewhere else entirely. `followScrolled`
+        means "the current scrollBeats is the transport's, not the user's"; the
+        moment the playhead is inside the user's window again, that window is
+        restored and the flag drops. */
+    double userScrollBeats = 0.0;
+    bool   followScrolled  = false;
+
+    void noteUserScroll() noexcept { userScrollBeats = scrollBeats; followScrolled = false; }
     double timelineBeats = totalBeats;
     int    hoveredNoteId   = -1;
     int    lastActiveLayer = -1;
@@ -1532,6 +1603,7 @@ private:
     //-- Phase 21 -------------------------------------------------------------
     int    expandedGroupLayerIndex = -1;
     int    expandedGroupId         = -1;
+    int    expandedGroupOccurrence = 0;      // Phase 58: which appearance's box
     int    expandedGroupTarget     = 0;      // (int) GroupAutomationTarget
     int    dragGroupPoint          = -1;
     bool   hoveredGroupHandle      = false;
@@ -1559,6 +1631,7 @@ private:
     int focusSlotId = -1;
     int hoveredGroupId = -1;
     int hoveredGroupLayer = -1;
+    int hoveredGroupOccurrence = 0;          // Phase 58
 
     //-- Phase 17 -------------------------------------------------------------
     /** The clip being moved or trimmed, and its state when the drag began. */
@@ -1577,13 +1650,16 @@ private:
         none,           // no drag, or a file from the browser
         file,
         sampleCard,     // a sampler card: hands over a file
-        instrumentCard  // a synth card: hands over a mount
+        instrumentCard, // a synth card: hands over a mount
+        groupRow        // a group-list row: hands over (layerIndex, groupId)
     };
 
     CardDropKind dropKind         = CardDropKind::none;
     int          dropSlotId       = -1;   // the card's slot, for the label
     int          dropTargetNote   = -1;   // instrument card over this note
     int          dropTargetSample = -1;   // sampler card over this block
+    int          dropGroupLayer   = -1;   // group row: which sheet it lives on
+    int          dropGroupId      = -1;   // group row: which group
 
     //-- Phase 49: the clip's own automation box ------------------------------
     /** Mirrors the note box (Phase 8) and the group box (Phase 21): one
@@ -1632,6 +1708,11 @@ private:
             may have been cut away (or the paste may land on another sheet)
             between the copy and the paste. */
         int          sourceGroupId = -1;
+
+        /** Phase 58: which appearance was copied. A paste places a NEW
+            appearance of the group (movement is per-appearance), so this is
+            what "copy the thing I selected" has to carry. */
+        int          sourceOccurrence = 0;
 
         juce::String name;
         juce::Colour colour      { groupPalette::group1 };

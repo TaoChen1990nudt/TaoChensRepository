@@ -80,29 +80,39 @@ void Layer::removeGroup (int groupId)
     // exists.
     for (auto& n : notes)
         if (n.groupId == groupId)
-            n.groupId = -1;
+        {
+            n.groupId         = -1;
+            n.groupOccurrence = 0;
+        }
 
     // Phase 27: clips are members too, and they are detached the same way. A
     // clip left pointing at a dissolved group would be a member of nothing that
     // still draws inside somebody's bracket.
     for (auto& s : samples)
         if (s.groupId == groupId)
-            s.groupId = -1;
+        {
+            s.groupId         = -1;
+            s.groupOccurrence = 0;
+        }
 
     groups.erase (std::remove_if (groups.begin(), groups.end(),
                                   [groupId] (const NoteGroup& g) { return g.getId() == groupId; }),
                   groups.end());
 }
 
-void Layer::assignNotesToGroup (const std::vector<int>& noteIds, int groupId)
+void Layer::assignNotesToGroup (const std::vector<int>& noteIds, int groupId, int occurrence)
 {
     // A group id that does not exist is the same as "no group": better to
     // detach than to leave notes pointing at a ghost.
     const int target = findGroup (groupId) != nullptr ? groupId : -1;
+    const int which  = target >= 0 ? juce::jmax (0, occurrence) : 0;
 
     for (int noteId : noteIds)
         if (auto* note = findNote (noteId))
-            note->groupId = target;
+        {
+            note->groupId         = target;
+            note->groupOccurrence = which;
+        }
 }
 
 int Layer::getGroupIdOfNote (int noteId) const noexcept
@@ -114,14 +124,88 @@ int Layer::getGroupIdOfNote (int noteId) const noexcept
     return -1;
 }
 
+int Layer::getGroupOccurrenceOfNote (int noteId) const noexcept
+{
+    for (const auto& n : notes)
+        if (n.id == noteId)
+            return n.groupId >= 0 ? n.groupOccurrence : 0;
+
+    return 0;
+}
+
 //==============================================================================
-void Layer::assignSamplesToGroup (const std::vector<int>& sampleIds, int groupId)
+std::vector<int> Layer::getGroupOccurrences (int groupId) const
+{
+    std::vector<int> occurrences;
+
+    if (groupId < 0)
+        return occurrences;
+
+    const auto add = [&occurrences] (int occurrence)
+    {
+        if (std::find (occurrences.begin(), occurrences.end(), occurrence) == occurrences.end())
+            occurrences.push_back (occurrence);
+    };
+
+    for (const auto& n : notes)
+        if (n.groupId == groupId)
+            add (n.groupOccurrence);
+
+    for (const auto& s : samples)
+        if (s.groupId == groupId)
+            add (s.groupOccurrence);
+
+    std::sort (occurrences.begin(), occurrences.end());
+    return occurrences;
+}
+
+int Layer::nextGroupOccurrence (int groupId) const
+{
+    const auto occurrences = getGroupOccurrences (groupId);
+
+    return occurrences.empty() ? 0 : occurrences.back() + 1;
+}
+
+std::vector<int> Layer::getOccurrenceNoteIds (int groupId, int occurrence) const
+{
+    std::vector<int> ids;
+
+    if (groupId < 0)
+        return ids;
+
+    for (const auto& n : notes)
+        if (n.groupId == groupId && n.groupOccurrence == occurrence)
+            ids.push_back (n.id);
+
+    return ids;
+}
+
+int Layer::countNotesInOccurrence (int groupId, int occurrence) const noexcept
+{
+    if (groupId < 0)
+        return 0;
+
+    int count = 0;
+
+    for (const auto& n : notes)
+        if (n.groupId == groupId && n.groupOccurrence == occurrence)
+            ++count;
+
+    return count;
+}
+
+//==============================================================================
+void Layer::assignSamplesToGroup (const std::vector<int>& sampleIds, int groupId, int occurrence)
 {
     const int target = findGroup (groupId) != nullptr ? groupId : -1;
+    const int which  = target >= 0 ? juce::jmax (0, occurrence) : 0;
 
     for (int sampleId : sampleIds)
         if (auto* sample = findSample (sampleId))
-            sample->groupId = target;
+        {
+            sample->groupId         = target;
+            sample->groupOccurrence = which;
+        }
 }
 
 int Layer::getGroupIdOfSample (int sampleId) const noexcept
@@ -132,7 +216,15 @@ int Layer::getGroupIdOfSample (int sampleId) const noexcept
     return -1;
 }
 
-std::vector<int> Layer::getGroupSampleIds (int groupId) const
+int Layer::getGroupOccurrenceOfSample (int sampleId) const noexcept
+{
+    if (const auto* sample = findSample (sampleId))
+        return sample->groupId >= 0 ? sample->groupOccurrence : 0;
+
+    return 0;
+}
+
+std::vector<int> Layer::getOccurrenceSampleIds (int groupId, int occurrence) const
 {
     std::vector<int> ids;
 
@@ -140,10 +232,24 @@ std::vector<int> Layer::getGroupSampleIds (int groupId) const
         return ids;
 
     for (const auto& s : samples)
-        if (s.groupId == groupId)
+        if (s.groupId == groupId && s.groupOccurrence == occurrence)
             ids.push_back (s.id);
 
     return ids;
+}
+
+int Layer::countSamplesInOccurrence (int groupId, int occurrence) const noexcept
+{
+    if (groupId < 0)
+        return 0;
+
+    int count = 0;
+
+    for (const auto& s : samples)
+        if (s.groupId == groupId && s.groupOccurrence == occurrence)
+            ++count;
+
+    return count;
 }
 
 int Layer::countSamplesInGroup (int groupId) const noexcept
@@ -158,6 +264,20 @@ int Layer::countSamplesInGroup (int groupId) const noexcept
             ++count;
 
     return count;
+}
+
+std::vector<int> Layer::getGroupSampleIds (int groupId) const
+{
+    std::vector<int> ids;
+
+    if (groupId < 0)
+        return ids;
+
+    for (const auto& s : samples)
+        if (s.groupId == groupId)
+            ids.push_back (s.id);
+
+    return ids;
 }
 
 std::vector<int> Layer::getGroupNoteIds (int groupId) const
@@ -210,10 +330,22 @@ void Layer::restoreGroups (std::vector<NoteGroup> restoredGroups)
 
     // A note that names a group which is not in the file is repaired to "no
     // group" rather than left dangling — the roll would otherwise draw a
-    // label for nothing and route by a group nobody can see.
+    // label for nothing and route by a group nobody can see. Phase 58: the
+    // occurrence goes with it, so a repaired note cannot claim appearance 3 of
+    // a group that has none.
     for (auto& n : notes)
         if (n.groupId >= 0 && findGroup (n.groupId) == nullptr)
-            n.groupId = -1;
+        {
+            n.groupId         = -1;
+            n.groupOccurrence = 0;
+        }
+
+    for (auto& s : samples)
+        if (s.groupId >= 0 && findGroup (s.groupId) == nullptr)
+        {
+            s.groupId         = -1;
+            s.groupOccurrence = 0;
+        }
 }
 
 NoteEvent* Layer::findNote (int noteId) noexcept

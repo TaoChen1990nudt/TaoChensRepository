@@ -133,6 +133,15 @@ private:
     int   dragRow  = -1;
     Part  dragPart = Part::none;
 
+    /** Phase 58: a press on the row BODY may become "drag this group out".
+
+        It cannot also fold on press, because the two gestures share the press:
+        folding there would leave a collapsed row behind every time you dragged
+        a group onto the roll. So a body press only arms, mouseDrag turns the
+        arm into a real drag, and mouseUp folds if the pointer never moved. */
+    bool dragMayStart  = false;
+    bool foldOnRelease = false;
+
     int   focusSlotId = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GroupPanel)

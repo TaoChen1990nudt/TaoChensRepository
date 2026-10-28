@@ -644,6 +644,7 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             scheduled.overridden   = route.overridden;
             scheduled.modTarget    = note.modTarget;
             scheduled.groupId      = note.groupId;
+            scheduled.groupOccurrence = note.groupOccurrence;
 
             // Tabulate the pitch integral once, here, so the audio thread only
             // ever does a table lookup. See ScheduledNote::pitchIntegral for why
@@ -788,6 +789,7 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             // layer, never from the group — so adding this field cannot change
             // what plays, only how loud.
             scheduled.groupId = clip.groupId;
+            scheduled.groupOccurrence = clip.groupOccurrence;
 
             contentBeats = juce::jmax (contentBeats, clip.endBeat());
             fresh->clips.push_back (std::move (scheduled));

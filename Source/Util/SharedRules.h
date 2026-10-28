@@ -131,6 +131,7 @@ namespace dragpayload
 
 constexpr const char* kSamplerDragPrefix    = "atomic-sampler:";
 constexpr const char* kInstrumentDragPrefix = "atomic-instrument:";
+constexpr const char* kGroupDragPrefix      = "atomic-group:";
 
 inline juce::String samplerDragDescription (int slotId)
 {
@@ -152,6 +153,55 @@ inline juce::String instrumentDragDescription (int slotId)
 inline int instrumentDragSlotId (const juce::String& text)
 {
     return dragpayload::idOf (text, kInstrumentDragPrefix);
+}
+
+/** Phase 58: a row dragged out of the group list.
+
+    TWO numbers, unlike a card, because groups live inside a layer and their
+    ids are only unique there: "group 2" exists on every sheet. A payload that
+    carried just the id would make the panel's row land on whichever layer
+    happened to be active, which is the same class of bug the roll avoids by
+    addressing groups as (layerIndex, groupId) everywhere else.
+
+    It stays text (not a pointer, not a NoteGroup*) because the drop happens
+    after the drag, and a group can be deleted mid-drag — the receiver has to
+    look the target up again, and it should be able to fail. */
+inline juce::String groupDragDescription (int layerIndex, int groupId)
+{
+    return juce::String (kGroupDragPrefix) + juce::String (layerIndex)
+             + ":" + juce::String (groupId);
+}
+
+/** False when `text` is not a group drag at all (a path, a card). The
+    out-parameters are left untouched on failure, so a caller cannot act on a
+    half-parsed payload. */
+inline bool groupDragTarget (const juce::String& text, int& layerIndex, int& groupId)
+{
+    if (! text.startsWith (kGroupDragPrefix))
+        return false;
+
+    // "atomic-group:0:3" -> rest "0:3"
+    const auto rest      = text.fromFirstOccurrenceOf (":", false, false);
+    const auto layerText = rest.upToFirstOccurrenceOf (":", false, false);
+    const auto groupText = rest.fromFirstOccurrenceOf (":", false, false);
+
+    // containsOnly is vacuously true for an empty string, so the emptiness is
+    // checked separately — otherwise "atomic-group::" would parse as (0, 0).
+    if (layerText.isEmpty() || groupText.isEmpty()
+         || ! layerText.containsOnly ("0123456789")
+         || ! groupText.containsOnly ("0123456789"))
+        return false;
+
+    const int parsedLayer = layerText.getIntValue();
+    const int parsedGroup = groupText.getIntValue();
+
+    if (parsedLayer < 0 || parsedGroup < 0)
+        return false;
+
+    layerIndex = parsedLayer;
+    groupId    = parsedGroup;
+
+    return true;
 }
 
 //-- Transport glyph geometry ---------------------------------------------------

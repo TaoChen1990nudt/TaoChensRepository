@@ -83,6 +83,20 @@ struct NoteEvent
         The group id is only meaningful inside the layer that owns the note. */
     int groupId = -1;
 
+    /** Phase 58: WHICH appearance of that group this note belongs to.
+
+        A group is one definition — one name, one colour, one mount, one trim —
+        and a song may want several copies of it: the same eight bars repeated
+        at the chorus, each one dragged around on its own. That is what this
+        number separates. Notes with the same (groupId, groupOccurrence) move
+        together; two occurrences of the same group are independent objects that
+        merely agree about everything in NoteGroup.
+
+        Always 0 for a group that has never been reused, which is every project
+        written before Phase 58 — so the field is absent from disk until it has
+        something to say. */
+    int groupOccurrence = 0;
+
     bool followsLayerOutput() const noexcept { return outputSlotOverride < 0; }
     bool belongsToGroup() const noexcept     { return groupId >= 0; }
     bool drivesPluginParam() const noexcept  { return modPluginParam >= 0; }
@@ -218,6 +232,11 @@ struct SampleEvent
         nothing about routing. See routing::resolveSample: a group's mount is a
         statement about notes, and a clip keeps its own sampler regardless. */
     int          groupId      = -1;
+
+    /** Phase 58: which appearance of that group, exactly like
+        NoteEvent::groupOccurrence — a block and the notes beside it belong to
+        the same occurrence, and two occurrences move independently. */
+    int          groupOccurrence = 0;
 
     //-- Phase 29: the window onto the file -----------------------------------
     /** Seconds into the source where this block starts.
@@ -607,25 +626,52 @@ public:
     void removeGroup (int groupId);
 
     /** Moves these notes into a group (they leave whatever group they were in).
-        Passing groupId < 0 just detaches them. Unknown ids are ignored. */
-    void assignNotesToGroup (const std::vector<int>& noteIds, int groupId);
+        Passing groupId < 0 just detaches them. Unknown ids are ignored.
+
+        `occurrence` says WHICH appearance of that group they join (Phase 58).
+        Default 0 is the original one — which is what every pre-58 caller means,
+        and exactly right for a group that was just created. */
+    void assignNotesToGroup (const std::vector<int>& noteIds, int groupId, int occurrence = 0);
 
     /** Group of a note, or -1. Cheap single lookup, used by every readout. */
     int getGroupIdOfNote (int noteId) const noexcept;
 
+    /** Which appearance of that group the note belongs to (0 when ungrouped). */
+    int getGroupOccurrenceOfNote (int noteId) const noexcept;
+
     /** Members, in note order (the order the roll draws them in). */
     std::vector<int> getGroupNoteIds (int groupId) const;
     int countNotesInGroup (int groupId) const noexcept;
+
+    //-- Phase 58: the appearances of one group -------------------------------
+    /** Every occurrence number this group currently has, ascending.
+
+        Derived, never stored: the same "membership lives on the member" rule
+        the group itself obeys. A group with no members has no appearances, and
+        an occurrence that loses its last member simply stops existing — there
+        is no empty bracket to clean up. */
+    std::vector<int> getGroupOccurrences (int groupId) const;
+
+    /** The number a NEW appearance of this group should take: one past the
+        highest in use, or 0 for a group that has never been placed. */
+    int nextGroupOccurrence (int groupId) const;
+
+    std::vector<int> getOccurrenceNoteIds (int groupId, int occurrence) const;
+    int countNotesInOccurrence (int groupId, int occurrence) const noexcept;
 
     //-- Phase 27: clips as group members -------------------------------------
     /** A clip can be grouped with notes. It stays a clip: membership means
         "move and select with the rest", never "play what the group plays" —
         the routing question is answered by routing::resolveSample and nowhere
         else. */
-    void assignSamplesToGroup (const std::vector<int>& sampleIds, int groupId);
+    void assignSamplesToGroup (const std::vector<int>& sampleIds, int groupId, int occurrence = 0);
     int  getGroupIdOfSample (int sampleId) const noexcept;
+    int  getGroupOccurrenceOfSample (int sampleId) const noexcept;
     std::vector<int> getGroupSampleIds (int groupId) const;
     int  countSamplesInGroup (int groupId) const noexcept;
+
+    std::vector<int> getOccurrenceSampleIds (int groupId, int occurrence) const;
+    int  countSamplesInOccurrence (int groupId, int occurrence) const noexcept;
 
     /** Replaces the group list (project load). Ids are preserved and the id
         counter is raised past them, exactly like restoreNotes(). */

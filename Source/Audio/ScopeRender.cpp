@@ -37,7 +37,9 @@ ExtractResult extract (const PublishedSchedule& full, const Scope& scope)
 
         switch (scope.kind)
         {
-            case Scope::Kind::group:     return note.groupId == scope.groupId;
+            case Scope::Kind::group:     return note.groupId == scope.groupId
+                                              && (scope.groupOccurrence < 0
+                                                    || note.groupOccurrence == scope.groupOccurrence);
             case Scope::Kind::selection: return contains (scope.noteIds, note.noteId);
             case Scope::Kind::layer:
             default:                     return true;
@@ -51,7 +53,9 @@ ExtractResult extract (const PublishedSchedule& full, const Scope& scope)
 
         switch (scope.kind)
         {
-            case Scope::Kind::group:     return clip.groupId == scope.groupId;
+            case Scope::Kind::group:     return clip.groupId == scope.groupId
+                                              && (scope.groupOccurrence < 0
+                                                    || clip.groupOccurrence == scope.groupOccurrence);
             case Scope::Kind::selection: return contains (scope.sampleIds, clip.clipId);
             case Scope::Kind::layer:
             default:                     return true;

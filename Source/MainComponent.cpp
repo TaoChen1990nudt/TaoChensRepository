@@ -6554,6 +6554,7 @@ void MainComponent::renderScopeToSample (const PianoRollComponent::RenderScopeRe
     {
         asked.kind    = scope::Scope::Kind::group;
         asked.groupId = request.groupId;
+        asked.groupOccurrence = request.groupOccurrence;   // Phase 58: this copy
     }
     else
     {

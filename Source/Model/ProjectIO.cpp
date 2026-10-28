@@ -607,6 +607,11 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                     if (sample.groupId >= 0)
                         sampleXml->setAttribute ("group", sample.groupId);
 
+                    // Phase 58 (v24): which appearance of that group. Absent =
+                    // 0, the only appearance a pre-58 project could have.
+                    if (sample.groupId >= 0 && sample.groupOccurrence != 0)
+                        sampleXml->setAttribute ("groupocc", sample.groupOccurrence);
+
                     // Phase 29: the window. Written only when set, so a v14
                     // project comes back with offset 0 — which is exactly
                     // what it meant.
@@ -678,6 +683,11 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
 
                 if (note.groupId >= 0)
                     noteXml->setAttribute ("group", note.groupId);
+
+                // Phase 58 (v24): which appearance of that group — see the
+                // block above. Absent = 0.
+                if (note.groupId >= 0 && note.groupOccurrence != 0)
+                    noteXml->setAttribute ("groupocc", note.groupOccurrence);
 
                 writeEnvelope (*noteXml, note.envelope);
             }
@@ -958,6 +968,7 @@ bool fromXmlText (const juce::String& xmlText,
                     sample.gainDb      = (float) sm->getDoubleAttribute ("gainDb", 0.0);
                     sample.outputSlotId = sm->getIntAttribute ("slot", -1);
                     sample.groupId      = sm->getIntAttribute ("group", -1);
+                    sample.groupOccurrence = juce::jmax (0, sm->getIntAttribute ("groupocc", 0));
                     sample.sourceOffsetSeconds = juce::jmax (0.0, sm->getDoubleAttribute ("offset", 0.0));
 
                     // Phase 49 (v21): the volume curve. v21 files carry it as
@@ -1031,6 +1042,7 @@ bool fromXmlText (const juce::String& xmlText,
                     note.velocity    = (float) n->getDoubleAttribute ("velocity", 0.8);
                     note.outputSlotOverride = n->getIntAttribute ("output", -1);
                     note.groupId  = n->getIntAttribute ("group", -1);
+                    note.groupOccurrence = juce::jmax (0, n->getIntAttribute ("groupocc", 0));
                     note.modTarget = noteModTargetFromKey (n->getStringAttribute ("mod", "level"));
                     note.modPluginParam = n->getIntAttribute ("pluginparam", -1);
 

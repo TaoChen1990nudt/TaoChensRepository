@@ -297,16 +297,60 @@ void PianoRollComponent::setPlayheadBeat (double beats)
 
     const double previous = playheadBeat;
 
+    const double visible = getVisibleBeats();
+
+    //-- Phase 58: hand the view back when the playhead comes home -----------
+    // Whatever moved the playhead — the transport, a scrub, a loop jump — if it
+    // is inside the window the user set up before the view was pushed away, that
+    // window comes back. Without this the scroll bar was a one-way trip: the
+    // playhead returned, the picture did not.
+    if (followScrolled && visible > 1.0
+         && beats >= userScrollBeats - 1.0e-9
+         && beats <= userScrollBeats + visible + 1.0e-9)
+    {
+        const double maxBeats = juce::jmax (0.0, timelineBeats - visible);
+        const double target   = juce::jlimit (0.0, maxBeats, userScrollBeats);
+
+        followScrolled = false;
+
+        const bool moved = ! juce::approximatelyEqual (target, scrollBeats);
+
+        scrollBeats  = target;
+        playheadBeat = beats;
+        soundingNotes.clear();
+
+        if (transportActive)
+            collectSoundingNotes (beats, soundingNotes);
+
+        if (moved)
+        {
+            repaint();
+
+            if (onScrollChanged != nullptr)
+                onScrollChanged();
+        }
+
+        return;
+    }
+
     // Follow the playhead once it approaches the right edge. Done before the
     // dirty-region maths below, because a scroll moves everything and no local
     // repaint would be correct.
     if (transportActive && beats >= 0.0 && ! juce::approximatelyEqual (previous, beats))
     {
-        const double visible = getVisibleBeats();
         const double lead    = scrollBeats + visible * 0.75;
 
         if (visible > 1.0 && (beats < scrollBeats || beats > lead))
         {
+            // The first push is where "the state before I moved over there" is
+            // captured — once, not on every frame, or the window would follow
+            // the playhead and there would be nothing to come back to.
+            if (! followScrolled)
+            {
+                userScrollBeats = scrollBeats;
+                followScrolled  = true;
+            }
+
             ensureTimelineExtendsTo (beats + visible);
             const double maxBeats = juce::jmax (0.0, timelineBeats - visible);
             scrollBeats = juce::jlimit (0.0, maxBeats, beats - visible * 0.15);
@@ -786,6 +830,7 @@ void PianoRollComponent::setScrollBeats (double beats)
         return;
 
     scrollBeats = clamped;
+    noteUserScroll();          // Phase 58: this is the window the user wants
     repaint();
 
     if (onScrollChanged != nullptr)
@@ -1364,7 +1409,50 @@ int PianoRollComponent::getSelectedGroupId() const
     return groupId;
 }
 
-bool PianoRollComponent::isWholeGroupSelected (int groupId, bool includeSamples) const
+int PianoRollComponent::getSelectedGroupOccurrence() const
+{
+    const auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr)
+        return -1;
+
+    // Phase 58: the selection also answers "WHICH copy", because copying a
+    // group has to copy the copy the user selected — not all four of them. A
+    // selection that straddles two appearances is not one object, so it answers
+    // -1 and the copy falls back to the loose-notes rule.
+    int occurrence = -1;
+
+    for (int id : selection)
+    {
+        const auto* note = layer->findNote (id);
+
+        if (note == nullptr || note->groupId < 0)
+            return -1;
+
+        if (occurrence < 0)
+            occurrence = note->groupOccurrence;
+        else if (occurrence != note->groupOccurrence)
+            return -1;
+    }
+
+    for (int id : sampleSelection)
+    {
+        const auto* clip = layer->findSample (id);
+
+        if (clip == nullptr || clip->groupId < 0)
+            return -1;
+
+        if (occurrence < 0)
+            occurrence = clip->groupOccurrence;
+        else if (occurrence != clip->groupOccurrence)
+            return -1;
+    }
+
+    return occurrence;
+}
+
+bool PianoRollComponent::isWholeGroupSelected (int groupId, bool includeSamples,
+                                               int occurrence) const
 {
     const auto* layer = stack.getActiveLayer();
 
@@ -1373,8 +1461,15 @@ bool PianoRollComponent::isWholeGroupSelected (int groupId, bool includeSamples)
 
     // Every member has to be in the selection, and nothing else may be — a
     // selection that also holds a loose note is two actions, not one.
-    const int notes   = layer->countNotesInGroup (groupId);
-    const int clips   = includeSamples ? layer->countSamplesInGroup (groupId) : 0;
+    //
+    // Phase 58: "every member" means every member of ONE appearance when
+    // `occurrence` is given. Selecting the chorus copy alone is a whole object,
+    // even though the group it belongs to has three more copies elsewhere.
+    const int notes   = occurrence < 0 ? layer->countNotesInGroup (groupId)
+                                       : layer->countNotesInOccurrence (groupId, occurrence);
+    const int clips   = ! includeSamples ? 0
+                        : (occurrence < 0 ? layer->countSamplesInGroup (groupId)
+                                          : layer->countSamplesInOccurrence (groupId, occurrence));
     const int members = notes + clips;
     const int chosen  = (int) selection.size() + (includeSamples ? (int) sampleSelection.size() : 0);
 
@@ -1390,17 +1485,27 @@ bool PianoRollComponent::isWholeGroupSelected (int groupId, bool includeSamples)
 
         if (note == nullptr || note->groupId != groupId)
             return false;
+
+        if (occurrence >= 0 && note->groupOccurrence != occurrence)
+            return false;
     }
 
     if (includeSamples)
         for (int id : sampleSelection)
-            if (layer->getGroupIdOfSample (id) != groupId)
+        {
+            const auto* clip = layer->findSample (id);
+
+            if (clip == nullptr || clip->groupId != groupId)
                 return false;
+
+            if (occurrence >= 0 && clip->groupOccurrence != occurrence)
+                return false;
+        }
 
     return true;
 }
 
-void PianoRollComponent::selectGroup (int groupId)
+void PianoRollComponent::selectGroup (int groupId, int occurrence)
 {
     for (int i = 0; i < stack.getNumLayers(); ++i)
     {
@@ -1425,8 +1530,15 @@ void PianoRollComponent::selectGroup (int groupId)
         // highlight appeared to cover. setMixedSelection exists for exactly this
         // (Phase 29 built it for mixed copy), and it is the only way to write
         // both lists without one clearing the other.
-        setMixedSelection (layer->getGroupNoteIds (groupId),
-                           layer->getGroupSampleIds (groupId));
+        // Phase 58: with an occurrence, only that copy; without one, the whole
+        // group (every copy) — which is what a caller holding just an id means.
+        if (occurrence < 0)
+            setMixedSelection (layer->getGroupNoteIds (groupId),
+                              layer->getGroupSampleIds (groupId));
+        else
+            setMixedSelection (layer->getOccurrenceNoteIds (groupId, occurrence),
+                              layer->getOccurrenceSampleIds (groupId, occurrence));
+
         return;
     }
 }
@@ -1443,7 +1555,8 @@ bool PianoRollComponent::ungroupSelection()
     for (int id : selection)
         if (auto* note = layer->findNote (id); note != nullptr && note->groupId >= 0)
         {
-            note->groupId = -1;
+            note->groupId         = -1;
+            note->groupOccurrence = 0;      // Phase 58: leave no stale appearance
             changed = true;
         }
 
@@ -1453,7 +1566,8 @@ bool PianoRollComponent::ungroupSelection()
     for (int id : sampleSelection)
         if (auto* clip = layer->findSample (id); clip != nullptr && clip->groupId >= 0)
         {
-            clip->groupId = -1;
+            clip->groupId         = -1;
+            clip->groupOccurrence = 0;
             changed = true;
         }
 
@@ -1467,12 +1581,31 @@ bool PianoRollComponent::ungroupSelection()
     return changed;
 }
 
-bool PianoRollComponent::disbandGroup (int layerIndex, int groupId)
+bool PianoRollComponent::disbandGroup (int layerIndex, int groupId, int occurrence)
 {
     auto* layer = stack.getLayer (layerIndex);
 
     if (layer == nullptr || layer->findGroup (groupId) == nullptr)
         return false;
+
+    //-- Phase 58: one copy, or the whole definition? ------------------------
+    // With several appearances on the sheet, "解散编组" on the chorus copy must
+    // not take the verse copy's group away with it — the user pointed at one
+    // object. So a single occurrence is DETACHED, and the definition is only
+    // dropped when this was the last thing holding it (or when no occurrence
+    // was named at all, which is the old whole-group verb).
+    if (occurrence >= 0 && layer->getGroupOccurrences (groupId).size() > 1)
+    {
+        const auto noteIds = layer->getOccurrenceNoteIds (groupId, occurrence);
+        const auto clipIds = layer->getOccurrenceSampleIds (groupId, occurrence);
+
+        layer->assignNotesToGroup (noteIds, -1);
+        layer->assignSamplesToGroup (clipIds, -1);
+
+        stack.notifyNotesChanged();
+        repaint();
+        return true;
+    }
 
     // Tell the host FIRST: it owns the automation window and has to drop the
     // group's track before the id stops resolving. Doing it afterwards leaves a
@@ -1515,7 +1648,7 @@ bool PianoRollComponent::setGroupOutputForSelection (int slotId)
     return false;
 }
 
-int PianoRollComponent::getGroupLabelAt (juce::Point<float> position) const
+int PianoRollComponent::getGroupLabelAt (juce::Point<float> position, int* occurrence) const
 {
     for (int i = 0; i < stack.getNumLayers(); ++i)
     {
@@ -1526,22 +1659,33 @@ int PianoRollComponent::getGroupLabelAt (juce::Point<float> position) const
 
         for (const auto& group : layer->getGroups())
         {
-            // Phase 21: the pill now ends in a handle, and that handle is its
-            // own hit target. Without this exclusion clicking it would select
-            // the group instead of opening the curve — which is exactly the bug
-            // the note's tail button already taught us to avoid.
-            if (getGroupAutomationHandleBounds (i, group.getId()).contains (position))
-                continue;
+            // Phase 58: every appearance has its own pill, and the one the
+            // pointer is over is the one the click is about.
+            for (int which : layer->getGroupOccurrences (group.getId()))
+            {
+                // Phase 21: the pill now ends in a handle, and that handle is
+                // its own hit target. Without this exclusion clicking it would
+                // select the group instead of opening the curve — which is
+                // exactly the bug the note's tail button already taught us to
+                // avoid.
+                if (getGroupAutomationHandleBounds (i, group.getId(), which).contains (position))
+                    continue;
 
-            if (getGroupLabelBounds (i, group.getId()).contains (position))
-                return group.getId();
+                if (getGroupLabelBounds (i, group.getId(), which).contains (position))
+                {
+                    if (occurrence != nullptr)
+                        *occurrence = which;
+
+                    return group.getId();
+                }
+            }
         }
     }
 
     return -1;
 }
 
-int PianoRollComponent::getGroupFrameAt (juce::Point<float> position) const
+int PianoRollComponent::getGroupFrameAt (juce::Point<float> position, int* occurrence) const
 {
     // Only the active layer: a ghost group is not editable, and a click on one
     // that picked the group up would drag notes the user cannot even select.
@@ -1553,22 +1697,33 @@ int PianoRollComponent::getGroupFrameAt (juce::Point<float> position) const
 
     for (const auto& group : layer->getGroups())
     {
-        // Phase 57: the same box the frame is drawn with (groupFrameOf), so the
-        // pointer agrees with the line — the old 3px expansion would have the
-        // group grabbed from outside its own border.
-        const auto content = groupFrameOf (activeIndex, group.getId());
+        // Phase 58: one box per appearance. The pointer is inside at most one of
+        // them, so "which group" is no longer a good enough answer — the caller
+        // also needs "which copy of it".
+        for (int which : layer->getGroupOccurrences (group.getId()))
+        {
+            // Phase 57: the same box the frame is drawn with (groupFrameOf), so
+            // the pointer agrees with the line — the old 3px expansion would
+            // have the group grabbed from outside its own border.
+            const auto content = groupFrameOf (activeIndex, group.getId(), which);
 
-        if (content.isEmpty())
-            continue;
+            if (content.isEmpty())
+                continue;
 
-        if (content.contains (position))
-            return group.getId();
+            if (content.contains (position))
+            {
+                if (occurrence != nullptr)
+                    *occurrence = which;
+
+                return group.getId();
+            }
+        }
     }
 
     return -1;
 }
 
-bool PianoRollComponent::isGroupFocused (int layerIndex, int groupId) const
+bool PianoRollComponent::isGroupFocused (int layerIndex, int groupId, int occurrence) const
 {
     if (focusSlotId < 0)
         return false;
@@ -1580,6 +1735,7 @@ bool PianoRollComponent::isGroupFocused (int layerIndex, int groupId) const
 
     for (const auto& note : layer->getNotes())
         if (note.groupId == groupId
+             && (occurrence < 0 || note.groupOccurrence == occurrence)
              && routing::resolve (*layer, note, rack).slotId == focusSlotId)
             return true;
 
@@ -1587,14 +1743,23 @@ bool PianoRollComponent::isGroupFocused (int layerIndex, int groupId) const
 }
 
 juce::Rectangle<float> PianoRollComponent::getGroupContentBounds (const Layer& layer,
-                                                                 const NoteGroup& group) const
+                                                                 const NoteGroup& group,
+                                                                 int occurrence) const
 {
     const auto area = getGridArea();
     juce::Rectangle<float> unionBounds;
 
+    // Phase 58: -1 means "the whole group" (every appearance at once), which is
+    // what a caller that only knows the group id wants; anything else picks ONE
+    // appearance out, and those are the rectangles the user sees.
+    const auto belongs = [&group, occurrence] (int groupId, int memberOccurrence)
+    {
+        return groupId == group.getId() && (occurrence < 0 || memberOccurrence == occurrence);
+    };
+
     for (const auto& note : layer.getNotes())
     {
-        if (note.groupId != group.getId())
+        if (! belongs (note.groupId, note.groupOccurrence))
             continue;
 
         const auto bounds = getNoteBounds (note);
@@ -1611,7 +1776,7 @@ juce::Rectangle<float> PianoRollComponent::getGroupContentBounds (const Layer& l
     // leave the clip behind.
     for (const auto& sample : layer.getSamples())
     {
-        if (sample.groupId != group.getId())
+        if (! belongs (sample.groupId, sample.groupOccurrence))
             continue;
 
         const auto bounds = getSampleScreenBounds (layerIndexOf (&layer), sample.id);
@@ -1637,7 +1802,8 @@ int PianoRollComponent::layerIndexOf (const Layer* layer) const
     return -1;
 }
 
-juce::Rectangle<float> PianoRollComponent::getGroupLabelBounds (int layerIndex, int groupId) const
+juce::Rectangle<float> PianoRollComponent::getGroupLabelBounds (int layerIndex, int groupId,
+                                                              int occurrence) const
 {
     const auto* layer = stack.getLayer (layerIndex);
 
@@ -1649,7 +1815,9 @@ juce::Rectangle<float> PianoRollComponent::getGroupLabelBounds (int layerIndex, 
     if (group == nullptr)
         return {};
 
-    const auto content = getGroupContentBounds (*layer, *group);
+    // Phase 58: a pill per appearance. Two copies of "副歌" on the sheet are two
+    // objects with two grab areas, not one label floating over both.
+    const auto content = getGroupContentBounds (*layer, *group, occurrence);
 
     if (content.isEmpty())
         return {};
@@ -1687,9 +1855,10 @@ juce::Rectangle<float> PianoRollComponent::getGroupLabelBounds (int layerIndex, 
 }
 
 juce::Rectangle<float> PianoRollComponent::getGroupAutomationHandleBounds (int layerIndex,
-                                                                          int groupId) const
+                                                                          int groupId,
+                                                                          int occurrence) const
 {
-    const auto pill = getGroupLabelBounds (layerIndex, groupId);
+    const auto pill = getGroupLabelBounds (layerIndex, groupId, occurrence);
 
     if (pill.isEmpty())
         return {};
@@ -1785,7 +1954,8 @@ void PianoRollComponent::pruneEmptyGroups()
     }
 }
 
-void PianoRollComponent::fillGroupMenu (juce::PopupMenu& menu, int layerIndex, int groupId) const
+void PianoRollComponent::fillGroupMenu (juce::PopupMenu& menu, int layerIndex, int groupId,
+                                        int occurrence) const
 {
     auto* layer = stack.getLayer (layerIndex);
 
@@ -1797,13 +1967,24 @@ void PianoRollComponent::fillGroupMenu (juce::PopupMenu& menu, int layerIndex, i
     if (group == nullptr)
         return;
 
-    const int members = layer->countNotesInGroup (groupId);
-    const int clips   = layer->countSamplesInGroup (groupId);   // Phase 27
+    // Phase 58: the counts belong to the copy under the pointer. With one
+    // appearance they are the group's counts, exactly as before; with several,
+    // "12 音符" for a 3-note copy would be a lie about what the verbs below do.
+    const bool perCopy = occurrence >= 0;
+    const int  members = perCopy ? layer->countNotesInOccurrence (groupId, occurrence)
+                                 : layer->countNotesInGroup (groupId);
+    const int  clips   = perCopy ? layer->countSamplesInOccurrence (groupId, occurrence)
+                                 : layer->countSamplesInGroup (groupId);   // Phase 27
+
+    const int copies = (int) layer->getGroupOccurrences (groupId).size();
 
     menu.addSectionHeader (group->getName() + utf8 (" · ")
                              + juce::String (members) + utf8 (" 音符")
                              + (clips > 0 ? utf8 (" · ") + juce::String (clips) + utf8 (" 采样")
-                                          : juce::String()));
+                                          : juce::String())
+                             + (copies > 1 && perCopy
+                                  ? utf8 (" · 第 ") + juce::String (occurrence + 1) + utf8 (" 处")
+                                  : juce::String()));
     menu.addItem (1, utf8 ("选中整组"));
     // Phase 56: the group as one object, moved one bar on. Not "复制" + "粘贴":
     // that spends the clipboard and lands wherever the playhead is, and the
@@ -1830,10 +2011,11 @@ void PianoRollComponent::fillGroupMenu (juce::PopupMenu& menu, int layerIndex, i
     menu.addItem (5, utf8 ("解散编组（音符保留）"));
 }
 
-void PianoRollComponent::showGroupMenu (int layerIndex, int groupId, juce::Point<int> screenPos)
+void PianoRollComponent::showGroupMenu (int layerIndex, int groupId, int occurrence,
+                                        juce::Point<int> screenPos)
 {
     juce::PopupMenu menu;
-    fillGroupMenu (menu, layerIndex, groupId);
+    fillGroupMenu (menu, layerIndex, groupId, occurrence);
 
     // Nothing to show means the group went away between the click and here.
     if (menu.getNumItems() == 0)
@@ -1843,17 +2025,17 @@ void PianoRollComponent::showGroupMenu (int layerIndex, int groupId, juce::Point
 
     menu.showMenuAsync (juce::PopupMenu::Options()
                             .withTargetScreenArea (juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1)),
-                        [safe, layerIndex, groupId, screenPos] (int result)
+                        [safe, layerIndex, groupId, occurrence, screenPos] (int result)
                         {
                             if (safe == nullptr || result <= 0)
                                 return;
 
                             switch (result)
                             {
-                                case 1: safe->selectGroup (groupId); break;
+                                case 1: safe->selectGroup (groupId, occurrence); break;
 
                                 case 8:
-                                    safe->duplicateGroupToNextBar (layerIndex, groupId);
+                                    safe->duplicateGroupToNextBar (layerIndex, groupId, occurrence);
                                     break;
 
                                 case 2:
@@ -1869,7 +2051,7 @@ void PianoRollComponent::showGroupMenu (int layerIndex, int groupId, juce::Point
                                     break;
 
                                 case 5:
-                                    safe->disbandGroup (layerIndex, groupId);
+                                    safe->disbandGroup (layerIndex, groupId, occurrence);
                                     break;
 
                                 case 6:
@@ -1888,8 +2070,9 @@ void PianoRollComponent::showGroupMenu (int layerIndex, int groupId, juce::Point
                                     if (safe->onRenderScopeRequested != nullptr)
                                     {
                                         RenderScopeRequest request;
-                                        request.layerIndex = layerIndex;
-                                        request.groupId    = groupId;
+                                        request.layerIndex      = layerIndex;
+                                        request.groupId         = groupId;
+                                        request.groupOccurrence = occurrence;
                                         safe->onRenderScopeRequested (request);
                                     }
                                     break;
@@ -2285,37 +2468,60 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     // Checked before the notes because the pill sits above them: clicking the
     // name is the obvious way to say "the whole group", and it costs one hit
     // test rather than a modifier key nobody would guess.
-    if (const int groupId = getGroupLabelAt (e.position); groupId >= 0)
+    int labelOccurrence = 0;
+
+    if (const int groupId = getGroupLabelAt (e.position, &labelOccurrence); groupId >= 0)
     {
         const int layerIndex = layerIndexOfGroup (groupId);
 
         if (e.mods.isPopupMenu())
         {
-            showGroupMenu (layerIndex, groupId, e.getScreenPosition());
+            showGroupMenu (layerIndex, groupId, labelOccurrence, e.getScreenPosition());
             return;
         }
 
-        armGroupMove (groupId, e.position);
+        armGroupMove (groupId, labelOccurrence, e.position);
         return;
     }
 
     // ---- Phase 17: an audio clip under the cursor --------------------------
     // Before the notes: a block is the size of several lanes, so it is the
     // thing you are aiming at when both are under the pointer.
-    if (auto* clip = hitTestSample (e.position))
+    if (auto* clipUnder = hitTestSample (e.position))
     {
-        const int clipId = clip->id;
+        const int clipId = clipUnder->id;
 
-        // Phase 28: the click is also the selection. Selecting before the menu
-        // means every item in it acts on what the user just pointed at.
+        //-- Phase 58: a SELECTED block's edge outranks the hit --------------
+        // The hit test can only answer with ONE block, and with two blocks
+        // overlapping the pixel you aimed at may belong to a stranger that is
+        // drawn on top. "I selected three and dragged one edge" then became
+        // "I dragged the stranger" — the trim looked like it failed.
+        // The pointer's own cursor already says "trim band", so ask that
+        // question first: if the edge belongs to something selected, that edge
+        // is what the gesture is about, and the selection must survive.
+        const auto edge     = selectedTrimEdgeAt (e.position);
+        const int  edgeId   = edge.first;
+        const bool edgeTail = edge.second;
+        const int  grabbedId = edgeId >= 0 ? edgeId : clipId;
+
+        // Phase 28: the click is also the selection — except on a trim grab
+        // that belongs to an already-selected block, where rewriting the
+        // selection would throw away exactly the blocks the trim is for.
         if (e.mods.isShiftDown() || e.mods.isCommandDown())
             toggleSampleSelection (clipId);
-        else if (! isSampleSelected (clipId))
+        else if (edgeId < 0 && ! isSampleSelected (clipId))
             setSampleSelection ({ clipId });
+
+        auto* grabbed = stack.getActiveLayer() != nullptr
+                          ? stack.getActiveLayer()->findSample (grabbedId)
+                          : nullptr;
+
+        if (grabbed == nullptr)
+            return;
 
         if (e.mods.isPopupMenu())
         {
-            showSampleMenu (clipId, e.getScreenPosition());
+            showSampleMenu (grabbedId, e.getScreenPosition());
             return;
         }
 
@@ -2323,9 +2529,9 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         {
             if (auto* activeLayer = stack.getActiveLayer())
             {
-                activeLayer->removeSample (clipId);
+                activeLayer->removeSample (grabbedId);
                 sampleSelection.erase (std::remove (sampleSelection.begin(),
-                                                    sampleSelection.end(), clipId),
+                                                    sampleSelection.end(), grabbedId),
                                        sampleSelection.end());
                 pruneEmptyGroups();
                 stack.notifyNotesChanged();
@@ -2342,39 +2548,40 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
             // selection, which is the cut's own feedback.
             const double at = beatAtScreenX (e.position.x);
 
-            splitSamplesAt ({ clipId }, snapEnabled ? snapBeat (at) : at);
+            splitSamplesAt ({ grabbedId }, snapEnabled ? snapBeat (at) : at);
             return;
         }
 
-        const auto bounds = getSampleScreenBounds (stack.getActiveLayerIndex(), clipId);
+        const auto bounds = getSampleScreenBounds (stack.getActiveLayerIndex(), grabbedId);
 
         // Phase 49: the chevron on the block opens its curve box. Checked
         // before the trim bands because it sits between them — the same order
         // the note's tail button answers in.
-        const auto handle = getSampleAutomationHandleBounds (*clip);
+        const auto handle = getSampleAutomationHandleBounds (*grabbed);
 
         if (! handle.isEmpty() && handle.contains (e.position))
         {
-            if (expandedSampleId == clipId && expandedSampleLayerIndex == stack.getActiveLayerIndex())
+            if (expandedSampleId == grabbedId && expandedSampleLayerIndex == stack.getActiveLayerIndex())
                 closeSampleAutomation();
             else
-                openSampleAutomation (stack.getActiveLayerIndex(), clipId);
+                openSampleAutomation (stack.getActiveLayerIndex(), grabbedId);
 
             return;
         }
 
         const float band   = ui::pf (kResizeHandleWidth);
-        const bool  onTail = e.position.x > bounds.getRight() - band;
-        const bool  onHead = ! onTail && e.position.x < bounds.getX() + band;
+        const bool  onTail = edgeId >= 0 ? edgeTail : (e.position.x > bounds.getRight() - band);
+        const bool  onHead = edgeId >= 0 ? ! edgeTail
+                                         : (! onTail && e.position.x < bounds.getX() + band);
 
         // Phase 28/29: a grab on a block's edge is a trim of the SELECTION
         // (Phase 56 widened it from "the grabbed block only"); a grab anywhere
         // else arms a RIGID move of the whole selection, clips and notes
         // together.
-        if ((onTail || onHead) && isSampleSelected (clipId))
+        if ((onTail || onHead) && isSampleSelected (grabbedId))
         {
-            dragSampleId       = clipId;
-            dragSampleOriginal = *clip;
+            dragSampleId       = grabbedId;
+            dragSampleOriginal = *grabbed;
             dragAnchorBeat     = beatAtScreenX (e.position.x);
             dragMode           = onTail ? DragMode::resizeSample : DragMode::resizeSampleLeft;
 
@@ -2562,11 +2769,15 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
     // Shift is exempt on purpose: additive marquee INSIDE a group still has to
     // work, and that is what Shift already means on empty canvas.
     if (! e.mods.isShiftDown())
-        if (const int frameGroup = getGroupFrameAt (e.position); frameGroup >= 0)
+    {
+        int frameOccurrence = 0;
+
+        if (const int frameGroup = getGroupFrameAt (e.position, &frameOccurrence); frameGroup >= 0)
         {
-            armGroupMove (frameGroup, e.position);
+            armGroupMove (frameGroup, frameOccurrence, e.position);
             return;
         }
+    }
 
     // ---- Empty grid: marquee over the ACTIVE layer only ----------------------
     // Phase 30: and the grid itself ends the spotlight. "Click somewhere that is
@@ -2784,7 +2995,7 @@ void PianoRollComponent::captureDragOriginals()
             dragOriginals.push_back (note);
 }
 
-void PianoRollComponent::captureGroupClips (int groupId)
+void PianoRollComponent::captureGroupClips (int groupId, int occurrence)
 {
     dragClipOriginals.clear();
 
@@ -2796,8 +3007,11 @@ void PianoRollComponent::captureGroupClips (int groupId)
     // Both capture and apply live here rather than in clampMove: the clamp
     // answers "how far", this answers "what moves", and mixing the two is how
     // a group ends up dragging clips that are not in it.
+    //
+    // Phase 58: and "not in IT" now means "not in this appearance of it" — the
+    // twin eight bars at the chorus are the same group and must not come along.
     for (const auto& clip : active->getSamples())
-        if (clip.groupId == groupId)
+        if (clip.groupId == groupId && (occurrence < 0 || clip.groupOccurrence == occurrence))
             dragClipOriginals.push_back (clip);
 }
 
@@ -2831,7 +3045,8 @@ void PianoRollComponent::applyMove (const MoveClamp& move)
 }
 
 bool PianoRollComponent::simulateGroupMove (int layerIndex, int groupId,
-                                            double deltaBeats, int deltaPitch)
+                                            double deltaBeats, int deltaPitch,
+                                            int occurrence)
 {    if (stack.getActiveLayerIndex() != layerIndex)
         return false;
     auto* active = stack.getActiveLayer();
@@ -2839,9 +3054,9 @@ bool PianoRollComponent::simulateGroupMove (int layerIndex, int groupId,
     if (active == nullptr || active->findGroup (groupId) == nullptr)
         return false;
 
-    selectGroup (groupId);
+    selectGroup (groupId, occurrence);
     captureDragOriginals();
-    captureGroupClips (groupId);
+    captureGroupClips (groupId, occurrence);
 
     if (dragOriginals.empty() && dragClipOriginals.empty())
         return false;
@@ -2853,7 +3068,8 @@ bool PianoRollComponent::simulateGroupMove (int layerIndex, int groupId,
     return true;
 }
 
-juce::Rectangle<float> PianoRollComponent::groupFrameOf (int layerIndex, int groupId) const
+juce::Rectangle<float> PianoRollComponent::groupFrameOf (int layerIndex, int groupId,
+                                                         int occurrence) const
 {
     const auto* layer = stack.getLayer (layerIndex);
 
@@ -2862,19 +3078,24 @@ juce::Rectangle<float> PianoRollComponent::groupFrameOf (int layerIndex, int gro
 
     const auto* group = layer->findGroup (groupId);
 
-    return group != nullptr ? getGroupContentBounds (*layer, *group) : juce::Rectangle<float>();
+    return group != nullptr ? getGroupContentBounds (*layer, *group, occurrence)
+                            : juce::Rectangle<float>();
 }
 
-void PianoRollComponent::armGroupMove (int groupId, juce::Point<float> position)
+void PianoRollComponent::armGroupMove (int groupId, int occurrence, juce::Point<float> position)
 {
     // Selecting is not moving: a group whose only gesture is "become the
     // selection" reads as broken the moment you try to drag it. So the same
     // click arms a rigid move of every member — the rules are unchanged, it is
     // still clampMove() over dragOriginals, exactly like dragging one of its
     // notes.
-    selectGroup (groupId);
+    //
+    // Phase 58: ONE appearance, not the group. Grabbing the chorus copy must
+    // leave the verse copy standing — that is the whole point of a reusable
+    // group, and it is why the occurrence travels down into the capture.
+    selectGroup (groupId, occurrence);
     captureDragOriginals();
-    captureGroupClips (groupId);
+    captureGroupClips (groupId, occurrence);
 
     if (dragOriginals.empty() && dragClipOriginals.empty())
         return;      // the group has no member on this sheet
@@ -3388,13 +3609,18 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
     }
 
     //-- Phase 16: group labels ---------------------------------------------
-    const int groupUnderMouse = getGroupLabelAt (e.position);
-    const int groupLayer      = groupUnderMouse >= 0 ? layerIndexOfGroup (groupUnderMouse) : -1;
+    int       occurrenceUnderMouse = 0;
+    const int groupUnderMouse      = getGroupLabelAt (e.position, &occurrenceUnderMouse);
+    const int groupLayer           = groupUnderMouse >= 0 ? layerIndexOfGroup (groupUnderMouse) : -1;
 
-    if (groupUnderMouse != hoveredGroupId || groupLayer != hoveredGroupLayer)
+    // Phase 58: the pill under the pointer is one appearance, so the highlight
+    // follows the copy — two pills of the same group must not both light up.
+    if (groupUnderMouse != hoveredGroupId || groupLayer != hoveredGroupLayer
+         || (groupUnderMouse >= 0 && occurrenceUnderMouse != hoveredGroupOccurrence))
     {
-        hoveredGroupId    = groupUnderMouse;
-        hoveredGroupLayer = groupLayer;
+        hoveredGroupId         = groupUnderMouse;
+        hoveredGroupLayer      = groupLayer;
+        hoveredGroupOccurrence = occurrenceUnderMouse;
         repaint();
     }
 
@@ -3430,6 +3656,15 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
         if (overHandle)
         {
             setMouseCursor (juce::MouseCursor::PointingHandCursor);
+            return;
+        }
+
+        // Phase 58: a SELECTED block's band is a trim target even when another
+        // block covers it — the press will grab the selected one (see
+        // mouseDown), so the pointer has to say so.
+        if (selectedTrimEdgeAt (e.position).first >= 0)
+        {
+            setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
             return;
         }
 
@@ -3530,6 +3765,7 @@ void PianoRollComponent::setBeatWidthAround (float pixels, double anchorBeat, fl
     // Clamping at the ends of the timeline is the one case where the anchor
     // cannot be honoured — there is no music left of beat 0 to scroll into.
     clampScroll();
+    noteUserScroll();          // Phase 58: zooming is the user's own move
 
     if (onScrollChanged != nullptr)
         onScrollChanged();
@@ -4100,27 +4336,30 @@ void PianoRollComponent::drawGroupBands (juce::Graphics& g)
         const bool  onActive = (i == activeIndex);
         const float baseAlpha = onActive ? 1.0f : ghostAlphaValue + 0.25f;
 
+        // Phase 58: one band per APPEARANCE. A group reused four times is four
+        // rectangles on the sheet and one definition behind them.
         for (const auto& group : layer->getGroups())
-        {
-            // groupFrameOf, not getGroupContentBounds: the box the self-test
-            // reads and the box that is painted have to be the same call, or
-            // "the frame sits on the block" becomes a claim about a function
-            // nobody draws with.
-            const auto content = groupFrameOf (i, group.getId());
+            for (int which : layer->getGroupOccurrences (group.getId()))
+            {
+                // groupFrameOf, not getGroupContentBounds: the box the self-test
+                // reads and the box that is painted have to be the same call, or
+                // "the frame sits on the block" becomes a claim about a function
+                // nobody draws with.
+                const auto content = groupFrameOf (i, group.getId(), which);
 
-            if (content.isEmpty())
-                continue;
+                if (content.isEmpty())
+                    continue;
 
-            const bool focused = isGroupFocused (i, group.getId());
-            const auto colour  = group.getColour();
+                const bool focused = isGroupFocused (i, group.getId(), which);
+                const auto colour  = group.getColour();
 
-            // Phase 57: the band is the members' box, not the members' box plus
-            // a margin — see drawGroupFrames for the outline that shares it.
-            const auto frame   = content;
+                // Phase 57: the band is the members' box, not the members' box
+                // plus a margin — see drawGroupFrames for the outline it shares.
+                const auto frame   = content;
 
-            g.setColour (colour.withAlpha (baseAlpha * (focused ? 0.10f : 0.05f)));
-            g.fillRoundedRectangle (frame, ui::pf (4));
-        }
+                g.setColour (colour.withAlpha (baseAlpha * (focused ? 0.10f : 0.05f)));
+                g.fillRoundedRectangle (frame, ui::pf (4));
+            }
     }
 }
 
@@ -4139,29 +4378,31 @@ void PianoRollComponent::drawGroupFrames (juce::Graphics& g)
         const float baseAlpha = onActive ? 1.0f : ghostAlphaValue + 0.25f;
 
         for (const auto& group : layer->getGroups())
-        {
-            const auto content = groupFrameOf (i, group.getId());
+            for (int which : layer->getGroupOccurrences (group.getId()))
+            {
+                const auto content = groupFrameOf (i, group.getId(), which);
 
-            if (content.isEmpty())
-                continue;
+                if (content.isEmpty())
+                    continue;
 
-            const bool focused = isGroupFocused (i, group.getId());
-            const auto colour  = group.getColour();
+                const bool focused = isGroupFocused (i, group.getId(), which);
+                const auto colour  = group.getColour();
 
-            g.setColour (colour.withAlpha (baseAlpha * (focused ? 0.85f : 0.34f)));
+                g.setColour (colour.withAlpha (baseAlpha * (focused ? 0.85f : 0.34f)));
 
-            // Half a pixel in: a 1px stroke on the exact edge is drawn ON the
-            // clip's own border and reads as "the clip got thicker" rather than
-            // "this is the group". Reduced by the stroke's own half-width, the
-            // two lines touch without merging — no gap, no double line.
-            const float stroke = focused ? ui::pf (1.4f) : ui::pf (1.0f);
-            auto box = content.reduced (stroke * 0.5f);
+                // Half a pixel in: a 1px stroke on the exact edge is drawn ON the
+                // clip's own border and reads as "the clip got thicker" rather
+                // than "this is the group". Reduced by the stroke's own
+                // half-width, the two lines touch without merging — no gap, no
+                // double line.
+                const float stroke = focused ? ui::pf (1.4f) : ui::pf (1.0f);
+                auto box = content.reduced (stroke * 0.5f);
 
-            if (box.getWidth() <= 0.0f || box.getHeight() <= 0.0f)
-                box = content;      // one-pixel member: the frame is all there is
+                if (box.getWidth() <= 0.0f || box.getHeight() <= 0.0f)
+                    box = content;      // one-pixel member: the frame is all there is
 
-            g.drawRoundedRectangle (box, ui::pf (4), stroke);
-        }
+                g.drawRoundedRectangle (box, ui::pf (4), stroke);
+            }
     }
 }
 
@@ -4178,15 +4419,19 @@ void PianoRollComponent::drawGroupLabels (juce::Graphics& g)
 
         const bool onActive = (i == activeIndex);
 
+        // Phase 58: a pill per appearance — each copy is its own grab area, so
+        // each copy has its own name tag.
         for (const auto& group : layer->getGroups())
+            for (int which : layer->getGroupOccurrences (group.getId()))
         {
-            const auto pill = getGroupLabelBounds (i, group.getId());
+            const auto pill = getGroupLabelBounds (i, group.getId(), which);
 
             if (pill.isEmpty())
                 continue;
 
-            const bool focused = isGroupFocused (i, group.getId());
-            const bool hovered = (hoveredGroupId == group.getId() && hoveredGroupLayer == i);
+            const bool focused = isGroupFocused (i, group.getId(), which);
+            const bool hovered = (hoveredGroupId == group.getId() && hoveredGroupLayer == i
+                                    && hoveredGroupOccurrence == which);
             const auto colour  = group.getColour();
 
             const float alpha = onActive ? 1.0f : 0.55f;
@@ -4226,9 +4471,10 @@ void PianoRollComponent::drawGroupLabels (juce::Graphics& g)
             // end opens a curve" is learned once. The first version drew a tiny
             // curve icon here and at 12 px it read as the letter A.
             {
-                const auto handle = getGroupAutomationHandleBounds (i, group.getId());
+                const auto handle = getGroupAutomationHandleBounds (i, group.getId(), which);
                 const bool open   = (expandedGroupId == group.getId()
-                                       && expandedGroupLayerIndex == i);
+                                       && expandedGroupLayerIndex == i
+                                       && expandedGroupOccurrence == which);
                 const bool hot    = hoveredGroupHandle
                                       && hoveredHandleGroupId == group.getId()
                                       && hoveredHandleLayer == i;
@@ -5605,7 +5851,8 @@ const NoteGroup* PianoRollComponent::getExpandedGroup() const
     return nullptr;
 }
 
-void PianoRollComponent::openGroupAutomation (int layerIndex, int groupId, int target)
+void PianoRollComponent::openGroupAutomation (int layerIndex, int groupId, int target,
+                                              int occurrence)
 {
     // One floating editor at a time, same rule as the note box.
     closeNoteAutomation();
@@ -5613,6 +5860,7 @@ void PianoRollComponent::openGroupAutomation (int layerIndex, int groupId, int t
 
     expandedGroupLayerIndex = layerIndex;
     expandedGroupId         = groupId;
+    expandedGroupOccurrence = juce::jmax (0, occurrence);
     expandedGroupTarget     = juce::jlimit (0, numGroupAutomationTargets - 1, target);
     dragGroupPoint          = -1;
 
@@ -5663,7 +5911,8 @@ void PianoRollComponent::closeGroupAutomation()
 }
 
 juce::Range<double> PianoRollComponent::getGroupBeatSpan (const Layer& layer,
-                                                          const NoteGroup& group) const
+                                                          const NoteGroup& group,
+                                                          int occurrence) const
 {
     bool   any = false;
     double lo  = 0.0;
@@ -5672,6 +5921,12 @@ juce::Range<double> PianoRollComponent::getGroupBeatSpan (const Layer& layer,
     for (const auto& note : layer.getNotes())
     {
         if (note.groupId != group.getId())
+            continue;
+
+        // Phase 58: the curve box belongs to ONE appearance. A box spanning
+        // every copy would put the same absolute-time curve over four
+        // unrelated stretches of the song.
+        if (occurrence >= 0 && note.groupOccurrence != occurrence)
             continue;
 
         if (! any)
@@ -5706,7 +5961,8 @@ const AutomationLane& PianoRollComponent::groupLaneFor (const NoteGroup& group, 
 }
 
 juce::Rectangle<float> PianoRollComponent::getGroupAutomationBoxBounds (int layerIndex,
-                                                                      int groupId) const
+                                                                      int groupId,
+                                                                      int occurrence) const
 {
     const auto* layer = stack.getLayer (layerIndex);
 
@@ -5718,12 +5974,12 @@ juce::Rectangle<float> PianoRollComponent::getGroupAutomationBoxBounds (int laye
     if (group == nullptr)
         return {};
 
-    const auto span = getGroupBeatSpan (*layer, *group);
+    const auto span = getGroupBeatSpan (*layer, *group, occurrence);
 
     if (span.isEmpty())
         return {};
 
-    const auto content = getGroupContentBounds (*layer, *group);
+    const auto content = getGroupContentBounds (*layer, *group, occurrence);
 
     if (content.isEmpty())
         return {};
@@ -5757,7 +6013,8 @@ juce::Rectangle<float> PianoRollComponent::getGroupAutomationBoxBounds (int laye
 
 juce::Rectangle<float> PianoRollComponent::getGroupCurveBounds() const
 {
-    const auto box = getGroupAutomationBoxBounds (expandedGroupLayerIndex, expandedGroupId);
+    const auto box = getGroupAutomationBoxBounds (expandedGroupLayerIndex, expandedGroupId,
+                                                  expandedGroupOccurrence);
 
     if (box.isEmpty())
         return {};
@@ -5774,7 +6031,8 @@ juce::Rectangle<float> PianoRollComponent::getGroupCurveBounds() const
 
 juce::Rectangle<float> PianoRollComponent::getGroupMenuArea() const
 {
-    const auto box = getGroupAutomationBoxBounds (expandedGroupLayerIndex, expandedGroupId);
+    const auto box = getGroupAutomationBoxBounds (expandedGroupLayerIndex, expandedGroupId,
+                                                  expandedGroupOccurrence);
 
     if (box.isEmpty())
         return {};
@@ -6773,13 +7031,15 @@ bool PianoRollComponent::cutNotesToClipboard()
 }
 
 PianoRollComponent::GroupClip PianoRollComponent::captureGroupClip (const NoteGroup& group,
-                                                                     double startBeat) const
+                                                                     double startBeat,
+                                                                     int occurrence) const
 {
     GroupClip clip;
 
-    clip.valid         = true;
-    clip.sourceGroupId = group.getId();
-    clip.name          = group.getName();
+    clip.valid            = true;
+    clip.sourceGroupId    = group.getId();
+    clip.sourceOccurrence = juce::jmax (0, occurrence);
+    clip.name             = group.getName();
     clip.colour       = group.getColour();
     clip.outputSlotId = group.getOutputSlotId();
     clip.levelDb      = group.getLevelDb();
@@ -6842,7 +7102,8 @@ int PianoRollComponent::addGroupCopy (Layer& layer, const GroupClip& source, dou
     return newId;
 }
 
-void PianoRollComponent::insertGroupMembers (Layer& layer, int groupId, double delta,
+void PianoRollComponent::insertGroupMembers (Layer& layer, int groupId, int occurrence,
+                                             double delta,
                                              const std::vector<NoteEvent>& notes,
                                              const std::vector<SampleEvent>& clips,
                                              std::vector<int>& newNotes,
@@ -6850,9 +7111,10 @@ void PianoRollComponent::insertGroupMembers (Layer& layer, int groupId, double d
 {
     for (auto note : notes)
     {
-        note.startBeat = juce::jmax (0.0, note.startBeat + delta);
-        note.id        = 0;
-        note.groupId   = groupId;
+        note.startBeat       = juce::jmax (0.0, note.startBeat + delta);
+        note.id              = 0;
+        note.groupId         = groupId;
+        note.groupOccurrence = occurrence;
 
         if (const int newId = layer.addNote (note); newId > 0)
             newNotes.push_back (newId);
@@ -6865,10 +7127,10 @@ void PianoRollComponent::insertGroupMembers (Layer& layer, int groupId, double d
 
         // Phase 56: a pasted block belongs to the group the paste targets, never
         // -1 — that was the bug: a group with blocks in it pasted as a group
-        // plus loose audio beside it. Phase 57 made that target usually the
-        // SOURCE group itself (a paste reuses it), which is why the id is a
-        // parameter and not a decision made here.
-        clip.groupId   = groupId;
+        // plus loose audio beside it. Phase 58: and to the same APPEARANCE as
+        // the notes beside it, which is what keeps the copy independent.
+        clip.groupId         = groupId;
+        clip.groupOccurrence = occurrence;
 
         ensureClipSlot (clip);
 
@@ -7005,10 +7267,19 @@ bool PianoRollComponent::pasteGroupFromClipboard()
     if (newGroupId < 0)
         return false;
 
+    //-- Phase 58: the paste is a NEW APPEARANCE, not more members -----------
+    // Phase 57 lent the members to the group itself, which made one bracket
+    // swallow both stretches: dragging the copy dragged the original, and the
+    // only way to separate them was to disband the group. The paste now places
+    // another appearance of the same definition — same name, same trim, same
+    // mount, same curves — with members of its own, so it moves as an object.
+    const int occurrence = active->nextGroupOccurrence (newGroupId);
+
     std::vector<int> newNotes;
     std::vector<int> newClips;
 
-    insertGroupMembers (*active, newGroupId, delta, noteClip, sampleClip, newNotes, newClips);
+    insertGroupMembers (*active, newGroupId, occurrence, delta,
+                        noteClip, sampleClip, newNotes, newClips);
 
     if (newNotes.empty() && newClips.empty())
     {
@@ -8346,9 +8617,16 @@ SampleEvent* PianoRollComponent::hitTestSample (juce::Point<float> position)
 
     const int index = stack.getActiveLayerIndex();
 
-    for (const auto& sample : layer->getSamples())
-        if (getSampleScreenBounds (index, sample.id).contains (position))
-            return layer->findSample (sample.id);
+    // Phase 58: LAST first. Blocks are drawn in list order, so the last one is
+    // what the pointer is looking at when two of them overlap — and a hit test
+    // that answers with the earliest block grabs the one UNDER the one you
+    // aimed at. That is how "drag this block's tail" became "some other block
+    // moved": the grab landed on a neighbour whose edge happened to be there.
+    const auto& samples = layer->getSamples();
+
+    for (auto it = samples.rbegin(); it != samples.rend(); ++it)
+        if (getSampleScreenBounds (index, it->id).contains (position))
+            return layer->findSample (it->id);
 
     return nullptr;
 }
@@ -8363,11 +8641,47 @@ const SampleEvent* PianoRollComponent::hitTestSample (juce::Point<float> positio
 
     const int index = stack.getActiveLayerIndex();
 
-    for (const auto& sample : layer->getSamples())
-        if (getSampleScreenBounds (index, sample.id).contains (position))
-            return layer->findSample (sample.id);
+    // Phase 58: topmost wins — see the non-const overload.
+    const auto& samples = layer->getSamples();
+
+    for (auto it = samples.rbegin(); it != samples.rend(); ++it)
+        if (getSampleScreenBounds (index, it->id).contains (position))
+            return layer->findSample (it->id);
 
     return nullptr;
+}
+
+std::pair<int, bool> PianoRollComponent::selectedTrimEdgeAt (juce::Point<float> position) const
+{
+    const auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || sampleSelection.empty())
+        return { -1, false };
+
+    const int   index    = stack.getActiveLayerIndex();
+    const float band     = ui::pf (kResizeHandleWidth);
+    const auto& samples  = layer->getSamples();
+
+    // Topmost first, the order hitTestSample answers in: the block drawn last
+    // is the one under the pointer, so it is also the first whose band counts.
+    for (auto it = samples.rbegin(); it != samples.rend(); ++it)
+    {
+        if (! isSampleSelected (it->id))
+            continue;
+
+        const auto b = getSampleScreenBounds (index, it->id);
+
+        if (b.isEmpty() || position.y < b.getY() || position.y > b.getBottom())
+            continue;
+
+        if (position.x >= b.getRight() - band)
+            return { it->id, true };
+
+        if (position.x <= b.getX() + band)
+            return { it->id, false };
+    }
+
+    return { -1, false };
 }
 
 int PianoRollComponent::getEditableSampleIdAt (juce::Point<float> position) const
@@ -8376,6 +8690,22 @@ int PianoRollComponent::getEditableSampleIdAt (juce::Point<float> position) cons
         return sample->id;
 
     return -1;
+}
+
+std::pair<int, bool> PianoRollComponent::getBlockGrabAtForTest (juce::Point<float> at) const
+{
+    // The press path's two steps, in its order. Kept as one callable so the
+    // self-test exercises the ORDER and not just the two halves separately:
+    // both halves could be right while the order is what broke.
+    const auto edge = selectedTrimEdgeAt (at);
+
+    if (edge.first >= 0)
+        return edge;
+
+    if (const auto* hit = hitTestSample (at))
+        return { hit->id, false };
+
+    return { -1, false };
 }
 
 int PianoRollComponent::getActiveLayerSampleCount() const
@@ -8845,7 +9175,7 @@ bool PianoRollComponent::simulateRulerZoom (float anchorX, float totalDy)
     return true;
 }
 
-bool PianoRollComponent::duplicateGroupToNextBar (int layerIndex, int groupId)
+bool PianoRollComponent::duplicateGroupToNextBar (int layerIndex, int groupId, int occurrence)
 {
     // The selection this command writes is the ACTIVE layer's, so a group on
     // another sheet has to bring that sheet forward first — otherwise the copy
@@ -8867,15 +9197,21 @@ bool PianoRollComponent::duplicateGroupToNextBar (int layerIndex, int groupId)
     // not be dereferenced after that (P53's dangling-pointer lesson, one
     // container over).
     const juce::String groupName = group->getName();
-    const GroupClip    source    = captureGroupClip (*group, 0.0);
 
     std::vector<NoteEvent>    notes;
     std::vector<SampleEvent>  clips;
     double first = std::numeric_limits<double>::max();
     double last  = 0.0;
 
+    // Phase 58: one appearance, unless the caller does not know which (the
+    // older "copy the whole group" call, and the self-test, pass -1).
+    const auto belong = [groupId, occurrence] (int memberGroup, int memberOccurrence)
+    {
+        return memberGroup == groupId && (occurrence < 0 || memberOccurrence == occurrence);
+    };
+
     for (const auto& note : layer->getNotes())
-        if (note.groupId == groupId)
+        if (belong (note.groupId, note.groupOccurrence))
         {
             notes.push_back (note);
             first = juce::jmin (first, note.startBeat);
@@ -8883,7 +9219,7 @@ bool PianoRollComponent::duplicateGroupToNextBar (int layerIndex, int groupId)
         }
 
     for (const auto& clip : layer->getSamples())
-        if (clip.groupId == groupId)
+        if (belong (clip.groupId, clip.groupOccurrence))
         {
             clips.push_back (clip);
             first = juce::jmin (first, clip.startBeat);
@@ -8909,24 +9245,21 @@ bool PianoRollComponent::duplicateGroupToNextBar (int layerIndex, int groupId)
 
     const double delta = target - first;
 
-    GroupClip moved = source;
-    moved.startBeat = first;
-
-    const int copyId = addGroupCopy (*layer, moved, delta);
-
-    if (copyId < 0)
-        return false;
+    // Phase 58: another APPEARANCE of the same group, not a copy of it. The
+    // definition stays one row in the group list; what multiplies is the thing
+    // on the timeline, and each one moves on its own. That also means there is
+    // no second NoteGroup to build — the name, trim, mount and curves are
+    // already there, and the new members simply join them.
+    const int copyId        = groupId;
+    const int newOccurrence = layer->nextGroupOccurrence (groupId);
 
     std::vector<int> newNotes;
     std::vector<int> newClips;
 
-    insertGroupMembers (*layer, copyId, delta, notes, clips, newNotes, newClips);
+    insertGroupMembers (*layer, copyId, newOccurrence, delta, notes, clips, newNotes, newClips);
 
     if (newNotes.empty() && newClips.empty())
-    {
-        layer->removeGroup (copyId);
-        return false;
-    }
+        return false;       // nothing landed; the group is not ours to delete
 
     ensureTimelineExtendsTo (last + delta + beatsPerBar);
     setMixedSelection (newNotes, newClips);
@@ -8935,6 +9268,95 @@ bool PianoRollComponent::duplicateGroupToNextBar (int layerIndex, int groupId)
     flashStatus (utf8 ("已复制 ") + groupName + membersDescription ((int) newNotes.size(), (int) newClips.size())
                    + utf8 (" 到第 ") + juce::String ((int) std::floor (target / beatsPerBar) + 1)
                    + utf8 (" 小节"));
+
+    repaint();
+    return true;
+}
+
+bool PianoRollComponent::placeGroupAppearance (int layerIndex, int groupId, double atBeat)
+{
+    // The selection and the notifications this ends with are the ACTIVE layer's,
+    // and the row may have come from another sheet — so bring it forward first,
+    // for the same reason duplicateGroupToNextBar does.
+    if (stack.getActiveLayerIndex() != layerIndex)
+        stack.setActiveLayerIndex (layerIndex);
+
+    auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr)
+        return false;
+
+    const auto* group = layer->findGroup (groupId);
+
+    if (group == nullptr)
+        return false;
+
+    // Read before anything grows a vector: adding members can reallocate the
+    // group list, so `group` must not be dereferenced after this point.
+    const juce::String groupName = group->getName();
+
+    //-- Template: the group's FIRST appearance -----------------------------
+    // The row in the list is "this group", not "wherever it was last put".
+    // First appearance keeps the answer stable: drag twice from the same row
+    // and you get the same shape twice, instead of a copy of a copy.
+    const auto occurrences = layer->getGroupOccurrences (groupId);
+
+    if (occurrences.empty())
+        return false;
+
+    const int source = occurrences.front();
+
+    std::vector<NoteEvent>   notes;
+    std::vector<SampleEvent> clips;
+    double first = std::numeric_limits<double>::max();
+    double last  = 0.0;
+
+    for (const auto& note : layer->getNotes())
+        if (note.groupId == groupId && note.groupOccurrence == source)
+        {
+            notes.push_back (note);
+            first = juce::jmin (first, note.startBeat);
+            last  = juce::jmax (last, note.endBeat());
+        }
+
+    for (const auto& clip : layer->getSamples())
+        if (clip.groupId == groupId && clip.groupOccurrence == source)
+        {
+            clips.push_back (clip);
+            first = juce::jmin (first, clip.startBeat);
+            last  = juce::jmax (last, clip.endBeat());
+        }
+
+    if (notes.empty() && clips.empty())
+        return false;       // nothing to place; do not invent an empty body
+
+    if (first == std::numeric_limits<double>::max())
+        first = 0.0;
+
+    // The pointer's beat is where the FIRST member goes, not where the group
+    // object starts in some abstract sense: the members are what you can see.
+    const double target = juce::jmax (0.0, atBeat);
+    const double delta  = target - first;
+
+    // Phase 58: another appearance of the SAME definition. Same name, colour,
+    // mount, trims and curves — the group list gains no row, and this copy
+    // moves on its own because it is a different (groupId, occurrence) pair.
+    const int newOccurrence = layer->nextGroupOccurrence (groupId);
+
+    std::vector<int> newNotes;
+    std::vector<int> newClips;
+
+    insertGroupMembers (*layer, groupId, newOccurrence, delta, notes, clips, newNotes, newClips);
+
+    if (newNotes.empty() && newClips.empty())
+        return false;
+
+    ensureTimelineExtendsTo (last + delta + beatsPerBar);
+    setMixedSelection (newNotes, newClips);
+    stack.notifyNotesChanged();
+
+    flashStatus (groupName + utf8 (" 又放了一处：")
+                   + membersDescription ((int) newNotes.size(), (int) newClips.size()));
 
     repaint();
     return true;
@@ -9688,6 +10110,67 @@ void PianoRollComponent::drawDropPreview (juce::Graphics& g)
         g.drawText (text, box.reduced (ui::pf (6.0)), juce::Justification::centredLeft, true);
     };
 
+    //-- 0. a group row: the pointer's beat is the whole answer --------------
+    // Phase 58. There is no target to hit, so the preview draws what the drop
+    // will be: a line where the group's first member lands, and a ghost of its
+    // span, so "one copy of this group, starting here" is visible before the
+    // button comes up.
+    if (dropKind == CardDropKind::groupRow)
+    {
+        const auto* layer = stack.getLayer (dropGroupLayer);
+        const auto* group = layer != nullptr ? layer->findGroup (dropGroupId) : nullptr;
+
+        if (group == nullptr)
+            return;     // deleted mid-drag: do not promise anything
+
+        const auto occurrences = layer->getGroupOccurrences (dropGroupId);
+
+        double first = std::numeric_limits<double>::max();
+        double last  = 0.0;
+
+        if (! occurrences.empty())
+            for (const auto& note : layer->getNotes())
+                if (note.groupId == dropGroupId && note.groupOccurrence == occurrences.front())
+                {
+                    first = juce::jmin (first, note.startBeat);
+                    last  = juce::jmax (last, note.endBeat());
+                }
+
+        if (first == std::numeric_limits<double>::max())
+            return;
+
+        const double atBeat = juce::jmax (0.0, beatAtScreenX (sampleDropPoint.x));
+        const double delta  = atBeat - first;
+
+        const float x0 = screenXForBeat (atBeat);
+        const float x1 = screenXForBeat (last + delta);
+
+        juce::Rectangle<float> ghost (x0, grid.getY() + ui::pf (2),
+                                      juce::jmax (ui::pf (2), x1 - x0),
+                                      grid.getHeight() - ui::pf (4));
+
+        g.setColour (colour.withAlpha (0.10f));
+        g.fillRoundedRectangle (ghost, ui::pf (3));
+
+        g.setColour (colour.withAlpha (0.45f));
+        juce::Path outline;
+        outline.addRoundedRectangle (ghost.reduced (0.5f), ui::pf (3));
+
+        const float dashes[] = { ui::pf (5), ui::pf (4) };
+        juce::Path dashed;
+        juce::PathStrokeType (ui::pf (1.4f)).createDashedStroke (dashed, outline, dashes, 2);
+        g.fillPath (dashed);
+
+        // The beat line itself, so the anchor is unambiguous even when the
+        // pointer is inside the ghost.
+        g.setColour (colour.withAlpha (0.95f));
+        g.fillRect (juce::Rectangle<float> (x0 - ui::pf (0.7f), ghost.getY(),
+                                            ui::pf (1.4f), ghost.getHeight()));
+
+        drawTag (utf8 ("放一处 ") + group->getName(), colour);
+        return;
+    }
+
     //-- 1. a synth card: only a note is a target ---------------------------
     // Phase 53. Nothing else can be said with a mount — dropping it on empty
     // grid would have to invent a note, which is not what the gesture means.
@@ -10047,6 +10530,16 @@ bool PianoRollComponent::isInterestedInDragSource (const SourceDetails& details)
 {
     const auto text = details.description.toString();
 
+    // Phase 58: a row dragged out of the group list. Accepted over the whole
+    // component, not just the grid, so the drag does not flicker "no" while it
+    // crosses the ruler on the way down.
+    {
+        int groupLayer = -1, groupId = -1;
+
+        if (groupDragTarget (text, groupLayer, groupId))
+            return true;
+    }
+
     // Phase 52 / 53: a card dragged out of the rack — the file is already
     // decoded and already has a slot, so this drop is "that source, here".
     // An instrument card has no file at all; it carries a mount.
@@ -10067,6 +10560,19 @@ void PianoRollComponent::updateCardDrop (juce::Point<float> point,
     dropSlotId       = -1;
     dropTargetNote   = -1;
     dropTargetSample = -1;
+    dropGroupLayer   = -1;
+    dropGroupId      = -1;
+
+    // Phase 58: a group row. There is no target to hit — the drop point IS the
+    // answer ("put that group's first beat here"), so the preview needs the two
+    // numbers and nothing else.
+    if (int groupLayer = -1, groupId = -1; groupDragTarget (description, groupLayer, groupId))
+    {
+        dropKind       = CardDropKind::groupRow;
+        dropGroupLayer = groupLayer;
+        dropGroupId    = groupId;
+        return;
+    }
 
     if (const int slotId = samplerDragSlotId (description); slotId > 0)
     {
@@ -10098,6 +10604,8 @@ void PianoRollComponent::clearCardDrop()
     dropSlotId       = -1;
     dropTargetNote   = -1;
     dropTargetSample = -1;
+    dropGroupLayer   = -1;
+    dropGroupId      = -1;
 }
 
 void PianoRollComponent::itemDragEnter (const SourceDetails& details)
@@ -10132,11 +10640,23 @@ void PianoRollComponent::itemDropped (const SourceDetails& details)
 
     const int targetNote   = dropTargetNote;
     const int targetSample = dropTargetSample;
+    const int groupLayer   = dropGroupLayer;
+    const int groupId      = dropGroupId;
 
     clearCardDrop();
 
     if (! getGridArea().contains (point))
     {
+        repaint();
+        return;
+    }
+
+    // Phase 58: a group row from the group list. Anywhere on the grid is a
+    // target — the pointer's beat is where the group's first member goes, the
+    // pitch lane it is over does not matter (the members bring their own).
+    if (groupLayer >= 0 && groupId >= 0)
+    {
+        placeGroupAppearance (groupLayer, groupId, beatAtScreenX (point.x));
         repaint();
         return;
     }

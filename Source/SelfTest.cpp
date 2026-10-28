@@ -4048,52 +4048,54 @@ juce::String MainComponent::runSelfTest()
                juce::String (before) + " -> " + juce::String (after) + utf8 (" 组，组内 ")
                  + juce::String ((int) layer->countNotesInGroup (groupId)) + utf8 (" 个音符"));
 
-        //-- Phase 57: the verb that still IS a copy carries its curves --------
-        // "复制到后一小节" is now the only one that builds a new group, so the
-        // "absolute-beat lanes travel with their members" promise is checked on
-        // it. A group lane is absolute time: a copy that lands later has to move
-        // its points by the same delta, or the notes arrive under a flat line.
-        const int groupsBeforeDup = (int) layer->getGroups().size();
+        //-- Phase 58: the copy is another APPEARANCE, and the curve is ONE ---
+        // "复制到后一小节" used to build a second NoteGroup and drag a copy of the
+        // absolute-beat lanes onto it. A second appearance shares the group's
+        // one curve: that is what "the same group, twice" has to mean, and it is
+        // why the counts below are occurrence counts, not group counts.
+        const int  groupsBeforeDup = (int) layer->getGroups().size();
+        const auto occBeforeDup    = layer->getGroupOccurrences (groupId);
 
-        const double srcFirst = [layer, groupId]
+        const auto firstStartOf = [&] (int occ)
         {
-            double first = std::numeric_limits<double>::max();
+            double at = -1.0;
 
-            for (const auto& note : layer->getNotes())
-                if (note.groupId == groupId)
-                    first = juce::jmin (first, note.startBeat);
+            for (int id : layer->getOccurrenceNoteIds (groupId, occ))
+                if (const auto* note = layer->findNote (id))
+                    at = at < 0.0 ? note->startBeat : juce::jmin (at, note->startBeat);
 
-            return first == std::numeric_limits<double>::max() ? 0.0 : first;
-        } ();
+            return at;
+        };
 
-        const bool duped = roll.duplicateGroupToNextBar (0, groupId);
+        const double srcFirstBeforeDup = firstStartOf (0);
 
-        const NoteGroup* fresh = nullptr;
+        const bool duped = roll.duplicateGroupToNextBar (0, groupId, 0);
 
-        for (const auto& candidate : layer->getGroups())
-            if (candidate.getId() != groupId)
-                fresh = &candidate;
+        const auto occurrences = layer->getGroupOccurrences (groupId);
 
         double dstFirst = -1.0;
 
-        if (fresh != nullptr)
-            for (int id : layer->getGroupNoteIds (fresh->getId()))
+        if (occurrences.size() > occBeforeDup.size())
+            for (int id : layer->getOccurrenceNoteIds (groupId, occurrences.back()))
                 if (const auto* note = layer->findNote (id))
-                    dstFirst = dstFirst < 0.0 ? note->startBeat : juce::jmin (dstFirst, note->startBeat);
+                    dstFirst = dstFirst < 0.0 ? note->startBeat
+                                              : juce::jmin (dstFirst, note->startBeat);
 
-        const double dupDelta = fresh != nullptr ? dstFirst - srcFirst : 0.0;
+        const auto* live = layer->findGroup (groupId);
 
-        const bool shiftedCurve = fresh != nullptr
-                                    && fresh->getLevelAutomation().getPoints().size() >= 2
-                                    && std::abs (fresh->getLevelAutomation().getPoints().front().beat
-                                                   - dupDelta) < 1.0e-6;
-
-        check ("A newly built copy still carries its absolute-beat curves",
-               duped && (int) layer->getGroups().size() == groupsBeforeDup + 1 && shiftedCurve,
-               fresh != nullptr && ! fresh->getLevelAutomation().getPoints().empty()
-                 ? utf8 ("副本起点 ") + juce::String (dupDelta, 2) + utf8 ("，曲线首点 ")
-                     + juce::String (fresh->getLevelAutomation().getPoints().front().beat, 2)
-                 : juce::String (utf8 ("没有副本曲线")));
+        check (utf8 ("复制到后一小节") + " adds one appearance and leaves the source where it was",
+               duped
+                 && (int) layer->getGroups().size() == groupsBeforeDup    // no second group
+                 && (int) occurrences.size() == (int) occBeforeDup.size() + 1
+                 && dstFirst > srcFirstBeforeDup + 1.0
+                 && std::abs (firstStartOf (0) - srcFirstBeforeDup) < 1.0e-6
+                 && live != nullptr
+                 && live->getLevelAutomation().getPoints().size() >= 2
+                 && std::abs (live->getLevelAutomation().getPoints().front().beat) < 1.0e-6,
+               juce::String ((int) occurrences.size()) + utf8 (" 处，副本起点 ")
+                 + juce::String (dstFirst, 2) + utf8 ("，源起点 ")
+                 + juce::String (firstStartOf (0), 2) + utf8 ("（应为 ")
+                 + juce::String (srcFirstBeforeDup, 2) + utf8 ("）"));
     } ();
 
     //-- Phase 25: the group is an object, and resizing is per note -----------
@@ -10212,29 +10214,19 @@ juce::String MainComponent::runSelfTest()
 
             const bool moved = roll.duplicateGroupToNextBar (0, gid3);
 
-            const auto soleNoteStartInNewGroup = [&] (std::initializer_list<int> known)
+            // Phase 58: the copy is another APPEARANCE of the same group, not a
+            // second NoteGroup, so it is found by its occurrence number — "a
+            // group I have not seen before" no longer exists to look for.
+            const auto startOfOccurrence = [&] (int gid, int occurrence)
             {
-                double found = -1.0;
+                for (int id : sheet->getOccurrenceNoteIds (gid, occurrence))
+                    if (const auto* n = sheet->findNote (id))
+                        return n->startBeat;
 
-                for (const auto& g : sheet->getGroups())
-                {
-                    bool skip = false;
-
-                    for (int id : known)
-                        skip = skip || g.getId() == id;
-
-                    if (skip || sheet->countNotesInGroup (g.getId()) != 1)
-                        continue;
-
-                    for (int id : sheet->getGroupNoteIds (g.getId()))
-                        if (const auto* n = sheet->findNote (id))
-                            found = n->startBeat;
-                }
-
-                return found;
+                return -1.0;
             };
 
-            const double copyAt = soleNoteStartInNewGroup ({ gid, gid2, gid3 });
+            const double copyAt = startOfOccurrence (gid3, 1);
 
             check (utf8 ("复制到后一小节") + " puts the copy on the bar line after a group that starts on one",
                    moved && std::abs (copyAt - 4.0) < 1.0e-6,
@@ -10252,7 +10244,7 @@ juce::String MainComponent::runSelfTest()
 
             roll.duplicateGroupToNextBar (0, gid4);
 
-            const double copyAt2 = soleNoteStartInNewGroup ({ gid, gid2, gid3, gid4 });
+            const double copyAt2 = startOfOccurrence (gid4, 1);
 
             // 2.0 + "next bar" would be 4.0, which is inside the source (2..8) —
             // the copy goes to 8.0 instead, so the two never overlap.
@@ -10297,6 +10289,204 @@ juce::String MainComponent::runSelfTest()
         focusSynth (previousFocus);
         stack.notifyNotesChanged();
         pruneOrphanSamplerSlots();
+    } ();
+
+    //-- Phase 58: a group is a definition, an appearance is a thing ----------
+    // The user's report was two sentences with one cause. Pasting a group put
+    // the copy INSIDE the group ("粘到了组的内部"), so dragging either copy
+    // moved both, and "the group's own object" was never on the timeline at
+    // all. A group now has occurrences; these checks pin down what that means
+    // for a drag out of the group list, for moving one copy, and for the block
+    // press that used to grab a neighbour.
+    [&]
+    {
+        LayerStack stack;
+        RackModel  rack;
+
+        stack.addLayer (utf8 ("出现"), palette::layer1);
+
+        auto* layer = stack.getLayer (0);
+
+        PianoRollComponent roll (stack, rack);
+        roll.setSize (1400, 620);
+        roll.setScrollBeats (0.0);
+
+        const auto makeNote = [layer] (int pitch, double beat, double length)
+        {
+            NoteEvent note;
+            note.pitch       = pitch;
+            note.startBeat   = beat;
+            note.lengthBeats = length;
+            return layer->addNote (note);
+        };
+
+        const int noteA = makeNote (60, 1.0, 1.0);
+        const int noteB = makeNote (64, 2.0, 1.0);
+
+        const int gid = layer->addGroup (utf8 ("P58 组"), groupPalette::group2);
+        layer->assignNotesToGroup ({ noteA, noteB }, gid);
+
+        //-- 1. the payload names the sheet AND the group ---------------------
+        // Two numbers, because group ids are only unique inside a layer: a
+        // payload carrying just the id would land the sheet-2 row on whichever
+        // sheet happened to be active.
+        int payLayer = -1;
+        int payGroup = -1;
+        const auto payload = groupDragDescription (2, 7);
+
+        int junkLayer = -1;
+        int junkGroup = -1;
+
+        // Parsed into a bool BEFORE check(): MSVC evaluates a call's arguments
+        // right to left, so a description that read payLayer inline would be
+        // built while it still held -1 and print "-1, -1" for every failure —
+        // a diagnostic that lies about the thing it is diagnosing.
+        const bool payloadParsed = groupDragTarget (payload, payLayer, payGroup);
+
+        check ("A group drag carries both the sheet and the group",
+               payloadParsed
+                 && payLayer == 2 && payGroup == 7
+                 && ! groupDragTarget ("atomic-group:", junkLayer, junkGroup)
+                 && ! groupDragTarget ("atomic-group::", junkLayer, junkGroup)
+                 && ! groupDragTarget (samplerDragDescription (3), junkLayer, junkGroup)
+                 && ! groupDragTarget ("C:\\loops\\kick.wav", junkLayer, junkGroup),
+               payload + " -> " + juce::String (payLayer) + ", " + juce::String (payGroup));
+
+        //-- 2. the drop is one MORE appearance, not a second group -----------
+        // A fixed 100 px into the grid: far enough from the source to be a
+        // different place, and a beat both ends can compute from the roll's own
+        // mapping (beat = scroll + px / beatWidth).
+        const auto   grid     = roll.getGridBounds();
+        const double beatWide = (double) roll.getBeatWidth();
+
+        // The offset is a DENSITY-SCALED pixel count, so it has to be the same
+        // number on both sides of the division: ui::pf (100) is 130 at scale
+        // 1.3, and dividing the scaled x by an unscaled 100 is off by 0.625
+        // beats — which is exactly how far the first run of this check missed.
+        const float  dropOffset = ui::pf (100);
+        const float  dropX      = grid.getX() + dropOffset;
+        const double dropBeat   = roll.getScrollBeats() + (double) dropOffset / beatWide;
+
+        const int groupsBefore = (int) layer->getGroups().size();
+
+        roll.simulateCardDrop (groupDragDescription (0, gid),
+                               { dropX, grid.getCentreY() });
+
+        const auto occurrences = layer->getGroupOccurrences (gid);
+
+        const auto startOf = [&] (int occurrence)
+        {
+            double at = -1.0;
+
+            for (int id : layer->getOccurrenceNoteIds (gid, occurrence))
+                if (const auto* note = layer->findNote (id))
+                    at = at < 0.0 ? note->startBeat : juce::jmin (at, note->startBeat);
+
+            return at;
+        };
+
+        const int newOccurrence = occurrences.empty() ? -1 : occurrences.back();
+
+        check ("Dragging a group row onto the grid adds an appearance, not a group",
+               (int) layer->getGroups().size() == groupsBefore
+                 && (int) occurrences.size() == 2
+                 && std::abs (startOf (0) - 1.0) < 1.0e-9
+                 && newOccurrence == 1
+                 && std::abs (startOf (newOccurrence) - dropBeat) < 0.02,
+               juce::String ((int) layer->getGroups().size()) + utf8 (" 组 / ")
+                 + juce::String ((int) occurrences.size()) + utf8 (" 处，新起点 ")
+                 + juce::String (startOf (newOccurrence), 3)
+                 + utf8 ("（应 ") + juce::String (dropBeat, 3) + utf8 ("）"));
+
+        //-- 3. each appearance moves on its own ------------------------------
+        // This is the bug's headline: before occurrences, "drag one copy" was
+        // "drag the group", and the other copy came along.
+        const double secondBefore = startOf (newOccurrence);
+
+        roll.simulateGroupMove (0, gid, 4.0, 0, newOccurrence);
+
+        const double sourceAfterFirstMove = startOf (0);
+        const double secondAfterFirstMove = startOf (newOccurrence);
+
+        roll.simulateGroupMove (0, gid, 2.0, 0, 0);
+
+        check ("The appearances of one group move independently",
+               std::abs (sourceAfterFirstMove - 1.0) < 1.0e-9
+                 && std::abs (secondAfterFirstMove - (secondBefore + 4.0)) < 1.0e-9
+                 && std::abs (startOf (0) - 3.0) < 1.0e-9
+                 && std::abs (startOf (newOccurrence) - (secondBefore + 4.0)) < 1.0e-9,
+               utf8 ("源 ") + juce::String (startOf (0), 2)
+                 + utf8 (" / 第二处 ") + juce::String (startOf (newOccurrence), 2));
+
+        //-- 4. `groupocc` survives the file ---------------------------------
+        const auto savedXml = project::toXmlText (stack, rack, 120.0);
+
+        LayerStack savedStack;
+        RackModel  savedRack;
+        double     savedBpm   = 0.0;
+        juce::String savedError;
+
+        const bool reloaded = project::fromXmlText (savedXml, savedStack, savedRack,
+                                                    savedBpm, savedError);
+
+        int reloadedOccurrences = -1;
+
+        if (auto* reloadedLayer = savedStack.getLayer (0))
+            if (reloadedLayer->findGroup (gid) != nullptr)
+                reloadedOccurrences = (int) reloadedLayer->getGroupOccurrences (gid).size();
+
+        check ("Both appearances come back from a saved file",
+               reloaded && reloadedOccurrences == 2,
+               juce::String (reloadedOccurrences) + utf8 (" 处")
+                 + (savedError.isEmpty() ? juce::String() : " · " + savedError));
+
+        //-- 5. dissolving ONE appearance leaves the group alone --------------
+        const bool dissolvedOne = roll.disbandGroup (0, gid, newOccurrence);
+
+        const auto afterDisband = layer->getGroupOccurrences (gid);
+
+        check ("Dissolving one appearance keeps the group and its other appearance",
+               dissolvedOne
+                 && (int) layer->getGroups().size() == groupsBefore
+                 && afterDisband.size() == 1 && afterDisband.front() == 0,
+               juce::String ((int) afterDisband.size()) + utf8 (" 处，组 ")
+                 + juce::String ((int) layer->getGroups().size()));
+
+        //-- 6. a press on a selected block's tail grabs THAT block ----------
+        // Two identical blocks, the second drawn on top. The hit test can only
+        // answer "the top one"; the press used to believe it, rewrote the
+        // selection to it and trimmed the wrong block — which the user saw as
+        // "selecting and dragging the length sometimes fails".
+        SampleEvent lower;
+        lower.name        = "lower";
+        lower.startBeat   = 1.0;
+        lower.lengthBeats = 4.0;
+        lower.pitch       = 60;
+        lower.laneSpan    = 2;
+
+        const int lowerId = layer->addSample (lower);
+        const int upperId = layer->addSample (lower);   // exact overlap, added last
+
+        roll.setSampleSelection ({ lowerId });
+
+        const auto lowerRect = roll.getSampleScreenBounds (0, lowerId);
+        const auto upperRect = roll.getSampleScreenBounds (0, upperId);
+
+        const juce::Point<float> onTail (lowerRect.getRight() - ui::pf (2.0f),
+                                         lowerRect.getCentreY());
+
+        const auto grab = roll.getBlockGrabAtForTest (onTail);
+
+        check ("A press on a selected block's tail grabs that block, not the one on top",
+               ! lowerRect.isEmpty() && upperRect.contains (onTail)
+                 && grab.first == lowerId
+                 && grab.second,
+               utf8 ("抓到 ") + juce::String (grab.first)
+                 + utf8 ("（下层 ") + juce::String (lowerId)
+                 + utf8 ("，上层 ") + juce::String (upperId) + "）");
+
+        layer->removeSample (lowerId);
+        layer->removeSample (upperId);
     } ();
 
     // The summary MUST come after the last check. It used to sit mid-function

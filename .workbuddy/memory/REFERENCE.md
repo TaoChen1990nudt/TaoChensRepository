@@ -82,7 +82,7 @@
 - 窗口门写作 `if (audio.isPlaying() || audio.getPlayback().hasMeters())`，**放在
   `if (! audio.isPlaying()) return;` 之前**——放后面就漏掉"停止后还在落"那一段，而那正是用户会看的。
 
-## 工程文件（`.atomic`，`formatVersion` = 23）
+## 工程文件（`.atomic`，`formatVersion` = 24）
 - **先解析到临时对象、末尾一次性提交**，坏文件绝不破坏当前会话。载入后重置
   `nextNoteId`/`nextSlotId`/组 id（max+1）。
 - 老文件必须仍能开：v3 `mod=`、v4 插件（标签 **"PLUGIN"** 全大写）、v5 `mixer=`、
@@ -96,7 +96,9 @@
   多一条 `target="mute"`、v20 效果器多参数（EQ 九参 / COMP 六参 / REVERB 五参）、
   v21 `<Sample>` 内的 `<Envelope>`（音量曲线，`fadein`/`fadeout` 读成等价斜坡）、
   v22 `<Sample pan="…">` 的 `<PanEnvelope>` + `autotarget="pan"` + `reversed="1"`
-  （三者缺失 = 音量曲线 / 未反转 / 声相平 0.5 且禁用）。
+  （三者缺失 = 音量曲线 / 未反转 / 声相平 0.5 且禁用）、v23 `<Sample pitchrange="N">`
+  （缺省 24）、v24 `<Note groupocc>` / `<Sample groupocc>`——**只在该组有多次出现时写出**
+  （`groupId >= 0 && groupOccurrence != 0`），缺失读成 0，所以老文件读进来每处都是第 0 次出现。
   **新 lane 一律追加在枚举末尾**，老文件不需要映射表。
 - **选中哪条 lane 显式写 `autotarget`，不靠元素顺序推断**：三条 lane 都写出来之后，
   "最后读到的那条算选中"恒把 target 变成 `plugin`。回退规则只在 `autotarget` **缺失**时启用。
@@ -231,6 +233,17 @@
   / `groupSelection` / `ungroupSelection` / `setSnapEnabled`），置灰也读同一个 `hasAnySelection()`。
   菜单里另写一份判断，就是"按钮能用、菜单不能用"的开始。模式项用 `isTicked`（平台唯一画得一致的勾），
   节头写当前模式名。
+- **已选块的边缘优先于命中拾取**（P58）：按下块时先问 `selectedTrimEdgeAt(pos)`——"这一像素是不是
+  某个**已选中**块的 trim band"，是就以那一块为准，并且**不改写选区**；只有它答 -1 才用
+  `hitTestSample()` 的结果。`hitTestSample` 同时改成**倒序遍历**（最后添加 = 画在最上层 = 先命中），
+  与绘制顺序一致。两条一起才治好"选中几块拖长度有时失败"：以前抓到的是盖在上面的邻居，
+  然后选区被改成邻居。自检走 `getBlockGrabAtForTest()`（顺序唯一），别只测 hitTestSample。
+  `mouseMove` 里同步：`selectedTrimEdgeAt(pos).first >= 0` 就显示左右箭头光标。
+- **播放跟随后退**（P58）：跟随曾是单向的——播放头推出屏幕就跟着滚，退回来却不回原处。
+  现在 `setScrollBeats` / `setBeatWidthAround`（用户自己滚）会 `noteUserScroll()` 记住
+  `userScrollBeats`；`setPlayheadBeat` 开头先判断"播放头是否落回 `[userScrollBeats, +可见宽度]`"，
+  是就 `scrollBeats = userScrollBeats` 并清 `followScrolled`，否则才走原来的跟随分支
+  （首次推走时 `if (!followScrolled) userScrollBeats = scrollBeats`）。
 
 ## 编组
 - **内联曲线框**：框的左右 = **组的起止拍**，`getGroupCurveBounds()` 水平零内边距；X 轴是组自身
@@ -242,14 +255,25 @@
   `pasteEditClipboard()` 见到 `groupClip.valid` 直接走 `pasteGroupFromClipboard()` —— 一个锚点、
   一次事务。以前是两趟（音符建组、采样各粘各的），结果是"组 + 旁边散着的音频"。
   `cutNotesToClipboard()` 也必须把块一起从时间线上删掉，否则剪切→粘贴会复制出一份没被搬走的音频。
-- **粘贴复用源组，不新建**（P57）：`GroupClip::sourceGroupId` 记住来源，粘贴时若该组仍在
-  当前图层就**直接往里加成员**（同一 name / trim / 挂载 / 曲线，组里出现第二处内容）；
-  只有源组不在（剪切榨干了它、或粘贴到另一图层）才新建一个同色同名的组。判据是
-  `active->findGroup(sourceGroupId) != nullptr`，不是"我手上有哪些列表"。
+- **组 = 一个定义 + 多次出现**（P58 的模型核心）：`NoteGroup` 是**定义**（name / 颜色 / 挂载 /
+  trim / 曲线），时间线上的每一份是它的一次**出现**。成员身份 = `(groupId, groupOccurrence)`，
+  `NoteEvent` / `SampleEvent` 各带一个 `groupOccurrence`（默认 0 = 老工程行为）。
+  - 两处出现**各自独立移动**，共享同一条曲线、同一份 trim、同一个挂载。
+  - `assignNotesToGroup(ids, gid, occurrence = 0)` / `assignSamplesToGroup(...)` 写出现号；
+    `getGroupOccurrences(gid)` 是派生出来的升序列表（不存字段）；`nextGroupOccurrence(gid)` 给新出现的号。
+  - **凡是比较 `groupId` 的地方，都要再问一次 occurrence**：`getGroupContentBounds`、
+    `captureGroupClips`、`drawGroupBands/Frames/Labels`（改成双层循环，每处一个括号一个标签）、
+    `isWholeGroupSelected`、`getSelectedGroupOccurrence`、`getGroupBeatSpan`。
+    约定：**`occurrence < 0` = 该组所有出现**（"整组"），`>= 0` = 只那一次。所有新参数都带默认
+    `-1` 或 `0`，老调用点行为不变。
+- **粘贴 = 新增一次出现**（P57 起因 / P58 定案）：`pasteGroupFromClipboard()` 复用源 `NoteGroup`，
+  但用 `nextGroupOccurrence()` 生成**新的出现号**——不是"往组里塞成员"。P57 的做法（借成员给源组）
+  让副本和源共用一个括号，拖哪处都一起动，用户看到的就是"粘贴到了组的内部"。
+  只有源组不在了（剪切榨干 / 另一图层）才新建一个同色同名的组。`GroupClip::sourceOccurrence`
+  记住模板是第几次出现。
   **所有粘贴入口必须转发**：`pasteNotesFromClipboard()` 开头见 `groupClip.valid` 就转给组路径，
   否则它会以"散音符"的身份粘一遍，块留在剪贴板上（P56 的 bug 以另一种形式回来）。
-  复用路径**不重放自动化曲线**（绝对时间，点仍留在原位置）；只有新建组时才按 delta 平移。
-  `duplicateGroupToNextBar()` 仍新建组——那是"再来一份"，不是"这个组又多了一处"。
+  复用路径**不重放曲线的平移**：绝对时间的点留在原处，"同一个组"就是同一条曲线。
 - **组框就是成员框，零外力扩展**（P57）：`groupFrameOf()` 返回 `getGroupContentBounds()` 本身，
   不再 `expanded(3px)`；绘制、命中（`getGroupFrameAt`）、自检读的是**同一个函数**。
   填充色块画在成员之下（`drawGroupBands`），**描边画在成员之上**（`drawGroupFrames`，在
@@ -258,9 +282,22 @@
 - **整组判定有两个口径**（P56）：`isWholeGroupSelected(groupId, includeSamples)`。挂载音源用
   false（块没有振荡器可挂，只看音符），复制用 true（少一个块就是半个组）。默认值 false，
   所以老调用点的行为不变。
-- **组的"复制到后一小节"**（P56）：`duplicateGroupToNextBar(layerIndex, groupId)`，走模型直接克隆，
-  **不经过剪贴板**（用户的剪贴板是他的）。目标 = `nextBarLineAfter(起点)`；若仍压在源上，
-  改用 `barLineAtOrAfter(源结束)`——长组不会自己盖住自己。菜单项放在"选中整组"下面。
+- **组的"复制到后一小节"也是新增出现**（P56 起 / P58 改）：`duplicateGroupToNextBar(layerIndex,
+  groupId, occurrence = -1)`，走模型直接克隆，**不经过剪贴板**（用户的剪贴板是他的）。
+  现在**不再 `addGroupCopy`**：`copyId = groupId`、`newOccurrence = nextGroupOccurrence(groupId)`，
+  空结果直接 return false（组不是我们建的，不能删）。目标 = `nextBarLineAfter(起点)`；若仍压在源上，
+  改用 `barLineAtOrAfter(源结束)`——长组不会自己盖住自己。菜单项放在"选中整组"下面，节头带
+  `· 第 N 处`，计数按次（`countNotes/SamplesInOccurrence`）。
+- **编组栏的行能拖到钢琴窗放一处**（P58）：`groupDragDescription(layerIndex, groupId)` →
+  `"atomic-group:<层>:<组>"`，**两个号**（组 id 只在层内唯一），解在 `groupDragTarget()`，
+  两端都在 `Util/SharedRules.h`；解析失败不许改写入参。
+  - `GroupPanel`：行 body 按下只 `dragMayStart = true`，`mouseDrag` 超 `ui::px(4)` 才
+    `startDragging`，**折叠延后到 `mouseUp`**（`foldOnRelease`）——否则每拖走一次就顺手折叠一次。
+    折叠箭头（`Part::collapse`）仍立即响应，它是控件不是把手。
+  - `PianoRollComponent::placeGroupAppearance(layerIndex, groupId, atBeat)` 是唯一落点实现
+    （drop 与自检都调它）：模板取该组**最早一次出现**（面板那一行说的是"这个组"，不是"它上次
+    落在哪"），指针所在拍是**第一个成员**的落点，新出现号，零新组。预览画一条落点竖线 + 一个
+    虚线跨度幽灵，标签「放一处 <组名>」。
 - **P35：组是一个 trim，成员可以是两种东西**。`NoteGroup` 只存 levelDb / pan / muted，
   **成员列表不存**——`groupId` 在音符和采样块自己身上，所有"组里有几个""组里是谁"都是扫出来的。
   这仍是唯一模型：删除成员不会留下悬挂 id。
@@ -293,7 +330,11 @@
   面板自己看不见层，别给它加 LayerStack。
 - 菜单含全部四个模式（含 原速，那是"改回去"的路）；选哪个就写到该槽位的**所有块**。
 
-## 机架卡片拖拽（P52 采样卡 / P53 双卡）
+## 机架卡片拖拽（P52 采样卡 / P53 双卡 / P58 组行）
+- **三种 payload，都在 `Util/SharedRules.h`**：卡片两种前缀（下面详述），P58 又加了
+  `atomic-group:<layerIndex>:<groupId>`——**两个号**，因为组 id 只在层内唯一。
+  编解码成对出现（`groupDragDescription` / `groupDragTarget`），解析失败不许改写入参，
+  这样"拖到一半组被删了"是"落点找不到"而不是野指针。
 - **两种卡是两个问题，两个前缀**（`SharedRules.h`）：`atomic-sampler:<id>`（交出文件）与
   `atomic-instrument:<id>`（交出挂载）。拼与解都在 `dragpayload::describe / idOf` 一处；
   接收端**不许**回头查槽位身份来分辨——拖拽途中槽位可能被删。
