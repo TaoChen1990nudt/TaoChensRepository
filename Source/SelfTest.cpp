@@ -11447,6 +11447,106 @@ juce::String MainComponent::runSelfTest()
                  + juce::String (roll.getScrollBeats(), 2));
     }
 
+    //-- Phase 68: the grid thins out instead of turning into texture ---------
+    {
+        LayerStack t68;
+        RackModel  r68;
+        PianoRollComponent roll (t68, r68);
+        roll.setSize (1200, 520);
+        t68.addLayer (utf8 ("P68 网格"), palette::layer1);
+
+        // At the default 48 px/beat a 1/16 sits 12 px from its neighbour: two
+        // hairlines you can still tell apart, and a line you can aim at.
+        const double wideStep = roll.visibleGridStep();
+
+        std::vector<double> wideLines;
+        roll.collectGridLines (0.0, 8.0, wideLines);       // 33 lines: 0, .25, … 8
+
+        // Zoomed to the floor (12 px/beat) the same 1/16 is 3 px apart — that is
+        // shading, not a grid, and snapping to it is aiming at nothing.
+        roll.setBeatWidth (PianoRollComponent::minBeatWidth);
+
+        const double tightStep = roll.visibleGridStep();
+
+        std::vector<double> tightLines;
+        roll.collectGridLines (0.0, 8.0, tightLines);      // 9 lines: 0, 1, … 8
+
+        check (utf8 ("缩到最小时网格步长升到 1 拍，1/16 的线不再画"),
+               std::abs (wideStep - PianoRollComponent::gridDivision) < 1.0e-9
+                 && std::abs (tightStep - 1.0) < 1.0e-9
+                 && wideLines.size() == 33
+                 && tightLines.size() == 9,
+               juce::String (wideStep, 2) + utf8 (" / ") + juce::String (tightStep, 2)
+                 + utf8 (" 拍，" ) + juce::String ((int) wideLines.size()) + utf8 (" / ")
+                 + juce::String ((int) tightLines.size()) + utf8 (" 根线"));
+
+        //-- the snap follows the same step ---------------------------------
+        // 2.3 sits between two lines either way; WHICH line is the question. On
+        // the 1/16 grid it lands on 2.25 (a line that is no longer drawn at this
+        // zoom), on the beat grid on 2.0.
+        const double tightSnap  = roll.snapBeatForTest (2.3);
+        const double tightSnap2 = roll.snapBeatForTest (5.9);
+
+        check (utf8 ("缩到最小时吸附落在拍线上，不落在看不见的 1/16 上"),
+               std::abs (tightSnap - 2.0) < 1.0e-9
+                 && std::abs (tightSnap2 - 6.0) < 1.0e-9,
+               juce::String (tightSnap, 2) + utf8 (" / ") + juce::String (tightSnap2, 2));
+
+        //-- every snap answer has to BE one of the drawn lines --------------
+        // The two functions are written against the same step, but "written
+        // against" is not "cannot drift", so the fixture checks the property
+        // instead of the implementation: whatever a drag asks for, the answer is
+        // a line that exists in the list the painter walks.
+        int offGrid = 0;
+
+        for (double wanted = 0.1; wanted < 7.9; wanted += 0.37)
+        {
+            const double snapped = roll.snapBeatForTest (wanted);
+
+            bool onALine = false;
+
+            for (double line : tightLines)
+                if (std::abs (line - snapped) < 1.0e-9)
+                    onALine = true;
+
+            if (! onALine)
+                ++offGrid;
+        }
+
+        check (utf8 ("吸附结果永远是画出来的那根线"),
+               offGrid == 0, juce::String (offGrid) + utf8 (" 次落在空处"));
+
+        //-- bars stay bars after the step climbs ---------------------------
+        // The old painter asked `step % 16 == 0` for a bar line. That is true
+        // only while the step is 1/16: at one beat per step, index 4 is beat 4,
+        // which is a bar — and `4 % 16` says "plain beat". The whole grid would
+        // then come out flat, with no heavy lines to navigate by.
+        const float alphaBar  = PianoRollComponent::gridLineAlphaForTest (4.0);
+        const float alphaBeat = PianoRollComponent::gridLineAlphaForTest (3.0);
+        const float alphaSub  = PianoRollComponent::gridLineAlphaForTest (3.25);
+
+        check (utf8 ("步长升到一拍后，第 4 拍仍画成小节线"),
+               std::abs (alphaBar - 0.16f) < 1.0e-6f
+                 && std::abs (alphaBeat - 0.075f) < 1.0e-6f
+                 && std::abs (alphaSub - 0.030f) < 1.0e-6f,
+               juce::String (alphaBar, 3) + utf8 (" / ") + juce::String (alphaBeat, 3)
+                 + utf8 (" / ") + juce::String (alphaSub, 3));
+
+        //-- and zooming back in restores the fine grid ---------------------
+        roll.setBeatWidth (PianoRollComponent::defaultBeatWidth);
+
+        std::vector<double> backLines;
+        roll.collectGridLines (0.0, 8.0, backLines);
+
+        check (utf8 ("放大回来后 1/16 的线回来了，吸附也回到 1/16"),
+               std::abs (roll.visibleGridStep() - PianoRollComponent::gridDivision) < 1.0e-9
+                 && backLines.size() == 33
+                 && std::abs (roll.snapBeatForTest (2.3) - 2.25) < 1.0e-9,
+               juce::String (roll.visibleGridStep(), 2) + utf8 (" 拍，")
+                 + juce::String ((int) backLines.size()) + utf8 (" 根线，吸附到 ")
+                 + juce::String (roll.snapBeatForTest (2.3), 2));
+    }
+
     //-- Phase 65: two selected groups drag together --------------------------
     {
         LayerStack t65;

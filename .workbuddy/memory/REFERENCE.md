@@ -685,6 +685,21 @@
 - 滚轮缩放仍锚定**视图中心**（`setBeatWidth()` 只是它的特例）。两者共用同一份数学。
 - 唯一的例外是 `clampScroll()` 在时间线两端生效——左边没有负拍，锚点只能让位。
 
+## 网格与吸附（P68：网格跟着缩放变粗）
+- `gridDivision = 0.25`（1/16）仍是**默认**步长，也是所有"最小长度/最小切分"的单位；
+  但**画出来的线和吸附到的那根线**用的是 `visibleGridStep()`：`0.25 → 1 → 4 → 16` 逐档 ×4，
+  直到线条之间至少有 `ui::pf(5)` px。12 px/拍（最小缩放）时 1/16 只有 3 px，直接跳到 1 拍。
+- **绘制与吸附读同一个 step**：`collectGridLines(from, to, out)` 产出线表，`drawGridLines` /
+  `drawGridInside` 遍历它，自检也数它。"略去中间的线"不是画笔里的 if，而是几何的函数——
+  画笔没有机会忘记检查。
+- **线条等级按 beat 判，不按循环下标**：`gridLineAlpha(beat)` 用"是不是 4 拍的整数倍 / 1 拍的
+  整数倍"决定 0.16 / 0.075 / 0.030。旧的 `step % 16 == 0` 只在 step 恒为 1/16 时成立；step 升到
+  1 拍后第 4 拍是 `4 % 16 = 4`，会被判成普通拍线，整个网格变平（P68-A）。
+- **吸附跟着网格走**：`snapBeat()` 也读 `visibleGridStep()`。缩小时吸附到 1 拍，放大回来还是 1/16。
+  一个"看得见的线才吸得动"的判据，比多一个吸附开关诚实。
+- 不受影响的地方：`note.lengthBeats` 的下限、粘贴推进 `snapUp()`、`nextBarLineAfter(first, gridDivision)`
+  —— 它们要的是**音乐最小单位**，不是"这一屏看得见什么"。
+
 ## 按键发声（P39 通道 / P40 双开关）
 
 - **两个独立开关**（`MidiSources{ typingKeyboard, externalController }`，P40 默认

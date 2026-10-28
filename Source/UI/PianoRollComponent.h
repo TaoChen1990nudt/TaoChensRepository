@@ -80,6 +80,26 @@ public:
         across the timeline, one notch at a time. */
     void setBeatWidthAround (float pixels, double anchorBeat, float anchorX);
 
+    /** Phase 68: the grid the user actually sees.
+
+        Zoomed out far enough, a 1/16 line sits 3 px from its neighbour and the
+        roll turns into grey texture at the same time as the snapping starts
+        asking for positions a third of a pixel wide. The step therefore climbs
+        1/16 → beat → bar → 4 bars until the lines have room to breathe, and
+        everything that touches the grid — drawing and snapping alike — reads it
+        from here. A line you can snap to is always a line that is on screen.
+
+        Public because it is `gridDivision`'s runtime half, and the standoff
+        between "the grid" and "the zoom" is something a caller may need to ask
+        about without painting. */
+    double visibleGridStep() const noexcept;
+
+    /** Phase 68: every grid line in a beat range, in beats. The drawing code
+        walks this list and so does the self-test, so "the thin lines were
+        skipped" is asserted on the same list that gets painted. */
+    void collectGridLines (double fromBeat, double toBeat,
+                           std::vector<double>& out) const;
+
     static constexpr int    numPitches    = 128;
     /** The DEFAULT project grid — the length of an untouched session, and what
         the automation window lays out against. NOT a wall: the roll extends its
@@ -1095,6 +1115,17 @@ public:
         to be able to read it. */
     double getPlayheadBeatForTest() const noexcept { return playheadBeat; }
 
+    /** Phase 68: the snap, asked from outside. The point of the phase is that
+        the answer lands on a line `collectGridLines` actually produces, so a
+        fixture has to be able to call this and compare the two. */
+    double snapBeatForTest (double beats) const { return snapBeat (beats); }
+
+    /** Phase 68: one line's weight, asked from outside. Deciding "bar or beat"
+        from the beat instead of from the loop index is exactly what makes a
+        coarse grid still show its bars — with `index % 16` a step of one beat
+        painted every bar as a beat. */
+    static float gridLineAlphaForTest (double beat) { return gridLineAlpha (beat); }
+
     /** Phase 30: pixels of a block that actually carry audio — the waveform's
         own width at the current zoom. Zero when the file is missing.
 
@@ -1307,7 +1338,13 @@ private:
     NoteEvent*       hitTestActiveLayer (juce::Point<float> position);
     const NoteEvent* hitTestActiveLayer (juce::Point<float> position) const;
 
-    static double snapBeat (double beats) noexcept;
+    /** Phase 68: the alpha for one grid line, decided by what the line IS (bar,
+        beat, subdivision) rather than by its index — once the step climbs, an
+        index is no longer a fixed number of 1/16s, so `step % 4` stops meaning
+        "a beat". */
+    static float gridLineAlpha (double beat) noexcept;
+
+    double snapBeat (double beats) const noexcept;
     static bool   isBlackKey (int pitch) noexcept;
 
     /** Phase 18: the pointer has to say what the button does. A pencil cursor

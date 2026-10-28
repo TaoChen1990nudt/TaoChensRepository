@@ -976,9 +976,79 @@ juce::Rectangle<float> PianoRollComponent::getNoteBounds (const NoteEvent& note)
 }
 
 //==============================================================================
-double PianoRollComponent::snapBeat (double beats) noexcept
+double PianoRollComponent::visibleGridStep() const noexcept
 {
-    return std::round (beats / gridDivision) * gridDivision;
+    // The one number this whole phase is about: how many pixels sit between two
+    // neighbouring grid lines. 5 design units is roughly the point where two
+    // hairlines stop reading as separate lines and start reading as shading.
+    const double minPixels = (double) ui::pf (5.0f);
+
+    double step = gridDivision;
+
+    // ×4 each time: 1/16 → beat → bar → 4 bars. ×4 and not ×2 because the three
+    // levels the roll draws (subdivision / beat / bar) are already four apart,
+    // so a half step would land between two levels that are never drawn.
+    while (step * (double) beatWidth < minPixels && step < gridDivision * 1024.0)
+        step *= 4.0;
+
+    return step;
+}
+
+float PianoRollComponent::gridLineAlpha (double beat) noexcept
+{
+    // Asked of the BEAT, not of the loop index. While the step is 1/16 the two
+    // happen to agree (`index % 4 == 0` is a beat); the moment it climbs to a
+    // beat, index 4 is beat 4 and its own bar line — and the old test would have
+    // painted it as a beat, or worse, as a subdivision.
+    auto onUnit = [] (double value, double unit)
+    {
+        return std::abs (value - std::round (value / unit) * unit) < 1.0e-6;
+    };
+
+    if (onUnit (beat, (double) beatsPerBar))        // bar
+        return 0.16f;
+
+    if (onUnit (beat, 1.0))                         // beat
+        return 0.075f;
+
+    return 0.030f;                                  // subdivision
+}
+
+void PianoRollComponent::collectGridLines (double fromBeat, double toBeat,
+                                           std::vector<double>& out) const
+{
+    out.clear();
+
+    const double step = visibleGridStep();
+
+    if (step <= 0.0 || toBeat < fromBeat)
+        return;
+
+    const int firstIndex = (int) std::floor (fromBeat / step);
+    const int lastIndex  = (int) std::ceil  (toBeat / step);
+
+    // One pass, no filtering by "is this line thin enough to skip": the step
+    // already made that decision, which is why the skipped lines are not
+    // something the drawing code can forget to check.
+    for (int index = firstIndex; index <= lastIndex; ++index)
+    {
+        const double beat = (double) index * step;
+
+        if (beat < 0.0 || beat > timelineBeats)
+            continue;
+
+        out.push_back (beat);
+    }
+}
+
+double PianoRollComponent::snapBeat (double beats) const noexcept
+{
+    // The visible step, not the 1/16: zoomed out, snapping to a line that is not
+    // drawn is the same as snapping to nothing — the note lands on a mark the
+    // user cannot see and cannot aim at.
+    const double step = visibleGridStep();
+
+    return std::round (beats / step) * step;
 }
 
 bool PianoRollComponent::isBlackKey (int pitch) noexcept
@@ -4757,25 +4827,17 @@ void PianoRollComponent::drawGridLines (juce::Graphics& g)
 {
     const auto area = getGridArea();
 
-    const int firstStep = (int) std::floor (scrollBeats / gridDivision);
-    const int lastStep  = (int) std::ceil ((scrollBeats + (double) area.getWidth() / beatWidth) / gridDivision);
+    // Phase 68: the list already reflects the current step, so "skip the thin
+    // lines when they are too close together" is a property of the geometry
+    // rather than a check the painter has to remember.
+    std::vector<double> lines;
+    collectGridLines (scrollBeats, scrollBeats + (double) area.getWidth() / beatWidth, lines);
 
-    for (int step = firstStep; step <= lastStep; ++step)
+    for (double beat : lines)
     {
-        const double beat = (double) step * gridDivision;
-
-        if (beat < 0.0 || beat > timelineBeats)
-            continue;
-
         const float x = std::floor (screenXForBeat (beat)) + 0.5f;
 
-        if (step % 16 == 0)          // bar
-            g.setColour (juce::Colours::white.withAlpha (0.16f));
-        else if (step % 4 == 0)      // beat
-            g.setColour (juce::Colours::white.withAlpha (0.075f));
-        else                         // 1/16
-            g.setColour (juce::Colours::white.withAlpha (0.030f));
-
+        g.setColour (juce::Colours::white.withAlpha (gridLineAlpha (beat)));
         g.drawVerticalLine ((int) x, area.getY(), area.getBottom());
     }
 }
@@ -6612,33 +6674,23 @@ void PianoRollComponent::drawGridInside (juce::Graphics& g, juce::Rectangle<floa
     juce::Graphics::ScopedSaveState saved (g);
     g.reduceClipRegion (area.toNearestInt());
 
-    // The piano roll's own grid: same 1/16 step, same bar / beat / 16th
-    // emphasis, same pixel rounding as drawGridLines(). A box that drew
-    // decorative quarter-marks put its curve on a grid that did not exist
-    // anywhere else on screen, which is the sort of thing that makes an editor
-    // feel slightly wrong without anyone being able to say why.
-    const int firstStep = (int) std::floor (beatAtScreenX (area.getX()) / gridDivision);
-    const int lastStep  = (int) std::ceil  (beatAtScreenX (area.getRight()) / gridDivision);
+    // The piano roll's own grid: same step the roll itself is using right now,
+    // same bar / beat / subdivision emphasis, same pixel rounding as
+    // drawGridLines(). A box that drew decorative quarter-marks put its curve on
+    // a grid that did not exist anywhere else on screen, which is the sort of
+    // thing that makes an editor feel slightly wrong without anyone being able
+    // to say why.
+    std::vector<double> lines;
+    collectGridLines (beatAtScreenX (area.getX()), beatAtScreenX (area.getRight()), lines);
 
-    for (int step = firstStep; step <= lastStep; ++step)
+    for (double beat : lines)
     {
-        const double beat = (double) step * gridDivision;
-
-        if (beat < 0.0 || beat > timelineBeats)
-            continue;
-
         const float x = std::floor (screenXForBeat (beat)) + 0.5f;
 
         if (x < area.getX() - 1.0f || x > area.getRight() + 1.0f)
             continue;
 
-        if (step % 16 == 0)          // bar
-            g.setColour (juce::Colours::white.withAlpha (0.16f));
-        else if (step % 4 == 0)      // beat
-            g.setColour (juce::Colours::white.withAlpha (0.075f));
-        else                         // 1/16
-            g.setColour (juce::Colours::white.withAlpha (0.030f));
-
+        g.setColour (juce::Colours::white.withAlpha (gridLineAlpha (beat)));
         g.drawVerticalLine ((int) x, area.getY(), area.getBottom());
     }
 
