@@ -3137,22 +3137,14 @@ void PianoRollComponent::captureDragOriginals()
 
 void PianoRollComponent::captureGroupClips (int groupId, int occurrence)
 {
-    dragClipOriginals.clear();
+    // Phase 65: kept as the "one appearance" spelling of the capture, but the
+    // gesture now arms EVERY selected block. A click on a group label is a
+    // click on one group, yet what moves is the selection — narrowing it to the
+    // group under the pointer is exactly what made "select two groups, drag one"
+    // drop the other.
+    juce::ignoreUnused (groupId, occurrence);
 
-    auto* active = stack.getActiveLayer();
-
-    if (active == nullptr || groupId < 0)
-        return;
-
-    // Both capture and apply live here rather than in clampMove: the clamp
-    // answers "how far", this answers "what moves", and mixing the two is how
-    // a group ends up dragging clips that are not in it.
-    //
-    // Phase 58: and "not in IT" now means "not in this appearance of it" — the
-    // twin eight bars at the chorus are the same group and must not come along.
-    for (const auto& clip : active->getSamples())
-        if (clip.groupId == groupId && (occurrence < 0 || clip.groupOccurrence == occurrence))
-            dragClipOriginals.push_back (clip);
+    captureSampleDragOriginals();
 }
 
 void PianoRollComponent::applyMove (const MoveClamp& move)
@@ -3406,7 +3398,11 @@ bool PianoRollComponent::simulateGroupMove (int layerIndex, int groupId,
     if (active == nullptr || active->findGroup (groupId) == nullptr)
         return false;
 
-    selectGroup (groupId, occurrence);
+    // Same rule as armGroupMove: a selection that already holds this appearance
+    // whole is kept, so the self-test drives the gesture the user gets.
+    if (! isWholeOccurrenceSelected (groupId, occurrence))
+        selectGroup (groupId, occurrence);
+
     captureDragOriginals();
     captureGroupClips (groupId, occurrence);
 
@@ -3445,7 +3441,16 @@ void PianoRollComponent::armGroupMove (int groupId, int occurrence, juce::Point<
     // Phase 58: ONE appearance, not the group. Grabbing the chorus copy must
     // leave the verse copy standing — that is the whole point of a reusable
     // group, and it is why the occurrence travels down into the capture.
-    selectGroup (groupId, occurrence);
+    //
+    // Phase 65: ...unless this appearance is ALREADY selected whole, which is
+    // what a multi-selection looks like. Then grabbing its label means "drag
+    // what I have selected", and replacing the selection with this one group
+    // would drop the other groups on the floor at the moment the pointer moves.
+    // "Select two groups, drag one" moves both; a click on a group that is not
+    // part of the selection still narrows to it, exactly as before.
+    if (! isWholeOccurrenceSelected (groupId, occurrence))
+        selectGroup (groupId, occurrence);
+
     captureDragOriginals();
     captureGroupClips (groupId, occurrence);
 
@@ -8153,6 +8158,16 @@ void PianoRollComponent::openSampleAutomation (int layerIndex, int sampleId)
     hoveredSampleCurvePoint  = -1;
     hoveredSampleCurveMenu   = false;
 
+    // Phase 65: opening the box is the moment a bypassed curve comes back.
+    // The switch that used to do this is gone, so a curve left disabled by an
+    // older build would otherwise stay drawn as a dim ghost with no way back —
+    // and "the shape I drew is not playing" is exactly the state this phase
+    // removed the control to prevent.
+    if (auto* layer = stack.getLayer (layerIndex))
+        if (auto* sample = layer->findSample (sampleId))
+            if (! sample->activeCurve().isEnabled())
+                sample->activeCurve().setEnabled (true);
+
     repaint();
 }
 
@@ -8293,25 +8308,11 @@ juce::Rectangle<float> PianoRollComponent::getSampleMenuArea (int layerIndex, in
 
 juce::Rectangle<float> PianoRollComponent::getSampleTargetArea (int layerIndex, int sampleId) const
 {
-    // Everything left of the switch. The target button and the enable switch
-    // used to be the same rectangle — one click meant "toggle" everywhere — and
-    // a second target makes that impossible: the label has to be a control of
-    // its own, or there is nowhere to say "pan".
-    const auto menuArea = getSampleMenuArea (layerIndex, sampleId);
-    const auto toggle   = getSampleToggleArea (layerIndex, sampleId);
-
-    return menuArea.withTrimmedRight (juce::jmax (0.0f, menuArea.getRight() - toggle.getX() + ui::pf (4)));
-}
-
-juce::Rectangle<float> PianoRollComponent::getSampleToggleArea (int layerIndex, int sampleId) const
-{
-    const auto  menuArea = getSampleMenuArea (layerIndex, sampleId);
-    const float switchW  = ui::pf (22);
-    const float switchH  = ui::pf (12);
-
-    return { menuArea.getRight() - switchW,
-             menuArea.getCentreY() - switchH * 0.5f,
-             switchW, switchH };
+    // Phase 65: the whole row. The enable switch that used to sit at its right
+    // end is gone (it was the only thing separating the label from "a control
+    // that does nothing"), so naming the target gets the full width instead of
+    // sharing it with a toggle nobody asked for.
+    return getSampleMenuArea (layerIndex, sampleId);
 }
 
 juce::Rectangle<float> PianoRollComponent::getSampleCloseArea (int layerIndex, int sampleId) const
@@ -8409,20 +8410,9 @@ bool PianoRollComponent::handleSampleAutomationMouseDown (const juce::MouseEvent
         return true;
     }
 
-    // Phase 50: three hit zones in the menu row, one meaning each. Clicking the
-    // switch toggles (the common case, one click), the label opens the target
-    // menu, and anywhere else in the row is just the frame.
-    if (getSampleToggleArea (layerIndex, sampleId).contains (pos))
-    {
-        sample->activeCurve().setEnabled (! sample->activeCurve().isEnabled());
-
-        if (onNoteEdited != nullptr)
-            onNoteEdited();
-
-        repaint();
-        return true;
-    }
-
+    // Phase 50: the row is the target menu. Phase 65 removed the enable switch
+    // that used to split it: the label is now the whole row, and a click
+    // anywhere on it opens the target list.
     if (getSampleTargetArea (layerIndex, sampleId).contains (pos))
     {
         showSampleCurveMenu (layerIndex, sampleId, e.getScreenPosition());
@@ -8496,9 +8486,8 @@ void PianoRollComponent::showSampleCurveMenu (int layerIndex, int sampleId,
     if (sample == nullptr)
         return;
 
-    const auto target  = sample->automationTarget;
-    const bool enabled = sample->activeCurve().isEnabled();
-    const bool onPan   = target == SampleAutomationTarget::pan;
+    const auto target = sample->automationTarget;
+    const bool onPan  = target == SampleAutomationTarget::pan;
 
     juce::PopupMenu menu;
 
@@ -8511,8 +8500,10 @@ void PianoRollComponent::showSampleCurveMenu (int layerIndex, int sampleId,
     menu.addItem (12, utf8 ("声相"), true, onPan);
     menu.addSeparator();
 
+    // Phase 65: no 启用 / 停用 item. The box's switch was removed for the same
+    // reason — a drawn curve plays — and a menu item that brings the bypass back
+    // would only move the lie one click away.
     menu.addSectionHeader (onPan ? utf8 ("声相曲线") : utf8 ("音量曲线"));
-    menu.addItem (1, enabled ? utf8 ("停用曲线") : utf8 ("启用曲线"), true, enabled);
 
     // "Flat" means the target's own neutral point: unity for volume, dead
     // centre for pan. A single hard-coded 1.0 here would make "reset" turn a
@@ -8557,10 +8548,6 @@ void PianoRollComponent::showSampleCurveMenu (int layerIndex, int sampleId,
 
         switch (result)
         {
-            case 1:
-                s->activeCurve().setEnabled (! s->activeCurve().isEnabled());
-                break;
-
             case 2:
                 s->activeCurve().loadPoints ({ { 0.0f, neutral }, { 1.0f, neutral } });
                 break;
@@ -8581,8 +8568,7 @@ void PianoRollComponent::showSampleCurveMenu (int layerIndex, int sampleId,
                 return;
         }
 
-        if (result != 1)
-            s->activeCurve().setEnabled (true);
+        s->activeCurve().setEnabled (true);
 
         if (safe->onNoteEdited != nullptr)
             safe->onNoteEdited();
@@ -8722,16 +8708,14 @@ void PianoRollComponent::drawSampleAutomationBox (juce::Graphics& g)
     {
         const bool hot = hoveredSampleCurveMenu;
 
-        // The switch is its own rectangle now (getSampleToggleArea), because the
-        // label beside it became a control too: 22 x 12 design px, centred, and
-        // never stretched to the row's height (the first P49 frame showed what
-        // stretching does — a 26 px ball spilling out of both ends).
-        const auto toggle = getSampleToggleArea (layerIndex, sample->id);
+        // Phase 65: the row is the target button and nothing else. The enable
+        // switch is gone — a curve you drew is a curve that plays, and a switch
+        // that can silently make the drawing a lie was the one thing in this
+        // box that could turn the shape into decoration.
         const auto target = getSampleTargetArea (layerIndex, sample->id);
-        const float switchH = toggle.getHeight();
 
         // The label names the target and carries a caret: a static word next to
-        // a switch reads as decoration, and "there is a second curve" would be
+        // nothing reads as decoration, and "there is a second curve" would be
         // invisible without something that looks pressable.
         const juce::String label = sample->automationTarget == SampleAutomationTarget::pan
                                      ? utf8 ("声相") : utf8 ("音量");
@@ -8754,20 +8738,6 @@ void PianoRollComponent::drawSampleAutomationBox (juce::Graphics& g)
         g.setColour ((hot ? juce::Colours::white : colour).withAlpha (0.75f));
         g.strokePath (caret, juce::PathStrokeType (ui::pf (1.2f), juce::PathStrokeType::curved,
                                                   juce::PathStrokeType::rounded));
-
-        // Lit when the curve is audible, dim when it is bypassed: the switch is
-        // the only place the difference is visible, so it has to read from the
-        // knob's side as well as its colour.
-        const bool on = sample->activeCurve().isEnabled();
-
-        g.setColour (on ? colour.withAlpha (0.9f) : theme::surface3);
-        g.fillRoundedRectangle (toggle, switchH * 0.5f);
-
-        const float knob = switchH - ui::pf (2);
-
-        g.setColour (juce::Colours::white.withAlpha (on ? 0.95f : 0.55f));
-        g.fillEllipse (on ? toggle.getRight() - knob - ui::pf (1) : toggle.getX() + ui::pf (1),
-                       toggle.getY() + ui::pf (1), knob, knob);
     }
 
     //-- Close ---------------------------------------------------------------

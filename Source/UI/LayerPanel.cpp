@@ -200,6 +200,45 @@ juce::Rectangle<int> LayerPanel::getAddButtonBounds() const
              juce::jmax (0, getWidth() - ui::px (24)), ui::px (32) };
 }
 
+juce::Rectangle<int> LayerPanel::getVisibilityToggleBounds() const
+{
+    // Right end of the title bar, vertically between the two header lines:
+    // the title occupies the left, so this is the only free corner up here.
+    return { getWidth() - ui::px (14) - ui::px (20), ui::px (16), ui::px (20), ui::px (20) };
+}
+
+bool LayerPanel::areAllLayersVisible() const
+{
+    // The sheet being edited is always drawn (Phase 20), so its own flag says
+    // nothing about the ghosts — only the others are asked.
+    const int active = stack.getActiveLayerIndex();
+
+    for (int i = 0; i < stack.getNumLayers(); ++i)
+    {
+        if (i == active)
+            continue;
+
+        const auto* layer = stack.getLayer (i);
+
+        if (layer != nullptr && ! layer->isVisible())
+            return false;
+    }
+
+    return true;
+}
+
+void LayerPanel::toggleAllLayerVisibility()
+{
+    // "All" is the target when the ghosts are currently hidden, and closing the
+    // ghosts is the target otherwise. The active sheet is written as visible
+    // too: it is drawn either way, and leaving it false would make the next
+    // switch to another sheet silently hide the one you just left.
+    const bool showAll = ! areAllLayersVisible();
+
+    for (int i = 0; i < stack.getNumLayers(); ++i)
+        stack.setLayerVisible (i, showAll || i == stack.getActiveLayerIndex());
+}
+
 juce::Rectangle<int> LayerPanel::getLaneCanvasBounds (int index) const
 {
     auto body = getBodyBounds (index);
@@ -244,6 +283,26 @@ void LayerPanel::paint (juce::Graphics& g)
 
     g.setColour (kDivider);
     g.drawHorizontalLine (headerHeight - 1, 0.0f, (float) getWidth());
+
+    //-- Phase 65: ghost switch ----------------------------------------------
+    // The same eye the rows use, in the one place that speaks for all of them.
+    // Open = every sheet is showing as a ghost; struck through = only the sheet
+    // being edited is on screen.
+    {
+        const auto eyeBox = getVisibilityToggleBounds();
+        const bool all    = areAllLayersVisible();
+
+        if (hoveredVisibilityToggle)
+        {
+            g.setColour (juce::Colours::white.withAlpha (0.07f));
+            g.fillRoundedRectangle (eyeBox.toFloat(), ui::pf (5));
+        }
+
+        drawEye (g, eyeBox.toFloat().reduced (ui::pf (4)),
+                 juce::Colours::white.withAlpha (hoveredVisibilityToggle ? 0.95f
+                                                                        : (all ? 0.72f : 0.42f)),
+                 all);
+    }
 
     //-- Rows -----------------------------------------------------------------
     // Clipped to the list area: a row scrolled past the header must not paint
@@ -828,6 +887,14 @@ void LayerPanel::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
+    // Phase 65: the title-bar eye is above the list, so it is tested before the
+    // "nothing outside the view area" guard below.
+    if (getVisibilityToggleBounds().contains (pos))
+    {
+        toggleAllLayerVisibility();
+        return;
+    }
+
     // Nothing outside the list area is a row: a row scrolled under the header
     // would otherwise still be clickable through it.
     if (! getViewArea().contains (pos))
@@ -1038,6 +1105,33 @@ void LayerPanel::mouseMove (const juce::MouseEvent& e)
 {
     const auto pos = e.getPosition();
 
+    // Phase 65: the title-bar eye. Answered first and returned, so the row
+    // hit-test below cannot claim a click that lands in the header.
+    if (getVisibilityToggleBounds().contains (pos))
+    {
+        // Leaving a row behind: the pointer is in the header now, so the row
+        // highlight has to go with it, or the last hovered row stays lit while
+        // the pointer is nowhere near it.
+        const bool dirty = ! hoveredVisibilityToggle
+                             || hoveredRow != -1 || hoveredPart != Part::none;
+
+        hoveredVisibilityToggle = true;
+        hoveredRow  = -1;
+        hoveredPart = Part::none;
+
+        if (dirty)
+            repaint();
+
+        setMouseCursor (juce::MouseCursor::PointingHandCursor);
+        return;
+    }
+
+    if (hoveredVisibilityToggle)
+    {
+        hoveredVisibilityToggle = false;
+        repaint();
+    }
+
     int  newRow  = -1;
     Part newPart = Part::none;
 
@@ -1079,12 +1173,19 @@ void LayerPanel::mouseMove (const juce::MouseEvent& e)
 
 void LayerPanel::mouseExit (const juce::MouseEvent&)
 {
+    bool dirty = hoveredVisibilityToggle;
+
+    hoveredVisibilityToggle = false;
+
     if (hoveredRow != -1 || hoveredPart != Part::none)
     {
         hoveredRow  = -1;
         hoveredPart = Part::none;
-        repaint();
+        dirty = true;
     }
+
+    if (dirty)
+        repaint();
 }
 
 void LayerPanel::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)

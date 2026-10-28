@@ -174,6 +174,10 @@
 - `withHeight()` 保中心、`withY()` 定顶边；**`withX()` 保留宽度**（要改宽得配 `.withWidth`）。
 - 窗口最大化 = `setBounds(userArea)` **减 `peer->getFrameSize()`**。
 - **顶栏顺序**：新建 → 保存/载入/导出 → 撤销/重做（图标）→ 混音台 → 设置。
+- **图层栏标题栏的眼睛（P65）**：`LayerPanel::getVisibilityToggleBounds()` 在标题右端，
+  图标复用行内的 `drawEye()`。状态不另存字段，由 `areAllLayersVisible()` 从模型派生
+  （活动层永远画，不参与判断）；一次点击 `toggleAllLayerVisibility()` 在"全部可见"和
+  "只留活动层"之间翻转，写的是每行眼睛的同一个 ghost 标志。
 - **数值控件右键 = 复位**：`Util/ValueMenu.h` 的 `ui::showValueMenu()`，复位 id = **9001**。
   **二级层级一律 `addSubMenu`**；宿主菜单拆 `fill…` + `apply…`。
 - **同一个"动词"只许有一个菜单出处**（P42）：卡片 / 通道条 / 编组 / 钢琴窗 / 自动化窗的
@@ -278,6 +282,12 @@
   跨度、Y 轴 0..1。打开即 `setEnabled(true)`；**与音符内联框互斥**。
 - **组要能拖起来**：唯一入口 `armGroupMove(groupId, pos)`。两条路：点标签 `getGroupLabelAt`、
   点框内空地 `getGroupFrameAt`（只认激活图层，排在音符命中之后、marquee 之前）。
+  **P65：这一处若已经整处在选区里，就不调 `selectGroup()`** —— 多选后点其中一个组的标签，
+  意思是"搬走我选的东西"，把选区缩成这一个组会让其余组在指针动起来的瞬间掉队。
+  抓取也从"这一组的块"放宽到"所有选中的块"（`captureGroupClips()` 现在就是
+  `captureSampleDragOriginals()`），所以两组各自的采样块一起平移。
+  整处判据是 `isWholeOccurrenceSelected(gid, occ)`，不是 `isWholeGroupSelected`（后者问整个选区，
+  多选时永远 false）。
 - **采样是组成员**：成员计数/`getGroupContentBounds`/组拖动/`pruneEmptyGroups` 都要同时看
   notes 和 samples。**P56 起复制粘贴也带采样**：整组（音符 + 块）被选中才算"整组"，
   `pasteEditClipboard()` 见到 `! groupClips.empty()`（P63 之前是 `groupClip.valid`）直接走
@@ -576,6 +586,11 @@
   offset（同样的秒数），音频留在原时间位置；右端拉伸只改 `lengthBeats`。
 - **尾部无上限（P51）**：右端想拖多长拖多长（见"采样伸缩"节）；左 ≥ offset 允许的距离
   （offset 不会 < 0，那个判据仍在）。旧的 `maxSampleLengthBeats()` 已删除。
+- **P65：开关没了**。块自动化框底部那行不再是"目标标签 + 启用开关"，整行就是目标按钮
+  （`getSampleTargetArea()` 就返回 `getSampleMenuArea()`），曲线画出来就生效。右键菜单里的
+  「启用 / 停用曲线」一并删掉——留着它只是把同一个谎言挪一次点击的距离。
+  `openSampleAutomation()` 会把 `enabled = false` 的旧曲线恢复成 true：开关删了之后，
+  那是唯一的回头路（老工程里可能存在这个状态）。
 - **三个命中区（P49 起是两个 + 一个按钮；P51 按钮挪到块顶）**：整高的左右边 = 拉伸，
   其余 = 拖动，**块顶右上**的 chevron = 展开曲线箱（Y = 块顶 + 1，距右缘 = 音符 chevron
   的同一公式 band+air+width——"右上角的小箭头展开曲线"对音符和块是同一个习惯）。

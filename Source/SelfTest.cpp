@@ -6317,6 +6317,17 @@ juce::String MainComponent::runSelfTest()
         // Down-ramp then back to unity: two points MOVED onto new values, the
         // gesture path the box's drags take.
         //
+        //-- Phase 65: the switch is gone, so the curve is never a lie --------
+        // A block saved by an older build can still carry enabled = false. With
+        // the switch deleted there is no way back from that state, so opening
+        // the box has to be the way back.
+        clip->volumeCurve.setEnabled (false);
+        pianoRoll.openSampleAutomation (index, a);
+
+        check (utf8 ("采样自动化框没有开关：打开框就把曲线恢复成生效"),
+               clip->volumeCurve.isEnabled(),
+               clip->volumeCurve.isEnabled() ? "enabled" : "still bypassed");
+
         // The edits run as their own statement, not inside the check's
         // condition: argument evaluation order is unspecified, and on the
         // first run the message was built BEFORE the edits ran — it printed
@@ -6385,6 +6396,20 @@ juce::String MainComponent::runSelfTest()
                  + juce::String (curveArea.getWidth(), 1)
                  + ", block x/w " + juce::String (blockRect.getX(), 1) + "/"
                  + juce::String (blockRect.getWidth(), 1));
+
+        //-- Phase 65: 开关去掉之后，菜单行和目标按钮必须还是同一个矩形 -----
+        // A deleted widget leaves no compile error — it leaves a gap. The row
+        // and the target button being identical is what proves the row has no
+        // switch-shaped hole at its right end.
+        const auto rowArea = pianoRoll.getSampleMenuAreaForTest (index, a);
+        const auto tapArea = pianoRoll.getSampleTargetAreaForTest (index, a);
+
+        check (utf8 ("采样自动化框的菜单行整行都是目标按钮（开关已去掉）"),
+               ! rowArea.isEmpty()
+                 && std::abs (tapArea.getWidth() - rowArea.getWidth()) < 0.01f
+                 && std::abs (tapArea.getRight() - rowArea.getRight()) < 0.01f,
+               juce::String (tapArea.getWidth(), 1) + utf8 (" vs ")
+                 + juce::String (rowArea.getWidth(), 1));
 
         // One floating editor at a time: opening the clip box must have
         // closed whatever the note box was showing, and the second toggle
@@ -11166,6 +11191,117 @@ juce::String MainComponent::runSelfTest()
         check (utf8 ("播放头跳回原窗口时，视图仍然归还"),
                std::abs (roll.getScrollBeats()) < 1.0e-6,
                juce::String (pushed, 1) + utf8 (" -> ") + juce::String (roll.getScrollBeats(), 1));
+    }
+
+    //-- Phase 65: two selected groups drag together --------------------------
+    {
+        LayerStack t65;
+        RackModel  r65;
+        PianoRollComponent roll (t65, r65);
+        roll.setSize (1200, 520);
+
+        t65.addLayer (utf8 ("P65 多组拖动"), palette::layer1);
+
+        auto* layer = t65.getLayer (0);
+        const int gA = layer->addGroup (utf8 ("组 A"), groupPalette::group1);
+        const int gB = layer->addGroup (utf8 ("组 B"), groupPalette::group2);
+
+        NoteEvent seed;
+        seed.pitch       = 60;
+        seed.lengthBeats = 1.0;
+
+        seed.startBeat = 0.0;  const int a0 = layer->addNote (seed);
+        seed.startBeat = 1.0;  const int a1 = layer->addNote (seed);
+        seed.startBeat = 4.0;  const int b0 = layer->addNote (seed);
+        seed.startBeat = 5.0;  const int b1 = layer->addNote (seed);
+
+        layer->assignNotesToGroup ({ a0, a1 }, gA, 0);
+        layer->setOccurrenceStart (gA, 0, 0.0);
+        layer->assignNotesToGroup ({ b0, b1 }, gB, 0);
+        layer->setOccurrenceStart (gB, 0, 4.0);
+
+        roll.setSelection ({ a0, a1, b0, b1 });
+
+        // Grab group A's label and drag it two beats. Both groups are selected
+        // whole, so this is "carry the selection" — the gesture that used to
+        // narrow the selection to A and leave B standing.
+        roll.simulateGroupMove (0, gA, 2.0, 0, 0);
+
+        const double originA = layer->occurrenceStart (gA, 0);
+        const double originB = layer->occurrenceStart (gB, 0);
+        const auto*  movedA  = layer->findNote (a0);
+        const auto*  movedB  = layer->findNote (b0);
+
+        check (utf8 ("两个组一起选中时，拖其中一个两个组一起走"),
+               movedA != nullptr && movedB != nullptr
+                 && std::abs (movedA->startBeat - 2.0) < 1.0e-6
+                 && std::abs (movedB->startBeat - 6.0) < 1.0e-6
+                 && std::abs (originA - 2.0) < 1.0e-6
+                 && std::abs (originB - 6.0) < 1.0e-6,
+               juce::String (movedA != nullptr ? movedA->startBeat : -1.0, 2)
+                 + utf8 (" / ") + juce::String (movedB != nullptr ? movedB->startBeat : -1.0, 2)
+                 + utf8 (" · 起点 ") + juce::String (originA, 2)
+                 + utf8 (" / ") + juce::String (originB, 2));
+
+        // ...and a group that is NOT in the selection still narrows to itself,
+        // which is what a plain click on a label has to keep doing.
+        roll.setSelection ({ a0, a1 });
+        roll.simulateGroupMove (0, gB, 1.0, 0, 0);
+
+        const auto* untouchedA = layer->findNote (a0);
+        const auto* movedB2    = layer->findNote (b0);
+
+        check (utf8 ("只选中一个组时，拖另一个组不会顺带拖走它"),
+               untouchedA != nullptr && movedB2 != nullptr
+                 && std::abs (untouchedA->startBeat - 2.0) < 1.0e-6
+                 && std::abs (movedB2->startBeat - 7.0) < 1.0e-6,
+               juce::String (untouchedA != nullptr ? untouchedA->startBeat : -1.0, 2)
+                 + utf8 (" / ") + juce::String (movedB2 != nullptr ? movedB2->startBeat : -1.0, 2));
+    }
+
+    //-- Phase 65: the title-bar eye flips every ghost at once ----------------
+    {
+        LayerStack t65e;
+        RackModel  r65e;
+        LayerPanel panel (t65e, r65e);
+        panel.setSize (LayerPanel::panelWidth, 720);
+
+        t65e.addLayer (utf8 ("L0"), palette::layer1);
+        t65e.addLayer (utf8 ("L1"), palette::layer2);
+        t65e.addLayer (utf8 ("L2"), palette::layer3);
+        t65e.setActiveLayerIndex (2);
+
+        t65e.setLayerVisible (0, false);
+        t65e.setLayerVisible (1, false);
+
+        const bool beforeAll = panel.areAllLayersVisible();
+
+        panel.toggleAllLayerVisibility();       // -> 全部可见
+
+        const bool nowAll = panel.areAllLayersVisible()
+                              && t65e.getLayer (0) != nullptr && t65e.getLayer (0)->isVisible()
+                              && t65e.getLayer (1) != nullptr && t65e.getLayer (1)->isVisible();
+
+        panel.toggleAllLayerVisibility();       // -> 仅当前可见
+
+        const bool nowOnlyActive = ! panel.areAllLayersVisible()
+                                     && t65e.getLayer (0) != nullptr && ! t65e.getLayer (0)->isVisible()
+                                     && t65e.getLayer (1) != nullptr && ! t65e.getLayer (1)->isVisible()
+                                     && t65e.getLayer (2) != nullptr && t65e.getLayer (2)->isVisible();
+
+        check (utf8 ("图层栏眼睛：一次切换全部可见 / 仅当前可见"),
+               ! beforeAll && nowAll && nowOnlyActive,
+               juce::String (beforeAll ? 1 : 0) + " / " + juce::String (nowAll ? 1 : 0)
+                 + " / " + juce::String (nowOnlyActive ? 1 : 0));
+
+        // The button lives in the title bar and must not sit on the title text.
+        const auto eyeBox = panel.getVisibilityToggleBounds();
+
+        check (utf8 ("眼睛按钮落在标题栏右上角，不压标题文字"),
+               eyeBox.getRight() <= panel.getWidth() && eyeBox.getWidth() > 0
+                 && eyeBox.getBottom() <= LayerPanel::headerHeight,
+               juce::String (eyeBox.getX()) + "," + juce::String (eyeBox.getY())
+                 + " " + juce::String (eyeBox.getWidth()) + "x" + juce::String (eyeBox.getHeight()));
     }
 
     //-- Phase 63: N objects in, N objects out ---------------------------------

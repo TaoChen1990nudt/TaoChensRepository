@@ -1001,6 +1001,20 @@ public:
         return getSampleCurveArea (layerIndex, sampleId);
     }
 
+    /** Phase 65: test hooks for the box's menu row. With the enable switch
+        removed the row and the target button are the SAME rectangle, and that
+        identity is the only way to prove no switch-shaped hole is left behind
+        (a deleted widget leaves no error, just a mystery gap). */
+    juce::Rectangle<float> getSampleTargetAreaForTest (int layerIndex, int sampleId) const
+    {
+        return getSampleTargetArea (layerIndex, sampleId);
+    }
+
+    juce::Rectangle<float> getSampleMenuAreaForTest (int layerIndex, int sampleId) const
+    {
+        return getSampleMenuArea (layerIndex, sampleId);
+    }
+
     /** Phase 50: test hook — the same cut the menu item runs. Returns how many
         blocks were split. */
     int simulateSampleSplitAtPlayhead() { return splitSelectedSamplesAtPlayhead(); }
@@ -1341,7 +1355,6 @@ private:
     /** Phase 50: the menu row has three parts now — the target button on the
         left, the enable switch on the right, the close cross in the corner. */
     juce::Rectangle<float> getSampleTargetArea (int layerIndex, int sampleId) const;
-    juce::Rectangle<float> getSampleToggleArea (int layerIndex, int sampleId) const;
 
     SampleEvent*       getExpandedSample();
     const SampleEvent* getExpandedSample() const;

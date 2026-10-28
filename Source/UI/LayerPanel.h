@@ -79,6 +79,15 @@ public:
     void setFocusSlotId (int slotId);
     int  getFocusSlotId() const noexcept { return focusSlotId; }
 
+    /** Phase 65: the title-bar eye. `areAllLayersVisible()` is the state the
+        icon draws (every sheet but the one being edited shows as a ghost), and
+        one toggle flips the whole set — the same per-layer flag the row eyes
+        set, applied at once. Public so the self-test can drive the gesture
+        instead of reading pixels. */
+    juce::Rectangle<int> getVisibilityToggleBounds() const;
+    bool areAllLayersVisible() const;
+    void toggleAllLayerVisibility();
+
     /** True when anything in this layer reaches the focused synth. Read by the
         self-test to prove the row highlight is not decoration. */
     bool isLayerAttachedToFocus (int index) const;
@@ -157,6 +166,9 @@ private:
 
     int  hoveredRow  = -1;
     Part hoveredPart = Part::none;
+
+    /** Phase 65: the title-bar eye is not a row, so it keeps its own hover. */
+    bool hoveredVisibilityToggle = false;
 
     /** Phase 16: the synth the roll is spotlighting, -1 for none. */
     int  focusSlotId = -1;

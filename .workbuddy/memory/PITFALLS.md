@@ -1126,3 +1126,40 @@ if (beats > scrollBeats + visible * 0.75) { userScrollBeats = scrollBeats; ... }
 "回到原处"这类判据尤其危险——抓拍时刻的状态天然满足"已经回来了"。
 另外：**别用"看起来在闪"去猜绘制问题**。闪屏第一嫌疑是布局/滚动每帧翻转，
 用探针把每帧的 `scrollBeats` 打出来，一秒钟就能看见横跳。
+
+## P65-A：多选之后，"点其中一个"不代表"只做这一个"
+
+`armGroupMove()` 的第一行是 `selectGroup(groupId, occurrence)` —— 点组标签 = 选中这个组。
+单组时完全正确；多选时它把用户刚框出来的选区**缩成一个组**，于是"选中两个组、拖其中一个"
+变成"只拖这一个"，另外那个在指针动起来的瞬间掉队。用户报的就是这个。
+
+判据不是"这个组被点中了"，而是"**这一处是不是已经整处在选区里**"：
+
+```cpp
+if (! isWholeOccurrenceSelected (groupId, occurrence))
+    selectGroup (groupId, occurrence);      // 没整选 -> 才缩成这一个
+```
+
+同一处还有第二个半截：`captureGroupClips(groupId, occurrence)` 只抓**这一组**的块。
+音符走 `captureDragOriginals()`（所有选中的音符），块只抓一组，于是多组拖动时音符全动、
+采样块只动一组。现在 `captureGroupClips()` 就是 `captureSampleDragOriginals()`（所有选中块）。
+
+**规律**：任何"点中 X 就把选区替换成 X"的地方，都要先问一句"X 是不是已经整个在选区里"。
+`isWholeGroupSelected` 不能用在这里——它循环的是整个选区，多选时永远 false。
+
+## P65-B：删掉一个控件，编译不会告诉你行尾空了一块
+
+采样块的自动化框底部原来是"目标标签 + 启用开关"。开关删掉后，如果只删绘制和命中，
+`getSampleTargetArea()` 里那行 `withTrimmedRight(... toggle.getX() ...)` 还在，行尾就永远留着
+26 px 的死区——点上去什么都不发生，也没人报错。
+
+所以这个删除配了一条**几何恒等式**断言：
+
+```cpp
+getSampleTargetAreaForTest (i, id) == getSampleMenuAreaForTest (i, id)   // 宽与右边界一致
+```
+
+咬测：把 target 改成 `withTrimmedRight (ui::pf (30))` → 立刻 518.8 vs 557.8 报错。
+
+**规律**：删控件不只是删代码，还要删掉"为它预留的空间"，并且这个"没有空间"要被断言，
+否则下次有人加回一个按钮时，谁也不知道那里本来是不是空的。
