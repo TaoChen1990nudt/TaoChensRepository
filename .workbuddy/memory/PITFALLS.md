@@ -1008,7 +1008,8 @@ if (groupId >= 0 && isWholeGroupSelected (groupId, true))   // 旧
 
 - 拖动：`wholeGroupOccurrencesInDrag()`（拿 `dragOriginals` + `dragClipOriginals` 的成员数
   和该出现的成员总数比）。
-- 删除/解组：`isWholeGroupSelected (gid, true, occ)`。
+- 删除/解组：~~`isWholeGroupSelected (gid, true, occ)`~~ → **P63 改成了 `isWholeOccurrenceSelected (gid, occ)`**，
+  原因见 P63-A：前者问的是整个选区，多组一起选时永远 false。
 
 **写第一版时踩过的坑**：`collectTwinsForEdit()` 一开始是"收集兄弟成员，然后按**兄弟**的出现号
 过滤整处选中"——兄弟当然不在被选中的那一处里，于是过滤永远不生效，删一处 = 删所有处。
@@ -1032,3 +1033,61 @@ if (groupId >= 0 && isWholeGroupSelected (groupId, true))   // 旧
 规则（MEMORY.md 硬规则 1）早就写了，但 P62 加断言时又犯了一次——顺手用正则把全文件
 19 处裸中文 `check ("…")` 都包成 `utf8 ("…")`，其中 11 处是以前留下的（P51/P52 那批）。
 以后加断言，先写 `utf8 (`。
+
+## P63-A：`isWholeGroupSelected` 问的是**整个选区**，多组一起选时永远 false
+
+P62 给这个函数加了 `occurrence` 参数，看起来已经是"这一处全不全"的判据了。不是：
+
+```cpp
+for (int id : selection)
+    if (note->groupId != groupId) return false;   // ← 选区里还有别的组，直接 false
+```
+
+`members` 和 `chosen` 是按**这一处**数的，但循环判的是**整个选区**。所以：
+
+- 单组复制 / 单组删除 → 正常；
+- 选中两个组再复制 → `copyNotesToClipboard` 的 `isWholeGroupSelected` 为假，落到散音符分支，
+  粘贴出来是一堆**散音符**（实测：组数 2、音符 8、`groupId` 全是 -1）；
+- 选中两个组再删 → `collectTwinsForEdit` 认为"没有一处是整处"，于是把兄弟全收进来连删。
+
+用户报的是"粘贴下来变成一个组包含两个组的内容"，我实测到的第一步是"散开"。**两种症状是同一个根**：
+多组选区下"整处"判据永远返回 false，谁用谁错。
+
+新判据 `isWholeOccurrenceSelected (groupId, occurrence)` 只数这一处：成员数从**模型**里数，
+选中数从选区里数，两边相等且大于 0。用它的地方：复制切片、`collectTwinsForEdit`。
+`isWholeGroupSelected` 保留给"这个组我是不是全选了"的单对象问句。
+
+## P63-B：剪贴板描述"一个组"时，它的成员也不能放在全局列表里
+
+P56–P62 的 `GroupClip` 只存组的**属性**（名字、颜色、挂载、电平、曲线），**成员**放在
+`noteClip` / `sampleClip` 里——那是整个选区共用的一份列表。
+
+于是"两个组一起复制"必然只有一个结果：第二个组的成员要么被并进第一个组，要么掉出来当散音符。
+`captureGroupClip` 多调用一次也没用，成员列表只有一个。
+
+所以 `GroupClip` 现在自带 `notes` / `clips`，`noteClip` / `sampleClip` 只装**不属于任何整处**的散货。
+配套改动两个地方，漏一个就出问题：
+1. `copySelectionToClipboards()` 原来在 `copyNotesToClipboard()` 之后再调
+   `copySamplesToClipboard()` ——后者会把**所有**选中块重新填进 `sampleClip`，包括整处已经认领的。
+   现在一次填充三个剪贴板，第二趟取消。
+2. `cutNotesToClipboard()` 原来只在 `groupClip.valid` 时删 `sampleClip` 里的块。现在整处的块不在
+   `sampleClip` 里了，必须改成删**所有选中的块**，否则剪切会留下组的音频。
+
+## P63-C：N 个对象一个锚点，否则"间距"这件信息就丢了
+
+粘贴的锚点算一次（`clipboardFirstBeat()` = 剪贴板里所有东西的最早拍），然后**所有对象共用同一个
+delta**。若每个对象各算"自己起点 → anchor"，两组本来隔 4 拍，贴出来会叠在同一拍上——看起来
+正好像"合并成了一个组"。
+
+咬测办法：把 `insertGroupMembers` 的 delta 换成 `anchor - object.startBeat`，自检的间距那条
+立刻报 `20.00 / 20.00`。这条用例存在的意义就是防这个。
+
+## P63-D：`isGroupClipboard()` 在菜单里的位置
+
+`fillEditMenu` 的"粘贴目标"是 if / else if 链：`canPasteNotes() && canPasteSamples()` →
+`canPasteNotes()` → `canPasteSamples()` → "剪贴板为空"。
+
+P63 之后，一个"只有音符、没有块"的组会让 `noteClip` 和 `sampleClip` **都为空**（成员在
+`groupClips[i].notes` 里），于是整条链走到底、菜单显示"剪贴板为空"，而粘贴其实是有效的。
+把 `isGroupClipboard()` 提到链首（`canPasteAutomationCurve()` 之后）就好了。
+规律：状态行是"哪一条 if 先命中"，新增一种状态就要检查它会不会被更早的分支吞掉。

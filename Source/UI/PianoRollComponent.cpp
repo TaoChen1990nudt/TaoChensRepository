@@ -8,6 +8,8 @@
 #include "Util/Theme.h"
 
 #include <limits>
+#include <map>
+#include <set>
 
 namespace atomic
 {
@@ -1591,7 +1593,11 @@ std::vector<std::pair<int, int>> PianoRollComponent::getSelectedGroups() const
         {
             // Blocks count: the user selects a group by clicking its label or by
             // dragging it, and a group of samples has no notes to select.
-            if (isWholeGroupSelected (group.getId(), true, occurrence))
+            //
+            // Phase 63: per appearance. Asking `isWholeGroupSelected` here made
+            // "select two groups" light up NEITHER row in the group panel — the
+            // same whole-selection-vs-one-appearance confusion as P63-A.
+            if (isWholeOccurrenceSelected (group.getId(), occurrence))
             {
                 groups.push_back ({ stack.getActiveLayerIndex(), group.getId() });
                 break;
@@ -3346,7 +3352,11 @@ void PianoRollComponent::collectTwinsForEdit (std::vector<int>& twinNotes,
         // An appearance the selection carries WHOLE is a per-copy decision:
         // deleting the chorus copy must not delete the verse. Only a PART of an
         // appearance is a change of shape.
-        if (isWholeGroupSelected (groupId, true, occurrence))
+        //
+        // Phase 63: asked per appearance. `isWholeGroupSelected` answers "no"
+        // as soon as a second group is in the selection, which turned every
+        // multi-group edit into "sync to all my twins".
+        if (isWholeOccurrenceSelected (groupId, occurrence))
             continue;
 
         // Ask per appearance: `collectTwinMembers` pairs by ordinal, and the
@@ -7311,23 +7321,128 @@ bool PianoRollComponent::copyNotesToClipboard()
     if (active == nullptr)
         return false;
 
-    // Phase 56: a group can be made of blocks alone (Phase 27). "Nothing
-    // selected" therefore means BOTH lists are empty — the note list alone is
-    // not the question any more.
     if (selection.empty() && sampleSelection.empty())
         return false;
 
+    // Phase 63: this fills ALL THREE clipboards — the objects, the loose notes
+    // and the loose blocks — in one pass, because "which member of this
+    // selection travels inside a copied object, and which travels on its own"
+    // is one question with one answer. Filling them in separate passes (this
+    // function, then copySamplesToClipboard) meant the block clipboard got a
+    // list that included the blocks the group clipboard had already claimed:
+    // one copy, two descriptions of it, and a paste that wrote both.
     noteClip.clear();
     noteClipFirstBeat = std::numeric_limits<double>::max();
     noteClipEndBeat   = 0.0;
-    groupClip         = GroupClip {};
+
+    sampleClip.clear();
+    sampleClipFirstBeat  = std::numeric_limits<double>::max();
+    sampleClipLengthBeat = 1.0;
+
+    // A fresh copy starts a fresh streak: keeping the old next-beat would send
+    // the first paste of a new clipboard to the tail of the previous one.
+    samplePasteNextBeat     = -1.0;
+    samplePastePlayheadSeen = -2.0;
+
+    groupClips.clear();
+
+    //-- 1. Sort the selection into slices, one per appearance ----------------
+    // Phase 63: the selection is split by (groupId, occurrence), not by kind.
+    // Two groups selected together used to be one undifferentiated pile of
+    // notes, which is why the copy could only be "a group" or "some notes" —
+    // never "these two groups".
+    using SliceKey = std::pair<int, int>;
+
+    std::map<SliceKey, std::vector<NoteEvent>>   noteSlices;
+    std::map<SliceKey, std::vector<SampleEvent>> clipSlices;
+    std::vector<NoteEvent>   looseNotes;
+    std::vector<SampleEvent> looseClips;
 
     for (const auto& note : active->getNotes())
     {
         if (! isSelected (note.id))
             continue;
 
-        noteClip.push_back (note);
+        // A member of a group that is gone is a loose note; the dangling id is
+        // the model's business, not the clipboard's.
+        if (note.groupId < 0 || active->findGroup (note.groupId) == nullptr)
+        {
+            looseNotes.push_back (note);
+            continue;
+        }
+
+        noteSlices[{ note.groupId, note.groupOccurrence }].push_back (note);
+    }
+
+    for (const auto& clip : active->getSamples())
+    {
+        if (! isSampleSelected (clip.id))
+            continue;
+
+        if (clip.groupId < 0 || active->findGroup (clip.groupId) == nullptr)
+        {
+            looseClips.push_back (clip);
+            continue;
+        }
+
+        clipSlices[{ clip.groupId, clip.groupOccurrence }].push_back (clip);
+    }
+
+    //-- 2. A slice that IS a whole appearance becomes one clipboard object ---
+    std::set<SliceKey> keys;
+
+    for (const auto& entry : noteSlices)
+        keys.insert (entry.first);
+
+    for (const auto& entry : clipSlices)
+        keys.insert (entry.first);
+
+    for (const auto& key : keys)
+    {
+        const auto noteIt = noteSlices.find (key);
+        const auto clipIt = clipSlices.find (key);
+
+        auto* group = active->findGroup (key.first);
+        const bool whole = group != nullptr && isWholeOccurrenceSelected (key.first, key.second);
+
+        if (! whole)
+        {
+            // Part of an appearance, or no appearance at all: these travel as
+            // members of nothing. Half a group is not a copyable object — the
+            // paste would have to invent where the other half was.
+            if (noteIt != noteSlices.end())
+                for (const auto& note : noteIt->second)
+                    looseNotes.push_back (note);
+
+            if (clipIt != clipSlices.end())
+                for (const auto& clip : clipIt->second)
+                    looseClips.push_back (clip);
+
+            continue;
+        }
+
+        // Phase 62: the appearance's PINNED origin, not the earliest member —
+        // an appearance that lost its earliest note to an earlier edit still
+        // sits where it was told to sit, and its curves are absolute to that.
+        const double start = active->occurrenceStart (key.first, key.second);
+
+        auto object = captureGroupClip (*group, start, key.second);
+
+        if (noteIt != noteSlices.end())
+            object.notes = noteIt->second;
+
+        if (clipIt != clipSlices.end())
+            object.clips = clipIt->second;
+
+        groupClips.push_back (std::move (object));
+    }
+
+    //-- 3. The leftovers are the loose clipboard ----------------------------
+    noteClip   = std::move (looseNotes);
+    sampleClip = std::move (looseClips);
+
+    for (const auto& note : noteClip)
+    {
         noteClipFirstBeat = juce::jmin (noteClipFirstBeat, note.startBeat);
         noteClipEndBeat   = juce::jmax (noteClipEndBeat, note.startBeat + note.lengthBeats);
     }
@@ -7335,78 +7450,178 @@ bool PianoRollComponent::copyNotesToClipboard()
     if (noteClip.empty())
         noteClipFirstBeat = 0.0;
 
-    //-- Phase 24: a whole group is copied as an OBJECT ----------------------
-    // The clipboard holds the group's own state (name, colour, mount, trim,
-    // curves) instead of sixty notes that happen to share an id.
-    //
-    // Phase 57: "one bigger group" is now the POINT, not the accident it was
-    // once avoided as. A paste reuses the source group, so copying a group and
-    // pasting it a bar later gives that group a second appearance — which is
-    // what the user asked for: one name, one trim, one mount, two places.
-    //
-    // Phase 56: "whole" now counts the group's BLOCKS too. Copying a group
-    // whose members are notes and blocks used to qualify on the notes alone,
-    // and the paste then dropped the blocks loose on the timeline — a group
-    // that arrived cut in half, which is exactly what "paste the group, not
-    // its contents" is asking not to happen.
-    const int groupId = getSelectedGroupId();
+    double clipEnd = 0.0;
 
-    // Phase 62: ...and it is ONE APPEARANCE that gets copied, which the old
-    // "every member of the group" test could not see. Copying the chorus copy
-    // of a group that also stands at the verse failed that test, fell through to
-    // the loose-note path, and the paste then dropped the blocks ungrouped and
-    // let the notes re-join the source appearance. "有时候粘贴会取消编组" — the
-    // sometimes was "this group has more than one place on the timeline".
-    const int occurrence = getSelectedGroupOccurrence();
-
-    if (groupId >= 0 && isWholeGroupSelected (groupId, true, occurrence))
+    for (const auto& clip : sampleClip)
     {
-        if (const auto* group = active->findGroup (groupId))
-        {
-            // The group's own start is what its curves are absolute to. With no
-            // notes to read it from, the earliest block answers — otherwise a
-            // block-only group would paste its curve at beat 0 and the shape
-            // would stay behind when the copy moved.
-            double start = noteClipFirstBeat;
-
-            if (noteClip.empty())
-            {
-                start = std::numeric_limits<double>::max();
-
-                for (int id : sampleSelection)
-                    if (const auto* clip = active->findSample (id))
-                        start = juce::jmin (start, clip->startBeat);
-
-                if (start == std::numeric_limits<double>::max())
-                    start = 0.0;
-            }
-
-            groupClip = captureGroupClip (*group, start, occurrence);
-
-            // The blocks come along. `copySelectionToClipboards` fills them a
-            // moment later anyway, but a group copy that depended on the CALLER
-            // remembering to run the second pass is a group copy that pastes
-            // without its audio the first time somebody calls this directly.
-            sampleClip.clear();
-
-            for (const auto& clip : active->getSamples())
-                if (isSampleSelected (clip.id))
-                    sampleClip.push_back (clip);
-
-            samplePasteNextBeat     = -1.0;     // the paste owns the anchor now
-            samplePastePlayheadSeen = -2.0;
-
-            flashStatus (utf8 ("已复制 ") + group->getName()
-                           + membersDescription ((int) noteClip.size(), (int) sampleSelection.size()));
-            return true;
-        }
+        sampleClipFirstBeat = juce::jmin (sampleClipFirstBeat, clip.startBeat);
+        clipEnd             = juce::jmax (clipEnd, clip.endBeat());
     }
 
-    if (noteClip.empty())
+    if (sampleClip.empty())
+        sampleClipFirstBeat = 0.0;
+    else
+        sampleClipLengthBeat = juce::jmax (gridDivision, clipEnd - sampleClipFirstBeat);
+
+    //-- 4. Say what happened ------------------------------------------------
+    if (! groupClips.empty())
+    {
+        int noteCount = 0;
+        int clipCount = 0;
+
+        for (const auto& object : groupClips)
+        {
+            noteCount += (int) object.notes.size();
+            clipCount += (int) object.clips.size();
+        }
+
+        flashStatus (utf8 ("已复制 ") + getGroupClipboardName()
+                       + membersDescription (noteCount, clipCount));
+        return true;
+    }
+
+    if (noteClip.empty() && sampleClip.empty())
         return false;
+
+    if (noteClip.empty())
+    {
+        flashStatus (utf8 ("已复制 ") + juce::String ((int) sampleClip.size()) + utf8 (" 个采样"));
+        return true;
+    }
 
     flashStatus (utf8 ("已复制 ") + juce::String ((int) noteClip.size()) + utf8 (" 个音符"));
     return true;
+}
+
+juce::String PianoRollComponent::getGroupClipboardName() const
+{
+    if (groupClips.empty())
+        return {};
+
+    // One object answers with its name; two or more answer with a count. Naming
+    // the first one would read as "you copied 组 A" when the clipboard also
+    // holds 组 B.
+    return groupClips.size() == 1 ? groupClips.front().name
+                                  : juce::String ((int) groupClips.size()) + utf8 (" 个组");
+}
+
+bool PianoRollComponent::isWholeOccurrenceSelected (int groupId, int occurrence) const
+{
+
+    const auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || groupId < 0 || occurrence < 0)
+        return false;
+
+    // Counted off the MODEL, not off the selection: the question is "did the
+    // user get all of it", and a selection that also holds half of the next
+    // group must not change the answer.
+    int members = 0;
+    int chosen  = 0;
+
+    for (const auto& note : layer->getNotes())
+        if (note.groupId == groupId && note.groupOccurrence == occurrence)
+        {
+            ++members;
+
+            if (isSelected (note.id))
+                ++chosen;
+        }
+
+    for (const auto& clip : layer->getSamples())
+        if (clip.groupId == groupId && clip.groupOccurrence == occurrence)
+        {
+            ++members;
+
+            if (isSampleSelected (clip.id))
+                ++chosen;
+        }
+
+    return members > 0 && chosen == members;
+}
+
+double PianoRollComponent::clipboardFirstBeat() const
+{
+    double first = std::numeric_limits<double>::max();
+
+    for (const auto& object : groupClips)
+        first = juce::jmin (first, object.startBeat);
+
+    if (! noteClip.empty())
+        first = juce::jmin (first, noteClipFirstBeat);
+
+    if (! sampleClip.empty())
+        first = juce::jmin (first, sampleClipFirstBeat);
+
+    if (first == std::numeric_limits<double>::max())
+        return 0.0;
+
+    return juce::jmax (0.0, first);
+}
+
+double PianoRollComponent::clipboardLastBeat() const
+{
+    double last = 0.0;
+
+    for (const auto& object : groupClips)
+    {
+        for (const auto& note : object.notes)
+            last = juce::jmax (last, note.startBeat + note.lengthBeats);
+
+        for (const auto& clip : object.clips)
+            last = juce::jmax (last, clip.endBeat());
+    }
+
+    if (! noteClip.empty())
+        last = juce::jmax (last, noteClipEndBeat);
+
+    for (const auto& clip : sampleClip)
+        last = juce::jmax (last, clip.endBeat());
+
+    return last;
+}
+
+void PianoRollComponent::pasteLooseNotesInto (Layer& layer, double delta,
+                                              std::vector<int>& newIds)
+{
+    // Loose notes arrive loose. The NoteEvent they were copied from still
+    // carries its groupId, and pasting it unchanged would quietly drop the copy
+    // back into the appearance the user copied it out of.
+    for (auto note : noteClip)
+    {
+        note.startBeat       = juce::jmax (0.0, note.startBeat + delta);
+        note.id              = 0;
+        note.groupId         = -1;
+        note.groupOccurrence = 0;
+
+        if (const int newId = layer.addNote (note); newId > 0)
+            newIds.push_back (newId);
+    }
+}
+
+void PianoRollComponent::pasteLooseSamplesInto (Layer& layer, double delta,
+                                                std::vector<int>& newIds)
+{
+    for (auto clip : sampleClip)
+    {
+        clip.startBeat = juce::jmax (0.0, clip.startBeat + delta);
+        clip.id        = 0;
+
+        clip.groupId         = -1;
+        clip.groupOccurrence = 0;
+
+        // A CUT takes its sampler with it, so the slot this clipboard holds may
+        // already be gone.
+        ensureClipSlot (clip);
+
+        if (const int newId = layer.addSample (std::move (clip)); newId > 0)
+        {
+            newIds.push_back (newId);
+
+            if (const auto* created = layer.findSample (newId))
+                ensureTimelineExtendsTo (created->endBeat());
+        }
+    }
 }
 
 bool PianoRollComponent::cutNotesToClipboard()
@@ -7422,32 +7637,29 @@ bool PianoRollComponent::cutNotesToClipboard()
     // Phase 56: copying a GROUP now puts its blocks on the clipboard too, so a
     // cut of that group has to take them off the timeline as well — otherwise
     // "cut a group" leaves its audio behind and the paste creates a second copy
-    // of blocks nobody moved. Read before the notes go: the ids are the ones
-    // the model still knows.
-    std::vector<int> cutClipIds;
-
-    if (groupClip.valid)
-        for (const auto& clip : sampleClip)
-            cutClipIds.push_back (clip.id);
-
+    // of blocks nobody moved.
+    //
+    // Phase 63: every selected block leaves, not just the ones the block
+    // clipboard happens to describe. Since the copy now splits its blocks
+    // between "member of a copied object" and "loose", reading the cut list off
+    // one of the two clipboards left the other half on the timeline.
     for (int id : selection)
         active->removeNote (id);
 
-    for (int id : cutClipIds)
+    for (int id : sampleSelection)
         active->removeSample (id);
 
     selection.clear();
-
-    if (! cutClipIds.empty())
-        sampleSelection.clear();
+    sampleSelection.clear();
 
     hoveredNoteId = -1;
     notifySelectionChanged();
     pruneEmptyGroups();
     stack.notifyNotesChanged();
 
-    flashStatus ((groupClip.valid ? utf8 ("已剪切 ") + groupClip.name
-                                 : utf8 ("已剪切 ") + juce::String ((int) noteClip.size()) + utf8 (" 个音符")));
+    flashStatus ((! groupClips.empty()
+                    ? utf8 ("已剪切 ") + getGroupClipboardName()
+                    : utf8 ("已剪切 ") + juce::String ((int) noteClip.size()) + utf8 (" 个音符")));
     return true;
 }
 
@@ -7457,7 +7669,6 @@ PianoRollComponent::GroupClip PianoRollComponent::captureGroupClip (const NoteGr
 {
     GroupClip clip;
 
-    clip.valid            = true;
     clip.sourceGroupId    = group.getId();
     clip.sourceOccurrence = juce::jmax (0, occurrence);
     clip.name             = group.getName();
@@ -7480,9 +7691,6 @@ PianoRollComponent::GroupClip PianoRollComponent::captureGroupClip (const NoteGr
 
 int PianoRollComponent::addGroupCopy (Layer& layer, const GroupClip& source, double deltaBeats)
 {
-    if (! source.valid)
-        return -1;
-
     // Created before the members so they can be born inside it: a note whose
     // groupId points at a group that does not exist yet would be repaired to
     // "ungrouped" by the model, and the copy would paste as loose notes.
@@ -7602,7 +7810,11 @@ bool PianoRollComponent::pasteNotesFromClipboard()
     // entry point goes through pasteGroupFromClipboard. This function used to
     // mint a second group for it — the very thing the user asked to stop — and
     // two paths deciding "does a paste create a group" is how they drift.
-    if (groupClip.valid)
+    //
+    // Phase 63: "a group" became "however many objects the clipboard holds",
+    // and the loose notes are pasted by that same transaction now, so a mixed
+    // selection lands with one delta instead of two.
+    if (! groupClips.empty())
         return pasteGroupFromClipboard();
 
     if (noteClip.empty())
@@ -7631,19 +7843,7 @@ bool PianoRollComponent::pasteNotesFromClipboard()
     // copied it out of (one bracket around two stretches, which is the thing
     // Phase 58 exists to stop).
     std::vector<int> newIds;
-
-    for (auto note : noteClip)
-    {
-        note.startBeat       = juce::jmax (0.0, note.startBeat + delta);
-        note.id              = 0;
-        note.groupId         = -1;
-        note.groupOccurrence = 0;
-
-        const int newId = active->addNote (note);
-
-        if (newId > 0)
-            newIds.push_back (newId);
-    }
+    pasteLooseNotesInto (*active, delta, newIds);
 
     if (newIds.empty())
         return false;
@@ -7662,20 +7862,20 @@ bool PianoRollComponent::pasteGroupFromClipboard()
 {
     auto* active = stack.getActiveLayer();
 
-    if (active == nullptr || ! groupClip.valid)
+    if (active == nullptr || groupClips.empty())
         return false;
 
     //-- The anchor ----------------------------------------------------------
-    // A group is ONE object, so it gets one anchor — the clipboard's own start,
-    // not "wherever the notes start". A block-only group has no notes to read a
-    // start from, and a group whose notes begin later than its first block
-    // would otherwise paste shifted by that difference.
-    const double sourceFirst = groupClip.startBeat;
-
-    double sourceEnd = noteClipEndBeat;
-
-    for (const auto& clip : sampleClip)
-        sourceEnd = juce::jmax (sourceEnd, clip.endBeat());
+    // The whole clipboard gets ONE anchor — the earliest beat anything on it
+    // stands at. A block-only group has no notes to read a start from, and a
+    // group whose notes begin later than its first block would otherwise paste
+    // shifted by that difference.
+    //
+    // Phase 63: one anchor for N objects is what keeps their SPACING. Anchoring
+    // each group on its own start would stack "two groups four beats apart" on
+    // a single beat and look like the merge this phase exists to undo.
+    const double sourceFirst = clipboardFirstBeat();
+    const double sourceEnd   = clipboardLastBeat();
 
     double anchor = playheadBeat >= 0.0 ? playheadBeat : sourceFirst;
 
@@ -7687,57 +7887,79 @@ bool PianoRollComponent::pasteGroupFromClipboard()
 
     const double delta = anchor - sourceFirst;
 
-    //-- Phase 57: a paste reuses the group it was copied from ----------------
-    // It used to mint a SECOND group ("Synth A 2"), so copying a group and
-    // pasting it a bar later split the very thing the user copied into two rows
-    // of the group list — two names, two trims to keep in sync, two mounts.
-    // The clipboard now carries the source id and the paste lends the new
-    // members to that same group: the copy IS the group, in a second place.
-    //
-    // The id is re-checked rather than trusted. Cut-then-paste sweeps the
-    // emptied group away, and a paste on another sheet cannot resolve an id
-    // from this one; in both cases the members still have to arrive inside
-    // SOME group, so one is built from the clipboard's own name and colour.
-    const bool reused = groupClip.sourceGroupId >= 0
-                          && active->findGroup (groupClip.sourceGroupId) != nullptr;
-
-    const int newGroupId = reused ? groupClip.sourceGroupId
-                                  : addGroupCopy (*active, groupClip, delta);
-
-    if (newGroupId < 0)
-        return false;
-
-    //-- Phase 58: the paste is a NEW APPEARANCE, not more members -----------
-    // Phase 57 lent the members to the group itself, which made one bracket
-    // swallow both stretches: dragging the copy dragged the original, and the
-    // only way to separate them was to disband the group. The paste now places
-    // another appearance of the same definition — same name, same trim, same
-    // mount, same curves — with members of its own, so it moves as an object.
-    const int occurrence = active->nextGroupOccurrence (newGroupId);
-
     std::vector<int> newNotes;
     std::vector<int> newClips;
 
-    insertGroupMembers (*active, newGroupId, occurrence, delta,
-                        noteClip, sampleClip, newNotes, newClips);
+    for (const auto& object : groupClips)
+    {
+        //-- Phase 57: a paste reuses the group it was copied from ------------
+        // It used to mint a SECOND group ("Synth A 2"), so copying a group and
+        // pasting it a bar later split the very thing the user copied into two
+        // rows of the group list — two names, two trims to keep in sync, two
+        // mounts. The clipboard carries the source id and the paste lends the
+        // new members to that same group: the copy IS the group, in a second
+        // place.
+        //
+        // The id is re-checked rather than trusted. Cut-then-paste sweeps the
+        // emptied group away, and a paste on another sheet cannot resolve an id
+        // from this one; in both cases the members still have to arrive inside
+        // SOME group, so one is built from the clipboard's own name and colour.
+        //
+        // Phase 63: per OBJECT, so a clipboard holding two different groups
+        // pastes two — and a clipboard holding two appearances of ONE group
+        // pastes two more appearances of it rather than one bigger one.
+        const bool reused = object.sourceGroupId >= 0
+                              && active->findGroup (object.sourceGroupId) != nullptr;
+
+        const int newGroupId = reused ? object.sourceGroupId
+                                      : addGroupCopy (*active, object, delta);
+
+        if (newGroupId < 0)
+            continue;
+
+        //-- Phase 58: the paste is a NEW APPEARANCE, not more members -------
+        // Phase 57 lent the members to the group itself, which made one bracket
+        // swallow both stretches: dragging the copy dragged the original, and
+        // the only way to separate them was to disband the group. The paste
+        // places another appearance of the same definition — same name, same
+        // trim, same mount, same curves — with members of its own.
+        const int occurrence = active->nextGroupOccurrence (newGroupId);
+
+        std::vector<int> objectNotes;
+        std::vector<int> objectClips;
+
+        insertGroupMembers (*active, newGroupId, occurrence, delta,
+                            object.notes, object.clips, objectNotes, objectClips);
+
+        if (objectNotes.empty() && objectClips.empty())
+        {
+            // Only a group this paste CREATED may be thrown away — the reused
+            // one was here before the paste and is not ours to delete.
+            if (! reused)
+                active->removeGroup (newGroupId);   // nothing landed; no bracket
+
+            continue;
+        }
+
+        newNotes.insert (newNotes.end(), objectNotes.begin(), objectNotes.end());
+        newClips.insert (newClips.end(), objectClips.begin(), objectClips.end());
+    }
+
+    //-- The loose leftovers of a mixed selection ----------------------------
+    // Same delta as the objects: a selection of "two groups and a stray note"
+    // has to land in the same relationship it was copied in, or the stray note
+    // arrives somewhere it never stood.
+    pasteLooseNotesInto (*active, delta, newNotes);
+    pasteLooseSamplesInto (*active, delta, newClips);
 
     if (newNotes.empty() && newClips.empty())
-    {
-        // Only a group this paste CREATED may be thrown away — the reused one
-        // was here before the paste and is not ours to delete.
-        if (! reused)
-            active->removeGroup (newGroupId);   // nothing landed; do not leave a bracket
-
         return false;
-    }
 
     ensureTimelineExtendsTo (anchor + juce::jmax (gridDivision, sourceEnd - sourceFirst) + 4.0);
     setMixedSelection (newNotes, newClips);
     stack.notifyNotesChanged();
 
-    const auto* pasted = active->findGroup (newGroupId);
-
-    flashStatus (utf8 ("已粘贴 ") + (pasted != nullptr ? pasted->getName() : juce::String())
+    flashStatus (utf8 ("已粘贴 ") + getGroupClipboardName()
                    + membersDescription ((int) newNotes.size(), (int) newClips.size()));
 
     repaint();
@@ -10023,32 +10245,12 @@ bool PianoRollComponent::pasteSamplesFromClipboard()
 
     const double delta = anchor - sampleClipFirstBeat;
 
+    // A pasted block does NOT inherit the group it was cut from. Membership
+    // means "these move together", and a copy that lands four bars later is not
+    // part of the shape the original group describes. One implementation with
+    // the group paste's leftovers, so the two cannot disagree.
     std::vector<int> newIds;
-
-    for (auto clip : sampleClip)
-    {
-        clip.startBeat = juce::jmax (0.0, clip.startBeat + delta);
-        clip.id        = 0;
-
-        // A pasted block does NOT inherit the group it was cut from. Membership
-        // means "these move together", and a copy that lands four bars later is
-        // not part of the shape the original group describes.
-        clip.groupId   = -1;
-
-        // Phase 33 (one implementation, Phase 56): a CUT takes its sampler with
-        // it, so the slot this clipboard holds may already be gone.
-        ensureClipSlot (clip);
-
-        const int newId = active->addSample (std::move (clip));
-
-        if (newId > 0)
-        {
-            newIds.push_back (newId);
-
-            if (const auto* created = active->findSample (newId))
-                ensureTimelineExtendsTo (created->endBeat());
-        }
-    }
+    pasteLooseSamplesInto (*active, delta, newIds);
 
     if (newIds.empty())
         return false;
@@ -10072,43 +10274,47 @@ bool PianoRollComponent::pasteSamplesFromClipboard()
 //==============================================================================
 void PianoRollComponent::copySelectionToClipboards()
 {
-    // Both clipboards are written by the same gesture, and the one with nothing
-    // selected is EMPTIED. That is the whole point: a paste must not resurrect
+    // The clipboards are written by ONE gesture, and the ones with nothing
+    // selected are EMPTIED. That is the whole point: a paste must not resurrect
     // the clips from a copy three actions ago just because this time only notes
     // happened to be selected.
     //
-    // Phase 56: the notes pass also runs when only blocks are selected, because
-    // that is how a block-only group gets recognised as a group. The check was
-    // `! selection.empty()`, which made such a selection "no selection" here and
-    // wiped the group clipboard right before the blocks pass filled the other.
+    // Phase 63: one pass fills all three — objects, loose notes, loose blocks.
+    // Running copySamplesToClipboard() afterwards (as this used to) handed the
+    // block clipboard a list that still contained the blocks the object
+    // clipboard had already claimed: two descriptions of one copy, and a paste
+    // that wrote both.
     if (! selection.empty() || ! sampleSelection.empty())
-        copyNotesToClipboard();
-    else
     {
-        noteClip.clear();
-        groupClip = GroupClip {};
+        copyNotesToClipboard();
+        return;
     }
 
-    if (! sampleSelection.empty())
-        copySamplesToClipboard();
-    else
-    {
-        sampleClip.clear();
-        sampleClipFirstBeat = 0.0;
-        sampleClipLengthBeat = 1.0;
-        samplePasteNextBeat = -1.0;
-        samplePastePlayheadSeen = -2.0;
-    }
+    noteClip.clear();
+    noteClipFirstBeat = 0.0;
+    noteClipEndBeat   = 0.0;
+
+    sampleClip.clear();
+    sampleClipFirstBeat     = 0.0;
+    sampleClipLengthBeat    = 1.0;
+    samplePasteNextBeat     = -1.0;
+    samplePastePlayheadSeen = -2.0;
+
+    groupClips.clear();
 }
 
 bool PianoRollComponent::pasteEditClipboard()
 {
-    //-- Phase 56: a copied group pastes as ONE object -----------------------
+    //-- Phase 56: a copied object pastes as ONE transaction ----------------
     // Not "the notes, then the blocks": two passes mean two anchors and two
     // halves that do not know about each other — the notes landed in a new
     // group and the blocks landed beside it, ungrouped. A group is one thing,
     // so the paste is one transaction.
-    if (groupClip.valid)
+    //
+    // Phase 63: "a group" became "every object on the clipboard", pasted by the
+    // same code with one shared anchor. That is what makes "copy two groups,
+    // paste" put back two groups instead of one group holding both.
+    if (! groupClips.empty())
         return pasteGroupFromClipboard();
 
     const bool haveNotes = canPasteNotes();

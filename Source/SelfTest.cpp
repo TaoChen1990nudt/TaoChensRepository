@@ -11109,6 +11109,136 @@ juce::String MainComponent::runSelfTest()
                  + (reloadedError.isEmpty() ? juce::String() : " · " + reloadedError));
     }
 
+    //-- Phase 63: N objects in, N objects out ---------------------------------
+    {
+        LayerStack t63;
+        RackModel  r63;
+        PianoRollComponent roll (t63, r63);
+        roll.setSize (1200, 520);
+
+        t63.addLayer (utf8 ("P63 多组"), palette::layer1);
+
+        auto* layer = t63.getLayer (0);
+        const int gA = layer->addGroup (utf8 ("组 A"), groupPalette::group1);
+        const int gB = layer->addGroup (utf8 ("组 B"), groupPalette::group2);
+
+        NoteEvent seed;
+        seed.pitch       = 60;
+        seed.lengthBeats = 1.0;
+
+        seed.startBeat = 0.0;  const int a0 = layer->addNote (seed);
+        seed.startBeat = 1.0;  const int a1 = layer->addNote (seed);
+        seed.startBeat = 4.0;  const int b0 = layer->addNote (seed);
+        seed.startBeat = 5.0;  const int b1 = layer->addNote (seed);
+
+        layer->assignNotesToGroup ({ a0, a1 }, gA, 0);
+        layer->setOccurrenceStart (gA, 0, 0.0);
+        layer->assignNotesToGroup ({ b0, b1 }, gB, 0);
+        layer->setOccurrenceStart (gB, 0, 4.0);
+
+        //-- 1. two groups in, two groups out ------------------------------
+        // The copy is asked what it collected before the paste can hide the
+        // answer: a clipboard that only ever holds one object cannot come back
+        // with two, no matter how the paste is written.
+        roll.setPlayheadBeat (20.0);
+        roll.setSelection ({ a0, a1, b0, b1 });
+        roll.copySelectionToClipboards();
+
+        const int objects = roll.getGroupClipboardCount();
+
+        roll.pasteEditClipboard();
+
+        const auto occA = layer->getGroupOccurrences (gA);
+        const auto occB = layer->getGroupOccurrences (gB);
+
+        check (utf8 ("两个组一起复制粘贴 = 各自多一处，不是一个组装着两家的内容"),
+               objects == 2
+                 && layer->getGroups().size() == 2
+                 && occA.size() == 2 && occB.size() == 2
+                 && layer->countNotesInOccurrence (gA, occA.back()) == 2
+                 && layer->countNotesInOccurrence (gB, occB.back()) == 2,
+               juce::String (objects) + utf8 (" 个对象；组数 ")
+                 + juce::String ((int) layer->getGroups().size())
+                 + utf8 ("；A ") + juce::String ((int) occA.size()) + utf8 (" 处，B ")
+                 + juce::String ((int) occB.size()) + utf8 (" 处"));
+
+        //-- 1b. both rows light up in the group panel ----------------------
+        // The panel mirrors this list. With the whole-selection test it was
+        // empty for EVERY group the moment two were selected, so "select two
+        // groups" looked like "select nothing" in the panel.
+        const int litRows = (int) roll.getSelectedGroups().size();
+
+        check (utf8 ("两组同时选中时，编组栏认得这两个组"),
+               litRows == 2, juce::String (litRows) + utf8 (" 个组"));
+
+        //-- 2. one anchor keeps the gap ------------------------------------
+        // Two groups four beats apart have to paste four beats apart. Anchoring
+        // each object on its own start would stack them on one beat — which is
+        // what "a single group holding both" looked like.
+        const double startA = occA.size() == 2 ? layer->occurrenceStart (gA, occA.back()) : -1.0;
+        const double startB = occB.size() == 2 ? layer->occurrenceStart (gB, occB.back()) : -1.0;
+
+        check (utf8 ("粘贴后两组仍相距 4 拍（20 与 24）"),
+               std::abs (startA - 20.0) < 1.0e-9 && std::abs (startB - 24.0) < 1.0e-9,
+               juce::String (startA, 2) + utf8 (" / ") + juce::String (startB, 2));
+
+        //-- 3. the SAME group selected in two places -----------------------
+        // The other half of the user's report, and the reason the old symptom
+        // read as "one group holding two": on screen two brackets of one reused
+        // group are "两个组" too, and selecting both used to paste ONE
+        // appearance carrying all four members.
+        std::vector<int> bothA;
+
+        for (const auto& note : layer->getNotes())
+            if (note.groupId == gA)
+                bothA.push_back (note.id);
+
+        roll.setPlayheadBeat (40.0);
+        roll.setSelection (bothA);
+        roll.copySelectionToClipboards();
+
+        const int objectsSame = roll.getGroupClipboardCount();
+
+        roll.pasteEditClipboard();
+
+        const auto occA2 = layer->getGroupOccurrences (gA);
+
+        bool anyCrowded = false;
+
+        for (int occurrence : occA2)
+            if (layer->countNotesInOccurrence (gA, occurrence) > 2)
+                anyCrowded = true;
+
+        check (utf8 ("同一组的两处一起复制 = 再来两处，没有一处被塞进四个成员"),
+               objectsSame == 2 && occA2.size() == 4 && ! anyCrowded,
+               juce::String (objectsSame) + utf8 (" 个对象；")
+                 + juce::String ((int) occA2.size()) + utf8 (" 处")
+                 + (anyCrowded ? utf8 ("，有处被塞满") : juce::String()));
+
+        //-- 4. a loose note copied beside a group stays loose --------------
+        // The mixed selection is the one that used to lose the split entirely:
+        // either the note joined the group or the group fell apart, depending
+        // on which pass ran last.
+        seed.startBeat = 7.0;
+        const int stray = layer->addNote (seed);
+
+        roll.setPlayheadBeat (80.0);
+        roll.setSelection ({ a0, a1, stray });
+        roll.copySelectionToClipboards();
+        roll.pasteEditClipboard();
+
+        int looseAt87 = 0;
+
+        for (const auto& note : layer->getNotes())
+            if (note.groupId < 0 && std::abs (note.startBeat - 87.0) < 1.0e-9)
+                ++looseAt87;
+
+        check (utf8 ("组 + 散音符一起复制：组还是组，散音符还是散的"),
+               looseAt87 == 1 && layer->getGroupOccurrences (gA).size() == 5,
+               juce::String (looseAt87) + utf8 (" 个散音符；A 现在 ")
+                 + juce::String ((int) layer->getGroupOccurrences (gA).size()) + utf8 (" 处"));
+    }
+
     //-- Phase 62: copy/paste must never ungroup -------------------------------
     {
         LayerStack t62p;

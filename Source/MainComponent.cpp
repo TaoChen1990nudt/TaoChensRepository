@@ -5726,6 +5726,24 @@ void MainComponent::fillEditMenu (juce::PopupMenu& menu) const
 
     if (pianoRoll.canPasteAutomationCurve())
         where = utf8 ("当前：自动化曲线");
+
+    //-- Phase 24/63: a copied object is not "N notes" ------------------------
+    // The paste places whole appearances carrying their name, mount and curves,
+    // so the status line has to say so — otherwise the menu describes a paste
+    // that never runs. This branch comes FIRST because an object clipboard need
+    // not hold any loose notes or blocks: a group of notes only leaves both
+    // loose lists empty, and the "剪贴板为空" fallback used to swallow it.
+    else if (pianoRoll.isGroupClipboard())
+    {
+        const int objects = pianoRoll.getGroupClipboardCount();
+
+        where = objects == 1
+                  ? utf8 ("整体：组「") + pianoRoll.getGroupClipboardName() + utf8 ("」")
+                  : utf8 ("整体：") + juce::String (objects) + utf8 (" 个组");
+
+        if (const int lanes = pianoRoll.getGroupClipboardLiveLanes(); lanes > 0)
+            where += utf8 (" · ") + juce::String (lanes) + utf8 (" 条曲线");
+    }
     else if (pianoRoll.canPasteNotes() && pianoRoll.canPasteSamples())
     {
         // Phase 29: copy fills both clipboards in one gesture, so "both" is a
@@ -5735,20 +5753,7 @@ void MainComponent::fillEditMenu (juce::PopupMenu& menu) const
                   + utf8 (" · 采样 ") + juce::String (pianoRoll.getSampleClipboardSize());
     }
     else if (pianoRoll.canPasteNotes())
-    {
         where = utf8 ("当前：") + juce::String (pianoRoll.getNoteClipboardSize()) + utf8 (" 个音符");
-
-        // Phase 24: a whole-group copy is not "N notes". The paste makes a
-        // SECOND group carrying its name, mount and curves, so the status line
-        // has to say so — otherwise the menu describes a paste that never runs.
-        if (pianoRoll.isGroupClipboard())
-        {
-            where = utf8 ("整体：组「") + pianoRoll.getGroupClipboardName() + utf8 ("」");
-
-            if (const int lanes = pianoRoll.getGroupClipboardLiveLanes(); lanes > 0)
-                where += utf8 (" · ") + juce::String (lanes) + utf8 (" 条曲线");
-        }
-    }
     else if (pianoRoll.canPasteSamples())
         where = utf8 ("剪贴板：") + juce::String (pianoRoll.getSampleClipboardSize()) + utf8 (" 个采样");
     else

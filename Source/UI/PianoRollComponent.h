@@ -367,26 +367,50 @@ public:
     bool pasteGroupFromClipboard();
 
     /** Phase 56: the block-only group. Its members have no notes to read a
-        start beat from, and its clipboard needs the same object treatment. */
-    bool isSampleOnlyGroupClipboard() const noexcept { return groupClip.valid && noteClip.empty(); }
+        start beat from, and its clipboard needs the same object treatment.
+
+        Phase 63: "only blocks" now means the clipboard holds nothing else at
+        all — a multi-group copy that happens to contain a block-only group is
+        not a block-only clipboard. */
+    bool isSampleOnlyGroupClipboard() const noexcept
+    {
+        return ! groupClips.empty() && noteClip.empty() && sampleClip.empty();
+    }
 
     /** Phase 24: was the last copy a whole group (so a paste lands back in that
         group) rather than a handful of notes? The self-test reads it; the edit
         menu's status line uses it to say which one happened. */
-    bool isGroupClipboard() const noexcept { return groupClip.valid; }
+    bool isGroupClipboard() const noexcept { return ! groupClips.empty(); }
+
+    /** Phase 63: how many whole appearances the clipboard holds. Copying two
+        groups and pasting must give two groups back, and this is the number
+        that says so. */
+    int getGroupClipboardCount() const noexcept { return (int) groupClips.size(); }
 
     /** The copied group's name, or empty when the clipboard holds loose notes.
-        Read by the self-test and by the edit menu's status line. */
-    juce::String getGroupClipboardName() const { return groupClip.valid ? groupClip.name : juce::String(); }
+        Read by the self-test and by the edit menu's status line.
+
+        Phase 63: a multi-group clipboard has no single name; it answers with a
+        count instead of pretending the first one speaks for all of them.
+        Defined in the .cpp: it needs utf8() for the Chinese count, and this
+        header deliberately does not drag Text.h in. */
+    juce::String getGroupClipboardName() const;
 
     /** Phase 24: how many lanes the last pasted/copied group carried switched
         on. Not the point of the feature, but it is the one number that proves
-        the group arrived with its curves and not just its notes. */
+        the group arrived with its curves and not just its notes.
+
+        Phase 63: the FIRST appearance's lanes — every appearance of one group
+        shares them (they belong to the definition), and the self-test reads it
+        on single-group copies. */
     int getGroupClipboardLiveLanes() const
     {
+        if (groupClips.empty())
+            return 0;
+
         int count = 0;
 
-        for (bool on : groupClip.laneOn)
+        for (bool on : groupClips.front().laneOn)
             count += on ? 1 : 0;
 
         return count;
@@ -868,6 +892,32 @@ public:
     bool pasteSamplesFromClipboard();
     bool canPasteSamples() const noexcept { return ! sampleClip.empty(); }
     int  getSampleClipboardSize() const noexcept { return (int) sampleClip.size(); }
+
+    //-- Phase 63: the clipboard as a set of objects --------------------------
+    /** Is EVERY member of THIS ONE appearance in the selection?
+
+        `isWholeGroupSelected` answers that question for the whole selection and
+        therefore answers "no" the instant a second group is selected too — the
+        exact selection this phase is about. The two questions only have the
+        same answer while one object is involved. */
+    bool isWholeOccurrenceSelected (int groupId, int occurrence) const;
+
+    /** The clipboard's own extent, groups included: the earliest beat anything
+        on it stands at, and the latest beat anything on it ends.
+
+        One anchor for the whole clipboard is what keeps "copy these two groups"
+        pasting two groups that are still 4 beats apart instead of two groups
+        stacked wherever each one's own start happened to be. */
+    double clipboardFirstBeat() const;
+    double clipboardLastBeat() const;
+
+    /** Drops the loose notes / loose clips of the clipboard onto `delta` and
+        reports what landed. Split out so "paste the groups" and "paste the
+        notes" cannot grow two different ideas of what a member of the clipboard
+        costs — the group paste reuses these for the leftovers of a mixed
+        selection. */
+    void pasteLooseNotesInto (Layer& layer, double delta, std::vector<int>& newIds);
+    void pasteLooseSamplesInto (Layer& layer, double delta, std::vector<int>& newIds);
 
     /** Phase 56: creates the second copy of the clipboard's group — name,
         colour, mount, level, pan and every automation lane shifted by `deltaBeats`
@@ -1771,8 +1821,6 @@ private:
         out, with no identity in it. */
     struct GroupClip
     {
-        bool         valid       = false;
-
         /** Phase 57: which group this clipboard came from.
 
             A paste reuses it instead of manufacturing a second group, so the
@@ -1796,9 +1844,26 @@ private:
         double       startBeat   = 0.0;
         std::array<AutomationLane, numGroupAutomationTargets> lanes;
         std::array<bool, numGroupAutomationTargets>          laneOn { { false, false, false } };
+
+        /** Phase 63: the members THIS appearance is made of.
+
+            They used to be read out of `noteClip` / `sampleClip` — one list for
+            the whole selection. Two groups copied together therefore wrote both
+            groups' members into whichever group the paste opened first: "复制了
+            两个组，粘下来是一个组装着两个组的内容". Members belong to the
+            appearance they were copied with, so they travel with it. */
+        std::vector<NoteEvent>   notes;
+        std::vector<SampleEvent> clips;
     };
 
-    GroupClip groupClip;
+    /** Phase 63: every whole appearance in the selection, one entry each.
+
+        One `GroupClip` could only ever describe one object, so a multi-group
+        copy had no way to say "these are two groups" — the second group's
+        members either merged into the first or fell out as loose notes. The
+        clipboard is a LIST now, and a paste walks it: N groups in, N groups
+        out, each landing where its own members say, all sharing one anchor. */
+    std::vector<GroupClip> groupClips;
 
     /** Phase 24: how to ask what a hosted synth exposes. Null = none. */
     PluginParamLister listPluginParams;

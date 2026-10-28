@@ -280,8 +280,9 @@
   点框内空地 `getGroupFrameAt`（只认激活图层，排在音符命中之后、marquee 之前）。
 - **采样是组成员**：成员计数/`getGroupContentBounds`/组拖动/`pruneEmptyGroups` 都要同时看
   notes 和 samples。**P56 起复制粘贴也带采样**：整组（音符 + 块）被选中才算"整组"，
-  `pasteEditClipboard()` 见到 `groupClip.valid` 直接走 `pasteGroupFromClipboard()` —— 一个锚点、
-  一次事务。以前是两趟（音符建组、采样各粘各的），结果是"组 + 旁边散着的音频"。
+  `pasteEditClipboard()` 见到 `! groupClips.empty()`（P63 之前是 `groupClip.valid`）直接走
+  `pasteGroupFromClipboard()` —— 一个锚点、一次事务。以前是两趟（音符建组、采样各粘各的），
+  结果是"组 + 旁边散着的音频"。
   `cutNotesToClipboard()` 也必须把块一起从时间线上删掉，否则剪切→粘贴会复制出一份没被搬走的音频。
 - **组 = 一个定义 + 多次出现**（P58 的模型核心）：`NoteGroup` 是**定义**（name / 颜色 / 挂载 /
   trim / 曲线），时间线上的每一份是它的一次**出现**。成员身份 = `(groupId, groupOccurrence)`，
@@ -299,8 +300,9 @@
   让副本和源共用一个括号，拖哪处都一起动，用户看到的就是"粘贴到了组的内部"。
   只有源组不在了（剪切榨干 / 另一图层）才新建一个同色同名的组。`GroupClip::sourceOccurrence`
   记住模板是第几次出现。
-  **所有粘贴入口必须转发**：`pasteNotesFromClipboard()` 开头见 `groupClip.valid` 就转给组路径，
-  否则它会以"散音符"的身份粘一遍，块留在剪贴板上（P56 的 bug 以另一种形式回来）。
+  **所有粘贴入口必须转发**：`pasteNotesFromClipboard()` 开头见 `groupClips` 非空就转给组路径
+  （P63 之前是 `groupClip.valid`），否则它会以"散音符"的身份粘一遍，块留在剪贴板上
+  （P56 的 bug 以另一种形式回来）。
   复用路径**不重放曲线的平移**：绝对时间的点留在原处，"同一个组"就是同一条曲线。
 - **组 = 一个形状 + 多个位置**（P62）：出现拥有的是**位置**，其余（成员、音高、长度、力度、
   包络、采样块的宽/高/曲线/反向/伸缩模式）都是**组的**，改一处就是改组。
@@ -309,8 +311,8 @@
     所以 `Layer::occurrenceStart()` 第一次被问到时物化并保存，此后永不自动变；
     `setOccurrenceStart()` 只在**整处移动**时用。
   - **同源判据 = "整处 / 局部"**：整处动（拖、删）= 对这一份的决定，兄弟不动；
-    动一部分 = 形状变了，兄弟跟着变。`wholeGroupOccurrencesInDrag()` / `isWholeGroupSelected(gid, true, occ)`
-    是同一个问题的两个入口。
+    动一部分 = 形状变了，兄弟跟着变。`wholeGroupOccurrencesInDrag()` / `isWholeOccurrenceSelected()`
+    （P63 起；之前误用 `isWholeGroupSelected`）是同一个问题的两个入口。
   - **形状同步** `Layer::syncGroupShape(gid, source)`：按成员序（start, pitch, id）配对，
     把源出现的相对位置 + 全部属性写进每个兄弟出现，锚点是兄弟自己的起点。多退少补。
   - **离开形状**（删/取消编组）没有模板可抄，用 `Layer::collectTwinMembers()`：在原件还在时
@@ -322,6 +324,23 @@
     三处**必须把起点钉住**，否则第一次编辑就会用"删完之后的最早成员"当锚点。
   - `formatVersion` 24 → **25**：`<Group>` 下加 `<Occurrence index="n" start="beat"/>`，
     只在出现有起点时写。老文件没有这些元素，靠懒物化补上，打开即正确、不会移动。
+- **剪贴板 = 一组出现**（P63）：`groupClips` 是 `std::vector<GroupClip>`，每个元素是**一处完整出现**，
+  并且**自带成员**（`GroupClip::notes` / `::clips`）。`noteClip` / `sampleClip` 只装
+  **不属于任何整处**的散音符/散块。
+  - **复制**：选区按 `(groupId, occurrence)` 切桶（`std::map<std::pair<int,int>, …>`），
+    整处选中的桶变成一个 `GroupClip`（起点用 `Layer::occurrenceStart()`，即 P62 钉住的那个数），
+    其余落散。`copyNotesToClipboard()` 一次填三个剪贴板；
+    `copySelectionToClipboards()` **不再**追调 `copySamplesToClipboard()`（那会把整处已认领的块
+    重新填回 `sampleClip`，粘贴时贴两遍）。
+  - **判据 `isWholeOccurrenceSelected(gid, occ)`**：成员数从**模型**里数、选中数从**选区**里数，
+    相等且 > 0。**不要拿 `isWholeGroupSelected(gid, true, occ)` 当它用**——那个函数循环整个
+    `selection`，选区里有第二个组就返回 false，多组复制/删除全都会走错分支（P63-A）。
+  - **粘贴**：所有对象共用**一个锚点**（`clipboardFirstBeat()` / `clipboardLastBeat()`），
+    delta 只算一次，所以两组的间距原样保留；每个对象各自 `nextGroupOccurrence()`，
+    "同一组的两处一起复制"= 该组再来两处，而不是一处塞进双倍成员（P63-C）。
+  - **剪切**删**所有选中的块**，不再按剪贴板内容判断——整处的块已经不在 `sampleClip` 里了（P63-B）。
+  - 菜单"粘贴目标"里 `isGroupClipboard()` 必须排在 `canPasteNotes()` 前面，否则"只有音符的组"
+    （两个松散列表都空）会显示"剪贴板为空"（P63-D）。
 - **组框就是成员框，零外力扩展**（P57）：`groupFrameOf()` 返回 `getGroupContentBounds()` 本身，
   不再 `expanded(3px)`；绘制、命中（`getGroupFrameAt`）、自检读的是**同一个函数**。
   填充色块画在成员之下（`drawGroupBands`），**描边画在成员之上**（`drawGroupFrames`，在
