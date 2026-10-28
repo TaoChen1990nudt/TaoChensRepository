@@ -8008,7 +8008,7 @@ bool PianoRollComponent::pasteNotesFromClipboard()
         anchor = snapBeat (anchor);
 
     if (std::abs (anchor - noteClipFirstBeat) < 1.0e-9)
-        anchor = noteClipFirstBeat + juce::jmax (gridDivision, noteClipEndBeat - noteClipFirstBeat);
+        anchor = noteClipFirstBeat + juce::jmax (minimumNoteLength(), noteClipEndBeat - noteClipFirstBeat);
 
     // Same rounding as a drag: the anchor is snapped once and every note keeps
     // its offset, so the block arrives with its internal timing intact.
@@ -8026,7 +8026,7 @@ bool PianoRollComponent::pasteNotesFromClipboard()
     if (newIds.empty())
         return false;
 
-    ensureTimelineExtendsTo (anchor + juce::jmax (gridDivision, noteClipEndBeat - noteClipFirstBeat) + 4.0);
+    ensureTimelineExtendsTo (anchor + juce::jmax (minimumNoteLength(), noteClipEndBeat - noteClipFirstBeat) + 4.0);
     setSelection (newIds);
     stack.notifyNotesChanged();
 
@@ -8061,7 +8061,7 @@ bool PianoRollComponent::pasteGroupFromClipboard()
         anchor = snapBeat (anchor);
 
     if (std::abs (anchor - sourceFirst) < 1.0e-9)
-        anchor = sourceFirst + juce::jmax (gridDivision, sourceEnd - sourceFirst);
+        anchor = sourceFirst + juce::jmax (minimumNoteLength(), sourceEnd - sourceFirst);
 
     const double delta = anchor - sourceFirst;
 
@@ -8133,7 +8133,7 @@ bool PianoRollComponent::pasteGroupFromClipboard()
     if (newNotes.empty() && newClips.empty())
         return false;
 
-    ensureTimelineExtendsTo (anchor + juce::jmax (gridDivision, sourceEnd - sourceFirst) + 4.0);
+    ensureTimelineExtendsTo (anchor + juce::jmax (minimumNoteLength(), sourceEnd - sourceFirst) + 4.0);
     setMixedSelection (newNotes, newClips);
     stack.notifyNotesChanged();
 

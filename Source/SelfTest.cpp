@@ -3595,6 +3595,40 @@ juce::String MainComponent::runSelfTest()
             check ("The preview releases by itself",
                    ! pe.hasSamplePreview(),
                    pe.hasSamplePreview() ? juce::String ("still engaged") : juce::String ("released"));
+
+            //-- Phase 70: a stop is a request the voice has to honour --------
+            // `stopSamplePreview()` only cleared a flag and the render loop never
+            // read it, so an eight-second audition played to the end no matter
+            // what the user clicked. A silent block two blocks after the stop is
+            // the thing that says it worked.
+            {
+                auto drone = makeBuffer (8.0, 220.0, 0.8f);
+
+                PlaybackEngine stopper;
+                stopper.setSampleRate (44100.0);
+                stopper.previewSample (drone, 8.0);
+
+                juce::AudioBuffer<float> stopHead (2, 4096);
+                stopHead.clear();
+                stopper.renderSamplePreview (stopHead, 4096);
+
+                stopper.stopSamplePreview();
+
+                juce::AudioBuffer<float> stopRamp (2, 4096);   // the 4 ms fade-out
+                stopRamp.clear();
+                stopper.renderSamplePreview (stopRamp, 4096);
+
+                juce::AudioBuffer<float> stopTail (2, 4096);
+                stopTail.clear();
+                stopper.renderSamplePreview (stopTail, 4096);
+
+                check (utf8 ("停止试听后预览真的停了，不会一直播到文件结束"),
+                       stopHead.getMagnitude (0, 0, 4096) > 0.001f
+                         && stopTail.getMagnitude (0, 0, 4096) < 1.0e-4f
+                         && ! stopper.hasSamplePreview(),
+                       utf8 ("起始 ") + juce::String (stopHead.getMagnitude (0, 0, 4096), 3)
+                         + utf8 ("，停止后 ") + juce::String (stopTail.getMagnitude (0, 0, 4096), 6));
+            }
         }
     }
 
@@ -11638,6 +11672,246 @@ juce::String MainComponent::runSelfTest()
                  + utf8 (" / ") + juce::String (a16, 3) + utf8 (" / ")
                  + juce::String (a64, 3));
     }
+
+    //-- Phase 70: a round trip keeps what the user actually set --------------
+    [&]
+    {
+        // P0-1: which lane the layer's header points at. Written as
+        // `autotarget`, because the ORDER of the <Automation> elements is not
+        // a rule — reading it that way made pan win every single time.
+        LayerStack s1;
+        RackModel  r1;
+        MixerModel m1;
+
+        s1.addLayer (utf8 ("往返"), palette::layer1);
+
+        auto* layer = s1.getLayer (0);
+        layer->setAutomationTarget (LayerAutomationTarget::volume);
+        layer->setAutomationExpanded (true);
+        layer->automationFor (LayerAutomationTarget::volume).addPoint (1.0, 0.5f, 4.0);
+        layer->automationFor (LayerAutomationTarget::pan).addPoint (1.0, -0.5f, 4.0);
+
+        // P0-2: a clip at the smallest length P69 can draw. 0.015625 is 1/64
+        // beat; the model used to round it up to 0.25 on the way in.
+        SampleEvent clip;
+        clip.startBeat   = 0.0;
+        clip.lengthBeats = 0.015625;
+        clip.pitch       = 60;
+        layer->addSample (clip);
+
+        const auto xml = project::toXmlText (s1, r1, 120.0, &m1, nullptr);
+
+        LayerStack s2;
+        RackModel  r2;
+        MixerModel m2;
+        double       bpm2 = 0.0;
+        juce::String error;
+
+        const bool loaded = project::fromXmlText (xml, s2, r2, bpm2, error, &m2, nullptr, nullptr);
+
+        const auto* round = s2.getLayer (0);
+        const auto& clips = round != nullptr ? round->getSamples()
+                                             : s1.getLayer (0)->getSamples();
+
+        check (utf8 ("图层的当前自动化轨往返后仍是 volume，不是文件里最后那条"),
+               loaded && round != nullptr
+                 && round->getAutomationTarget() == LayerAutomationTarget::volume
+                 && round->isAutomationExpanded(),
+               round != nullptr
+                 ? juce::String (round->getAutomationTarget() == LayerAutomationTarget::pan ? "pan" : "volume")
+                 : error);
+
+        check (utf8 ("1/64 拍的采样块往返后仍是 1/64 拍，不被撑成 1/16 音符"),
+               loaded && clips.size() == 1
+                 && std::abs (clips[0].lengthBeats - 0.015625) < 1.0e-9,
+               juce::String (clips.size() == 1 ? clips[0].lengthBeats : -1.0, 5)
+                 + utf8 (" 拍"));
+
+        // The same rule has to hold for a file written BEFORE Phase 70, which
+        // has no `autotarget` at all: the lane that was open (expanded="1") is
+        // the best guess available, and "the last element" is not a guess, it
+        // is a coin toss that always lands on pan.
+        const auto legacy = project::toXmlText (s1, r1, 120.0, &m1, nullptr)
+                                .replace (" autotarget=\"volume\"", "")
+                                .replace (" autotarget=\"pan\"", "");
+
+        LayerStack s3;
+        RackModel  r3;
+        double       bpm3 = 0.0;
+        juce::String error3;
+
+        const bool legacyLoaded = project::fromXmlText (legacy, s3, r3, bpm3, error3, nullptr, nullptr, nullptr);
+
+        check (utf8 ("旧工程没有 autotarget 时，按「展开着的那条」认当前轨"),
+               legacyLoaded && s3.getLayer (0) != nullptr
+                 && s3.getLayer (0)->getAutomationTarget() == LayerAutomationTarget::volume,
+               s3.getLayer (0) != nullptr
+                 ? juce::String (s3.getLayer (0)->getAutomationTarget() == LayerAutomationTarget::pan ? "pan" : "volume")
+                 : error3);
+
+        // P0-3: loading a project REPLACES the routing. A console that was
+        // wired 0 → 1 must not keep that route when the file says the master,
+        // and a correct route must not be refused because of a leftover.
+        LayerStack s4;
+        RackModel  r4;
+        MixerModel clean;
+
+        s4.addLayer (utf8 ("路由"), palette::layer1);
+        const auto routingXml = project::toXmlText (s4, r4, 120.0, &clean, nullptr);
+
+        MixerModel dirty;
+        dirty.setChannelCount (16);
+        const bool allowed = dirty.setChannelOutput (0, 1);
+
+        LayerStack s5;
+        RackModel  r5;
+        double       bpm5 = 0.0;
+        juce::String error5;
+
+        const bool routingLoaded = project::fromXmlText (routingXml, s5, r5, bpm5, error5, &dirty, nullptr, nullptr);
+
+        check (utf8 ("加载工程后通道 0 回到主输出，上一个会话的路由不残留"),
+               allowed && routingLoaded
+                 && dirty.getChannelOutput (0) == MixerModel::masterChannel
+                 && dirty.getChannelCount() == MixerModel::defaultChannels,
+               juce::String (utf8 (allowed ? "设得进" : "设不进")) + utf8 ("，读回 ")
+                 + juce::String (dirty.getChannelOutput (0)));
+    } ();
+
+    //-- Phase 70: the interaction fixes that needed a geometry or an index ----
+    [&]
+    {
+        // P2-5: deleting a layer ABOVE the active one has to move the active
+        // index with it. Clamping alone left the user editing a different
+        // sheet.
+        //
+        // The active layer has to be one that is NOT last, or clamping and
+        // shifting give the same answer and the fixture proves nothing: with
+        // four layers and A selected, removing layer 0 must land on 0, while a
+        // clamp-only implementation stays on 1 because 1 is still in range.
+        LayerStack s;
+        s.addLayer (utf8 ("A"), palette::layer1);
+        s.addLayer (utf8 ("B"), palette::layer1);
+        s.addLayer (utf8 ("C"), palette::layer1);
+        s.addLayer (utf8 ("D"), palette::layer1);
+        s.setActiveLayerIndex (1);                      // B is active, D is last
+
+        const int before = s.getActiveLayerIndex();
+        s.removeLayer (0);
+
+        check (utf8 ("删掉活动层上方的一层，活动层跟着上移一格"),
+               before == 1 && s.getActiveLayerIndex() == 0 && s.getNumLayers() == 3,
+               juce::String (before) + utf8 (" -> ") + juce::String (s.getActiveLayerIndex())
+                 + utf8 ("，剩 ") + juce::String (s.getNumLayers()) + utf8 (" 层"));
+    } ();
+
+    [&]
+    {
+        // P2-4: one layer has no ghosts, so the header eye must not be drawn at
+        // all. It used to answer "all visible" no matter what, which turned the
+        // toggle into a button with two identical positions.
+        LayerStack s;
+        RackModel  r;
+        LayerPanel panel (s, r);
+        panel.setSize (LayerPanel::panelWidth, 400);
+
+        s.addLayer (utf8 ("独层"), palette::layer1);
+        const auto single = panel.getVisibilityToggleBounds();
+
+        s.addLayer (utf8 ("第二层"), palette::layer2);
+        const auto pair = panel.getVisibilityToggleBounds();
+
+        check (utf8 ("只有一层时标题栏不画全部可见的眼睛，两层时才画"),
+               single.isEmpty() && ! pair.isEmpty(),
+               juce::String (single.getWidth()) + utf8 (" px / ")
+                 + juce::String (pair.getWidth()) + utf8 (" px"));
+    } ();
+
+    [&]
+    {
+        // P2-6: the fader's hit area used to reach 8 px sideways into a 4 px
+        // gap, so its last 4 px were the meter's left bar.
+        LayerStack s;
+        RackModel  r;
+        MixerModel m;
+        MixerPanel panel (s, r, m);
+        panel.setSize (1400, 520);
+
+        bool clear = true;
+
+        for (int ch = 0; ch < m.getChannelCount(); ++ch)
+            clear = clear && panel.faderHitClearsMeter (ch);
+
+        check (utf8 ("推子的点击区停在电平表左边，不再吃掉电平表一根柱子"),
+               clear && panel.faderHitClearsMeter (MixerModel::masterChannel),
+               juce::String (clear ? "clear" : "overlaps"));
+    } ();
+
+    [&]
+    {
+        // P2-8: a selection must not survive a console that shrank under it.
+        LayerStack s;
+        RackModel  r;
+        MixerModel m;
+        MixerPanel panel (s, r, m);
+        panel.setSize (1400, 520);
+
+        m.setChannelCount (24);
+        panel.setSelectedChannel (20);
+        const int wide = panel.getSelectedChannel();
+
+        m.setChannelCount (8);                        // mixerChanged() fires
+        const int narrow = panel.getSelectedChannel();
+
+        // ...and asking for a strip that does not exist is clamped here, not
+        // left for whoever reads the number next.
+        panel.setSelectedChannel (100);
+        const int bogus = panel.getSelectedChannel();
+
+        check (utf8 ("通道数缩到 8 时选中跟着夹回，不指向不存在的通道"),
+               wide == 20 && narrow == 7 && bogus == 7,
+               juce::String (wide) + utf8 (" -> ") + juce::String (narrow)
+                 + utf8 ("，直接选 100 得 ") + juce::String (bogus));
+    } ();
+
+    [&]
+    {
+        // P2-7: pasting on top of the source pushes the copy clear by ONE GRID
+        // STEP — which at 1/64 zoom is a 1/64 beat, not the 1/16 the advance
+        // used to be hard-coded to.
+        LayerStack s;
+        RackModel  r;
+        PianoRollComponent roll (s, r);
+        roll.setSize (1200, 520);
+
+        s.addLayer (utf8 ("P70 粘贴推进"), palette::layer1);
+
+        auto* layer = s.getLayer (0);
+
+        NoteEvent n;
+        n.pitch       = 60;
+        n.startBeat   = 0.0;
+        n.lengthBeats = 0.015625;
+
+        const int id = layer->addNote (n);
+
+        roll.setBeatWidth (PianoRollComponent::maxBeatWidth);    // 1/64 网格
+        roll.setSelection ({ id });
+        roll.setPlayheadBeat (0.0);                              // 锚点 = 源位置
+        roll.copySelectionToClipboards();
+
+        const bool pasted = roll.pasteNotesFromClipboard();
+
+        double pushed = -1.0;
+
+        for (const auto& note : layer->getNotes())
+            if (note.id != id)
+                pushed = pushed < 0.0 ? note.startBeat : juce::jmin (pushed, note.startBeat);
+
+        check (utf8 ("1/64 网格上原地粘贴只推进一格 1/64，不跳到 1/16"),
+               pasted && std::abs (pushed - 0.015625) < 1.0e-9,
+               juce::String (pushed, 5) + utf8 (" 拍"));
+    } ();
 
     //-- Phase 65: two selected groups drag together --------------------------
     {

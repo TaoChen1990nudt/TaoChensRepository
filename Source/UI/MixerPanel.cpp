@@ -175,7 +175,17 @@ bool MixerPanel::deleteStrip (int channel)
     //    was the selected one, stay on the same place in the console. The master
     //    is display slot 0 and is not part of this count, so it always survives.
     if (selectedChannel != MixerModel::masterChannel)
-        setSelectedChannel (juce::jlimit (0, mixer.getChannelCount() - 1, selectedChannel));
+    {
+        // Phase 70: "follows the row" is not a clamp. Removing a strip ABOVE the
+        // selection slides every strip below it up one place, so the selection
+        // has to move up with them — clamping alone left it on the neighbour the
+        // user was not looking at, and the rack and insert editor then edited a
+        // channel nobody had chosen. Removing the selected strip itself keeps
+        // the index: the one below takes its place, which IS the same row.
+        const int follow = channel < selectedChannel ? selectedChannel - 1 : selectedChannel;
+
+        setSelectedChannel (juce::jlimit (0, mixer.getChannelCount() - 1, follow));
+    }
 
     setStripScrollX (stripScrollX);
     repaint();
@@ -307,6 +317,24 @@ juce::Rectangle<int> MixerPanel::getFaderBounds (int channel) const
     // width it had before — a two-bar meter squeezed into 9 px could show that
     // a signal was there, but not how much of it was on each side.
     return r.removeFromLeft (faderWidthFor (r.getWidth()));
+}
+
+juce::Rectangle<int> MixerPanel::getFaderHitBounds (int channel) const
+{
+    const auto fader = getFaderBounds (channel);
+    const auto meter = getMeterBounds (channel);
+
+    // The meter is carved out of the same row, to the right, with a 4 px gap.
+    // Reach no further than half of it.
+    const int gap    = juce::jmax (0, meter.getX() - fader.getRight());
+    const int reach  = juce::jmin (ui::px (8), gap / 2);
+
+    return fader.expanded (reach, 0);
+}
+
+bool MixerPanel::faderHitClearsMeter (int channel) const
+{
+    return getFaderHitBounds (channel).getRight() <= getMeterBounds (channel).getX();
 }
 
 juce::Rectangle<int> MixerPanel::getOutputBounds (int channel) const
@@ -709,12 +737,31 @@ juce::String MixerPanel::describeMeterGeometry() const
 
 void MixerPanel::setSelectedChannel (int channel)
 {
-    const int clamped = juce::jlimit (0, MixerModel::masterChannel, channel);
+    // Phase 70: the ceiling is the live strip count, not the array capacity.
+    // Coming from a 24-channel project to an 8-channel one used to leave the
+    // selection on a strip that no longer exists — the rack header then read
+    // "通道 22" and the insert editor wrote into nothing. The master stays
+    // selectable: it is display slot 0 and always exists.
+    const int clamped = channel == MixerModel::masterChannel
+                          ? MixerModel::masterChannel
+                          : juce::jlimit (0, juce::jmax (0, mixer.getChannelCount() - 1), channel);
 
     if (selectedChannel == clamped)
         return;
 
     selectedChannel = clamped;
+    repaint();
+}
+
+void MixerPanel::mixerChanged()
+{
+    // The console can shrink under the selection (a project load, or a delete).
+    // The master is display slot 0 and never goes away, so only a channel
+    // selection has to move.
+    if (selectedChannel != MixerModel::masterChannel
+         && selectedChannel >= mixer.getChannelCount())
+        setSelectedChannel (mixer.getChannelCount() - 1);
+
     repaint();
 }
 
@@ -1040,6 +1087,15 @@ void MixerPanel::drawStrip (juce::Graphics& g, int channel)
     for (int i = 0; i < 2; ++i)
     {
         const bool solo = i == 1;
+
+        // Phase 70: the master has no solo. Soloing the end of the chain is not
+        // a state that means anything — `toggleSolo()` already refuses it — so
+        // drawing the button only produced a control that could never light and
+        // a right-click menu entry that did nothing. The M beside it is real:
+        // it mutes the whole mix.
+        if (solo && isMaster (channel))
+            continue;
+
         auto r = (solo ? getSoloBounds (channel) : getMuteBounds (channel)).toFloat();
         const bool on = solo ? isChannelSoloed (channel) : isChannelMuted (channel);
         const bool hot = hoveredChannel == channel
@@ -1273,10 +1329,10 @@ void MixerPanel::mouseDown (const juce::MouseEvent& e)
             // on mute/solo (they fell through to the channel menu, so a
             // right-click on 静音 offered 删除通道条). One control, one verb:
             // what this number is for, plus whether you want a curve on it.
-            const bool onFader = getFaderBounds (channel).expanded (8, 0).contains (pos);
+            const bool onFader = getFaderHitBounds (channel).contains (pos);
             const bool onPan   = getPanBounds (channel).expanded (0, 4).contains (pos);
             const bool onMute  = getMuteBounds (channel).contains (pos);
-            const bool onSolo  = getSoloBounds (channel).contains (pos);
+            const bool onSolo  = ! isMaster (channel) && getSoloBounds (channel).contains (pos);
 
             if (onFader || onPan || onMute || onSolo)
             {
@@ -1378,7 +1434,7 @@ void MixerPanel::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
-    if (getSoloBounds (channel).contains (pos))
+    if (! isMaster (channel) && getSoloBounds (channel).contains (pos))
     {
         toggleSolo (channel);
         return;
@@ -1392,7 +1448,7 @@ void MixerPanel::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
-    if (getFaderBounds (channel).expanded (8, 0).contains (pos))
+    if (getFaderHitBounds (channel).contains (pos))
     {
         dragPart = Part::fader;
         dragChannel = channel;
@@ -1545,9 +1601,10 @@ void MixerPanel::mouseMove (const juce::MouseEvent& e)
             else if (! isMaster (channel) && getStripCloseBounds (channel).contains (pos))
                                                                   part = Part::stripClose;
             else if (getMuteBounds (channel).contains (pos))      part = Part::mute;
-            else if (getSoloBounds (channel).contains (pos)) part = Part::solo;
+            else if (! isMaster (channel) && getSoloBounds (channel).contains (pos))
+                                                                  part = Part::solo;
             else if (getMonoBounds (channel).contains (pos))      part = Part::mono;
-            else if (getFaderBounds (channel).expanded (8, 0).contains (pos)) part = Part::fader;
+            else if (getFaderHitBounds (channel).contains (pos)) part = Part::fader;
             else if (getPanBounds (channel).expanded (0, 4).contains (pos))   part = Part::pan;
             else                                             part = Part::strip;
         }

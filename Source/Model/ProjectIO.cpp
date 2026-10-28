@@ -512,6 +512,13 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
             if (layer->isCollapsed())
                 xml->setAttribute ("collapsed", 1);
 
+            // Which lane the layer's header and the automation window point at,
+            // said out loud — slot cards have done this since Phase 42 for the
+            // same reason. Leaving it to be inferred from the ORDER of the
+            // <Automation> elements means the last one read always wins, which
+            // is "pan, always", regardless of what the user was editing.
+            xml->setAttribute ("autotarget", layerTargetToText (layer->getAutomationTarget()));
+
             for (auto target : { LayerAutomationTarget::volume, LayerAutomationTarget::pan })
                 writeLane (*xml, layer->automationFor (target),
                            layerTargetToText (target),
@@ -886,6 +893,13 @@ bool fromXmlText (const juce::String& xmlText,
             bool         laneEnabled = false, laneExpanded = false;
             juce::String targetText;
 
+            // Files written before Phase 70 carry no `autotarget`, so the only
+            // trace of which lane was open is the one lane with `expanded="1"`.
+            // Collect it here and decide once, after the loop — setting the
+            // target per element is what made "the last one wins" happen.
+            LayerAutomationTarget legacyTarget  = LayerAutomationTarget::volume;
+            bool                  legacyKnown   = false;
+
             for (auto* autoXml = child->getFirstChildElement(); autoXml != nullptr; autoXml = autoXml->getNextElement())
             {
                 if (! autoXml->hasTagName ("Automation"))
@@ -897,9 +911,17 @@ bool fromXmlText (const juce::String& xmlText,
                 layer->automationFor (target).setEnabled (laneEnabled);
                 layer->setAutomationExpanded (layer->isAutomationExpanded() || laneExpanded);
 
-                if (targetText.isNotEmpty())
-                    layer->setAutomationTarget (target);
+                if (laneExpanded)
+                {
+                    legacyTarget = target;
+                    legacyKnown  = true;
+                }
             }
+
+            if (child->hasAttribute ("autotarget"))
+                layer->setAutomationTarget (layerTargetFromText (child->getStringAttribute ("autotarget")));
+            else if (legacyKnown)
+                layer->setAutomationTarget (legacyTarget);
 
             std::vector<NoteEvent> notes;
             std::vector<NoteGroup> groups;
@@ -1215,13 +1237,17 @@ bool fromXmlText (const juce::String& xmlText,
 
         mixer->setChannelCount (parsedChannelCount);
 
-        // After the count, not before: setChannelOutput() refuses a destination
-        // that is not a live strip, so the console has to be its final size
-        // first. It also re-checks for loops, which is the last line of defence
-        // against a hand-edited .atomic file.
-        for (int channel = 0; channel < MixerModel::numChannels; ++channel)
-            if (parsedOutputs[(size_t) channel] != MixerModel::masterChannel)
-                mixer->setChannelOutput (channel, parsedOutputs[(size_t) channel]);
+        // After the count, not before: the destination has to be a live strip,
+        // so the console has to be its final size first.
+        //
+        // Phase 70: all of them, unconditionally, and as one replacement. The
+        // old loop skipped the master destination — which is the same thing as
+        // saying "a strip that fed the master last time keeps feeding whatever
+        // it fed last time", and a project that never touched routing inherited
+        // a route from a different project. restoreRouting() also clears the
+        // map before applying, so `wouldLoop` judges each route against a clean
+        // console instead of against the leftovers.
+        mixer->restoreRouting (parsedOutputs);
 
         // Mono is set both ways, not just when true: a load replaces the
         // console, and a strip that was listening in mono before must not keep

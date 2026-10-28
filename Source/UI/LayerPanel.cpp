@@ -202,6 +202,13 @@ juce::Rectangle<int> LayerPanel::getAddButtonBounds() const
 
 juce::Rectangle<int> LayerPanel::getVisibilityToggleBounds() const
 {
+    // Phase 70: a lone sheet has no ghosts, so "all visible" and "only this one"
+    // are the same state and the eye has nothing to toggle. Drawing it anyway
+    // produced a button whose two positions looked identical — it read as a
+    // broken control, not as "there is nothing to hide".
+    if (stack.getNumLayers() <= 1)
+        return {};
+
     // Right end of the title bar, vertically between the two header lines:
     // the title occupies the left, so this is the only free corner up here.
     return { getWidth() - ui::px (14) - ui::px (20), ui::px (16), ui::px (20), ui::px (20) };
@@ -209,15 +216,16 @@ juce::Rectangle<int> LayerPanel::getVisibilityToggleBounds() const
 
 bool LayerPanel::areAllLayersVisible() const
 {
-    // The sheet being edited is always drawn (Phase 20), so its own flag says
-    // nothing about the ghosts — only the others are asked.
-    const int active = stack.getActiveLayerIndex();
-
+    // Phase 70: every layer, the active one included.
+    //
+    // The old version skipped it on the grounds that the sheet being edited is
+    // always drawn, so its flag says nothing. That is true of the DRAWING, but
+    // not of the STATE the eye is reporting — and skipping it made the answer
+    // "true" for a one-layer project no matter what, which is what turned the
+    // toggle into a no-op. The flag is still written for the active layer (see
+    // toggleAllLayerVisibility) for the same reason it always was.
     for (int i = 0; i < stack.getNumLayers(); ++i)
     {
-        if (i == active)
-            continue;
-
         const auto* layer = stack.getLayer (i);
 
         if (layer != nullptr && ! layer->isVisible())
@@ -292,16 +300,21 @@ void LayerPanel::paint (juce::Graphics& g)
         const auto eyeBox = getVisibilityToggleBounds();
         const bool all    = areAllLayersVisible();
 
-        if (hoveredVisibilityToggle)
+        // Empty on a one-layer project: there is nothing to toggle (see
+        // getVisibilityToggleBounds).
+        if (! eyeBox.isEmpty())
         {
-            g.setColour (juce::Colours::white.withAlpha (0.07f));
-            g.fillRoundedRectangle (eyeBox.toFloat(), ui::pf (5));
-        }
+            if (hoveredVisibilityToggle)
+            {
+                g.setColour (juce::Colours::white.withAlpha (0.07f));
+                g.fillRoundedRectangle (eyeBox.toFloat(), ui::pf (5));
+            }
 
-        drawEye (g, eyeBox.toFloat().reduced (ui::pf (4)),
-                 juce::Colours::white.withAlpha (hoveredVisibilityToggle ? 0.95f
-                                                                        : (all ? 0.72f : 0.42f)),
-                 all);
+            drawEye (g, eyeBox.toFloat().reduced (ui::pf (4)),
+                     juce::Colours::white.withAlpha (hoveredVisibilityToggle ? 0.95f
+                                                                            : (all ? 0.72f : 0.42f)),
+                     all);
+        }
     }
 
     //-- Rows -----------------------------------------------------------------

@@ -88,6 +88,11 @@ public:
         gave up half its width and the meter took it" is ONE assertion, not two
         that can half-pass. Asked from the outside, like the two above. */
     bool faderYieldedHalfTheRow() const;
+
+    /** Phase 70: the fader's hit area must stop before the meter's left bar.
+        It used to reach a flat 8 px across a 4 px gap, so the last 4 px of
+        "fader" were the meter — clicking there jumped the fader to that level. */
+    bool faderHitClearsMeter (int channel) const;
     juce::String describeControlGeometry() const;
 
     /** Phase 43: which of the four controls a menu is about. Declared up here
@@ -220,7 +225,14 @@ public:
     //-- Listeners -------------------------------------------------------------
     void layersChanged() override { repaint(); }
     void rackChanged() override   { repaint(); }
-    void mixerChanged() override  { repaint(); }
+    /** Phase 70: repaint, and bring the selection down with the console.
+
+        Clamping inside `setSelectedChannel()` only helps callers that go
+        through it; loading a smaller project changes the count without going
+        near the selection, and everything that reads `selectedChannel` — the
+        rack header, the insert editor — would then be pointed at a strip that
+        no longer exists. */
+    void mixerChanged() override;
 
 private:
     enum class Part { none, strip, fader, pan, mute, solo, mono, output, stripClose,
@@ -250,6 +262,16 @@ private:
     static int faderWidthFor (int rowWidth);
 
     juce::Rectangle<int> getFaderBounds (int channel) const;
+
+    /** Phase 70: the fader's HIT area, which is wider than its paint area.
+
+        The horizontal reach used to be a flat 8 px, but the gap between the
+        fader and the meter is 4 — so the last 4 px of the "fader" was the
+        meter's left bar. Clicking there jumped the fader to that level instead
+        of doing nothing, and the cursor promised a drag the user had not aimed
+        at. Half the gap is the widest a hit area can grow without taking a
+        neighbour's pixels. */
+    juce::Rectangle<int> getFaderHitBounds (int channel) const;
     juce::Rectangle<int> getPanBounds (int channel) const;
     juce::Rectangle<int> getOutputBounds (int channel) const;
     juce::Rectangle<int> getMuteBounds (int channel) const;

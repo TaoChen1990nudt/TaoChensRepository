@@ -127,7 +127,7 @@
     <Track id="27" owner="master" ownerId="0" target="0"/>
   </AutomationWindow>
   <Layers active="2">
-    <Layer id="103" name="Layer 1" colour="ff4fd1c5" visible="0" output="1" levelDb="-4.000000" pan="-0.120000" muted="0" soloed="0">
+    <Layer id="103" name="Layer 1" colour="ff4fd1c5" visible="0" output="1" levelDb="-4.000000" pan="-0.120000" muted="0" soloed="0" autotarget="volume">
       <Automation enabled="1" target="volume" expanded="0">
         <Point beat="0.00000000" value="0.620000"/>
         <Point beat="8.00000000" value="0.950000"/>
@@ -224,7 +224,7 @@
         </Note>
       </Notes>
     </Layer>
-    <Layer id="104" name="Layer 2" colour="ffd99a4d" visible="0" output="2" levelDb="-6.000000" pan="0.000000" muted="0" soloed="0">
+    <Layer id="104" name="Layer 2" colour="ffd99a4d" visible="0" output="2" levelDb="-6.000000" pan="0.000000" muted="0" soloed="0" autotarget="pan">
       <Automation enabled="0" target="volume" expanded="0">
         <Point beat="0.00000000" value="1.000000"/>
         <Point beat="64.00000000" value="1.000000"/>
@@ -455,7 +455,7 @@
         </Note>
       </Notes>
     </Layer>
-    <Layer id="105" name="Layer 3" colour="ff8a6ccb" visible="0" output="1" levelDb="-2.500000" pan="0.120000" muted="0" soloed="0">
+    <Layer id="105" name="Layer 3" colour="ff8a6ccb" visible="0" output="1" levelDb="-2.500000" pan="0.120000" muted="0" soloed="0" autotarget="volume">
       <Automation enabled="0" target="volume" expanded="0">
         <Point beat="0.00000000" value="1.000000"/>
         <Point beat="64.00000000" value="1.000000"/>

@@ -918,7 +918,15 @@ int Layer::addSample (SampleEvent sampleToAdd)
 {
     sampleToAdd.id          = nextSampleId++;
     sampleToAdd.startBeat   = juce::jmax (0.0, sampleToAdd.startBeat);
-    sampleToAdd.lengthBeats = juce::jmax (0.25, sampleToAdd.lengthBeats);
+
+    // Phase 70: no floor here beyond "not negative". The model used to clamp to
+    // 0.25 beats (a 1/16 note), which since Phase 69 silently stretched every
+    // short clip to 16× its length on the way through addSample — and this is
+    // the entry point for pasting, cutting and the group-sync top-up, so a
+    // 1/64 clip could come back as its own 1/16 sibling. How short a clip may
+    // be drawn or dragged is an editing rule (minimumNoteLength()); the model
+    // stores what it is told, exactly as restoreNotes does.
+    sampleToAdd.lengthBeats = juce::jmax (0.0, sampleToAdd.lengthBeats);
     sampleToAdd.laneSpan    = juce::jlimit (1, SampleEvent::numPitchLanes, sampleToAdd.laneSpan);
     sampleToAdd.pitch       = juce::jlimit (0, 127 - sampleToAdd.laneSpan + 1, sampleToAdd.pitch);
     samples.push_back (std::move (sampleToAdd));
@@ -939,7 +947,7 @@ void Layer::restoreSamples (std::vector<SampleEvent> restoredSamples)
     for (auto& s : restoredSamples)
     {
         s.startBeat   = juce::jmax (0.0, s.startBeat);
-        s.lengthBeats = juce::jmax (0.25, s.lengthBeats);
+        s.lengthBeats = juce::jmax (0.0, s.lengthBeats);   // Phase 70: was 0.25
         s.laneSpan    = juce::jlimit (1, SampleEvent::numPitchLanes, s.laneSpan);
         s.pitch       = juce::jlimit (0, 127 - s.laneSpan + 1, s.pitch);
         s.gainDb      = juce::jlimit (-48.0f, 12.0f, s.gainDb);
@@ -1035,6 +1043,15 @@ void LayerStack::removeLayer (int index)
         return;
 
     layers.erase (layers.begin() + index);
+
+    // Phase 70: removing a layer ABOVE the active one slides the whole stack up,
+    // so the active index has to move with it — clamping alone left the user
+    // editing a different sheet than the one that was selected. Removing the
+    // active layer itself keeps the index, which is the layer that took its
+    // place (or the new last one, if it was at the end).
+    if (index < activeIndex)
+        --activeIndex;
+
     activeIndex = juce::jlimit (0, (int) layers.size() - 1, activeIndex);
     notifyLayersChanged();
 }

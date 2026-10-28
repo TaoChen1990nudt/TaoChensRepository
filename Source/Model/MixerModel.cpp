@@ -68,6 +68,33 @@ bool MixerModel::wouldLoop (int channel, int destination) const noexcept
     return true;
 }
 
+void MixerModel::restoreRouting (const std::array<int, numChannels>& outputs)
+{
+    // Start from a clean console. Every strip to the master is not just the
+    // default — it is the only baseline that makes the file's routes mean the
+    // same thing they meant when they were saved.
+    channelOutputs.fill (masterChannel);
+
+    for (int channel = 0; channel < numChannels; ++channel)
+    {
+        const int destination = outputs[(size_t) channel];
+
+        if (destination == masterChannel)
+            continue;
+
+        // A destination that is not a live strip, or one that would close a
+        // loop, is bad data. The strip falls back to the master — the same
+        // degradation getChannelOutput() applies on the read side, decided
+        // once here instead of per block at render time.
+        if (! juce::isPositiveAndBelow (destination, channelCount) || wouldLoop (channel, destination))
+            continue;
+
+        channelOutputs[(size_t) channel] = destination;
+    }
+
+    notify();
+}
+
 bool MixerModel::setChannelOutput (int channel, int destination)
 {
     if (! juce::isPositiveAndBelow (channel, channelCount))

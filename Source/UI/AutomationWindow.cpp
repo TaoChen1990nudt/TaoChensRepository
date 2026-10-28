@@ -67,7 +67,9 @@ AutomationWindow::Resolved AutomationWindow::resolve (const AutomationTrack& tra
         resolved.lane      = &const_cast<MixerModel&> (mixer).automationFor (target);
         resolved.name      = utf8 ("主输出");
         resolved.colour    = groupPalette::group1;   // 主输出：金色系身份，随色板降饱和
-        resolved.parameter = target == 1 ? utf8 ("主声相") : utf8 ("主音量");
+        resolved.parameter = target == 1 ? utf8 ("主声相")
+                           : target == 2 ? utf8 ("主静音")
+                                         : utf8 ("主音量");
     }
     else if (track.owner == AutomationOwner::layer)
     {

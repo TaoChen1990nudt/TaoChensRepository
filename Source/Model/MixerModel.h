@@ -97,6 +97,17 @@ public:
         strip's menu greys those entries out instead of letting a click fail. */
     bool wouldLoop (int channel, int destination) const noexcept;
 
+    /** Phase 70: replace the whole routing map in one step (project load).
+
+        Loading a project is a REPLACEMENT, not an edit: whatever the previous
+        session had wired must not survive, and it must not be the baseline the
+        new routes are judged against. Applying the file one strip at a time —
+        and only when the route differed from the master — left the old
+        topology in place for every strip that happened to feed the master in
+        the new project, and let `wouldLoop` refuse a correct route because a
+        leftover from the old project was still there. */
+    void restoreRouting (const std::array<int, numChannels>& outputs);
+
     //-- Phase 25: mono monitoring ---------------------------------------------
     /** Sums the strip's stereo bus to mono before it leaves for the next
         destination. A monitoring control, not a mix control: it is applied

@@ -150,7 +150,11 @@ void RenderStats::addPeak (int slotId, float newPeak)
         }
     }
 
-    slotPeaks.emplace_back (slotId, newPeak);
+    // Phase 70: capacity IS the ceiling. Growing past it would allocate on the
+    // audio thread; a slot that does not fit into the metering budget simply
+    // does not get a meter, which is the same thing the UI does with slot 17.
+    if (slotPeaks.size() < slotPeaks.capacity())
+        slotPeaks.emplace_back (slotId, newPeak);
 }
 
 float RenderStats::peakForSlot (int slotId) const
@@ -173,7 +177,8 @@ void RenderStats::addLayerPeak (int layerIndex, float newPeak)
         }
     }
 
-    layerPeaks.emplace_back (layerIndex, newPeak);
+    if (layerPeaks.size() < layerPeaks.capacity())
+        layerPeaks.emplace_back (layerIndex, newPeak);
 }
 
 float RenderStats::peakForLayer (int layerIndex) const
@@ -197,7 +202,8 @@ void RenderStats::addChannelPeak (int channel, float leftPeak, float rightPeak)
         }
     }
 
-    channelPeaks.push_back ({ channel, leftPeak, rightPeak });
+    if (channelPeaks.size() < channelPeaks.capacity())
+        channelPeaks.push_back ({ channel, leftPeak, rightPeak });
 }
 
 float RenderStats::peakForChannel (int channel) const
@@ -882,11 +888,23 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
     const double newLengthSecs  = fresh->lengthSeconds();
 
     {
-        // The lock covers a shared_ptr assignment and nothing else. No note is
+        // The lock covers shared_ptr assignments and nothing else. No note is
         // copied and no audio is computed while it is held.
         const juce::SpinLock::ScopedLockType guard (scheduleLock);
+
+        // Phase 70: park the outgoing schedule before dropping the reference to
+        // it. The audio thread reads a bare pointer now, so whoever was looking
+        // at the previous one has no count of its own — this list is what keeps
+        // it alive until the block that read it has finished. Two is the margin:
+        // the audio thread can only ever be one publish behind.
+        scheduleRetired.push_back (std::move (schedule));
         schedule = std::move (fresh);
+
+        while (scheduleRetired.size() > 2)
+            scheduleRetired.erase (scheduleRetired.begin());
     }
+
+    publishedSchedule.store (schedule.get(), std::memory_order_release);
 
     lengthBeats.store (newLengthBeats, std::memory_order_relaxed);
     lengthSeconds.store (newLengthSecs, std::memory_order_relaxed);
@@ -1725,7 +1743,18 @@ void PlaybackEngine::renderHostedInstruments (const PublishedSchedule& current, 
                 const double onOffset  = (note.startSeconds - startSeconds) * sampleRate;
                 const double offOffset = (note.endSeconds   - startSeconds) * sampleRate;
 
-                if (offOffset <= (double) chunkStart || onOffset >= (double) (chunkStart + chunkLen))
+                const int on  = (int) std::llround (onOffset)  - chunkStart;
+                const int off = (int) std::llround (offOffset) - chunkStart;
+
+                // Phase 70: judge the ROUNDED sample offsets, not the doubles.
+                // A note-off landing exactly on the block boundary used to fall
+                // through both blocks — this one refused it because
+                // `off < chunkLen` was false, and the next one skipped it
+                // because `offOffset <= chunkStart` was true. A hosted plugin
+                // then never got its note-off and the note rang until the next
+                // stop. Rounding first lets one comparison decide both sides:
+                // here the tail is `chunkLen`, one block later it is `0`.
+                if (off < 0 || on >= chunkLen)
                     continue;
 
                 // A muted layer has to be silent on a plugin too, and a plugin
@@ -1737,9 +1766,6 @@ void PlaybackEngine::renderHostedInstruments (const PublishedSchedule& current, 
                 for (const auto& mix : current.layers)
                     if (mix.layerIndex == note.layerIndex)
                         layerAudible = mix.audible;
-
-                const int on  = (int) std::llround (onOffset)  - chunkStart;
-                const int off = (int) std::llround (offOffset) - chunkStart;
 
                 if (on >= 0 && on < chunkLen && layerAudible && note.gain > 0.0f)
                 {
@@ -2013,7 +2039,7 @@ void PlaybackEngine::allNotesOffHosted()
 //==============================================================================
 void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numSamples)
 {
-    auto current = getSchedule();
+    auto current = getScheduleRaw();
 
     if (current == nullptr || numSamples <= 0)
     {
@@ -2038,7 +2064,11 @@ void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numS
     blockBeats.store ((double) numSamples * beatsPerSample, std::memory_order_relaxed);
     blockStartTimeMs.store (juce::Time::getMillisecondCounterHiRes(), std::memory_order_relaxed);
 
-    RenderStats stats;
+    // Phase 70: reuse the one member instead of building a fresh set of vectors
+    // in every callback. clear() keeps the capacity, so the writers below only
+    // touch memory that was bought when the engine was constructed.
+    liveStats.clear();
+    RenderStats& stats = liveStats;
 
     int offset    = 0;
     int remaining = numSamples;
@@ -2177,7 +2207,7 @@ void PlaybackEngine::renderAudition (juce::AudioBuffer<float>& output, int numSa
         auditionVoice.gain     = 1.0f;
         auditionVoice.pan      = 0.0f;
 
-        if (auto current = getSchedule())
+        if (auto current = getScheduleRaw())
             for (const auto& slot : current->slots)
                 if (slot.slotId == slotId)
                 {
@@ -2195,7 +2225,7 @@ void PlaybackEngine::renderAudition (juce::AudioBuffer<float>& output, int numSa
     if (! auditionVoice.active)
         return;
 
-    auto current = getSchedule();
+    auto current = getScheduleRaw();
 
     const float masterGain = current != nullptr ? current->masterGain : kMasterGain;
     const float masterPan  = current != nullptr ? current->masterPan  : 0.0f;
@@ -2494,7 +2524,7 @@ void PlaybackEngine::applyLiveEvent (LiveEvent& event)
         liveVoicesActive.store (active, std::memory_order_relaxed);
     }
 
-    auto current = getSchedule();
+    auto current = getScheduleRaw();
 
     const SlotMix* slot = nullptr;
 
@@ -2614,16 +2644,16 @@ void PlaybackEngine::renderLive (juce::AudioBuffer<float>& output, int numSample
     if (numSamples <= 0 || output.getNumChannels() <= 0 || sampleRate <= 0.0)
         return;
 
-    auto current = getSchedule();
+    auto current = getScheduleRaw();
 
     const float masterGain = current != nullptr ? current->masterGain : kMasterGain;
     const float masterPan  = current != nullptr ? current->masterPan  : 0.0f;
 
     if (liveVoicesActive.load (std::memory_order_relaxed) > 0)
-        renderLiveOscillators (current.get(), masterGain, masterPan, output, numSamples);
+        renderLiveOscillators (current, masterGain, masterPan, output, numSamples);
 
     if (livePluginEngaged.load (std::memory_order_relaxed) > 0)
-        renderLivePlugins (current.get(), masterGain, output, numSamples);
+        renderLivePlugins (current, masterGain, output, numSamples);
 }
 
 void PlaybackEngine::renderLiveOscillators (const PublishedSchedule* current, float masterGain,
@@ -2839,6 +2869,12 @@ void PlaybackEngine::previewSample (std::shared_ptr<const SampleBuffer> buffer, 
     // point, exactly like the note preview above.
     {
         const juce::SpinLock::ScopedLockType lock (previewLock);
+
+        // Phase 70: this is where the previous sample dies — message thread,
+        // which is allowed to free eight megabytes. The audio thread only ever
+        // parks its outgoing buffer here.
+        previewRetired.reset();
+
         previewPending = std::move (buffer);
     }
 
@@ -2852,8 +2888,16 @@ void PlaybackEngine::stopSamplePreview()
 {
     previewEngaged.store (false, std::memory_order_relaxed);
 
-    // The voice notices on its next block. Deliberately does NOT bump the
-    // serial: that would mean "here is a new thing to play".
+    // Phase 70: the voice ramps down over 4 ms and stops itself (it reads
+    // `engaged` every sample now). This is the message thread, so it is also
+    // the right place to release the buffer the audio thread parked.
+    {
+        const juce::SpinLock::ScopedLockType lock (previewLock);
+        previewRetired.reset();
+    }
+
+    // Deliberately does NOT bump the serial: that would mean "here is a new
+    // thing to play".
 }
 
 void PlaybackEngine::renderSamplePreview (juce::AudioBuffer<float>& output, int numSamples)
@@ -2873,6 +2917,13 @@ void PlaybackEngine::renderSamplePreview (juce::AudioBuffer<float>& output, int 
 
         if (! lock.isLocked())
             return;             // message thread is mid-handoff; try next block
+
+        // Phase 70: park the outgoing buffer instead of letting the assignment
+        // release it. When the message thread has already dropped its own
+        // reference, this was the last one — so the free of the whole sample
+        // happened here, on the audio thread. The message thread frees it on
+        // the next hand-off.
+        previewRetired      = std::move (previewVoice.buffer);
 
         previewVoice.serial   = serial;
         previewVoice.buffer   = previewPending;
@@ -2912,7 +2963,7 @@ void PlaybackEngine::renderSamplePreview (juce::AudioBuffer<float>& output, int 
         return;
     }
 
-    auto current = getSchedule();
+    auto current = getScheduleRaw();
 
     const float masterGain = current != nullptr ? current->masterGain : kMasterGain;
     const float masterPan  = current != nullptr ? current->masterPan  : 0.0f;
@@ -2947,15 +2998,33 @@ void PlaybackEngine::renderSamplePreview (juce::AudioBuffer<float>& output, int 
             break;
         }
 
-        float target = 1.0f;
+        // Phase 70: a stop is a request and the voice has to honour it. This
+        // loop used to ignore `engaged` entirely — `stopSamplePreview()` only
+        // cleared the flag, so a 60-second audition played on to the end and
+        // hasSamplePreview() kept answering true for the whole minute.
+        const bool stopRequested = ! engaged;
+
+        float target = stopRequested ? 0.0f : 1.0f;
 
         // Fade the tail out instead of letting the last frame end on a step.
-        const double remaining = previewVoice.frames - previewVoice.position;
+        if (! stopRequested)
+        {
+            const double remaining = previewVoice.frames - previewVoice.position;
 
-        if (remaining < fadeFrames)
-            target = (float) juce::jmax (0.0, remaining / fadeFrames);
+            if (remaining < fadeFrames)
+                target = (float) juce::jmax (0.0, remaining / fadeFrames);
+        }
 
         previewVoice.gain += (target - previewVoice.gain) * smoothing;
+
+        // The same 4 ms ramp that ends a sample naturally also ends a stopped
+        // one: once it is inaudible, there is nothing left to play.
+        if (stopRequested && previewVoice.gain < 1.0e-4f)
+        {
+            previewVoice.gain   = 0.0f;
+            previewVoice.active = false;
+            break;
+        }
 
         const int frame = (int) previewVoice.position;
 
@@ -3002,7 +3071,7 @@ RenderStats PlaybackEngine::renderOffline (double seconds) const
 void PlaybackEngine::renderWindow (double startSeconds, int numSamples,
                                    juce::AudioBuffer<float>& output, RenderStats* stats) const
 {
-    auto current = getSchedule();
+    auto current = getScheduleRaw();
 
     if (current == nullptr || numSamples <= 0)
         return;
@@ -3155,7 +3224,7 @@ void PlaybackEngine::resetMixState()
 //==============================================================================
 int PlaybackEngine::countNotesRoutedTo (int slotId) const
 {
-    auto current = getSchedule();
+    auto current = getScheduleRaw();
 
     if (current == nullptr)
         return 0;
@@ -3171,7 +3240,7 @@ int PlaybackEngine::countNotesRoutedTo (int slotId) const
 
 int PlaybackEngine::countOverridesRoutedTo (int slotId) const
 {
-    auto current = getSchedule();
+    auto current = getScheduleRaw();
 
     if (current == nullptr)
         return 0;

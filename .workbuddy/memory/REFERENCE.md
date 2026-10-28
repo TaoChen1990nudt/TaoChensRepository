@@ -55,6 +55,21 @@
 ## 音频
 - 音频线程**绝不**读 Layer / NoteEvent / RackModel：消息线程 `publishSchedule()` 构建不可变
   `PublishedSchedule`，锁只覆盖 shared_ptr 赋值。声部无状态：相位 = freq × 音符内秒数。
+- **P70：音频线程读的是裸指针，不是 shared_ptr**。`getScheduleRaw()` → `publishedSchedule`
+  （原子发布，acquire 一次 load），发布侧把旧的推进 `scheduleRetired` 并**只保留两个**。
+  以前的 `getSchedule()` 每块自旋抢锁 + 拷一个 shared_ptr，而那个拷贝可能是最后一个引用，
+  于是整个 `PublishedSchedule`（几十个 note、每个 insert 一个 `shared_ptr<PluginDescription>`）
+  在回调里析构。`getSchedule()` 保留给消息线程与 `renderOffline()`。
+- **P70：回调里零分配**。`RenderStats` 是成员 `liveStats`，块首 `clear()`（保留 capacity）；
+  `addPeak` / `addLayerPeak` / `addChannelPeak` 都带 `size() < capacity()` 闸——容量就是上限，
+  超出的槽干脆没有电平表。这条和 `previewRetired`（旧 buffer 交给消息线程释放）是同一条规矩：
+  **谁分配谁释放，那个「谁」不能是音频线程**。
+- **P70：note-off 判据用取整后的采样偏移**。`on = llround(onOffset) - chunkStart`、
+  `off = llround(offOffset) - chunkStart`，跳过条件是 `off < 0 || on >= chunkLen`。
+  以前用 `offOffset <= chunkStart` 跳过 + `off < chunkLen` 发送，落在块尾的 note-off
+  **两块都不发**，宿主 VST 的长音就一直响到下一次 stop。
+- **P70：预览的停止是真停**。`renderSamplePreview()` 每个采样读 `engaged`，为 false 时把
+  target 拉到 0，4 ms 淡完后 `active = false`。以前只是清标志位，循环根本不看它。
 - 链路：**声部 → 通道总线（通道插入）→ 主插入 → 主推子**。图层推子/组增益在声部阶段（乘），
   音源推子+滤波在总线阶段；`busIndexFor(mixerChannel)`，-1/越界 → 直通。汇总顺序 =
   发布时的 `channelOrder`。
@@ -82,7 +97,7 @@
 - 窗口门写作 `if (audio.isPlaying() || audio.getPlayback().hasMeters())`，**放在
   `if (! audio.isPlaying()) return;` 之前**——放后面就漏掉"停止后还在落"那一段，而那正是用户会看的。
 
-## 工程文件（`.atomic`，`formatVersion` = 24）
+## 工程文件（`.atomic`，`formatVersion` = 25）
 - **先解析到临时对象、末尾一次性提交**，坏文件绝不破坏当前会话。载入后重置
   `nextNoteId`/`nextSlotId`/组 id（max+1）。
 - 老文件必须仍能开：v3 `mod=`、v4 插件（标签 **"PLUGIN"** 全大写）、v5 `mixer=`、
@@ -102,10 +117,21 @@
   **新 lane 一律追加在枚举末尾**，老文件不需要映射表。
 - **选中哪条 lane 显式写 `autotarget`，不靠元素顺序推断**：三条 lane 都写出来之后，
   "最后读到的那条算选中"恒把 target 变成 `plugin`。回退规则只在 `autotarget` **缺失**时启用。
+- **P70：`<Layer autotarget>` 同理**。图层只有 volume/pan 两条 lane，所以后果不是
+  "恒为 plugin"，而是"**恒为 pan**"——而且读侧是循环里每条就 `setAutomationTarget` 一次，
+  连 `expanded` 都没看。现在写侧显式落盘，读侧循环结束后**一次性决定**：
+  有 `autotarget` 用它，没有则回退到"带 `expanded="1"` 的那条"（旧文件），都没有就保持默认 volume。
 - **组静音存在组上，不存成员上**：一个属性熬过粘贴、复制、合并；写到六十个音符上就是六十个
   可能出错的地方。
 - **`out` 的 master 哨兵随上限走**：v11 及更早 = 8，v12 起 = 127。读旧文件必须翻成 master。
-- 提交顺序：**先 `setChannelCount` 再 `setChannelOutput`**（后者拒绝非活通道）。
+- 提交顺序：**先 `setChannelCount`，再 `restoreRouting(parsedOutputs)`**（后者拒绝非活通道）。
+- **P70：路由是"替换"，不是"逐条编辑"**。`restoreRouting()` 先把整张表清成主输出，再按文件
+  逐条应用，最后一次性 `notify()`。旧写法 `if (parsedOutputs[ch] != master) setChannelOutput(...)`
+  有两处错：新工程里"回主输出"的通道一条都不调（上一个会话的路由留下来），而且每条都在
+  **残留拓扑**上判环——文件里正确的 `1 → 0` 会因为旧会话的 `0 → 1` 还没清而被拒。
+- **P70：模型不给长度设下限**。`addSample` / `restoreSamples` 只 `jmax(0.0, …)`，和
+  `restoreNotes` 一致；多短能画是编辑器的 `minimumNoteLength()`。写死 0.25 会让 1/64 的块
+  在存盘往返、粘贴、组内补齐时统统变宽 16 倍。
 - 导出：发布快照 → 后台按块渲染，长度用 `contentBeats`，不归一化（峰值 >0.999 才拉回）。
 
 ## 会话与撤销
@@ -217,6 +243,17 @@
 - **通道条固定宽** `stripWidth = ui::px(92)`，溢出时底部手绘滚动条。
 - **主输出不是通道**：无删除项、无输出下拉；有 MONO（`masterMono`），引擎在**主推子斜坡之后**
   折叠——那是信号离开声卡的唯一位置。
+- **P70：主输出也没有 SOLO**。`toggleSolo()` 早就对 master 直接 return，但绘制、hover、右键
+  还都把它当按钮——结果是一个永远点不亮、光标却会变手型的死键。现在四处一起排除
+  （`drawStrip`、`hitTest`、`mouseDown`、右键菜单）；M 是真的（静音整个混音）。
+- **P70：删条之后选中跟着"行"走**。删掉选中条**上方**的一条，`selectedChannel` 要 `-1`——
+  只 `jlimit` 会让选中静默落到隔壁那条上，机架标题和插入编辑随即打到用户没看的通道。
+  删掉选中条本身则保持索引（下面那条顶上来的就是同一行）。
+- **P70：选中值夹到 `channelCount`，不是 127**。`setSelectedChannel()` 的上界是**活通道数**
+  （master 例外，它永远存在）；`mixerChanged()` 再兜一层，通道数缩小时把选中拉回来。
+  否则从 24 通道的工程切到 8 通道，选中还停在 22。
+- **P70：推子命中区不能吃电平表**。`getFaderHitBounds()` 的横向扩展取 `min(ui::px(8), gap/2)`，
+  gap 是推子与电平表之间的 4 px。平扩 8 的话，最后 4 px 归电平表，点它会把推子跳到那个位置。
 - 通道路由只写在 `getChannelOutput/setChannelOutput/wouldLoop`：默认全 `masterChannel`，
   环路在模型层**拒绝**，`sanitiseOutputs()` 在缩通道时回落。
 - **单声道监听**：`channelMono` → `ChannelMix::mono`，引擎在**插入之后、求和之前** (L+R)/2。

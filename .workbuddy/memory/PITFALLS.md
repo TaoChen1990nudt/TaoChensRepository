@@ -1321,3 +1321,89 @@ double minimumNoteLength() const noexcept
 
 **规律**：凡是"由视图推导出来的限制"，都要问一句"缩小时它会变成什么样"。视图是**放大**
 时的问题，缩小时通常是另一个问题（这里是"别把下限抬高"）。
+
+## P70-A：夹取会掩盖移位，夹具必须让两种实现落到不同答案上
+
+P70 一轮里踩了三次同一个坑，症状都一样：**断言在缺陷版上也 PASS**。
+
+**第一次（P0-1，图层当前自动化轨）**。修复有两条路：写侧落盘 `autotarget`，读侧改成
+"循环结束后一次性决定"。咬测只植入"写侧不写属性"，断言照样过——因为读侧的回退逻辑
+（带 `expanded="1"` 的那条）给了同一个答案 `volume`。真正的根因在读侧，必须植入
+"循环里每条 `setAutomationTarget`"才咬得住（`pan` / `pan`）。
+
+**第二次（P2-5，`removeLayer` 的 `activeIndex`）**。三层、active=2（最后一条）、删 index 0：
+- 正确实现：`2 - 1 = 1`
+- 缺陷实现：`jlimit(0, 1, 2) = 1`
+
+两边相等。改成四层、`setActiveLayerIndex(1)`、删 0：正确 `0`，缺陷 `1`，才分得开。
+
+**第三次（P2-8，选中通道夹取）**。植入"夹到 127"之后断言仍然过，因为 `mixerChanged()`
+又兜了一层把 20 夹成 7。夹具必须**绕开兜底**：直接 `setSelectedChannel(100)` 在 8 通道的
+console 上，缺陷版给 100。
+
+**规律**：写断言之前，把"正确"和"缺陷"两条路径**手算一遍**，两者数字相等就重写夹具。
+这一步三十秒，能省掉一整轮"编译—运行—发现没咬住—改夹具—重编译"。
+和 P68-B（闭环自洽）、P69-B（数值恰好重合）是同一条根的三种外壳。
+
+## P70-B：加载路径上"只在不同时才写"＝把上一个会话当成基线
+
+```cpp
+for (int ch = 0; ch < numChannels; ++ch)
+    if (parsedOutputs[ch] != masterChannel)          // ← 目标为主输出的通道一条都不调
+        mixer->setChannelOutput (ch, parsedOutputs[ch]);
+```
+
+看起来是"省掉无意义的写入"，实际是"**新工程说了什么，只对那些不是默认值的通道生效**"。
+新工程里 `ch0 → 主输出`（默认值）时一行都不执行，`ch0` 就保留上一个会话的 `1`。
+
+第二层伤害更隐蔽：`setChannelOutput()` 会判环，而判环读的是**当前**拓扑。逐条应用时，
+文件里正确的 `1 → 0` 会被旧会话残留的 `0 → 1` 判成环而**拒掉**——坏数据被"保护"逻辑
+自己制造出来。
+
+修法固定成两步：**先整体重置到默认，再逐条应用**（`restoreRouting()`，末尾一次 `notify()`）。
+
+**规律**：凡是"加载/初始化/替换"语义的入口，第一个动作必须是"清成默认"，不是"逐条设置"。
+任何 `if (新值 != 默认) 写入` 的写法都在偷偷假设"当前状态已经是默认"。
+
+## P70-C：shared_ptr 的最后一个引用，析构位置不可控
+
+`getSchedule()` 返回 `std::shared_ptr` 的**副本**。发布侧换掉成员之后，音频线程手里那份
+可能就是最后一个引用 —— 构造函数返回时 `PublishedSchedule` 在**实时线程**析构，
+几十个 note 加上每个 insert 的 `shared_ptr<PluginDescription>` 一起 `delete`。
+每块还要自旋抢一次锁。这两件事都不该出现在回调里，但代码里没有任何一行看起来是错的。
+
+修法是换所有权模型，不是加锁：
+
+```cpp
+std::atomic<const PublishedSchedule*> publishedSchedule;      // 读者：一次 acquire load
+std::shared_ptr<const PublishedSchedule> schedule;            // 发布者持有
+std::vector<std::shared_ptr<const PublishedSchedule>> scheduleRetired;   // 只保两个
+```
+
+发布 = 旧的 `move` 进 retired → 新的进 `schedule` → `store(release)`；retired 超过两个就
+`erase(begin())`，**释放永远发生在消息线程**。读者只拿到裸指针，有效期一个块。
+
+**规律**：实时线程上出现 `shared_ptr` 拷贝，就等于"析构时机交给调度器"。要么读者不持有
+所有权（裸指针 + 发布者保命），要么一开始就别共享。
+
+## P70-D：边界判据写成两种形式，两侧就会各漏一半
+
+note-off 的旧代码：
+
+```cpp
+if (offOffset <= (double) chunkStart || ...) continue;      // 跳过
+const int off = (int) std::llround (offOffset) - chunkStart;
+if (off >= 0 && off < chunkLen) addEvent (noteOff, off);    // 发送
+```
+
+一个用**浮点原值**判跳过，一个用**取整后**判发送。音尾正好落在块尾时：
+- 本块：`off == chunkLen` → 不发；
+- 下一块：`offOffset == chunkStart'` → `<=` 成立 → 跳过。
+
+**两块都不发**。宿主 VST 的持续音因此一直响到 stop。
+
+修法是把判据挪到同一层：先算 `on` / `off` 两个整数，跳过条件改成 `off < 0 || on >= chunkLen`。
+这样同一个边界在两块里分别是 `chunkLen` 和 `0`，一进一出，恰好接上。
+
+**规律**：一个事件的"开始/结束"如果会被相邻两个块各判一次，两个块必须用**同一个表达式**
+判断同一件事。混用浮点与整数、混用 `<=` 与 `<`，边界上就会出现一条谁都不负责的缝。

@@ -525,6 +525,22 @@ struct RenderStats
 
     RenderStats();
 
+    /** Phase 70: empties the vectors without giving back the memory they hold.
+
+        The audio thread reuses ONE instance across callbacks (see
+        `liveStats`), so this has to be `clear()`, not "construct a fresh one" —
+        a new object per block meant three reserves and three frees per device
+        callback, which is exactly the kind of allocation a real-time callback
+        is not allowed to make. `std::vector::clear()` keeps the capacity, so
+        the arrays bought in prepareToPlay are spent once and never again. */
+    void clear() noexcept
+    {
+        peak = 0.0f;
+        slotPeaks.clear();
+        layerPeaks.clear();
+        channelPeaks.clear();
+    }
+
     void  addPeak (int slotId, float newPeak);
     float peakForSlot (int slotId) const;
     void  addLayerPeak (int layerIndex, float newPeak);
@@ -593,6 +609,27 @@ public:
                           const MixerModel* mixer = nullptr);
 
     std::shared_ptr<const PublishedSchedule> getSchedule() const;
+
+    /** Phase 70: the audio thread's read of the same thing.
+
+        `getSchedule()` takes a spin lock and returns a shared_ptr COPY — which
+        meant every audio callback spun for the lock, and worse, that copy was
+        sometimes the last reference: the message thread had already published a
+        newer schedule and dropped its own, so the destructor of the whole
+        PublishedSchedule (dozens of notes, and a shared_ptr per plugin insert)
+        ran on the audio thread.
+
+        This returns a bare pointer off one acquire load. The object stays alive
+        because the publisher keeps the last two schedules in `scheduleRetired`
+        before letting go of them — one block of lag is all the audio thread
+        ever has, so two is generous.
+
+        Never hold the result across a publish, and never store it: it is valid
+        for the duration of the block that read it, not longer. */
+    const PublishedSchedule* getScheduleRaw() const noexcept
+    {
+        return publishedSchedule.load (std::memory_order_acquire);
+    }
 
     //-- Transport ------------------------------------------------------------
     /** The transport counts in BEATS, not seconds.
@@ -856,6 +893,29 @@ private:
     mutable juce::SpinLock scheduleLock;
     std::shared_ptr<const PublishedSchedule> schedule;
 
+    /** Phase 70: the same schedule, published for the audio thread.
+
+        `publishedSchedule` is what `getScheduleRaw()` reads — one atomic load,
+        no lock. `schedule` is what the message thread (and the offline
+        renderer) keeps a counted reference to, so `getSchedule()` can hand out
+        a shared_ptr as before.
+
+        `scheduleRetired` is the safety margin: publishing pushes the outgoing
+        schedule in here and drops anything older than two, so a block that is
+        mid-render when the swap happens is reading an object that still has an
+        owner. The release therefore always happens on the message thread. */
+    std::atomic<const PublishedSchedule*> publishedSchedule { nullptr };
+    std::vector<std::shared_ptr<const PublishedSchedule>> scheduleRetired;
+
+    /** Phase 70: the one measurement object the audio callback reuses.
+
+        It used to be a local in renderNextBlock, so every callback constructed
+        three vectors (three reserves), filled them, and freed them on return —
+        a malloc/free storm in the real-time thread. The capacities are bought
+        once, when the engine is constructed; from then on the callback only
+        calls clear(). */
+    RenderStats liveStats;
+
     std::atomic<double> positionBeats { 0.0 };
     std::atomic<double> lengthBeats   { timelineBeats };
     std::atomic<double> lengthSeconds { timelineBeats * 0.5 };
@@ -1065,6 +1125,16 @@ private:
         allocation, and losing one block of a preview is inaudible. */
     juce::SpinLock previewLock;
     std::shared_ptr<const SampleBuffer> previewPending;
+
+    /** Phase 70: where the audio thread parks the buffer it is replacing.
+
+        Assigning straight over `previewVoice.buffer` drops the last reference
+        to the outgoing sample whenever the message thread has already let go
+        of it, and that is a free of the whole frame array — on the audio
+        thread, which is the one thing this file is careful about. Moving it
+        here instead means the message thread performs the release, one
+        hand-off later, under the same lock. */
+    std::shared_ptr<const SampleBuffer> previewRetired;
     std::atomic<int>    previewSerial   { 0 };
     std::atomic<int>    previewConsumed { 0 };
     std::atomic<double> previewSeconds  { 3.0 };
