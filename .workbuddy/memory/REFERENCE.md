@@ -370,8 +370,11 @@
   - **同源判据 = "整处 / 局部"**：整处动（拖、删）= 对这一份的决定，兄弟不动；
     动一部分 = 形状变了，兄弟跟着变。`wholeGroupOccurrencesInDrag()` / `isWholeOccurrenceSelected()`
     （P63 起；之前误用 `isWholeGroupSelected`）是同一个问题的两个入口。
-  - **形状同步** `Layer::syncGroupShape(gid, source)`：按成员序（start, pitch, id）配对，
+  - **形状同步** `Layer::syncGroupShape(gid, source)`：按成员序配对，
     把源出现的相对位置 + 全部属性写进每个兄弟出现，锚点是兄弟自己的起点。多退少补。
+    成员序 = `noteShapeLess` / `clipShapeLess`，**配对键只能写形状编辑自己不会改的字段**：
+    起点 + 名字（block 侧，P72；以前第二键是 pitch，拖底边改 pitch 就把序号配对扰乱了，
+    两个副本互换名字和音频）。音符侧仍是 start, pitch, id——同样的隐患还在，没改。
   - **离开形状**（删/取消编组）没有模板可抄，用 `Layer::collectTwinMembers()`：在原件还在时
     按序号配对，返回兄弟出现里对应的成员，由调用方删除或解组。判据同上：整处选中就跳过。
   - 同步挂在**编辑动作本身**，不挂在 mouseUp：`applyMove`（拖动/整组动）、`applyNoteResize`、
@@ -637,6 +640,19 @@
   头：`start += delta`，终点钉住）。不要用鼠标算的 delta：最小长度和 offset 会把主块夹住，
   兄弟就会超前。每个兄弟走的是同一个 `applySampleTrim`，各自的 offset/最小长度仍然生效。
   早先只有被抓住的那块动（P25 的规则照搬到块上），多选时看着像"只改了一个"。
+- **高度是上下两条边**（P72）：`edgeOfClip()` 一次命中四条边（头 / 尾 / 上 / 下，取最近的），
+  `clipEdgeAt()` 只在**已选中**的块里找（P58/P59 的规则不变），`selectedTrimEdgeAt()` 是它
+  过滤出「头 / 尾」的结果——不要各判一次，角落像素会得到两个答案（按下按一个走、光标画另一个）。
+  上边缘拖 = `pitch` 不动、`laneSpan` 跟指针所在行变；下边缘拖 = 顶行不动、`pitch` 跟指针行变。
+  两向都按整行（`pitchAtScreenY`），因为 `laneSpan` 就是行数，块不跨行。上限
+  `maxLaneSpanFor(pitch) = min(128, numPitches - pitch)`——夹 `laneSpan` 本身会让 pitch 120 的块
+  长到 128 行以外（画出去，用户以为没反应）。
+  高度带 `jmin(band, height * 0.25f)`：一行高的块只有 `keyHeight`（约 18 px），上下各一条 8 px 的
+  带子会把整块吃掉，中间就没有「拖位置」的地方了。光标：上 / 下 → `UpDownResizeCursor`。
+  改高走 `applySampleSpanDrag()`——delta 取**已生效**的那个（clamp 会吃掉一部分），并且加在
+  **手势起点**上而不是当前值上：组同步已经把主块的绝对高度抄给了别的副本，按当前值加就是两倍高。
+  右键「加高一行 / 降低一行」走 `growSelectedSamples(lanes)`：作用于整个选择、各自一步、
+  副本由 `syncShapeOfClip()` 跟上（高度是形状，见「编组」节）。
 - **块是窗口不是拷贝**：`sourceOffsetSeconds` 是文件内起点；左端拉伸同时改 `startBeat` 与
   offset（同样的秒数），音频留在原时间位置；右端拉伸只改 `lengthBeats`。
 - **尾部无上限（P51）**：右端想拖多长拖多长（见"采样伸缩"节）；左 ≥ offset 允许的距离
@@ -646,8 +662,8 @@
   「启用 / 停用曲线」一并删掉——留着它只是把同一个谎言挪一次点击的距离。
   `openSampleAutomation()` 会把 `enabled = false` 的旧曲线恢复成 true：开关删了之后，
   那是唯一的回头路（老工程里可能存在这个状态）。
-- **三个命中区（P49 起是两个 + 一个按钮；P51 按钮挪到块顶）**：整高的左右边 = 拉伸，
-  其余 = 拖动，**块顶右上**的 chevron = 展开曲线箱（Y = 块顶 + 1，距右缘 = 音符 chevron
+- **命中区（P49 起是两个 + 一个按钮；P51 按钮挪到块顶；P72 加两条横边）**：左右边 = 拉伸，
+  上下边 = 改高度，其余 = 拖动，**块顶右上**的 chevron = 展开曲线箱（Y = 块顶 + 1，距右缘 = 音符 chevron
   的同一公式 band+air+width——"右上角的小箭头展开曲线"对音符和块是同一个习惯）。
   **淡入淡出手柄已删除**（P29 的三个 `kFade*` 常量、`applySampleFade`、
   `hitTestSampleFadeHandle`、`drawSampleFades` 全套退场）。

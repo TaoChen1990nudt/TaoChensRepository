@@ -11329,6 +11329,253 @@ juce::String MainComponent::runSelfTest()
                  + (reloadedError.isEmpty() ? juce::String() : " · " + reloadedError));
     }
 
+    //-- Phase 72: 采样块的高度是上下两条边的事 -------------------------------
+    // 长度一直有两种抓法（头、尾两块带子），高度却只有右键菜单——"这个块该多厚"
+    // 只能一行一行点。两条水平边就是同一件事，转九十度。
+    {
+        LayerStack t72;
+        RackModel  r72;
+        PianoRollComponent roll (t72, r72);
+        roll.setSize (1200, 620);
+
+        t72.addLayer (utf8 ("P72 高度"), palette::layer1);
+        auto* layer = t72.getLayer (0);
+
+        const auto makeBlock = [layer] (const char* name, double start, int pitch, int span)
+        {
+            SampleEvent clip;
+            clip.name        = name;
+            clip.startBeat   = start;
+            clip.lengthBeats = 4.0;
+            clip.pitch       = pitch;
+            clip.laneSpan    = span;
+            return layer->addSample (clip);
+        };
+
+        // 一行中心的屏幕 y。块占 [pitch, topPitch]，矩形的 y 是 topPitch 那行的
+        // 顶边，行高 = 高度 / 行数。
+        const auto rowCentreY = [] (juce::Rectangle<float> b, int topPitch, int span, int lane)
+        {
+            const float laneH = b.getHeight() / (float) juce::jmax (1, span);
+            return b.getY() + (float) (topPitch - lane) * laneH + laneH * 0.5f;
+        };
+
+        const auto showSpan = [] (const SampleEvent* c)
+        {
+            return c == nullptr ? juce::String ("-")
+                                : juce::String (c->pitch) + "+" + juce::String (c->laneSpan);
+        };
+
+        //-- 1. 上边缘：底部不动，向上长 ------------------------------------
+        const int upId = makeBlock ("up", 1.0, 60, 2);
+        roll.setSampleSelection ({ upId });
+
+        const auto upRect = roll.getSampleScreenBounds (0, upId);
+        roll.simulateSampleSpanDrag (upId, rowCentreY (upRect, 61, 2, 63), true);
+
+        const auto* up = layer->findSample (upId);
+
+        check (utf8 ("拖采样块的上边缘，块向上长高，底部那一行不动"),
+               up != nullptr && up->pitch == 60 && up->laneSpan == 4 && up->topPitch() == 63,
+               showSpan (up) + utf8 ("（应为 60+4，顶 63）"));
+
+        //-- 2. 四条边都能认出来 --------------------------------------------
+        // 顶边和底边各自回答"我在这里"，正中间回答"哪条都不是"——否则整块都是
+        // 缩放带，就再也拖不动位置了。
+        const auto tallRect  = roll.getSampleScreenBounds (0, upId);
+        const auto edgeTop   = roll.getBlockEdgeAtForTest ({ tallRect.getCentreX(),
+                                                            tallRect.getY() + ui::pf (2.0f) });
+        const auto edgeBottom = roll.getBlockEdgeAtForTest ({ tallRect.getCentreX(),
+                                                             tallRect.getBottom() - ui::pf (2.0f) });
+        const auto edgeNone  = roll.getBlockEdgeAtForTest (tallRect.getCentre());
+
+        check (utf8 ("采样块的顶边、底边各是一条缩放带，正中间不是"),
+               edgeTop.first == upId && edgeTop.second == 3
+                 && edgeBottom.first == upId && edgeBottom.second == 4
+                 && edgeNone.second == 0,
+               juce::String (edgeTop.second) + " / " + juce::String (edgeBottom.second)
+                 + " / " + juce::String (edgeNone.second) + utf8 ("（应为 3 / 4 / 0）"));
+
+        //-- 3. 下边缘：顶部不动，向下长 ------------------------------------
+        const int downId = makeBlock ("down", 6.0, 60, 2);
+        roll.setSampleSelection ({ downId });
+
+        const auto downRect = roll.getSampleScreenBounds (0, downId);
+        roll.simulateSampleSpanDrag (downId, rowCentreY (downRect, 61, 2, 58), false);
+
+        const auto* down = layer->findSample (downId);
+
+        check (utf8 ("拖采样块的下边缘，块向下长高，顶上那一行不动"),
+               down != nullptr && down->pitch == 58 && down->topPitch() == 61 && down->laneSpan == 4,
+               showSpan (down) + utf8 ("（应为 58+4，顶 61）"));
+
+        //-- 4. 两个方向都翻不过去 ------------------------------------------
+        // 顶边拖到底边以下 = 一行高，不是负数；底边拖到顶边以上 = 一行高，
+        // 也不会"翻过来从另一侧长"。
+        roll.setSampleSelection ({ upId });
+        roll.simulateSampleSpanDrag (upId, rowCentreY (tallRect, 63, 4, 55), true);
+
+        const auto* squashedTop = layer->findSample (upId);
+
+        roll.setSampleSelection ({ downId });
+        roll.simulateSampleSpanDrag (downId, rowCentreY (downRect, 61, 4, 70), false);
+
+        const auto* squashedBottom = layer->findSample (downId);
+
+        check (utf8 ("上边缘拖过底边、下边缘拖过顶边，块都停在一行高，不会翻面"),
+               squashedTop != nullptr && squashedTop->laneSpan == 1 && squashedTop->pitch == 60
+                 && squashedBottom != nullptr && squashedBottom->laneSpan == 1
+                 && squashedBottom->pitch == 61,
+               showSpan (squashedTop) + " / " + showSpan (squashedBottom)
+                 + utf8 ("（应为 60+1 / 61+1）"));
+
+        //-- 5. 天花板是网格顶行 --------------------------------------------
+        // 没有这个上限，加高会把块顶到 128 行外面去：laneSpan 数到 129，
+        // 而画出来的那一半在网格外，用户只看到"加高没反应"。
+        const int highId = makeBlock ("high", 12.0, 120, 2);
+        roll.setSampleSelection ({ highId });
+
+        const auto highRect = roll.getSampleScreenBounds (0, highId);
+        roll.simulateSampleSpanDrag (highId, rowCentreY (highRect, 121, 2, 127), true);
+
+        const auto* high = layer->findSample (highId);
+        const int afterDrag = high != nullptr ? high->laneSpan : -1;
+
+        // 已经贴上顶行了，再"加高一行"也不该加：菜单那一步走的是同一个上限，
+        // 而 128 行是网格的尽头。
+        roll.growSelectedSamples (1);
+
+        const int afterGrow = high != nullptr ? high->laneSpan : -1;
+
+        check (utf8 ("采样块长到网格顶行为止，不会伸到 128 行外面"),
+               high != nullptr && afterDrag == 8 && high->topPitch() == 127
+                 && afterGrow == 8,
+               showSpan (high) + utf8 ("，拖到 ") + juce::String (afterDrag)
+                 + utf8 (" 行，再加高还是 ") + juce::String (afterGrow)
+                 + utf8 (" 行（应为 8 / 8）"));
+
+        //-- 6. 编组：一个块变高，别的副本跟着变高 --------------------------
+        const int shaped = layer->addGroup (utf8 ("高度组"), groupPalette::group1);
+
+        const int originId = makeBlock ("copy", 20.0, 40, 2);
+        layer->assignSamplesToGroup ({ originId }, shaped, 0);
+        layer->setOccurrenceStart (shaped, 0, 20.0);
+
+        const int twinId = makeBlock ("copy", 40.0, 40, 2);
+        layer->assignSamplesToGroup ({ twinId }, shaped, 1);
+        layer->setOccurrenceStart (shaped, 1, 40.0);
+
+        roll.setSampleSelection ({ originId });
+
+        const auto originRect = roll.getSampleScreenBounds (0, originId);
+        roll.simulateSampleSpanDrag (originId, rowCentreY (originRect, 41, 2, 45), true);
+
+        const auto* originClip = layer->findSample (originId);
+        const auto* twinClip   = layer->findSample (twinId);
+
+        check (utf8 ("编组里拖高一个采样块，另一处副本同时变高，位置各在各处"),
+               originClip != nullptr && twinClip != nullptr
+                 && originClip->laneSpan == 6 && originClip->topPitch() == 45
+                 && twinClip->laneSpan == 6 && twinClip->pitch == 40
+                 && std::abs (twinClip->startBeat - 40.0) < 1.0e-9,
+               showSpan (originClip) + " / " + showSpan (twinClip)
+                 + utf8 ("，副本起 ") + juce::String (twinClip != nullptr ? twinClip->startBeat : -1.0, 1));
+
+        //-- 7. 菜单的加高一行也是一步，不是一像素 --------------------------
+        // 菜单作用于整个选择（和删除、恢复长度一样），并且每个块各自 +1 行；
+        // 副本由 syncShapeOfClip 跟上，不靠调用方记得。
+        const int menuA = makeBlock ("menuA", 60.0, 50, 2);
+        const int menuB = makeBlock ("menuB", 66.0, 44, 3);
+
+        roll.setSampleSelection ({ menuA, menuB });
+        roll.growSelectedSamples (1);
+
+        const auto* clipA = layer->findSample (menuA);
+        const auto* clipB = layer->findSample (menuB);
+
+        check (utf8 ("右键加高一行作用于整个选择，每块各自长一行"),
+               clipA != nullptr && clipA->laneSpan == 3
+                 && clipB != nullptr && clipB->laneSpan == 4,
+               showSpan (clipA) + " / " + showSpan (clipB) + utf8 ("（应为 50+3 / 44+4）"));
+
+        roll.setSampleSelection ({ originId });
+        roll.growSelectedSamples (1);
+
+        const auto* menuOrigin = layer->findSample (originId);
+        const auto* menuTwin   = layer->findSample (twinId);
+
+        check (utf8 ("菜单加高一行，编组里的副本也长一行"),
+               menuOrigin != nullptr && menuTwin != nullptr
+                 && menuOrigin->laneSpan == 7 && menuTwin->laneSpan == 7,
+               showSpan (menuOrigin) + " / " + showSpan (menuTwin) + utf8 ("（应为 40+7 / 40+7）"));
+
+        //-- 8. 改高度不会把副本的内容换掉 ----------------------------------
+        // 配对靠"成员在排序里的序号"，而排序曾经把 pitch 算进去：拖底边让块
+        // 跨过同组的另一块，排序一变，序号配错，于是两个副本互换名字和音频。
+        const int ordered = layer->addGroup (utf8 ("排序组"), groupPalette::group2);
+
+        const int a0 = makeBlock ("aa", 80.0, 60, 2);
+        const int b0 = makeBlock ("bb", 80.0, 48, 2);
+        layer->assignSamplesToGroup ({ a0, b0 }, ordered, 0);
+        layer->setOccurrenceStart (ordered, 0, 80.0);
+
+        const int a1 = makeBlock ("aa", 90.0, 60, 2);
+        const int b1 = makeBlock ("bb", 90.0, 48, 2);
+        layer->assignSamplesToGroup ({ a1, b1 }, ordered, 1);
+        layer->setOccurrenceStart (ordered, 1, 90.0);
+
+        roll.setSampleSelection ({ a0 });
+
+        const auto aRect = roll.getSampleScreenBounds (0, a0);
+        roll.simulateSampleSpanDrag (a0, rowCentreY (aRect, 61, 2, 40), false);
+
+        const auto* sortedA0 = layer->findSample (a0);
+        const auto* sortedB0 = layer->findSample (b0);
+        const auto* sortedA1 = layer->findSample (a1);
+        const auto* sortedB1 = layer->findSample (b1);
+
+        check (utf8 ("拖块下边缘越过同组另一块，两块的名字和音频不会互换"),
+               sortedA0 != nullptr && sortedB0 != nullptr
+                 && sortedA1 != nullptr && sortedB1 != nullptr
+                 && sortedA0->name == "aa" && sortedB0->name == "bb"
+                 && sortedA1->name == "aa" && sortedB1->name == "bb"
+                 && sortedA0->pitch == 40 && sortedA1->pitch == 40
+                 && sortedB1->pitch == 48,
+               (sortedA0 != nullptr ? sortedA0->name : juce::String ("-")) + " / "
+                 + (sortedB0 != nullptr ? sortedB0->name : juce::String ("-")) + utf8 (" @ ")
+                 + juce::String (sortedA1 != nullptr ? sortedA1->pitch : -1) + " / "
+                 + juce::String (sortedB1 != nullptr ? sortedB1->pitch : -1));
+
+        //-- 9. 同一组的两个副本同时在选择里，变高只落一次 ------------------
+        // 组自己会把形状抄给别的副本（绝对值），而选择集那条路是"起点值 +
+        // delta"。两者混起来就是"抄成 4 行、再加 2 行" = 两倍高，而且每多拖
+        // 一个像素就再长一次。
+        const int doubled = layer->addGroup (utf8 ("双份组"), groupPalette::group3);
+
+        const int d0 = makeBlock ("dd", 110.0, 70, 2);
+        const int e0 = makeBlock ("ee", 110.0, 66, 2);
+        layer->assignSamplesToGroup ({ d0, e0 }, doubled, 0);
+        layer->setOccurrenceStart (doubled, 0, 110.0);
+
+        const int d1 = makeBlock ("dd", 120.0, 70, 2);
+        const int e1 = makeBlock ("ee", 120.0, 66, 2);
+        layer->assignSamplesToGroup ({ d1, e1 }, doubled, 1);
+        layer->setOccurrenceStart (doubled, 1, 120.0);
+
+        roll.setSampleSelection ({ d0, d1 });
+
+        const auto dRect = roll.getSampleScreenBounds (0, d0);
+        roll.simulateSampleSpanDrag (d0, rowCentreY (dRect, 71, 2, 73), true);
+
+        const auto* dd0 = layer->findSample (d0);
+        const auto* dd1 = layer->findSample (d1);
+
+        check (utf8 ("选择里同时有同一组的两个副本，变高只落一次，不会长成两倍"),
+               dd0 != nullptr && dd1 != nullptr
+                 && dd0->laneSpan == 4 && dd1->laneSpan == 4,
+               showSpan (dd0) + " / " + showSpan (dd1) + utf8 ("（应为 70+4 / 70+4）"));
+    }
+
     //-- Phase 64 / 66: the playhead follower must not oscillate ---------------
     {
         LayerStack t64;

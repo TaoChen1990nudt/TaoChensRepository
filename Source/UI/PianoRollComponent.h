@@ -711,6 +711,11 @@ public:
         resizeTargetId()/applyNoteResize() pair the drag does. */
     bool simulateNoteResize (int noteId, double wantedBeat, bool fromTail = true);
 
+    /** Phase 72: one height step of the gesture a drag would make — the same
+        `applySampleSpanDrag` the mouse path calls, so the self-test cannot
+        pass on arithmetic the real gesture does not use. */
+    bool simulateSampleSpanDrag (int sampleId, float wantedY, bool fromTop = true);
+
     /** Phase 25: the group on the ACTIVE layer whose frame (the translucent
         bracket drawn around its members) contains this point, or -1. Notes are
         hit-tested first, so this only answers for the empty part of the frame —
@@ -1089,6 +1094,17 @@ public:
         bug. */
     std::pair<int, bool> getBlockGrabAtForTest (juce::Point<float> at) const;
 
+    /** Phase 72: which of the four edges a press at `at` would grab, as
+        (clipId, edge) where edge is the ClipEdge ordinal — 0 none, 1 head,
+        2 tail, 3 top, 4 bottom. The enum stays private; the self-test only
+        needs to tell the four apart. */
+    std::pair<int, int> getBlockEdgeAtForTest (juce::Point<float> at) const;
+
+    /** Phase 72: one lane step of 加高一行 / 降低一行, for the self-test. Same
+        function the menu calls, so the assertion cannot pass on arithmetic the
+        command does not use. */
+    void growSelectedSamples (int lanes);
+
     /** Phase 53: test hook — the DROP itself, at a local point.
 
         Builds the same SourceDetails the window delivers and calls the same
@@ -1342,7 +1358,15 @@ public:
 private:
     enum class DragMode { none, moveNote, resizeNote, resizeNoteLeft, marquee, panView,
                           scrollThumb, automationPoint, resizeSample, resizeSampleLeft,
+                          resizeSampleTop, resizeSampleBottom,
                           rulerScrub, rulerZoom, groupAutomationPoint, sampleCurvePoint };
+
+    /** Phase 72: which edge of a block the pointer is on. Two of them trim the
+        LENGTH (head / tail) and two change how many pitch lanes the block
+        covers (top / bottom), so "the band under the cursor" is one question
+        with four answers instead of two questions that can disagree on a
+        corner pixel. */
+    enum class ClipEdge { none, head, tail, top, bottom };
 
     /** Phase 52: the one place a block is actually built. `addSampleAt` (a
         dropped file) and `addSampleFromSlot` (a dragged card) differ only in
@@ -1504,6 +1528,34 @@ private:
         This asks the question the cursor is already drawing — "you are on a
         trim band" — before the click is allowed to rewrite the selection. */
     std::pair<int, bool> selectedTrimEdgeAt (juce::Point<float> position) const;
+
+    /** Phase 72: the same question for all FOUR edges of an already-selected
+        block. `selectedTrimEdgeAt` is this with the height bands filtered out,
+        so a corner pixel cannot be "head" for one caller and "top" for
+        another: both read the nearest edge of the same hit test. */
+    std::pair<int, ClipEdge> clipEdgeAt (juce::Point<float> position) const;
+
+    /** Phase 72: the height band under the pointer, for a block that need not
+        be selected (a press on an unselected block's top edge still works —
+        the trim bands have always worked that way). */
+    static ClipEdge edgeOfClip (juce::Rectangle<float> bounds, juce::Point<float> position);
+
+    /** Phase 72: set how many lanes a block covers from one of its horizontal
+        edges. `fromTop` moves the top edge and leaves the bottom lane alone
+        (the block grows upward); otherwise the bottom lane follows the pointer
+        and the top stays where the user sees it. Both snap to whole lanes,
+        because that is the model: a block never straddles a lane boundary. */
+    bool applySampleSpan (const SampleEvent& origin, float wantedY, bool fromTop);
+
+    /** Phase 72: `applySampleSpan` for the whole selection — the primary block
+        decides the delta, the others move by the same number of lanes, exactly
+        like applySampleTrimDrag does for length. */
+    bool applySampleSpanDrag (const SampleEvent& primary, float wantedY, bool fromTop,
+                              const std::vector<SampleEvent>& siblings);
+
+    /** Phase 72: the largest laneSpan a block sitting on `pitch` can have
+        without poking out above the top lane of the roll. */
+    int maxLaneSpanFor (int pitch) const noexcept;
 
     /** Right-click on a clip: delete, duplicate, fit to source, trim. */
     void showSampleMenu (int sampleId, juce::Point<int> screenPos);
@@ -1778,6 +1830,12 @@ private:
         every tail up with the pointer (the P25 mistake, in blocks this time).
         Empty unless a trim started on a multi-block selection. */
     std::vector<SampleEvent> dragTrimOriginals;
+
+    /** Phase 72: the same list for a HEIGHT drag. Separate from the trim list
+        even though the two are never live at once: one reads "how long", the
+        other "how many lanes", and sharing a bucket would invite the next edit
+        to apply a lane delta as a beat delta. */
+    std::vector<SampleEvent> dragSpanOriginals;
 
     DragMode dragMode        = DragMode::none;
     double   dragAnchorBeat  = 0.0;

@@ -2815,9 +2815,9 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         // The pointer's own cursor already says "trim band", so ask that
         // question first: if the edge belongs to something selected, that edge
         // is what the gesture is about, and the selection must survive.
-        const auto edge     = selectedTrimEdgeAt (e.position);
-        const int  edgeId   = edge.first;
-        const bool edgeTail = edge.second;
+        const auto edge      = clipEdgeAt (e.position);
+        const int  edgeId    = edge.first;
+        const auto edgeKind  = edge.second;
         const int  grabbedId = edgeId >= 0 ? edgeId : clipId;
 
         // Phase 28: the click is also the selection — except on a trim grab
@@ -2868,7 +2868,11 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
             return;
         }
 
-        const auto bounds = getSampleScreenBounds (stack.getActiveLayerIndex(), grabbedId);
+        // Phase 72: four edges, one answer. A block that was just selected by
+        // this very press has no entry in the selection hit test yet, so the
+        // band is computed from the block the press landed on.
+        const auto bounds    = getSampleScreenBounds (stack.getActiveLayerIndex(), grabbedId);
+        const ClipEdge edgeUnder = edgeId >= 0 ? edgeKind : edgeOfClip (bounds, e.position);
 
         // Phase 49: the chevron on the block opens its curve box. Checked
         // before the trim bands because it sits between them — the same order
@@ -2885,21 +2889,18 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
             return;
         }
 
-        const float band   = ui::pf (kResizeHandleWidth);
-        const bool  onTail = edgeId >= 0 ? edgeTail : (e.position.x > bounds.getRight() - band);
-        const bool  onHead = edgeId >= 0 ? ! edgeTail
-                                         : (! onTail && e.position.x < bounds.getX() + band);
-
         // Phase 28/29: a grab on a block's edge is a trim of the SELECTION
         // (Phase 56 widened it from "the grabbed block only"); a grab anywhere
         // else arms a RIGID move of the whole selection, clips and notes
         // together.
-        if ((onTail || onHead) && isSampleSelected (grabbedId))
+        if ((edgeUnder == ClipEdge::tail || edgeUnder == ClipEdge::head)
+              && isSampleSelected (grabbedId))
         {
             dragSampleId       = grabbedId;
             dragSampleOriginal = *grabbed;
             dragAnchorBeat     = beatAtScreenX (e.position.x);
-            dragMode           = onTail ? DragMode::resizeSample : DragMode::resizeSampleLeft;
+            dragMode           = edgeUnder == ClipEdge::tail ? DragMode::resizeSample
+                                                             : DragMode::resizeSampleLeft;
 
             // Phase 56: the trim is a selection-wide edit. Capture the other
             // blocks now, while they are still the shapes the user sees; the
@@ -2911,6 +2912,26 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
                     for (int id : sampleSelection)
                         if (const auto* other = activeLayer->findSample (id))
                             dragTrimOriginals.push_back (*other);
+        }
+        else if ((edgeUnder == ClipEdge::top || edgeUnder == ClipEdge::bottom)
+                   && isSampleSelected (grabbedId))
+        {
+            // Phase 72: the two horizontal edges change how many pitch lanes the
+            // block covers — the same selection-wide rule as the trim, with the
+            // same one-delta arithmetic (see applySampleSpanDrag).
+            dragSampleId       = grabbedId;
+            dragSampleOriginal = *grabbed;
+            dragAnchorBeat     = beatAtScreenX (e.position.x);
+            dragMode           = edgeUnder == ClipEdge::top ? DragMode::resizeSampleTop
+                                                            : DragMode::resizeSampleBottom;
+
+            dragSpanOriginals.clear();
+
+            if (sampleSelection.size() > 1)
+                if (auto* activeLayer = stack.getActiveLayer())
+                    for (int id : sampleSelection)
+                        if (const auto* other = activeLayer->findSample (id))
+                            dragSpanOriginals.push_back (*other);
         }
         else
         {
@@ -3948,6 +3969,21 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
             dragSampleCurvePoint (expandedSampleLayerIndex, expandedSampleId, e.position);
             break;
 
+        case DragMode::resizeSampleTop:
+        case DragMode::resizeSampleBottom:
+        {
+            // Phase 72: the pointer's ROW is the edge, so the block grows and
+            // shrinks in whole lanes as the mouse crosses them — the same
+            // "snap to the thing you are aiming at" a note's resize gets from
+            // the grid.
+            applySampleSpanDrag (dragSampleOriginal, e.position.y,
+                                 dragMode == DragMode::resizeSampleTop,
+                                 dragSpanOriginals);
+
+            stack.notifyNotesChanged();
+            break;
+        }
+
         case DragMode::marquee:
             marqueeCurrent = e.position;
             repaint();
@@ -4014,6 +4050,7 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent&)
     dragOriginals.clear();
     dragClipOriginals.clear();     // Phase 28: armed by a clip move as well
     dragTrimOriginals.clear();     // Phase 56: armed by a clip trim as well
+    dragSpanOriginals.clear();     // Phase 72: armed by a clip height drag
     dragResizeNoteId = -1;
     dragEnvelopePoint = -1;
     dragSampleId = -1;
@@ -4274,19 +4311,29 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
         // Phase 58: a SELECTED block's band is a trim target even when another
         // block covers it — the press will grab the selected one (see
         // mouseDown), so the pointer has to say so.
-        if (selectedTrimEdgeAt (e.position).first >= 0)
+        // Phase 72: four edges now, so the band itself says WHICH resize: the
+        // two vertical edges change the length, the two horizontal ones the
+        // height.
+        auto edge = clipEdgeAt (e.position);
+
+        if (edge.first < 0)
+            edge = { clip->id, edgeOfClip (getSampleScreenBounds (stack.getActiveLayerIndex(),
+                                                                  clip->id),
+                                           e.position) };
+
+        if (edge.second == ClipEdge::top || edge.second == ClipEdge::bottom)
+        {
+            setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
+            return;
+        }
+
+        if (edge.second == ClipEdge::head || edge.second == ClipEdge::tail)
         {
             setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
             return;
         }
 
-        const auto bounds = getSampleScreenBounds (stack.getActiveLayerIndex(), clip->id);
-        const float band  = ui::pf (kResizeHandleWidth);
-        const bool  onEnd = e.position.x > bounds.getRight() - band
-                              || e.position.x < bounds.getX() + band;
-
-        setMouseCursor (onEnd ? juce::MouseCursor::LeftRightResizeCursor
-                              : juce::MouseCursor::PointingHandCursor);
+        setMouseCursor (juce::MouseCursor::PointingHandCursor);
 
         if (hoveredNoteId != -1)
         {
@@ -8302,6 +8349,179 @@ bool PianoRollComponent::applySampleTrimDrag (const SampleEvent& primary, double
 }
 
 //==============================================================================
+//-- Phase 72: how TALL a block is — the two horizontal edges -----------------
+//
+// Length was the only thing an edge could change: the head and the tail were
+// the only bands, so a block's height was whatever `laneSpan` the drop gave it
+// (four lanes) and the menu's 加高一行 / 降低一行 were the only way to change it
+// afterwards. The two edges a block already has are enough to make that a
+// gesture — the same one a note gets on its tail, turned ninety degrees.
+
+int PianoRollComponent::maxLaneSpanFor (int pitch) const noexcept
+{
+    // A block sits ON a lane and grows up. 128 lanes of roll, so the ceiling is
+    // what is left above the lane it stands on. Never below 1: a block that
+    // cannot be one lane tall is not a block.
+    return juce::jlimit (1, SampleEvent::numPitchLanes, numPitches - pitch);
+}
+
+bool PianoRollComponent::applySampleSpan (const SampleEvent& origin, float wantedY, bool fromTop)
+{
+    auto* active = stack.getActiveLayer();
+
+    if (active == nullptr)
+        return false;
+
+    auto* clip = active->findSample (origin.id);
+
+    if (clip == nullptr)
+        return false;
+
+    // Whole lanes only, and the pointer's lane IS the edge: `laneSpan` is a
+    // count of pitch lanes, so a block never straddles a boundary. This is why
+    // the drag reads the row under the pointer instead of a pixel delta — the
+    // picture the user is aiming at is made of rows.
+    const int lane = juce::jlimit (0, numPitches - 1, pitchAtScreenY (wantedY));
+
+    const int bottom = origin.pitch;
+
+    if (fromTop)
+    {
+        // The bottom lane does not move; the top edge follows the pointer. Push
+        // it below the bottom and the block is one lane tall — there is no
+        // "negative height", and flipping it to grow downwards mid-drag would
+        // make the block jump to the other side of the pointer.
+        clip->pitch    = bottom;
+        clip->laneSpan = juce::jlimit (1, maxLaneSpanFor (bottom),
+                                       juce::jmax (bottom, lane) - bottom + 1);
+    }
+    else
+    {
+        // The top lane does not move; the bottom edge follows the pointer. The
+        // mirror of the case above: the block cannot get shorter than one lane
+        // and cannot turn inside out.
+        const int newBottom = juce::jlimit (0, origin.topPitch(), lane);
+
+        clip->pitch    = newBottom;
+        clip->laneSpan = origin.topPitch() - newBottom + 1;
+    }
+
+    // Phase 62/72: how many lanes a block covers is SHAPE, exactly like its
+    // width — so the other appearances of its group get the same height. Called
+    // on every move, the way applySampleTrim does.
+    syncShapeOfClip (origin.id);
+    return true;
+}
+
+bool PianoRollComponent::applySampleSpanDrag (const SampleEvent& primary, float wantedY, bool fromTop,
+                                              const std::vector<SampleEvent>& siblings)
+{
+    if (! applySampleSpan (primary, wantedY, fromTop))
+        return false;
+
+    if (siblings.empty())
+        return true;
+
+    auto* active = stack.getActiveLayer();
+
+    if (active == nullptr)
+        return true;
+
+    const auto* applied = active->findSample (primary.id);
+
+    if (applied == nullptr)
+        return true;
+
+    // The APPLIED delta, never the pointer's: the lane limits can eat part of
+    // the drag for the block the pointer owns, and a sibling moved by the raw
+    // delta would then part company with it. Same arithmetic, and same reason,
+    // as applySampleTrimDrag.
+    const int delta = fromTop ? applied->topPitch() - primary.topPitch()
+                              : applied->pitch - primary.pitch;
+
+    if (delta == 0)
+        return true;
+
+    for (const auto& sibling : siblings)
+    {
+        if (sibling.id == primary.id)
+            continue;
+
+        auto* target = active->findSample (sibling.id);
+
+        if (target == nullptr)
+            continue;
+
+        if (fromTop)
+            target->laneSpan = juce::jlimit (1, maxLaneSpanFor (sibling.pitch),
+                                             sibling.laneSpan + delta);
+        else
+        {
+            target->pitch    = juce::jlimit (0, sibling.topPitch(), sibling.pitch + delta);
+            target->laneSpan = sibling.topPitch() - target->pitch + 1;
+        }
+
+        syncShapeOfClip (sibling.id);
+    }
+
+    return true;
+}
+
+bool PianoRollComponent::simulateSampleSpanDrag (int sampleId, float wantedY, bool fromTop)
+{
+    auto* active = stack.getActiveLayer();
+
+    if (active == nullptr)
+        return false;
+
+    const auto* clip = active->findSample (sampleId);
+
+    if (clip == nullptr)
+        return false;
+
+    const SampleEvent origin = *clip;
+
+    std::vector<SampleEvent> siblings;
+
+    if (sampleSelection.size() > 1)
+        for (int id : sampleSelection)
+            if (const auto* other = active->findSample (id))
+                siblings.push_back (*other);
+
+    const bool changed = applySampleSpanDrag (origin, wantedY, fromTop, siblings);
+
+    stack.notifyNotesChanged();
+    return changed;
+}
+
+void PianoRollComponent::growSelectedSamples (int lanes)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || lanes == 0)
+        return;
+
+    for (int id : sampleSelection)
+    {
+        auto* clip = layer->findSample (id);
+
+        if (clip == nullptr)
+            continue;
+
+        // 加高 keeps the bottom lane and grows upward, 降低 takes the top lane
+        // away. Neither moves the block's place on the timeline. The ceiling is
+        // the roll's top lane — without it, 加高 on a block sitting at lane 126
+        // pushed laneSpan past 128 and the block was drawn out of the grid.
+        clip->laneSpan = juce::jlimit (1, maxLaneSpanFor (clip->pitch),
+                                       clip->laneSpan + lanes);
+    }
+
+    // Phase 62/72: a height is shape, so every appearance of the group follows.
+    for (int id : sampleSelection)
+        syncShapeOfClip (id);
+}
+
+//==============================================================================
 //-- Phase 49: the clip's own automation box ---------------------------------
 //
 // A clip's volume curve, edited in a floating box exactly as wide as the
@@ -9482,20 +9702,70 @@ const SampleEvent* PianoRollComponent::hitTestSample (juce::Point<float> positio
     return nullptr;
 }
 
-std::pair<int, bool> PianoRollComponent::selectedTrimEdgeAt (juce::Point<float> position) const
+PianoRollComponent::ClipEdge PianoRollComponent::edgeOfClip (juce::Rectangle<float> bounds,
+                                                            juce::Point<float> position)
+{
+    if (bounds.isEmpty()
+          || position.y < bounds.getY() || position.y > bounds.getBottom()
+          || position.x < bounds.getX() || position.x > bounds.getRight())
+        return ClipEdge::none;
+
+    const float band = ui::pf (kResizeHandleWidth);
+
+    // Phase 72: the height bands are narrower than the length bands on a short
+    // block. One lane is only keyHeight tall, and two full bands would cover it
+    // completely — leaving no pixel that means "move this block".
+    const float bandY = juce::jmin (band, bounds.getHeight() * 0.25f);
+
+    const float toTail   = bounds.getRight() - position.x;
+    const float toHead   = position.x - bounds.getX();
+    const float toTop    = position.y - bounds.getY();
+    const float toBottom = bounds.getBottom() - position.y;
+
+    // Nearest edge wins, so a corner pixel means the edge it is drawn on
+    // instead of "whichever test ran first". Length edges win ties: length is
+    // the edit a block is usually aimed at, and it was here first.
+    ClipEdge best     = ClipEdge::none;
+    float    bestDist = 1.0e9f;
+
+    if (toTail <= band && toTail < bestDist)
+    {
+        bestDist = toTail;
+        best     = ClipEdge::tail;
+    }
+
+    if (toHead <= band && toHead < bestDist)
+    {
+        bestDist = toHead;
+        best     = ClipEdge::head;
+    }
+
+    if (toTop <= bandY && toTop < bestDist)
+    {
+        bestDist = toTop;
+        best     = ClipEdge::top;
+    }
+
+    if (toBottom <= bandY && toBottom < bestDist)
+        best = ClipEdge::bottom;
+
+    return best;
+}
+
+std::pair<int, PianoRollComponent::ClipEdge>
+PianoRollComponent::clipEdgeAt (juce::Point<float> position) const
 {
     const auto* layer = stack.getActiveLayer();
 
     if (layer == nullptr || sampleSelection.empty())
-        return { -1, false };
+        return { -1, ClipEdge::none };
 
-    const int   index    = stack.getActiveLayerIndex();
-    const float band     = ui::pf (kResizeHandleWidth);
-    const auto& samples  = layer->getSamples();
+    const int   index   = stack.getActiveLayerIndex();
+    const auto& samples = layer->getSamples();
 
-    int   bestId   = -1;
-    bool  bestTail = false;
-    float bestDist = 1.0e9f;
+    int      bestId   = -1;
+    ClipEdge bestEdge = ClipEdge::none;
+    float    bestDist = 1.0e9f;
 
     // Topmost first, the order hitTestSample answers in: the block drawn last
     // is the one under the pointer, so ties go to it.
@@ -9515,30 +9785,42 @@ std::pair<int, bool> PianoRollComponent::selectedTrimEdgeAt (juce::Point<float> 
         // the user saw "only the rightmost block trims, the others sometimes do
         // nothing at all". The bands are for the inside of the edge; a pointer
         // past the block is not aiming at that block.
-        if (b.isEmpty()
-              || position.y < b.getY() || position.y > b.getBottom()
-              || position.x < b.getX() || position.x > b.getRight())
-            continue;
+        const auto edge = edgeOfClip (b, position);
 
-        const float toTail = b.getRight() - position.x;
-        const float toHead = position.x - b.getX();
+        if (edge == ClipEdge::none)
+            continue;
 
         // The NEARER edge wins. Two blocks that share a boundary both answer
         // "in band" for the same pixel; picking by distance makes that pixel
         // mean "the edge it is drawn on", not "whichever block came first".
-        const bool  tail = toTail <= toHead;
-        const float dist = tail ? toTail : toHead;
+        const float dist = edge == ClipEdge::tail ? b.getRight() - position.x
+                         : edge == ClipEdge::head ? position.x - b.getX()
+                         : edge == ClipEdge::top  ? position.y - b.getY()
+                                                  : b.getBottom() - position.y;
 
-        if (dist > band || dist >= bestDist)
+        if (dist >= bestDist)
             continue;
 
         bestId   = it->id;
-        bestTail = tail;
+        bestEdge = edge;
         bestDist = dist;
     }
 
-    return bestId >= 0 ? std::pair<int, bool> { bestId, bestTail }
-                       : std::pair<int, bool> { -1, false };
+    return { bestId, bestEdge };
+}
+
+std::pair<int, bool> PianoRollComponent::selectedTrimEdgeAt (juce::Point<float> position) const
+{
+    // Phase 72: one hit test, four answers. This caller only cares about the
+    // two that change the LENGTH, so it filters — but it asks the same
+    // function the height drag asks, so a corner pixel cannot be "head" for
+    // one and "top" for the other.
+    const auto edge = clipEdgeAt (position);
+
+    if (edge.second != ClipEdge::tail && edge.second != ClipEdge::head)
+        return { -1, false };
+
+    return { edge.first, edge.second == ClipEdge::tail };
 }
 
 int PianoRollComponent::getEditableSampleIdAt (juce::Point<float> position) const
@@ -9563,6 +9845,13 @@ std::pair<int, bool> PianoRollComponent::getBlockGrabAtForTest (juce::Point<floa
         return { hit->id, false };
 
     return { -1, false };
+}
+
+std::pair<int, int> PianoRollComponent::getBlockEdgeAtForTest (juce::Point<float> at) const
+{
+    const auto edge = clipEdgeAt (at);
+
+    return { edge.first, (int) edge.second };
 }
 
 int PianoRollComponent::getActiveLayerSampleCount() const
@@ -11308,15 +11597,18 @@ void PianoRollComponent::showSampleMenu (int sampleId, juce::Point<int> screenPo
             if (result == 2)
                 target->startBeat = safe->snapEnabled ? safe->snapBeat (target->startBeat)
                                                       : target->startBeat;
-            else if (result == 3)
+            else if (result == 3 || result == 4)
             {
-                target->laneSpan = juce::jlimit (1, SampleEvent::numPitchLanes, target->laneSpan + 1);
-                safe->syncShapeOfClip (sampleId);      // Phase 62: height is shape too
-            }
-            else if (result == 4)
-            {
-                target->laneSpan = juce::jlimit (1, SampleEvent::numPitchLanes, target->laneSpan - 1);
-                safe->syncShapeOfClip (sampleId);
+                // Phase 72: the whole selection, like delete and restore — and
+                // every other appearance of their groups, which
+                // growSelectedSamples reaches through syncShapeOfClip. Before
+                // this the command wrote one block's laneSpan and called the
+                // sync by hand: the same edit, but the multi-selection and the
+                // "which copies does it reach" rule lived in two places.
+                safe->growSelectedSamples (result == 3 ? 1 : -1);
+                safe->stack.notifyNotesChanged();
+                safe->repaint();
+                return;
             }
             else if (result == 7)
             {

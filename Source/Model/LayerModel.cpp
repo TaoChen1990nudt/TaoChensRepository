@@ -435,8 +435,16 @@ namespace
         if (std::abs (a.startBeat - b.startBeat) > 1.0e-9)
             return a.startBeat < b.startBeat;
 
-        if (a.pitch != b.pitch)
-            return a.pitch < b.pitch;
+        // Phase 72: pitch is SHAPE, not identity — and this comparator is what
+        // PAIRS a member with its twin, so it must not read a field the shape
+        // edit itself can change. Dragging a block's bottom edge moves its
+        // pitch; sorting on pitch then re-ordered the members, and the ordinal
+        // pairing (which is all the pairing has) handed each twin the other's
+        // name, audio and curves. Start + name identifies a member; identical
+        // duplicates are interchangeable, so the id tie-break never has to be
+        // meaningful.
+        if (a.name != b.name)
+            return a.name < b.name;
 
         return a.id < b.id;
     }
