@@ -345,14 +345,27 @@ void PianoRollComponent::setPlayheadBeat (double beats)
         return;
     }
 
-    // Follow the playhead once it approaches the right edge. Done before the
-    // dirty-region maths below, because a scroll moves everything and no local
-    // repaint would be correct.
-    if (transportActive && beats >= 0.0 && ! juce::approximatelyEqual (previous, beats))
+    //-- Phase 66: follow at the EDGE of the window, not at three quarters ----
+    // The old trigger fired when the playhead reached 75% of the window and
+    // dropped it back at 15% — a page-turn: the picture held still, then jumped
+    // a screen and held still again. What the user asked for is the other kind
+    // of follow: the playhead walks up to the right edge and STAYS there while
+    // the ruler slides under it, and the same on the way back, pinned to the
+    // left edge. So the condition is "outside the window" and the landing spot
+    // is the edge itself.
+    //
+    // Beat 0 is the one exception, and it is the user's: a rewind to the very
+    // start is a return, not a scroll. Chasing it would yank the window off
+    // whatever the user was looking at, and the hand-back above already owns
+    // that case — so the left edge only follows while the playhead is
+    // genuinely somewhere past the start.
+    if (transportActive && visible > 1.0 && ! juce::approximatelyEqual (previous, beats))
     {
-        const double lead    = scrollBeats + visible * 0.75;
+        const double rightEdge = scrollBeats + visible;
+        const bool   pastRight = beats > rightEdge + 1.0e-9;
+        const bool   pastLeft  = beats > 1.0e-9 && beats < scrollBeats - 1.0e-9;
 
-        if (visible > 1.0 && (beats < scrollBeats || beats > lead))
+        if (pastRight || pastLeft)
         {
             // The first push is where "the state before I moved over there" is
             // captured — once, not on every frame, or the window would follow
@@ -363,9 +376,13 @@ void PianoRollComponent::setPlayheadBeat (double beats)
                 followScrolled  = true;
             }
 
-            ensureTimelineExtendsTo (beats + visible);
+            if (pastRight)
+                ensureTimelineExtendsTo (beats + visible);
+
             const double maxBeats = juce::jmax (0.0, timelineBeats - visible);
-            scrollBeats = juce::jlimit (0.0, maxBeats, beats - visible * 0.15);
+            const double target   = juce::jlimit (0.0, maxBeats, pastRight ? beats - visible : beats);
+
+            scrollBeats = target;
 
             playheadBeat = beats;
             soundingNotes.clear();
@@ -1969,9 +1986,16 @@ juce::Rectangle<float> PianoRollComponent::getGroupLabelBounds (int layerIndex, 
     juce::GlyphArrangement glyphs;
     glyphs.addLineOfText (font, text, 0.0f, 0.0f);
 
-    const float width = juce::jlimit (ui::pf (34), ui::pf (168),
-                                      glyphs.getBoundingBox (0, -1, true).getWidth()
-                                        + ui::pf (16) + ui::pf (13));
+    // Phase 66: the pill may not be wider than the group it names. A group
+    // 0.2 beats long is about 8 px at the default zoom, while the minimum pill
+    // is 34 px — the name tag then hangs out over whatever sits to the right,
+    // and which group it belongs to stops being readable. Clamped to the
+    // group's own width the tag is exactly as wide as the bracket under it;
+    // `drawText` with useEllipses = false trims the text for us.
+    const float width = juce::jmin (juce::jlimit (ui::pf (34), ui::pf (168),
+                                                  glyphs.getBoundingBox (0, -1, true).getWidth()
+                                                    + ui::pf (16) + ui::pf (13)),
+                                    content.getWidth());
 
     // Above the topmost member, and inside the grid when the group sits against
     // the very top row — a label half off the canvas would be unclickable.
@@ -2001,6 +2025,14 @@ juce::Rectangle<float> PianoRollComponent::getGroupAutomationHandleBounds (int l
     // reads: a handle flush with the edge looks like a clipped button.
     const float w = ui::pf (12);
 
+    // Phase 66: a pill narrower than the group now can be narrower than this
+    // handle too — placing it anyway puts a 12 px button outside the tag it
+    // belongs to. Below that width there is no handle: the tag is a name, and
+    // a group that narrow is not a place where two controls fit anyway.
+    if (pill.getWidth() < w + ui::pf (6))
+    {
+        return {};
+    }
     return { pill.getRight() - w - ui::pf (1.5f), pill.getY() + ui::pf (1.5f),
              w, juce::jmax (ui::pf (8), pill.getHeight() - ui::pf (3)) };
 }
@@ -4914,22 +4946,26 @@ void PianoRollComponent::drawGroupLabels (juce::Graphics& g)
                                       && hoveredHandleGroupId == group.getId()
                                       && hoveredHandleLayer == i;
 
-                g.setColour (open ? colour.brighter (0.8f).withAlpha (alpha * 0.55f)
-                                  : juce::Colours::black.withAlpha (alpha * 0.30f));
-                g.fillRoundedRectangle (handle, ui::pf (2.5f));
+                // Phase 66: absent when the tag is too narrow to hold it.
+                if (! handle.isEmpty())
+                {
+                    g.setColour (open ? colour.brighter (0.8f).withAlpha (alpha * 0.55f)
+                                      : juce::Colours::black.withAlpha (alpha * 0.30f));
+                    g.fillRoundedRectangle (handle, ui::pf (2.5f));
 
-                juce::Path chevron;
-                const float cx = handle.getCentreX();
-                const float cy = handle.getCentreY() + (open ? ui::pf (1.2f) : 0.0f);
+                    juce::Path chevron;
+                    const float cx = handle.getCentreX();
+                    const float cy = handle.getCentreY() + (open ? ui::pf (1.2f) : 0.0f);
 
-                chevron.startNewSubPath (cx - ui::pf (2.8f), cy - ui::pf (1.4f));
-                chevron.lineTo (cx, cy + ui::pf (1.8f));
-                chevron.lineTo (cx + ui::pf (2.8f), cy - ui::pf (1.4f));
+                    chevron.startNewSubPath (cx - ui::pf (2.8f), cy - ui::pf (1.4f));
+                    chevron.lineTo (cx, cy + ui::pf (1.8f));
+                    chevron.lineTo (cx + ui::pf (2.8f), cy - ui::pf (1.4f));
 
-                g.setColour (juce::Colours::white.withAlpha (open || hot ? 0.95f : 0.7f));
-                g.strokePath (chevron, juce::PathStrokeType (ui::pf (1.2f),
-                                                             juce::PathStrokeType::curved,
-                                                             juce::PathStrokeType::rounded));
+                    g.setColour (juce::Colours::white.withAlpha (open || hot ? 0.95f : 0.7f));
+                    g.strokePath (chevron, juce::PathStrokeType (ui::pf (1.2f),
+                                                                 juce::PathStrokeType::curved,
+                                                                 juce::PathStrokeType::rounded));
+                }
             }
 
             // A mount marker: the pill's bottom edge is underlined in the

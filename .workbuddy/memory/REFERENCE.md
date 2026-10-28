@@ -288,6 +288,10 @@
   `captureSampleDragOriginals()`），所以两组各自的采样块一起平移。
   整处判据是 `isWholeOccurrenceSelected(gid, occ)`，不是 `isWholeGroupSelected`（后者问整个选区，
   多选时永远 false）。
+- **名字标签不能比组宽（P66）**：`getGroupLabelBounds()` 的文字宽度再和组框宽度取 `jmin`。
+  标签最小 34 px，而一个 0.1 拍的组在屏幕上只有 5 px（`getNoteBounds` 的 5 px 下限），
+  不夹的话标签会横出组框压到隔壁内容。宽度不够 `12 + 6` px 时 `getGroupAutomationHandleBounds()`
+  返回空——曲线把手不画，也别在标签外面画。
 - **采样是组成员**：成员计数/`getGroupContentBounds`/组拖动/`pruneEmptyGroups` 都要同时看
   notes 和 samples。**P56 起复制粘贴也带采样**：整组（音符 + 块）被选中才算"整组"，
   `pasteEditClipboard()` 见到 `! groupClips.empty()`（P63 之前是 `groupClip.valid`）直接走
@@ -549,13 +553,15 @@
 - 落点写盘只有一处 `parkTransportAt(beat)`：`audio.stopTransport()`（引擎语义 = 归零 + 淡出）
   **之后**再 `setPositionBeats`，中间不重绘，看不到归零那一瞬。
 - **空格 / 回车**：空格 = 在跑就停、停着就播；回车 = 永远回零。
-- **播放跟随视图（P58 / P64）**：`setPlayheadBeat()` 里两条互斥分支。
-  **推走** = 播放头越过窗口 75%（`scrollBeats + visible * 0.75`），记下当时的 `userScrollBeats`，
-  视图前移让播放头落在 15% 处（一次挪 60% 窗口）；**归还** = 播放头回到 `userScrollBeats` 那个
-  窗口内，视图退回原处。
-  **归还必须再要求"播放头在往回走"**（`beats < previous`）。推走时抓拍的那个窗口本来就含着
-  当前播放头，少这一条就是：本帧推走 → 下帧归还 → 再下帧推走，60fps 横跳 60% 窗口，
-  表现为钢琴窗疯狂闪屏（P64）。前进永不归还；loop 跳回 / scrub / seek 都算回退，照常归还。
+- **播放跟随视图（P58 / P64 / P66）**：`setPlayheadBeat()` 里两条互斥分支。
+  **贴边跟随（P66）** = 播放头越过窗口**右边界**（`scrollBeats + visible`）就 `scrollBeats = beats - visible`
+  —— 播放头钉在标尺尾部，画面在它下面连续滑动；越过**左边界**就 `scrollBeats = beats`，钉在标尺头部。
+  每帧都滚一小段（60fps ≈ 0.03 拍/帧），所以**每帧整窗重绘是它的正常成本**，不是 bug。
+  左边界要求 `beats > 1e-9`：回退到 0 是"回家"不是"滚动"，交给下面的归还分支（用户明确要求排除 0 点）。
+  **归还** = 播放头回到 `userScrollBeats` 那个窗口内，视图退回原处；**必须再要求"播放头在往回走"**
+  （`beats < previous`）。推走时抓拍的那个窗口本来就含着当前播放头，少这一条就是：本帧推走 →
+  下帧归还 → 再下帧推走，60fps 横跳一整个窗口，表现为钢琴窗疯狂闪屏（P64）。
+  P66 之前的"推走"是**翻页**：触发线 3/4、落点 15%，一次挪 60% 窗口后画面静止。别把两种写法混用。
 
 ## 文件树与扫描（P28 / P33 默认折叠）
 - **层级唯一来源是扫描出来的 `DirNode` 树**：`buildRows()` 摊平成行。空目录不出行。

@@ -11134,7 +11134,7 @@ juce::String MainComponent::runSelfTest()
                  + (reloadedError.isEmpty() ? juce::String() : " · " + reloadedError));
     }
 
-    //-- Phase 64: the playhead follower must not oscillate -------------------
+    //-- Phase 64 / 66: the playhead follower must not oscillate ---------------
     {
         LayerStack t64;
         RackModel  r64;
@@ -11150,6 +11150,9 @@ juce::String MainComponent::runSelfTest()
         int    jumps      = 0;
         int    backwards  = 0;
         double biggest    = 0.0;
+        double overshoot  = 0.0;
+        double worstGap   = 0.0;     // distance from the playhead to the right edge
+        bool   following  = false;
 
         // 120 BPM at 60 fps is about 0.033 beat per frame — the same cadence the
         // transport timer drives this with.
@@ -11159,9 +11162,21 @@ juce::String MainComponent::runSelfTest()
 
             const double now = roll.getScrollBeats();
 
+            // Phase 66: the playhead may never leave the window on the right.
+            // "Stays on the last beat of the ruler" is exactly this number.
+            overshoot = juce::jmax (overshoot, b - (now + visible));
+
+            // ...and once the follow has started, it has to KEEP the playhead at
+            // the edge. A page-turn lands it in the middle of the window and
+            // waits: the gap is then most of a screen, which is the thing that
+            // is not wanted here.
+            if (following)
+                worstGap = juce::jmax (worstGap, (now + visible) - b);
+
             if (! juce::approximatelyEqual (now, lastScroll))
             {
                 ++jumps;
+                following = true;
 
                 if (now < lastScroll - 1.0e-9)
                     ++backwards;
@@ -11171,14 +11186,17 @@ juce::String MainComponent::runSelfTest()
             }
         }
 
-        // The bug this pins: the push fires at 3/4 of the window, then the
-        // hand-back sees the playhead still inside the window it just captured
-        // and undoes it on the next frame — 60 times a second, 85% of the window
-        // each way. "Backwards" is that oscillation.
-        check (utf8 ("播放头越过窗口 3/4 后视图只向前跟，不再每帧横跳"),
-               backwards == 0 && jumps < 40,
+        // Phase 64's bug was the push undoing itself every frame; Phase 66 moved
+        // the trigger from 75% of the window to the edge itself, which makes the
+        // follow a continuous slide rather than a page-turn. Both are pinned
+        // here: no backwards step, no playhead outside on the right, and the
+        // playhead never parked in the middle of the window either.
+        check (utf8 ("播放头前进时始终贴在窗口右边界，视口只向右滑"),
+               backwards == 0 && overshoot < 0.01 && worstGap < 0.1,
                juce::String (jumps) + utf8 (" 次跟随，回退 ") + juce::String (backwards)
-                 + utf8 (" 次，最大 ") + juce::String (biggest, 1)
+                 + utf8 (" 次，最大步进 ") + juce::String (biggest, 2)
+                 + utf8 (" 拍，越过右边界 ") + juce::String (overshoot, 3)
+                 + utf8 (" 拍，离右边界最远 ") + juce::String (worstGap, 2)
                  + utf8 (" 拍（窗口 ") + juce::String (visible, 1) + utf8 (" 拍）"));
 
         // ...and the hand-back still does its own job: a loop jump or a rewind
@@ -11191,6 +11209,137 @@ juce::String MainComponent::runSelfTest()
         check (utf8 ("播放头跳回原窗口时，视图仍然归还"),
                std::abs (roll.getScrollBeats()) < 1.0e-6,
                juce::String (pushed, 1) + utf8 (" -> ") + juce::String (roll.getScrollBeats(), 1));
+    }
+
+    //-- Phase 66: the way BACK is pinned to the left edge --------------------
+    {
+        LayerStack t66;
+        RackModel  r66;
+        PianoRollComponent roll (t66, r66);
+        roll.setSize (1200, 520);
+        t66.addLayer (utf8 ("P66 回退"), palette::layer1);
+        roll.setPlayheadBeat (0.0);
+        roll.setTransportActive (true);
+
+        const double visible = roll.getVisibleBeats();
+
+        // Walk out past the right edge, the way playing does.
+        for (double b = 0.2; b <= 140.0; b += 0.2)
+            roll.setPlayheadBeat (b);
+
+        const double farScroll = roll.getScrollBeats();
+
+        // ...then come back, one frame at a time. Scrubbing and a loop jump both
+        // look like this to the roll.
+        int    increases = 0;
+        double outside   = 0.0;
+        double last      = roll.getScrollBeats();
+
+        for (double b = 139.8; b >= 20.0; b -= 0.2)
+        {
+            roll.setPlayheadBeat (b);
+
+            const double now = roll.getScrollBeats();
+
+            // "Stays on the first beat of the ruler" means never left of the
+            // window's own left edge.
+            outside = juce::jmax (outside, now - b);
+
+            if (now > last + 1.0e-9)
+                ++increases;
+
+            last = now;
+        }
+
+        check (utf8 ("播放头回退时始终贴在窗口左边界，视口只向左滑"),
+               increases == 0 && outside < 0.01 && roll.getScrollBeats() < farScroll,
+               juce::String (farScroll, 1) + utf8 (" -> ") + juce::String (roll.getScrollBeats(), 1)
+                 + utf8 (" · 反向移动 ") + juce::String (increases)
+                 + utf8 (" 次，播放头越出左边 ") + juce::String (outside, 3)
+                 + utf8 (" 拍（窗口 ") + juce::String (visible, 1) + utf8 (" 拍）"));
+    }
+
+    //-- Phase 66: a rewind to beat 0 is a return, not a scroll ---------------
+    {
+        LayerStack t66z;
+        RackModel  r66z;
+        PianoRollComponent roll (t66z, r66z);
+        roll.setSize (1200, 520);
+        t66z.addLayer (utf8 ("P66 归零"), palette::layer1);
+        roll.setPlayheadBeat (0.0);
+
+        // The window the user is looking at is NOT at the start, and the
+        // playhead starts inside it.
+        roll.setScrollBeats (100.0);
+        roll.setPlayheadBeat (101.0);
+        roll.setTransportActive (true);
+
+        const double parked = roll.getScrollBeats();
+
+        // A rewind to the very beginning: the left edge must not chase it.
+        roll.setPlayheadBeat (0.0);
+
+        check (utf8 ("播放头归零时不把视口拽回开头（排除 0 点）"),
+               std::abs (roll.getScrollBeats() - parked) < 1.0e-6,
+               juce::String (parked, 1) + utf8 (" -> ") + juce::String (roll.getScrollBeats(), 1));
+    }
+
+    //-- Phase 66: the name tag is never wider than the group -----------------
+    {
+        LayerStack t66t;
+        RackModel  r66t;
+
+        t66t.addLayer (utf8 ("P66 标签"), palette::layer1);
+
+        auto* layer = t66t.getLayer (0);
+
+        NoteEvent seed;
+        seed.pitch    = 72;      // middle C: a fresh roll centres its scroll there
+        seed.velocity = 0.9f;
+
+        // 0.1 beats is 5 px on screen (getNoteBounds' floor) — far narrower than
+        // the 34 px minimum pill used to be.
+        seed.startBeat   = 8.0;
+        seed.lengthBeats = 0.1;
+        const int thin = layer->addNote (seed);
+
+        // ...and one with room to spare, so "clamped" is not "always squashed".
+        seed.startBeat   = 20.0;
+        seed.lengthBeats = 4.0;
+        const int wide = layer->addNote (seed);
+
+        const int gThin = layer->addGroup (utf8 ("窄组"), groupPalette::group1);
+        const int gWide = layer->addGroup (utf8 ("宽组"), groupPalette::group2);
+
+        layer->assignNotesToGroup ({ thin }, gThin, 0);
+        layer->assignNotesToGroup ({ wide }, gWide, 0);
+
+        PianoRollComponent roll (t66t, r66t);
+        roll.setSize (1400, 520);
+
+        const auto thinPill = roll.getGroupLabelBounds (0, gThin, 0);
+        const auto thinBox  = roll.getGroupFrameBoundsForTest (0, gThin, 0);
+        const auto widePill = roll.getGroupLabelBounds (0, gWide, 0);
+        const auto wideBox  = roll.getGroupFrameBoundsForTest (0, gWide, 0);
+
+        check (utf8 ("组比名字标签还窄时，标签收成组的宽度"),
+               ! thinPill.isEmpty() && ! thinBox.isEmpty()
+                 && thinPill.getWidth() <= thinBox.getWidth() + 0.5f
+                 && thinPill.getWidth() >= thinBox.getWidth() - 0.5f,
+               juce::String (thinPill.getWidth(), 1) + utf8 (" px 标签 vs ")
+                 + juce::String (thinBox.getWidth(), 1) + utf8 (" px 组"));
+
+        check (utf8 ("足够宽的组，标签仍是自己该有的宽度（不是一律压扁）"),
+               widePill.getWidth() > ui::pf (20)
+                 && widePill.getWidth() <= wideBox.getWidth() + 0.5f,
+               juce::String (widePill.getWidth(), 1) + utf8 (" px 标签 vs ")
+                 + juce::String (wideBox.getWidth(), 1) + utf8 (" px 组"));
+
+        check (utf8 ("标签窄到放不下曲线把手时，把手不出现在标签外面"),
+               roll.getGroupAutomationHandleBounds (0, gThin, 0).isEmpty()
+                 && ! roll.getGroupAutomationHandleBounds (0, gWide, 0).isEmpty(),
+               juce::String (thinPill.getWidth(), 1) + utf8 (" px / ")
+                 + juce::String (widePill.getWidth(), 1) + utf8 (" px"));
     }
 
     //-- Phase 65: two selected groups drag together --------------------------

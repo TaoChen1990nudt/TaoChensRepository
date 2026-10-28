@@ -646,6 +646,15 @@ public:
     juce::Rectangle<float> getGroupLabelBounds (int layerIndex, int groupId,
                                                 int occurrence = -1) const;
 
+    /** Phase 66: test hook — the bracket's own rectangle. The name tag is now
+        clamped to the group's width, so "as wide as what it names" has to be
+        asserted against the box the frame is drawn with, not against a guess. */
+    juce::Rectangle<float> getGroupFrameBoundsForTest (int layerIndex, int groupId,
+                                                       int occurrence = -1) const
+    {
+        return groupFrameOf (layerIndex, groupId, occurrence);
+    }
+
     /** The group whose label is under this point, or -1. `occurrence`, when
         given, receives WHICH appearance of it (Phase 58). */
     int getGroupLabelAt (juce::Point<float> position, int* occurrence = nullptr) const;
