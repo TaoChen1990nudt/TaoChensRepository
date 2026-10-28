@@ -280,6 +280,13 @@
   宿主侧 `fillStripAutomationItems` / `applyStripAutomationChoice` 决定"推子=level lane"。
 
 ## 编辑手势（P22 起）
+- **打开不是选择**（P76）：`handleDoubleClick()` 进组只改 `editingGroupId`，**不重写选区**。
+  `if (! isSampleSelected (clip->id)) setSampleSelection ({ clip->id });`（音符侧同构，
+  用 `isSelected`）。无条件的 `setSampleSelection({clip->id})` 会把双击第一击刚选好的
+  「整次出现」收窄成一个成员，之后拖高度/长度只动一块——用户看到的是"要动两次其他才
+  联动一次"。这条与「按在已选中的东西上不能替换选区」（`handlePress` 的
+  `else if (! isSelected)`、P65 的组名 pill）是同一条规则在"打开"上的版本。
+  想让"只留这一个"，正确入口是点空白（P75）再点它。
 - **按下归谁：已选中的块优先于"画在最上面的"**（P75）：`clipEdgeAt()` 在四条边都没
   命中之后，再倒序遍历一次已选中的块，点在谁的矩形里就回 `(那块, none)`。
   `none` 是"抓住了块、没抓住边"，`handlePress` 因此保留选区并 `armSampleMove()`。

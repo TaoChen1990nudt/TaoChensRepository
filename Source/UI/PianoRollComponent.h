@@ -741,6 +741,13 @@ public:
         return dragMode == DragMode::resizeNote || dragMode == DragMode::resizeNoteLeft;
     }
 
+    /** Phase 76: WHICH note a length drag would resize, or -1 when the press
+        armed no resize. P25 confines the trim to the grabbed note even when the
+        selection is a whole appearance, and that confinement is invisible from
+        the selection (which is correct either way) and from the originals list
+        (which is "everything that moves", not "the one that stretches"). */
+    int  getResizeNoteIdForTest() const noexcept { return dragResizeNoteId; }
+
     /** Detaches the selected notes from their group(s). The group entity stays
         as long as it still has members. Returns true when anything changed. */
     bool ungroupSelection();

@@ -11913,6 +11913,267 @@ juce::String MainComponent::runSelfTest()
         }
     }
 
+    //-- Phase 76: 双击进组不许收窄已有的选区 ---------------------------------
+    // 用户报的"组内调多个采样高度，有时要拖两次其他才跟"，根子不在高度算术
+    // 上——216 种组合的模糊检查都过——而在"进组"这一步偷走了选区：
+    //
+    //   点组 → 整次出现被选中（P73 的规矩）；
+    //   双击其中一个块进组 → P73 把选区改写成"被双击的那一个"；
+    //   拖动它的上边缘 → 只有它一个跟着长。
+    //
+    // 第二次之所以好了，是因为用户重新选了一遍。同一个东西已经在选区里，一个
+    // 打开手势就不该把它换掉——和 P65 给组名 pill 定的那条一样。
+    {
+        LayerStack t76;
+        RackModel  r76;
+        PianoRollComponent roll (t76, r76);
+        roll.setSize (1200, 620);
+
+        t76.addLayer (utf8 ("P76 高度"), palette::layer1);
+        auto* layer = t76.getLayer (0);
+
+        const int gid = layer->addGroup (utf8 ("P76 组"), groupPalette::group1);
+
+        const auto makeBlock = [layer, gid] (const char* name, double start, int pitch, int occ)
+        {
+            SampleEvent clip;
+            clip.name            = name;
+            clip.startBeat       = start;
+            clip.lengthBeats     = 4.0;
+            clip.pitch           = pitch;
+            clip.laneSpan        = 2;
+            clip.groupId         = gid;
+            clip.groupOccurrence = occ;
+            return layer->addSample (clip);
+        };
+
+        const int a0 = makeBlock ("a", 1.0, 60, 0);
+        const int b0 = makeBlock ("b", 6.0, 64, 0);
+        const int c0 = makeBlock ("c", 11.0, 68, 0);
+
+        makeBlock ("a", 41.0, 60, 1);
+        makeBlock ("b", 46.0, 64, 1);
+        makeBlock ("c", 51.0, 68, 1);
+
+        layer->setOccurrenceStart (gid, 0, 0.0);
+        layer->setOccurrenceStart (gid, 1, 40.0);
+
+        const auto spansOf = [&] ()
+        {
+            juce::String out;
+
+            for (const auto& s : layer->getSamples())
+                out << s.name << "." << s.groupOccurrence << "=" << s.pitch << "+"
+                    << s.laneSpan << "  ";
+
+            return out;
+        };
+
+        //-- 1. 点一个块：闭组状态回答"整次出现" ---------------------------
+        roll.simulatePressForTest (roll.getSampleScreenBounds (0, a0).getCentre());
+
+        const int whole = (int) roll.getSampleSelection().size();
+
+        //-- 2. 双击同一个块进组：进组，但不是"改成只选它" ------------------
+        roll.simulateDoubleClickForTest (roll.getSampleScreenBounds (0, a0).getCentre());
+
+        check (utf8 ("双击进组不会把已经选中的整次出现收窄成一个块"),
+               roll.getEditingGroupId() == gid && whole == 3
+                 && roll.isSampleSelected (a0) && roll.isSampleSelected (b0)
+                 && roll.isSampleSelected (c0),
+               juce::String (whole) + utf8 (" 块被选中 → 进组后 ")
+                 + juce::String ((int) roll.getSampleSelection().size()) + utf8 (" 块（应为 3 → 3）"));
+
+        //-- 3. 接着拖 a0 的上边缘两格：同一次出现的三块一起长 --------------
+        const auto rect = roll.getSampleScreenBounds (0, a0);
+        const float laneH = rect.getHeight() / 2.0f;
+        const float x = rect.getX() + rect.getWidth() * 0.35f;
+        const float y = rect.getY() + ui::pf (2.0f);
+
+        const bool armed = roll.simulateSpanDragFromPress ({ x, y }, y - laneH * 2.0f);
+
+        const auto* ra = layer->findSample (a0);
+        const auto* rb = layer->findSample (b0);
+        const auto* rc = layer->findSample (c0);
+
+        check (utf8 ("进组后拖一块的上边缘，同一处出现的三块一起长高"),
+               armed && ra != nullptr && rb != nullptr && rc != nullptr
+                 && ra->laneSpan == 4 && rb->laneSpan == 4 && rc->laneSpan == 4,
+               (armed ? juce::String ("armed ") : juce::String ("not armed ")) + spansOf()
+                 + utf8 ("（应为 a=60+4 b=64+4 c=68+4，两处各一份）"));
+    }
+
+    //-- Phase 76: 高度拖拽的模糊检查 -----------------------------------------
+    // 抽头的音高、层高、拖动格数、上/下边缘、选中组合、副本个数全扫一遍：同一次
+    // 出现里被选中的块必须走同样多。算术要是哪天被改坏，这一条会先挂。
+    {
+        int checked = 0;
+        juce::String firstBad;
+
+        for (int occ = 1; occ <= 3 && firstBad.isEmpty(); ++occ)
+        for (int members = 2; members <= 3 && firstBad.isEmpty(); ++members)
+        for (int basePitch = 40; basePitch <= 100 && firstBad.isEmpty(); basePitch += 20)
+        for (int span0 = 1; span0 <= 4 && firstBad.isEmpty(); span0 += 3)
+        for (int selCount = 2; selCount <= members && firstBad.isEmpty(); ++selCount)
+        for (int dir = -1; dir <= 1 && firstBad.isEmpty(); dir += 2)
+        for (int lanes = 1; lanes <= 3 && firstBad.isEmpty(); ++lanes)
+        {
+            LayerStack tF;
+            RackModel  rF;
+            PianoRollComponent roll (tF, rF);
+            roll.setSize (1200, 620);
+
+            tF.addLayer (utf8 ("FUZZ"), palette::layer1);
+            auto* layer = tF.getLayer (0);
+
+            const int gid = layer->addGroup (utf8 ("F"), groupPalette::group1);
+
+            std::vector<int> ids;
+
+            for (int o = 0; o < occ; ++o)
+                for (int m = 0; m < members; ++m)
+                {
+                    SampleEvent clip;
+                    clip.name            = juce::String ("m") + juce::String (m);
+                    clip.startBeat       = 1.0 + m * 5.0 + o * 40.0;
+                    clip.lengthBeats     = 4.0;
+                    clip.pitch           = basePitch + m * 3;
+                    clip.laneSpan        = span0;
+                    clip.groupId         = gid;
+                    clip.groupOccurrence = o;
+                    ids.push_back (layer->addSample (clip));
+                }
+
+            for (int o = 0; o < occ; ++o)
+                layer->setOccurrenceStart (gid, o, o * 40.0);
+
+            roll.enterGroupEdit (gid);
+
+            std::vector<int> sel;
+
+            for (int i = 0; i < selCount; ++i)
+                sel.push_back (ids[(size_t) i]);
+
+            roll.setSampleSelection (sel);
+
+            const int primary = sel.front();
+            const auto r0 = roll.getSampleScreenBounds (0, primary);
+
+            if (! roll.getGridBounds().contains (r0.getCentre()))
+                continue;                       // 看的见的块才按得到
+
+            const float x = r0.getX() + r0.getWidth() * 0.35f;
+            const bool fromTop = dir < 0;
+            const float pressY = fromTop ? r0.getY() + ui::pf (2.0f)
+                                         : r0.getBottom() - ui::pf (2.0f);
+
+            const float laneH = r0.getHeight() / (float) span0;
+            const float targetY = pressY + (fromTop ? -1.0f : 1.0f) * laneH * (float) lanes;
+
+            const bool armed = roll.simulateSpanDragFromPress ({ x, pressY }, targetY);
+            const auto* p = layer->findSample (primary);
+
+            if (! armed || p == nullptr)
+            {
+                firstBad = "not armed (occ=" + juce::String (occ) + " m=" + juce::String (members)
+                             + " base=" + juce::String (basePitch) + " span0=" + juce::String (span0)
+                             + " sel=" + juce::String (selCount) + ")";
+                break;
+            }
+
+            const int primaryDelta = p->laneSpan - span0;
+
+            for (size_t i = 0; i < sel.size(); ++i)
+            {
+                const auto* c = layer->findSample (sel[i]);
+
+                if (c == nullptr)
+                {
+                    firstBad = "selected block vanished";
+                    break;
+                }
+
+                // 只有真正被网格顶端夹住的块才允许偏离。
+                const int ceil = juce::jlimit (1, SampleEvent::numPitchLanes,
+                                               128 - (basePitch + (int) i * 3));
+
+                if (c->laneSpan != juce::jlimit (1, ceil, span0 + primaryDelta))
+                {
+                    firstBad = "sel#" + juce::String ((int) i) + " span " + juce::String (span0)
+                                 + " -> " + juce::String (c->laneSpan) + "，抽头却 "
+                                 + juce::String (span0) + " -> " + juce::String (p->laneSpan)
+                                 + "（occ=" + juce::String (occ) + " m=" + juce::String (members)
+                                 + " base=" + juce::String (basePitch) + " sel=" + juce::String (selCount)
+                                 + " lanes=" + juce::String (lanes) + " top=" + juce::String ((int) fromTop) + "）";
+                    break;
+                }
+            }
+
+            ++checked;
+        }
+
+        check (utf8 ("模糊：同一次出现里多块一起拖高度，从没漏过一块"),
+               firstBad.isEmpty(),
+               firstBad.isEmpty() ? juce::String (checked) + utf8 (" 组合全过") : firstBad);
+    }
+
+    //-- Phase 76: 拖到键盘最顶上，夹住的是每个块自己的天花板 ------------------
+    // 上面那条模糊检查只看得见中间三十来格，怎么拖都够不到 128，所以它算的
+    // 那条 jlimit(1, ceil, …) 一直是防守性的——把兄弟块的夹取整段删掉，它照样
+    // 全过（咬测 4 就是这么过的）。真到顶的那一下必须单独测：主块被顶到 127
+    // 之后，剩下的空间要由每个块自己算，站得高的先封顶，站得低的继续走。
+    {
+        LayerStack t76t;
+        RackModel  r76t;
+        PianoRollComponent roll (t76t, r76t);
+        roll.setSize (1200, 620);
+
+        t76t.addLayer (utf8 ("P76 顶"), palette::layer1);
+        auto* layer = t76t.getLayer (0);
+
+        const int gidT = layer->addGroup (utf8 ("T"), groupPalette::group1);
+
+        const auto addBlock = [&] (const char* name, int pitch, int span)
+        {
+            SampleEvent clip;
+            clip.name        = name;
+            clip.startBeat   = 1.0 + (pitch - 64) * 0.5;
+            clip.lengthBeats = 4.0;
+            clip.pitch       = pitch;
+            clip.laneSpan    = span;
+            clip.groupId     = gidT;
+            return layer->addSample (clip);
+        };
+
+        const int low  = addBlock ("low",  64, 2);   // 头顶还有 64 格
+        const int high = addBlock ("high", 88, 2);   // 头顶只剩 40 格
+
+        roll.enterGroupEdit (gidT);
+        roll.setSampleSelection ({ low, high });
+
+        const auto rect = roll.getSampleScreenBounds (0, low);
+        const float x = rect.getX() + rect.getWidth() * 0.35f;
+        const float y = rect.getY() + ui::pf (2.0f);
+
+        // 往上拽两百格：远多于任何一条天花板，两根都得撞顶。
+        const bool armedT = roll.simulateSpanDragFromPress ({ x, y }, y - ui::pf (1400.0f));
+
+        const auto* pl = layer->findSample (low);
+        const auto* ph = layer->findSample (high);
+
+        check (utf8 ("拖到键盘最顶上，主块停在 127，高处的兄弟只长到自己那一格天花板"),
+               armedT && pl != nullptr && ph != nullptr
+                 && pl->topPitch() == PianoRollComponent::numPitches - 1
+                 && pl->laneSpan == PianoRollComponent::numPitches - 64
+                 && ph->laneSpan == PianoRollComponent::numPitches - 88,
+               (armedT ? juce::String ("armed ") : juce::String ("not armed "))
+                 + (pl != nullptr ? juce::String (pl->pitch) + "+" + juce::String (pl->laneSpan)
+                                  : juce::String ("?")) + " / "
+                 + (ph != nullptr ? juce::String (ph->pitch) + "+" + juce::String (ph->laneSpan)
+                                  : juce::String ("?"))
+                 + utf8 ("（应为 64+64 / 88+40：低的顶到 127，高的先封顶）"));
+    }
+
     //-- Phase 73: 编组要先双击进去，才能改里面的东西 -------------------------
     // 组是一个对象：点它就整块拖，像视频剪辑里的片段。把七个音符里的一个单独
     // 挪走是另一种意图，需要另一种手势——双击。在此之前，任何一次按下都得到
@@ -11969,16 +12230,34 @@ juce::String MainComponent::runSelfTest()
                showSel() + utf8 ("（应为 AB-，组 -1）"));
 
         //-- 2. 双击才是"进去" --------------------------------------------
+        // Phase 76: 进组不再收窄选区。上一击刚把整次出现选中，双击是"打开"，
+        // 不是"改成只选这个"——收窄的后果见 P76 的高度拖动用例。
         roll.simulateDoubleClickForTest (centreOf (na));
 
-        check (utf8 ("双击组里的音符会进入这个组的编辑，并选中被双击的那一个"),
-               roll.getEditingGroupId() == gid && roll.isNoteSelectedForTest (na) && ! roll.isNoteSelectedForTest (nb),
-               showSel() + utf8 ("（应为 A--，组 ") + juce::String (gid) + "）");
+        check (utf8 ("双击组里的音符会进入这个组的编辑，刚选中的整组不会被收窄"),
+               roll.getEditingGroupId() == gid
+                 && roll.isNoteSelectedForTest (na) && roll.isNoteSelectedForTest (nb),
+               showSel() + utf8 ("（应为 AB-，组 ") + juce::String (gid) + "）");
 
         //-- 3. 进去之后，点谁选谁 ----------------------------------------
+        // Phase 76: 「收窄成这一个」只发生在按的这个还不在选区里的时候。
+        // 按在已经选中的成员上不能替换选区——多选之后还要能按住其中一个把
+        // 整组一起拖走（P65 给组名 pill 定的是同一条）。两条都要能过，
+        // 只测后面那半会让"多选后按一下就散了"变成静默的回归。
         roll.simulatePressForTest (centreOf (nb));
 
-        check (utf8 ("进入组内编辑后，点哪一个音符就只选哪一个"),
+        const bool keptTheSelection = roll.getEditingGroupId() == gid
+                                        && roll.isNoteSelectedForTest (na)
+                                        && roll.isNoteSelectedForTest (nb);
+
+        check (utf8 ("组内编辑时按在已选中的音符上，不会把选区收窄成它一个"),
+               keptTheSelection,
+               showSel() + utf8 ("（应为 AB-，组 ") + juce::String (gid) + "）");
+
+        roll.setSelection ({});
+        roll.simulatePressForTest (centreOf (nb));
+
+        check (utf8 ("进入组内编辑后，点没被选中的音符就只选它一个"),
                roll.isNoteSelectedForTest (nb) && ! roll.isNoteSelectedForTest (na) && roll.getEditingGroupId() == gid,
                showSel() + utf8 ("（应为 -B-，组未退出）"));
 
@@ -12050,20 +12329,27 @@ juce::String MainComponent::runSelfTest()
         roll.simulatePressForTest (tailOf (na));
 
         const bool lockedGrab = roll.getDragOriginalCountForTest() == 2
+                                  && roll.getResizeNoteIdForTest() == -1
                                   && ! roll.pressArmedNoteResizeForTest();
 
         roll.simulateDoubleClickForTest (centreOf (na));
         roll.simulatePressForTest (tailOf (na));
 
-        const bool openGrab = roll.getDragOriginalCountForTest() == 1
-                                && roll.pressArmedNoteResizeForTest();
+        // Phase 76: 进组不再收窄选区，所以这里手上还是两块——判据不能是
+        // 「原样有几个」（那是"会动的东西"，两块当然两个），而是「谁会被
+        // 缩放」。P25 把它锁在 dragResizeNoteId 上：拖长度只拉指针下那一块，
+        // 不管选区里有几个。测数量会在"多选"和"只缩放一个"同时成立时误报。
+        const bool openGrab = roll.getResizeNoteIdForTest() == na
+                                && roll.pressArmedNoteResizeForTest()
+                                && roll.isNoteSelectedForTest (na);
 
         check (utf8 ("组的长度只有进去之后才能单独改：没进去时按边缘仍是整组，进去后才是缩放那一个"),
                lockedGrab && openGrab,
                juce::String (roll.getDragOriginalCountForTest())
-                 + (roll.pressArmedNoteResizeForTest() ? utf8 (" 个 / 缩放")
-                                                       : utf8 (" 个 / 不缩放"))
-                 + utf8 ("（关门时应 2 个 / 不缩放，开门后 1 个 / 缩放；")
+                 + (roll.pressArmedNoteResizeForTest() ? utf8 (" 个 / 缩放") : utf8 (" 个 / 不缩放"))
+                 + utf8 (" / 缩放目标 ") + juce::String (roll.getResizeNoteIdForTest())
+                 + utf8 ("（关门时应 2 个 / 不缩放 / -1，开门后缩放目标应是 ")
+                 + juce::String (na) + "；"
                  + (lockedGrab ? utf8 ("关门对") : utf8 ("关门错"))
                  + " / " + (openGrab ? utf8 ("开门对") : utf8 ("开门错")) + "）");
     }

@@ -3342,12 +3342,28 @@ void PianoRollComponent::handleDoubleClick (juce::Point<float> pos)
     // pointer — "close". A double click on a note inside the open group keeps
     // its old meaning (open that note), because "open what is already open" is
     // not a second gesture, it is the gesture that was there before.
+    //-- Phase 76: opening is not selecting ---------------------------------
+    // A click on a closed group already answered "the whole appearance" (P73),
+    // so the press that opened the double click left every member in the
+    // selection. Rewriting the selection to the one member under the pointer
+    // then threw that away — and the next height or length drag moved that one
+    // block while its group's copies, which the shape rule does propagate,
+    // still followed. The user saw "I had several selected, only one moved,
+    // and only after selecting again did the rest keep up".
+    //
+    // Same rule the group's pill got in P65: a gesture that lands on something
+    // already selected must not replace what is selected. A double click on a
+    // member OUTSIDE the selection still narrows to it, which is how "open this
+    // one and start here" keeps working.
     if (auto* clip = hitTestSample (pos))
     {
         if (clip->groupId >= 0 && clip->groupId != editingGroupId)
         {
             enterGroupEdit (clip->groupId);
-            setSampleSelection ({ clip->id });
+
+            if (! isSampleSelected (clip->id))
+                setSampleSelection ({ clip->id });
+
             return;
         }
     }
@@ -3357,7 +3373,10 @@ void PianoRollComponent::handleDoubleClick (juce::Point<float> pos)
         if (hit->groupId >= 0 && hit->groupId != editingGroupId)
         {
             enterGroupEdit (hit->groupId);
-            setSelection ({ hit->id });
+
+            if (! isSelected (hit->id))
+                setSelection ({ hit->id });
+
             return;
         }
 
