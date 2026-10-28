@@ -426,6 +426,25 @@ public:
     int getHistorySize() const { return (int) history.size(); }
     int getHistoryPosition() const { return historyPos; }
 
+    //-- Phase 71: an undo step is an ACTION, not a state ---------------------
+    /** Brackets one mouse press-and-release.
+
+        Between these two calls the history takes no snapshots at all: dragging
+        a note four beats used to fire one notesChanged per mouse move and leave
+        four states behind, so "undo" walked the drag back one quarter at a
+        time. The gesture's final state is captured once, when the mouse comes
+        up, which is what "undo what I just did" has always meant.
+
+        Nesting is ignored on purpose — one press is one gesture. A press that
+        never sees its release (the window closed mid-drag) is closed by the
+        next press. */
+    void beginUndoGesture();
+    void endUndoGesture();
+
+    /** True between begin and end. The self-test uses it to prove the bracket
+        actually swallows the edits in between. */
+    bool isUndoGestureActive() const { return undoGestureActive; }
+
     //-- Phase 12: the roll / automation split --------------------------------
     static constexpr int splitterThickness = ui::px (8);
 
@@ -1098,6 +1117,61 @@ private:
     int  historyPos       = 0;
     bool restoringHistory = false;
     static constexpr int maxHistoryStates = 64;
+
+    /** Phase 71: true from a mouse press until its release; every snapshot
+        request in between is dropped. See beginUndoGesture(). */
+    bool undoGestureActive = false;
+
+    /** Phase 71: the press/release witness.
+
+        A Desktop-wide listener rather than one per panel, because the gesture
+        it has to bracket happens in the roll, in the console window, in a
+        plugin's own editor and everywhere in between — and a rule that has to
+        be repeated in forty components is a rule that will be missing in one of
+        them. It sees a press, it sees a release, and it does nothing else.
+
+        Note the order JUCE uses: a component's own mouseDown/mouseUp runs
+        BEFORE its listeners'. That is exactly what this needs — the release
+        that finishes a drag has already written its final state by the time
+        endUndoGesture() captures it. */
+    struct GestureWatcher final : public juce::MouseListener
+    {
+        explicit GestureWatcher (MainComponent& ownerToUse) : owner (ownerToUse) {}
+
+        void mouseDown (const juce::MouseEvent&) override;
+        void mouseUp   (const juce::MouseEvent&) override;
+
+        MainComponent& owner;
+    };
+
+    GestureWatcher gestureWatcher { *this };
+
+    //-- Phase 71: previewing a note through a hosted instrument --------------
+    /** What the roll's preview is currently holding down on a plugin.
+
+        A hosted instrument is not oscillated at — it is PLAYED: the preview
+        sends it the same note-on the computer keyboard does and lets go after
+        a moment. `pitch < 0` means nothing is held. */
+    struct HostedPreview
+    {
+        int          slotId      = -1;
+        int          pitch       = -1;
+        juce::uint32 releaseAtMs = 0;
+    };
+
+    HostedPreview hostedPreview;
+
+    /** How long a preview holds a plugin note before letting go. Same shape as
+        the oscillator preview (hold ~0.28 s then decay), so both previews end
+        when the hand expects them to. */
+    static constexpr int hostedPreviewHoldMs = 420;
+
+    /** One entry point for "sound this note now": a hosted instrument gets a
+        real note-on, everything else gets the oscillator voice. */
+    void auditionPreview (int slotId, int pitch, float velocity, bool retrigger);
+
+    /** Sends the note-off for a held preview, if there is one. */
+    void releaseHostedPreview();
 
     /** One dialog at a time: a second FileChooser would orphan the first. */
     std::unique_ptr<juce::FileChooser> chooser;

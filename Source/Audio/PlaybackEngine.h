@@ -703,6 +703,14 @@ public:
         sliding rather than twelve blips. */
     void auditionNote (int pitch, float velocity, int slotId, bool retrigger = true);
 
+    /** Phase 71: ends the preview at 4 ms' notice.
+
+        Called when the same gesture is re-routed to a hosted instrument: the
+        oscillator voice that was standing in for it must not keep sounding
+        underneath the plugin, or "the preview is the patch" would be false for
+        as long as the fade lasts. A no-op when nothing is previewing. */
+    void stopAudition();
+
     /** True while a preview is pending or sounding. The device callback uses it
         to keep rendering after the transport's fade-out has finished. */
     bool hasAudition() const noexcept
@@ -784,6 +792,24 @@ public:
     int getLiveVoiceCount() const noexcept
     {
         return liveVoicesActive.load (std::memory_order_relaxed);
+    }
+
+    /** How many of the live-plugin slots are still claimed.
+
+        Phase 71: a table entry that outlives the instrument it points at is
+        invisible — `hasLiveNotes()` drops to zero either way, because the
+        renderer counts only the slots it actually rendered. But the table has
+        eight places, so eight such leftovers end live playback for the session.
+        This is the only way to see them. */
+    int getLivePluginSlotCount() const noexcept
+    {
+        int count = 0;
+
+        for (const auto& live : livePluginSlots)
+            if (live.slotId >= 0)
+                ++count;
+
+        return count;
     }
 
     /** Audio thread, once per device callback, BEFORE any rendering.
@@ -992,6 +1018,12 @@ private:
     std::atomic<bool>  auditionRetrigger { true };
     std::atomic<bool>  auditionEngaged   { false };
 
+    /** Phase 71: "cut the preview short". A flag rather than a store into
+        `auditionEngaged`, because the callback has to keep rendering long
+        enough for the 4 ms ramp to finish — dropping `engaged` first would
+        silence the device callback mid-ramp and the preview would click. */
+    std::atomic<bool>  auditionStopRequest { false };
+
     /** Audio thread only. Phase kept across a pitch change so a drag does not
         restart the waveform mid-cycle. */
     struct AuditionVoice
@@ -1111,6 +1143,15 @@ private:
     LiveVoice* findLiveVoice (int pitch, bool includeReleased);
     int        freeLiveVoiceSlot() const;
     LivePluginSlot* findLivePluginSlot (int slotId);
+
+    /** Phase 71: gives back every live-plugin slot whose instrument is gone.
+
+        Split out of the renderer on purpose: the renderer needs the plugin host
+        to do anything, and this question — "does the slot the key went to still
+        exist, and is it still a hosted instrument?" — is answered by the
+        schedule alone. A key can outlive its instrument (the card was deleted
+        mid-note), and the table it left behind keeps one of eight places. */
+    void pruneLivePluginSlots (const PublishedSchedule*);
     void  renderLiveOscillators (const PublishedSchedule*, float masterGain,
                                  float masterPan, juce::AudioBuffer<float>&, int numSamples);
     void  renderLivePlugins (const PublishedSchedule*, float masterGain,

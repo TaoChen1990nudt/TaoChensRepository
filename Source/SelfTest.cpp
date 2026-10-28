@@ -1758,6 +1758,167 @@ juce::String MainComponent::runSelfTest()
                  + juce::String (stack.getLayer (0) != nullptr
                                    ? (int) stack.getLayer (0)->getNotes().size() : -1)
                  + " notes (expected " + juce::String (notesBefore) + ")");
+
+        //-- Phase 71: one gesture, one undo step --------------------------
+        // The shape of a real drag: one press, four mouse-move updates, one
+        // release. Before Phase 71 each of the four committed its own state, so
+        // "undo" walked a four-beat drag back one beat at a time.
+        {
+            auto* dragLayer = stack.getLayer (0);
+
+            if (dragLayer != nullptr && ! dragLayer->getNotes().empty())
+            {
+                const NoteEvent startNote = dragLayer->getNotes().front();
+                const double    fromBeat  = startNote.startBeat;
+
+                cancelPendingUpdate();
+                history    = savedHistory;
+                historyPos = savedPos;
+
+                const int statesBefore = getHistorySize();
+
+                beginUndoGesture();
+
+                for (int step = 1; step <= 4; ++step)
+                {
+                    if (auto* moved = stack.getLayer (0)->findNote (startNote.id))
+                        moved->startBeat = fromBeat + (double) step;
+
+                    stack.notifyNotesChanged();
+
+                    // What the AsyncUpdater does at the end of every message
+                    // turn — while the mouse is still down.
+                    cancelPendingUpdate();
+                    commitHistory();
+                }
+
+                const int statesMidDrag = getHistorySize();
+
+                endUndoGesture();
+
+                check (utf8 ("拖动途中不落任何撤销步骤"),
+                       statesMidDrag == statesBefore && ! isUndoGestureActive(),
+                       juce::String (statesMidDrag - statesBefore) + utf8 (" 步 / 拖拽中"));
+
+                check (utf8 ("一次拖拽（四次更新）只留一个撤销步骤"),
+                       getHistorySize() == statesBefore + 1,
+                       juce::String (getHistorySize() - statesBefore) + utf8 (" 步"));
+
+                undo();
+
+                auto* afterUndo = stack.getLayer (0) != nullptr
+                                    ? stack.getLayer (0)->findNote (startNote.id) : nullptr;
+
+                check (utf8 ("撤销一次就回到拖拽前的位置"),
+                       afterUndo != nullptr
+                         && juce::approximatelyEqual (afterUndo->startBeat, fromBeat),
+                       afterUndo != nullptr ? juce::String (afterUndo->startBeat, 3)
+                                            : juce::String (utf8 ("音符没了")));
+
+                // Back to the demo, whichever position this block left it in.
+                cancelPendingUpdate();
+                restoreState (baseline);
+                cancelPendingUpdate();
+
+                history    = savedHistory;
+                historyPos = savedPos;
+                savedStateText = captureState();
+            }
+        }
+
+        //-- Phase 71: the preview of a hosted instrument -------------------
+        {
+            auto* previewSlot = rack.getSlot (0);
+
+            if (previewSlot != nullptr)
+            {
+                const int slotId    = previewSlot->id;
+                const int printedId = previewSlot->pluginId;
+
+                // A fake instance id: publish only needs `pluginId > 0` to
+                // decide a slot is hosted, which is the same recipe the plugin
+                // automation fixtures above use.
+                previewSlot->pluginId = 7788;
+                republish();
+
+                auditionPreview (slotId, 60, 0.9f, true);
+
+                check (utf8 ("图层挂的是 VST 时，预览交给插件演奏而不是正弦"),
+                       hostedPreview.pitch == 60 && hostedPreview.slotId == slotId
+                         && ! audio.getPlayback().hasAudition(),
+                       "held " + juce::String (hostedPreview.pitch)
+                         + (audio.getPlayback().hasAudition() ? utf8 (" / 还在发正弦")
+                                                              : juce::String()));
+
+                auditionPreview (slotId, 64, 0.9f, false);
+
+                check (utf8 ("预览换音高时先放开旧音"),
+                       hostedPreview.pitch == 64,
+                       juce::String (hostedPreview.pitch));
+
+                releaseHostedPreview();
+
+                check (utf8 ("预览结束会放开按住的音"),
+                       hostedPreview.pitch == -1 && hostedPreview.slotId == -1,
+                       juce::String (hostedPreview.pitch));
+
+                // The engine sees the events while the slot is STILL hosted, so
+                // they land in its live-plugin table exactly as they would in a
+                // real session — one note, held and released.
+                juce::AudioBuffer<float> drain;
+                drain.setSize (2, 512);
+                drain.clear();
+
+                audio.getPlayback().beginLiveBlock();
+
+                check (utf8 ("预览的音符真的交给了插件演奏"),
+                       audio.getPlayback().getLivePluginSlotCount() == 1,
+                       juce::String (audio.getPlayback().getLivePluginSlotCount())
+                         + utf8 (" 个槽"));
+
+                // Now the instrument goes away — the slot is deleted, or it is
+                // re-mounted as a built-in synth. The table entry that points at
+                // it has to go too: it holds one of eight lives the session has,
+                // and nothing renders it any more.
+                previewSlot->pluginId = printedId;
+                republish();
+
+                audio.getPlayback().beginLiveBlock();
+                audio.getPlayback().renderLive (drain, 512);
+
+                check (utf8 ("插件预览放下后引擎不再占着现场槽位"),
+                       audio.getPlayback().getLivePluginSlotCount() == 0,
+                       juce::String (audio.getPlayback().getLivePluginSlotCount())
+                         + utf8 (" 个槽 / ")
+                         + (audio.getPlayback().hasLiveNotes() ? utf8 ("仍然占着")
+                                                               : utf8 ("已交还")));
+
+
+                // And the fallback: the same slot as a built-in synth sounds
+                // through the oscillator voice, with nothing held on a plugin.
+                auditionPreview (slotId, 60, 0.9f, true);
+
+                check (utf8 ("内置合成器的预览仍走振荡器"),
+                       audio.getPlayback().hasAudition() && hostedPreview.pitch == -1,
+                       audio.getPlayback().hasAudition() ? utf8 ("在发正弦")
+                                                         : utf8 ("没声音"));
+
+                // Release it again, or the preview keeps a voice up past this
+                // block. Twenty blocks of 512 covers the 200 ms the fade-out
+                // takes at any sane sample rate.
+                audio.getPlayback().stopAudition();
+
+                for (int block = 0; block < 20; ++block)
+                {
+                    drain.clear();
+                    audio.getPlayback().renderAudition (drain, 512);
+                }
+
+                check (utf8 ("停止预览后振荡器会自己收干净"),
+                       ! audio.getPlayback().hasAudition(),
+                       audio.getPlayback().hasAudition() ? utf8 ("还在响") : utf8 ("已停"));
+            }
+        }
     }
 
     //-- Phase 8: the mixer window and its contents ---------------------------

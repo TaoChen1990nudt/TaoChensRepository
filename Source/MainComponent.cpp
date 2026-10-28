@@ -346,6 +346,12 @@ MainComponent::MainComponent()
     setSize (ui::px (1440), ui::px (820));
     setWantsKeyboardFocus (true);
 
+    // Phase 71: the press/release witness. Registered on the Desktop rather
+    // than on this component's subtree, because the console, a plugin's editor
+    // and the automation window are all separate top-level windows — a gesture
+    // in any of them has to bracket the same way.
+    juce::Desktop::getInstance().addGlobalMouseListener (&gestureWatcher);
+
     // Phase 34: the question both cascade deletions ask. Installed here rather
     // than defaulted in the header so the self-test can swap in a scripted
     // answer and put the real dialog back afterwards.
@@ -927,9 +933,13 @@ MainComponent::MainComponent()
 
     // Phase 19: drawing or dragging a note sounds it. The roll names the pitch
     // and the synth; the engine is the only thing here that can make noise.
+    //
+    // Phase 71: a hosted instrument is played for real — the preview sends it
+    // the note-on the keyboard would, so what you hear while drawing IS the
+    // patch on that slot rather than a sine standing in for it.
     pianoRoll.onAuditionRequested = [this] (int slotId, int pitch, float velocity, bool retrigger)
     {
-        audio.getPlayback().auditionNote (pitch, velocity, slotId, retrigger);
+        auditionPreview (slotId, pitch, velocity, retrigger);
     };
 
     //-- Phase 39: the keyboard, wired before anything can press a key --------
@@ -973,6 +983,11 @@ MainComponent::~MainComponent()
     stopTimer();
     cancelPendingUpdate();
 
+    // Phase 71: before anything else can be torn down — a global listener that
+    // outlives its owner is a crash on the next click anywhere.
+    juce::Desktop::getInstance().removeGlobalMouseListener (&gestureWatcher);
+
+    releaseHostedPreview();
     closeMixerWindow();
 
     stack.removeListener (this);
@@ -1010,6 +1025,12 @@ void MainComponent::commitHistory()
     if (restoringHistory || history.empty())
         return;
 
+    // Phase 71: a gesture in flight is not a state yet. Everything that asks
+    // for a snapshot meanwhile — the AsyncUpdater, hasUnsavedChanges(), a
+    // panel's own flush — is answered by the capture taken at mouse-up.
+    if (undoGestureActive)
+        return;
+
     auto now = captureState();
 
     if (now == history[(size_t) historyPos])
@@ -1040,12 +1061,63 @@ void MainComponent::commitHistory()
 bool MainComponent::canUndo() const { return historyPos > 0; }
 bool MainComponent::canRedo() const { return historyPos + 1 < (int) history.size(); }
 
+//==============================================================================
+//  Phase 71: an undo step is a gesture
+//==============================================================================
+void MainComponent::GestureWatcher::mouseDown (const juce::MouseEvent&)
+{
+    owner.beginUndoGesture();
+}
+
+void MainComponent::GestureWatcher::mouseUp (const juce::MouseEvent&)
+{
+    owner.endUndoGesture();
+}
+
+void MainComponent::beginUndoGesture()
+{
+    // A second press without a release (a modal swallowed the up, the window
+    // was closed mid-drag) still ends the one before it: the alternative is a
+    // session that never records anything again.
+    if (undoGestureActive)
+    {
+        endUndoGesture();
+        return;
+    }
+
+    // Settle whatever the previous gesture left pending BEFORE the bracket
+    // closes. Doing it the other way round would fold two separate actions —
+    // click a fader, then drag a note — into one undo step.
+    cancelPendingUpdate();
+    commitHistory();
+
+    undoGestureActive = true;
+}
+
+void MainComponent::endUndoGesture()
+{
+    if (! undoGestureActive)
+        return;
+
+    undoGestureActive = false;
+
+    // The one snapshot this gesture is worth. Everything in between was
+    // dropped, so a four-beat drag is one step rather than one per mouse move.
+    cancelPendingUpdate();
+    commitHistory();
+}
+
 void MainComponent::undo()
 {
     // Flush whatever gesture is still in flight first, or Ctrl+Z right after a
     // drag would undo the state *before* the drag and then store the drag on
     // top of it.
+    //
+    // Phase 71: mid-drag, the open gesture IS the thing to undo, so it is
+    // closed here (one step) and then stepped over — "undo" during a drag
+    // cancels the drag, which is what the hand pressed for.
     cancelPendingUpdate();
+    undoGestureActive = false;
     commitHistory();
 
     if (! canUndo())
@@ -1058,6 +1130,7 @@ void MainComponent::undo()
 void MainComponent::redo()
 {
     cancelPendingUpdate();
+    undoGestureActive = false;
     commitHistory();
 
     if (! canRedo())
@@ -1082,6 +1155,11 @@ void MainComponent::applyHistoryPosition()
 
 void MainComponent::restoreState (const juce::String& xml)
 {
+    // Phase 71: the session — and with it every slot id — is about to be
+    // replaced. A note still held on a plugin preview would be held on a slot
+    // that no longer exists, and nothing would ever let go of it.
+    releaseHostedPreview();
+
     double bpmValue = audio.getBpm();
     juce::String error;
 
@@ -1100,6 +1178,59 @@ void MainComponent::restoreState (const juce::String& xml)
     automationWindow.repaint();
     mixerPanel.repaint();
     pianoRoll.repaint();
+}
+
+//==============================================================================
+//  Phase 71: the preview of a note
+//==============================================================================
+void MainComponent::auditionPreview (int slotId, int pitch, float velocity, bool retrigger)
+{
+    auto* slot = rack.findSlot (slotId);
+
+    if (slot != nullptr && slot->isPlugin())
+    {
+        // One mouse move = one request, so the same pitch arriving again is the
+        // same held key, not a new one. Re-sending it would restart the patch's
+        // envelope on every pixel of travel and turn a drag into a machine gun.
+        if (! retrigger && hostedPreview.slotId == slotId && hostedPreview.pitch == pitch)
+        {
+            hostedPreview.releaseAtMs = juce::Time::getMillisecondCounter() + hostedPreviewHoldMs;
+            return;
+        }
+
+        // A different pitch, or a fresh gesture: let go of the old note first.
+        // Two notes down at once is a chord, and a drag is not one.
+        releaseHostedPreview();
+
+        // The oscillator voice may still be ringing from the previous target
+        // (routing can change mid-gesture). Ramp it out now, or the sine keeps
+        // sounding under the plugin and it is the sine you hear.
+        audio.getPlayback().stopAudition();
+
+        audio.getPlayback().noteOnLive (slotId, pitch, velocity);
+
+        hostedPreview.slotId      = slotId;
+        hostedPreview.pitch       = pitch;
+        hostedPreview.releaseAtMs = juce::Time::getMillisecondCounter() + hostedPreviewHoldMs;
+        return;
+    }
+
+    // Back on a built-in synth (or nothing at all): the plugin must not keep
+    // the note it was given, or it drones under the new preview.
+    releaseHostedPreview();
+
+    audio.getPlayback().auditionNote (pitch, velocity, slotId, retrigger);
+}
+
+void MainComponent::releaseHostedPreview()
+{
+    if (hostedPreview.pitch < 0)
+        return;
+
+    audio.getPlayback().noteOffLive (hostedPreview.pitch);
+
+    hostedPreview.pitch  = -1;
+    hostedPreview.slotId = -1;
 }
 
 //==============================================================================
@@ -3737,6 +3868,21 @@ void MainComponent::setBpm (double newBpm)
 
 void MainComponent::timerCallback()
 {
+    // Phase 71: a plugin preview is a held key, not a fire-and-forget voice —
+    // the engine will keep it down until it is told otherwise. This is what
+    // lets go: a little after the last mouse move, like the oscillator preview
+    // letting go of its own envelope. Above every early-out below, because a
+    // preview sounds with the transport stopped and with nothing else running.
+    if (hostedPreview.pitch >= 0)
+    {
+        const juce::uint32 now = juce::Time::getMillisecondCounter();
+
+        // Signed difference, so the 49-day wrap of the millisecond counter
+        // cannot leave a note held for the rest of the session.
+        if ((juce::int32) (now - hostedPreview.releaseAtMs) >= 0)
+            releaseHostedPreview();
+    }
+
     // Phase 39: a key released while another window had focus never produces a
     // key-up event here, and a stuck note is the worst thing a keyboard can do.
     // This sits above the transport early-out on purpose: playing an instrument

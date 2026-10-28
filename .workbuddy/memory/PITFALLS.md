@@ -1407,3 +1407,71 @@ if (off >= 0 && off < chunkLen) addEvent (noteOff, off);    // 发送
 
 **规律**：一个事件的"开始/结束"如果会被相邻两个块各判一次，两个块必须用**同一个表达式**
 判断同一件事。混用浮点与整数、混用 `<=` 与 `<`，边界上就会出现一条谁都不负责的缝。
+
+## P71-A：AsyncUpdater 合并的是"一个消息循环"，不是"一个动作"
+
+`modelChanged()` 里的 `triggerAsyncUpdate()` 看起来已经是"把多次通知并成一步"，注释也写着
+"dragging a note fires a notesChanged every mouse move, and each of those is NOT an undo step"。
+但它只挡住**同一个**消息循环里的连发（`layersChanged` + `notesChanged`）。拖拽的每一次
+`mouseDrag` 都是一个新的消息循环，于是 60 次移动 = 60 个快照，撤销要按 60 次。
+
+时间上的"帧"和用户意义上的"动作"是两个量，任何"靠时间去猜边界"的方案都会在慢拖（每帧一次）
+和快拖（一帧多次）之间给不出同一个答案。边界只能**由手势本身**给出：
+
+```cpp
+GestureWatcher : juce::MouseListener        // 挂在 Desktop 上，见下
+{ mouseDown → beginUndoGesture();  mouseUp → endUndoGesture(); }
+
+void commitHistory() { if (undoGestureActive) return; ... }   // 手势里一概不落
+```
+
+**为什么挂 Desktop 而不是面板**：混音台（`MixerWindow`）、插件编辑器（`PluginEditorWindow`）、
+`AutomationWindow` 都是独立顶层窗口，不在这棵树里。`addMouseListener(l, true)` 只覆盖本组件子树，
+所以每条路径都要各自登记一次——四十个组件里漏一个，那个面板就还是老行为。
+
+**顺序正好合用**（`juce_Component.cpp` 的 `internalMouseUp`）：`mouseUp(me)` 先跑，
+`MouseListenerList::sendMouseEvent` 后跑。也就是说"松手时最后一次写入"发生在
+`endUndoGesture()` 之前，捕获到的就是最终状态。反过来（listener 先跑）会漏掉收尾那一笔。
+
+**还有一条**：`beginUndoGesture()` 必须先 `commitHistory()` 再置 `undoGestureActive = true`，
+否则它自己也会被守卫拦住，"上一个手势"永远结算不了。
+
+## P71-B：停止标志消费得太早，会被"还没起来的预览"吃掉
+
+`stopAudition()` 设一个 `auditionStopRequest` 标志，`renderAudition()` 消费它。第一版把消费
+写在函数开头（serial 比较之前）：
+
+```cpp
+if (auditionStopRequest.exchange (false) && auditionVoice.active)   // ← active 还是 false
+    auditionVoice.played = kAuditionLength;
+const int serial = auditionSerial.load();   // 这一段才把 active 置 true
+```
+
+按下鼠标到第一次渲染之间，`active` 还是 `false`：标志被 `exchange` 拿走了、什么也没做，紧接着
+serial 分支把 `played` 归零、`active = true`，正弦以满音量响满 1.1 秒。"停止"变成了"从头开始"。
+
+修法是把消费挪到 serial 分支**之后**。判断"顺序是否重要"的方法：问标志服务的是**已经起来的
+声音**还是**即将起来的声音**——后者就必须排在"让它起来"之后。
+
+## P71-C：断言盯错了量，缺陷版照样 PASS
+
+"插件键交还"这条第一版断言 `!hasLiveNotes()`，缺陷版（死槽不回收）却照样过。原因在实现里：
+
+```cpp
+for (auto& live : livePluginSlots) {
+    if (slot == nullptr || slot->pluginId <= 0) continue;   // 缺陷版
+    ++engaged;                                              // 计数在这之后
+}
+livePluginEngaged.store (engaged);                          // 于是记成 0
+```
+
+`hasLiveNotes()` = `voices || engaged || queued`，engaged 被记成 0 就落回 false——**槽没还，但
+"有没有声音"这个量看不见它**。真正被污染的是另一件事：八格表被占了。
+
+两条都要补：
+1. 加 `getLivePluginSlotCount()`，断言盯住"表里还有几条"；
+2. 让事件在槽**还是插件时**就 `beginLiveBlock()` drain，真的建出条目（第一版是在改回内置
+   合成器之后才 drain，事件走了振荡器分支，压根没建槽——断言测的是空场景）。
+
+**规律**：断言要盯住"被缺陷改变的那个量"，不是"最顺手的那个量"。顺手的量往往是被另一条
+路径兜住的（同 P70-A、P68-B）。

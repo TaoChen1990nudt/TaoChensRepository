@@ -141,6 +141,12 @@
 - 脏标记 = `savedStateText` + `dirtyCache`；关窗/新建/载入统一走 `confirmDiscardChanges`，
   `handleCloseRequest()` 返回 false = 对话框接管退出。
 - 撤销 = 整工程 XML 快照 + AsyncUpdater 合并同一轮次；`restoringHistory` 期间 Listener 返回。
+  **粒度的单位是动作，不是消息循环**（P71）：`beginUndoGesture()` / `endUndoGesture()` 包住一次
+  鼠标按下与释放，`commitHistory()` 在 `undoGestureActive` 期间直接 return，快照只在释放时落一次。
+  边界来自 `GestureWatcher`——一个挂在 `juce::Desktop` 上的 `MouseListener`，不是面板自己的：
+  混音台 / 插件编辑器 / 自动化窗都是独立顶层窗口。`undo()` / `redo()` 先把打开的手势结掉（拖拽中
+  按 Ctrl+Z = 取消这次拖拽）；`beginUndoGesture()` 里**先 commit 再置标志**，否则自己也被拦住。
+  唯一一个例外是异步提交的"非鼠标编辑"（键盘删除等）：它们在下一个消息循环里照常落一步。
 - 混音台在 `MixerWindow`，面板归 MainComponent：关窗不销毁状态。
 
 ## 自动化
@@ -769,6 +775,11 @@
   无锁队列。模型（`RackModel` / `LayerStack`）只在消息线程读。
 - **目标音源**：`focusedSlotId`（且不是 sampler）→ 否则 `routing::layerSlotId(activeLayer)`。
   与 FL 的"选中通道"同义；`applyFocus()` 与 60 Hz 定时器把这个答案写进原子。
+- **钢琴窗预览也走 live 通道**（P71）：`MainComponent::auditionPreview()` 是唯一分岔点——
+  目标槽 `isPlugin()` → `noteOnLive()` 发真 MIDI（`hostedPreview` 记槽与音高，60 Hz `timerCallback`
+  到 420 ms 发 `noteOffLive()`，同音高 + `retrigger == false` 只续期不重发）；否则才 `auditionNote()`。
+  切目标时两头都要收：`stopAudition()` 掐正弦（标志把 `played` 推到 `kAuditionLength` 走 4 ms 淡出，
+  **消费点必须在 serial 分支之后**），`releaseHostedPreview()` 放插件音。`restoreState()` 开头也放一次。
 - **发声走 `PlaybackEngine` 的 live 通道**，不是试听通道：
   `noteOnLive(slotId, pitch, vel)` / `noteOffLive(pitch)` / `allLiveNotesOff()` +
   `beginLiveBlock()`（每个回调一次，唯一排空点）+ `renderLive()`（`AudioEngine` 在 masterFade

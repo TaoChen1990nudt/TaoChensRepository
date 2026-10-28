@@ -2171,10 +2171,18 @@ void PlaybackEngine::auditionNote (int pitch, float velocity, int slotId, bool r
     auditionSerial.fetch_add (1, std::memory_order_release);
 }
 
+void PlaybackEngine::stopAudition()
+{
+    auditionStopRequest.store (true, std::memory_order_relaxed);
+}
+
 void PlaybackEngine::renderAudition (juce::AudioBuffer<float>& output, int numSamples)
 {
     if (numSamples <= 0 || output.getNumChannels() <= 0 || sampleRate <= 0.0)
         return;
+
+    // Phase 71: jump the envelope past its hold so the ordinary 4 ms ramp takes
+    // it to zero — the same edge as every other end of the preview.
 
     const int serial = auditionSerial.load (std::memory_order_acquire);
 
@@ -2221,6 +2229,13 @@ void PlaybackEngine::renderAudition (juce::AudioBuffer<float>& output, int numSa
         auditionEngaged.store (true, std::memory_order_relaxed);
         auditionConsumed.store (serial, std::memory_order_release);
     }
+
+    // Phase 71: handled AFTER the request above, so a stop that arrives while a
+    // request is still queued wins — otherwise the preview would start at full
+    // level and only then be told to stop, which is the opposite of "cut it".
+    if (auditionStopRequest.exchange (false, std::memory_order_relaxed)
+          && auditionVoice.active)
+        auditionVoice.played = juce::jmax (auditionVoice.played, kAuditionLength);
 
     if (! auditionVoice.active)
         return;
@@ -2417,6 +2432,45 @@ PlaybackEngine::LivePluginSlot* PlaybackEngine::findLivePluginSlot (int slotId)
             return &live;
 
     return nullptr;
+}
+
+void PlaybackEngine::pruneLivePluginSlots (const PublishedSchedule* current)
+{
+    if (current == nullptr)
+        return;
+
+    int engaged = 0;
+
+    for (auto& live : livePluginSlots)
+    {
+        if (live.slotId < 0)
+            continue;
+
+        bool stillHosted = false;
+
+        for (const auto& slot : current->slots)
+            if (slot.slotId == live.slotId && slot.pluginId > 0)
+            {
+                stillHosted = true;
+                break;
+            }
+
+        // Gone, or finished ringing: either way the place in the table goes
+        // back. The second half is what the renderer used to do on its own, and
+        // it still does — this just makes sure it happens even when there is no
+        // plugin host to render with.
+        if (! stillHosted || (live.numHeld == 0 && live.tailFrames <= 0))
+        {
+            live.slotId     = -1;
+            live.numHeld    = 0;
+            live.tailFrames = 0;
+            continue;
+        }
+
+        ++engaged;
+    }
+
+    livePluginEngaged.store (engaged, std::memory_order_relaxed);
 }
 
 //==============================================================================
@@ -2646,6 +2700,11 @@ void PlaybackEngine::renderLive (juce::AudioBuffer<float>& output, int numSample
 
     auto current = getScheduleRaw();
 
+    // Phase 71: before anything is rendered, drop the keys whose instrument no
+    // longer exists. Their table entries are what made eight deleted
+    // instruments the end of live playback.
+    pruneLivePluginSlots (current);
+
     const float masterGain = current != nullptr ? current->masterGain : kMasterGain;
     const float masterPan  = current != nullptr ? current->masterPan  : 0.0f;
 
@@ -2767,6 +2826,32 @@ void PlaybackEngine::renderLivePlugins (const PublishedSchedule* current, float 
             continue;
         }
 
+        const SlotMix* slot = nullptr;
+
+        for (const auto& candidate : current->slots)
+            if (candidate.slotId == live.slotId)
+            {
+                slot = &candidate;
+                break;
+            }
+
+        auto* plugin = slot != nullptr && slot->pluginId > 0
+                         ? pluginHost->getInstanceWhileLocked (slot->pluginId)
+                         : nullptr;
+
+        // Phase 71: the instrument this key went to is gone — its slot was
+        // deleted, re-mounted, or its instance unloaded. Nothing will ever
+        // render the note again, so the entry has to be given back: leaving it
+        // here burned one of the eight live slots for the rest of the session,
+        // and a key pressed later could match it by accident.
+        if (slot == nullptr || slot->pluginId <= 0 || plugin == nullptr)
+        {
+            live.slotId     = -1;
+            live.numHeld    = 0;
+            live.tailFrames = 0;
+            continue;
+        }
+
         ++engaged;
 
         bool alreadyRendered = false;
@@ -2779,23 +2864,6 @@ void PlaybackEngine::renderLivePlugins (const PublishedSchedule* current, float 
         // a second processBlock would not double its output — it would double
         // the rate its own DSP runs at, and that is a bug nobody would guess.
         if (alreadyRendered)
-            continue;
-
-        const SlotMix* slot = nullptr;
-
-        for (const auto& candidate : current->slots)
-            if (candidate.slotId == live.slotId)
-            {
-                slot = &candidate;
-                break;
-            }
-
-        if (slot == nullptr || slot->pluginId <= 0)
-            continue;
-
-        auto* plugin = pluginHost->getInstanceWhileLocked (slot->pluginId);
-
-        if (plugin == nullptr)
             continue;
 
         const int channels = juce::jlimit (1, 2, plugin->getTotalNumOutputChannels());

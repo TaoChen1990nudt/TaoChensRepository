@@ -18,7 +18,9 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
 5. **改模型后必发 `layersChanged()` / `notesChanged()`**：采样槽清扫
    `pruneOrphanSamplerSlots()` 挂在这两个通知上，不是回调——"谁记得调回调"不是规则。
 6. **唯一入口**：会话重置 = `buildSession(withEmptyLayer)`；删槽 = `removeSlotAndItsClips()`
-   （先删块再删槽）；撤销 = 整工程 XML 快照。
+   （先删块再删槽）；撤销 = 整工程 XML 快照，**粒度是一次鼠标手势**（`beginUndoGesture()` /
+   `endUndoGesture()` 包住按下与释放，手势期间 `commitHistory()` 直接返回）；试听分岔 =
+   `MainComponent::auditionPreview()`（插件槽发真 MIDI，内置合成器才发正弦）。
 
 ## 目录
 - `Source/Model/` 数据与路由（LayerModel / RackModel / MixerModel / Routing / ProjectIO / Gain）
@@ -32,6 +34,6 @@ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + JUCE 8.0.4（FetchContent）。PATH �
 否则 MSB6001 谎报找不到编译器。
 
 ## 工程文件
-`.atomic`，`formatVersion = 18`。老版本 v3–v17 必须仍能开（逐版字段见 `REFERENCE.md`）。
+`.atomic`，`formatVersion = 25`（逐版字段见 `REFERENCE.md`）。老版本必须仍能开。
 **"选中哪条自动化 lane"这类状态必须显式写属性**，不能靠元素顺序或别的属性推断。
 先解析到临时对象、末尾一次性提交，坏文件绝不破坏当前会话。
