@@ -10,6 +10,7 @@
 
 #include "Model/HardwareRack.h"
 #include "UI/AutomationLaneComponent.h"
+#include "UI/NameEditor.h"
 
 namespace atomic
 {
@@ -54,6 +55,12 @@ public:
     /** The "＋ 添加音源" button. The host owns the plugin library, so it owns
         the menu that offers built-in synths next to hosted VST3s. */
     std::function<void (juce::Point<int> screenPos)> onAddSlotRequested;
+
+    /** P79: a card was renamed. The HOST does the work, not the panel, because
+        a sampler's name is also printed on every block in the roll that plays
+        through it — and the roll is the host's to walk. The panel only knows
+        which card and what word. */
+    std::function<void (int slotId, juce::String newName)> onSlotRenamed;
 
     /** Right-click on a card, or a click on its "→ 输出" chip. The host owns the
         plugin library AND the mixer channel list, so it owns this menu:
@@ -155,6 +162,23 @@ public:
         card" is a comparison, not an impression. */
     juce::Rectangle<int> getCardBoundsForTest (int index) const { return getCardBounds (index); }
 
+    //-- P79: renaming --------------------------------------------------------
+    /** Where a card prints its name, in both the folded and the open state.
+        Public for the same reason LayerPanel::getNameBounds is: the paint code
+        and the double-click test must be one rectangle. */
+    juce::Rectangle<int> getNameBounds (int index) const;
+
+    /** Opens the in-place editor on that card's name. Also the self-test's way
+        in — the same call the double click makes. */
+    bool beginRenameSlot (int index);
+
+    /** The card INDEX being renamed, or -1. */
+    int getRenamingSlotForTest() const;
+
+    /** P79: the real double click, driven by its coordinate. */
+    void simulateDoubleClickForTest (juce::Point<int> at) { handleDoubleClick (at); }
+    NameEditor& getNameEditorForTest() noexcept { return nameEditor; }
+
     /** Which card is highlighted, or -1. The self-test asserts the highlight
         follows the selection, so the id has to be readable. */
     int getRoutingFocusSlotId() const noexcept { return focusSlotId; }
@@ -168,6 +192,7 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     void mouseMove (const juce::MouseEvent&) override;
@@ -273,6 +298,20 @@ private:
         told from a click that is still just a click. */
     juce::Point<int> dragOrigin;
     bool  dragMayStart = false;
+
+    //-- P79 ------------------------------------------------------------------
+    NameEditor nameEditor;
+
+    /** The SLOT ID being renamed, not its card index: deleting a card above
+        this one slides a different synth into that index, and a commit would
+        then rename the wrong instrument. */
+    int        renamingSlotId = -1;
+
+    /** The card under a point, row-scroll respected, or -1. */
+    int cardAt (juce::Point<int>) const;
+
+    /** P79: the double click without the event around it. */
+    void handleDoubleClick (juce::Point<int> position);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RackPanel)
 };

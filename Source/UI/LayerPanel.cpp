@@ -35,6 +35,22 @@ LayerPanel::LayerPanel (LayerStack& layerStackToUse, RackModel& rackToUse)
     stack.addListener (this);
     rack.addListener (this);
 
+    // P79: a double click on a row's name renames it. The editor is a child of
+    // the panel, not of the row (there is no row component), so it is placed on
+    // the name's rectangle when it opens.
+    addChildComponent (nameEditor);
+    nameEditor.onCommit = [this] (const juce::String& newName)
+    {
+        // By ID: the list may have shifted while the box was open.
+        const int index = stack.indexOfLayerId (renamingLayerId);
+
+        if (index < 0)
+            return;
+
+        stack.setLayerName (index, newName);
+    };
+    nameEditor.onClosed = [this] { renamingLayerId = -1; };
+
     syncLaneEditors();
 }
 
@@ -192,6 +208,65 @@ juce::Rectangle<int> LayerPanel::getCollapseBounds (int index) const
     auto body = getBodyBounds (index);
 
     return { getWidth() - ui::px (104), body.getY() + ui::px (5), ui::px (20), ui::px (18) };
+}
+
+juce::Rectangle<int> LayerPanel::getNameBounds (int index) const
+{
+    const auto body = getBodyBounds (index);
+
+    // Two states, two rectangles, and one place that knows both. These numbers
+    // used to live inside drawRow; the rename box has to land on the word in
+    // the folded state AND the open one, and a second copy of the numbers would
+    // put the box a couple of pixels off the moment one of them was restyled.
+    if (isCollapsed (index))
+        return { ui::px (34), body.getY() + ui::px (7), getWidth() - ui::px (190), ui::px (16) };
+
+    return { ui::px (34), body.getY() + ui::px (5), getWidth() - ui::px (124), ui::px (17) };
+}
+
+int LayerPanel::rowAt (juce::Point<int> position) const
+{
+    // A row scrolled under the header is not there as far as the pointer is
+    // concerned, which is the same rule mouseDown applies.
+    if (! getViewArea().contains (position))
+        return -1;
+
+    for (int i = 0; i < stack.getNumLayers(); ++i)
+        if (getRowBounds (i).contains (position))
+            return i;
+
+    return -1;
+}
+
+bool LayerPanel::beginRenameLayer (int index)
+{
+    auto* layer = stack.getLayer (index);
+
+    if (layer == nullptr)
+        return false;
+
+    const auto nameBounds = getNameBounds (index);
+
+    // A half-scrolled row would put the box over the neighbour it is clipped
+    // by. Refusing is honest: the user can scroll the row into view and double
+    // click again, which is one gesture, versus editing the wrong name.
+    if (! getViewArea().contains (nameBounds))
+        return false;
+
+    // A second double click on another row: drop the first silently, so only
+    // one text box can ever be open and there is no doubt which one commits.
+    nameEditor.close (false);
+
+    renamingLayerId = layer->getId();
+    nameEditor.begin (nameBounds, layer->getName(),
+                      isCollapsed (index) ? 12.0f : 13.0f,
+                      juce::Colours::white.withAlpha (layer->isMuted() ? 0.38f : 0.92f));
+    return true;
+}
+
+int LayerPanel::getRenamingLayerForTest() const noexcept
+{
+    return renamingLayerId < 0 ? -1 : stack.indexOfLayerId (renamingLayerId);
 }
 
 juce::Rectangle<int> LayerPanel::getAddButtonBounds() const
@@ -459,9 +534,7 @@ void LayerPanel::drawRow (juce::Graphics& g, int index)
 
         g.setColour (juce::Colours::white.withAlpha (nameAlpha));
         g.setFont (boldFont (12.0f));
-        g.drawText (layer->getName(),
-                    juce::Rectangle<int> (ui::px (34), rowY + ui::px (7),
-                                          getWidth() - ui::px (190), ui::px (16)),
+        g.drawText (layer->getName(), getNameBounds (index),
                     juce::Justification::centredLeft, false);
 
         g.setColour (juce::Colours::white.withAlpha (ghost ? 0.30f : 0.20f));
@@ -482,9 +555,7 @@ void LayerPanel::drawRow (juce::Graphics& g, int index)
     //-- Name -----------------------------------------------------------------
     g.setColour (juce::Colours::white.withAlpha (nameAlpha));
     g.setFont (boldFont (13.0f));
-    g.drawText (layer->getName(),
-                juce::Rectangle<int> (ui::px (34), rowY + ui::px (5),
-                                      getWidth() - ui::px (124), ui::px (17)),
+    g.drawText (layer->getName(), getNameBounds (index),
                 juce::Justification::centredLeft, false);
 
     mixerlook::drawCaret (g, getCollapseBounds (index).toFloat(), true,
@@ -495,7 +566,9 @@ void LayerPanel::drawRow (juce::Graphics& g, int index)
                          + separatorDot() + mixerlook::dbText (layer->getLevelDb()) + " dB";
 
     if (attached && focusedSlot != nullptr)
-        sub << separatorDot() << utf8 ("挂载 ") << focusedSlot->name;
+        // P79: the display name, not the stored one — a hosted slot the user
+        // renamed must read the same here as on its own card and in the roll.
+        sub << separatorDot() << utf8 ("挂载 ") << focusedSlot->getDisplayName();
 
     g.setColour (juce::Colours::white.withAlpha (ghost ? 0.30f : 0.20f));
     g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
@@ -875,6 +948,27 @@ void LayerPanel::setPlayheadBeat (double beats)
 
 void LayerPanel::layersChanged()
 {
+    // P79: the row being renamed can be gone — an undo, a load, another panel's
+    // delete. Committing into "whatever is at that index now" would rename the
+    // wrong sheet; closing is the only honest answer.
+    if (renamingLayerId >= 0)
+    {
+        const int index = stack.indexOfLayerId (renamingLayerId);
+
+        if (index < 0)
+        {
+            renamingLayerId = -1;
+            nameEditor.close (false);
+        }
+        else
+        {
+            // Still there, but the row may have MOVED (a lane unfolded above
+            // it, the list scrolled, the row folded to a title bar). The box
+            // follows the word, not the row it started on.
+            nameEditor.reposition (getNameBounds (index));
+        }
+    }
+
     syncLaneEditors();
     repaint();
 }
@@ -882,6 +976,16 @@ void LayerPanel::layersChanged()
 void LayerPanel::resized()
 {
     updateLayout();
+
+    // P79: the panel can be resized while a name is being typed (the splitter,
+    // a window resize). The box has to stay on the word, and a width change
+    // sends no model notification to hang that off.
+    if (renamingLayerId >= 0 && nameEditor.isEditing())
+    {
+        const int index = stack.indexOfLayerId (renamingLayerId);
+        if (index >= 0)
+            nameEditor.reposition (getNameBounds (index));
+    }
 }
 
 //==============================================================================
@@ -1113,6 +1217,28 @@ void LayerPanel::mouseUp (const juce::MouseEvent&)
     dragRow  = -1;
 }
 
+void LayerPanel::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    handleDoubleClick (e.getPosition());
+}
+
+void LayerPanel::handleDoubleClick (juce::Point<int> pos)
+{
+    const int index = rowAt (pos);
+
+    if (index < 0)
+        return;
+
+    // P78's rule is that a double click OPENS whatever is under the pointer.
+    // Here that is the word itself, so opening it means editing it. Anything
+    // else on the row keeps its single-click meaning: a double click on the eye
+    // is two toggles, and it must not start a rename.
+    if (! getNameBounds (index).contains (pos))
+        return;
+
+    beginRenameLayer (index);
+}
+
 //==============================================================================
 void LayerPanel::mouseMove (const juce::MouseEvent& e)
 {
@@ -1170,11 +1296,17 @@ void LayerPanel::mouseMove (const juce::MouseEvent& e)
         break;
     }
 
-    setMouseCursor ((newPart == Part::volume || newPart == Part::pan)
-                      ? juce::MouseCursor::LeftRightResizeCursor
-                      : (newPart == Part::none || newPart == Part::body)
-                          ? juce::MouseCursor::NormalCursor
-                          : juce::MouseCursor::PointingHandCursor);
+    // P79: the name is the one part of a row you can TYPE into, so the pointer
+    // says so. Without the I-beam nobody finds the double click: a label looks
+    // exactly like the labels that cannot be edited.
+    const bool overName = newRow >= 0 && getNameBounds (newRow).contains (pos);
+
+    setMouseCursor (overName ? juce::MouseCursor::IBeamCursor
+                             : (newPart == Part::volume || newPart == Part::pan)
+                                 ? juce::MouseCursor::LeftRightResizeCursor
+                                 : (newPart == Part::none || newPart == Part::body)
+                                     ? juce::MouseCursor::NormalCursor
+                                     : juce::MouseCursor::PointingHandCursor);
 
     if (newRow != hoveredRow || newPart != hoveredPart)
     {

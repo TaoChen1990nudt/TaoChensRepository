@@ -541,6 +541,13 @@ MainComponent::MainComponent()
         showRackAddMenu (pos);
     };
 
+    // P79: a card's name is not only the card's. Sample blocks print it too,
+    // and only the host can walk every sheet to keep them saying the same word.
+    rackPanel.onSlotRenamed = [this] (int slotId, juce::String newName)
+    {
+        renameSynthSlot (slotId, newName);
+    };
+
     rackPanel.onCardMenuRequested = [this] (int slotId, juce::Point<int> pos)
     {
         showRackCardMenu (slotId, pos);
@@ -7120,6 +7127,65 @@ void MainComponent::openSampleEnvelopePanel (int layerIndex, int sampleId)
 
     sampleEnvelopePanel.setBounds (x, y, w, h);
     sampleEnvelopePanel.toFront (true);
+}
+
+void MainComponent::openDemoRename()
+{
+    // The second sheet if there is one: renaming the top row would put the box
+    // where the eye already is, and the point of the frame is the row you are
+    // NOT looking at.
+    layerPanel.beginRenameLayer (stack.getNumLayers() > 1 ? 1 : 0);
+}
+
+//==============================================================================
+void MainComponent::renameSynthSlot (int slotId, const juce::String& newName)
+{
+    auto* slot = rack.findSlot (slotId);
+
+    if (slot == nullptr)
+        return;
+
+    // The word the blocks are still wearing. Read BEFORE the rack changes it,
+    // and read from `name` rather than getDisplayName(): a block's name is a
+    // copy of `name` (that is how a dropped file's block gets its title), so
+    // `name` is the thing the copies can be told apart from.
+    const auto previous = slot->name;
+
+    rack.setSlotName (slotId, newName);
+
+    if (slot->name == previous)
+        return;      // refused, or the same word — nothing to carry across
+
+    //-- Follow the blocks ---------------------------------------------------
+    // A block is a window onto a sampler, and its title is that sampler's name:
+    // the two are the same word by construction (see PianoRollComponent::
+    // sampleLabelText). Renaming the sampler therefore renames its blocks.
+    //
+    // The test is `sample.name == previous`, not `outputSlotId == slotId`
+    // alone: a block that was once renamed by hand, or one dropped from a file
+    // and then pointed at this sampler, carries its OWN name and must keep it.
+    // Only the copies still wearing the old word follow.
+    bool followed = false;
+
+    for (int i = 0; i < stack.getNumLayers(); ++i)
+    {
+        auto* layer = stack.getLayer (i);
+
+        if (layer == nullptr)
+            continue;
+
+        for (auto& sample : layer->getSamples())
+        {
+            if (sample.outputSlotId != slotId || sample.name != previous)
+                continue;
+
+            sample.name = slot->name;
+            followed    = true;
+        }
+    }
+
+    if (followed)
+        stack.notifyNotesChanged();
 }
 
 void MainComponent::openDemoEnvelopePanel()

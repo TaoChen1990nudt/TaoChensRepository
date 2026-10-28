@@ -9,6 +9,7 @@
 
 #include "Model/HardwareRack.h"
 #include "Model/LayerModel.h"
+#include "UI/NameEditor.h"
 
 namespace atomic
 {
@@ -97,6 +98,23 @@ public:
         reads it to prove the panel and the roll agree. */
     bool isGroupFocused (int layerIndex, int groupId) const;
 
+    //-- P79: renaming --------------------------------------------------------
+    /** Where a row prints its group name. Public for the same reason the two
+        other panels' equivalents are: paint and the double click must agree on
+        one rectangle, or the box lands beside the word it is renaming. */
+    juce::Rectangle<int> getNameBounds (int rowIndex) const;
+
+    /** Opens the in-place editor on a row's name — the same call the double
+        click makes, so a test cannot pass down a path the user does not have. */
+    bool beginRenameGroup (int rowIndex);
+
+    /** Row index being renamed, or -1. */
+    int  getRenamingRowForTest() const;
+
+    /** P79: the real double click, driven by its coordinate. */
+    void simulateDoubleClickForTest (juce::Point<int> at) { handleDoubleClick (at); }
+    NameEditor& getNameEditorForTest() noexcept { return nameEditor; }
+
     /** Phase 35: mute a row, by row index. The chip and the keyboard/menu path
         both land here, so "the panel muted it" and "a test muted it" cannot be
         two different operations. Out-of-range is ignored. */
@@ -115,6 +133,7 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     void mouseMove (const juce::MouseEvent&) override;
@@ -158,6 +177,7 @@ private:
     float scrollY    = 0.0f;
     int   hoveredRow = -1;
     Part  hoveredPart = Part::none;
+    bool  hoveredName = false;   // P79: I-beam state, tracked so it repaints once
 
     int   dragRow  = -1;
     Part  dragPart = Part::none;
@@ -180,6 +200,24 @@ private:
     int   focusSlotId = -1;
 
     std::vector<RowRef> selectedRows;   // Phase 59: the roll's mirror
+
+    //-- P79 ------------------------------------------------------------------
+    NameEditor nameEditor;
+
+    /** Layer ID + group ID, never the row index.
+
+        A row index is a position in a list that regrouping, deleting and
+        switching sheets all shuffle; renaming through a stale index would type
+        the user's word onto a different group. The ids stay true, and -1 in
+        `renamingGroupId` means nothing is being renamed. */
+    int renamingLayerId = -1;
+    int renamingGroupId = -1;
+
+    /** Where (layerId, groupId) currently sits, or -1 if it stopped existing. */
+    int rowIndexForRenaming() const;
+
+    /** P79: the double click without the event around it. */
+    void handleDoubleClick (juce::Point<int> position);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GroupPanel)
 };

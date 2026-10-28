@@ -13889,6 +13889,261 @@ juce::String MainComponent::runSelfTest()
                  + juce::String (layer->countNotesInOccurrence (gid, 0)) + utf8 (" 个成员"));
     }
 
+    //-- P79: 改名 -----------------------------------------------------------
+    // 三个名字、三处入口、一份数据。要证的不是"能改"，而是改完之后别处说的是
+    // 同一个词：采样块头上那行字、钢琴窗组框的标题，以前都是各自抄一份的副本。
+    {
+        //-- A. 图层名：双击名字就地改 ------------------------------------
+        LayerStack t79;
+        RackModel  r79;
+        LayerPanel sheets (t79, r79);
+        sheets.setSize (LayerPanel::panelWidth, 720);
+
+        t79.addLayer (utf8 ("图层 1"), palette::layer1);
+        t79.addLayer (utf8 ("图层 2"), palette::layer2);
+
+        sheets.simulateDoubleClickForTest (sheets.getNameBounds (0).getCentre());
+
+        // isVisible() 也算进来：数据和"编辑器在编辑"都可以是对的，而框根本
+        // 没被显示出来（父组件 addChildComponent 默认隐藏）——用户看到的是
+        // 一个什么都发生了、屏幕上什么都没变的程序。
+        check (utf8 ("双击图层名会就地打开改名框，指的是那一行"),
+               sheets.getRenamingLayerForTest() == 0
+                 && sheets.getNameEditorForTest().isEditing()
+                 && sheets.getNameEditorForTest().isVisible(),
+               juce::String (sheets.getRenamingLayerForTest()) + utf8 ("（应为 0，框开着）")
+                 + utf8 ("，可见 ") + (sheets.getNameEditorForTest().isVisible() ? "1" : "0"));
+
+        sheets.getNameEditorForTest().getEditor().setText (utf8 ("弦乐"), juce::dontSendNotification);
+        sheets.getNameEditorForTest().close (true);
+
+        check (utf8 ("回车之后图层名就改了，改名框也收了"),
+               t79.getLayer (0) != nullptr
+                 && t79.getLayer (0)->getName() == utf8 ("弦乐")
+                 && ! sheets.getNameEditorForTest().isEditing()
+                 && ! sheets.getNameEditorForTest().isVisible()
+                 && sheets.getRenamingLayerForTest() == -1,
+               (t79.getLayer (0) != nullptr ? t79.getLayer (0)->getName() : juce::String())
+                 + utf8 (" / 框 ") + (sheets.getNameEditorForTest().isEditing() ? utf8 ("还开着")
+                                                                              : utf8 ("收着")));
+
+        // 双击的是行体，不是名字：那是"选中这一层"，不是"给它改名"
+        const auto belowName = sheets.getNameBounds (0).getBottomLeft() + juce::Point<int> (6, 12);
+        sheets.simulateDoubleClickForTest (belowName);
+
+        check (utf8 ("双击名字以外的行体不会开改名框"),
+               sheets.getRenamingLayerForTest() == -1,
+               juce::String (sheets.getRenamingLayerForTest()) + utf8 ("（应为 -1）"));
+
+        //-- B. 组名：编组栏里改，钢琴窗的组框跟着说 ----------------------
+        auto* layerA = t79.getLayer (0);
+
+        const int g79 = layerA->addGroup (utf8 ("组 A"), groupPalette::group1);
+        layerA->addNote ({ 101, 60, 0.0, 1.0, 0.9f });
+        layerA->assignNotesToGroup ({ 101 }, g79);
+
+        GroupPanel groups (t79, r79);
+        groups.setSize (280, 560);
+
+        groups.simulateDoubleClickForTest (groups.getNameBounds (0).getCentre());
+
+        check (utf8 ("双击编组框的名字会就地打开改名框"),
+               groups.getRenamingRowForTest() == 0
+                 && groups.getNameEditorForTest().isEditing()
+                 && groups.getNameEditorForTest().isVisible(),
+               juce::String (groups.getRenamingRowForTest()) + utf8 ("（应为 0）"));
+
+        groups.getNameEditorForTest().getEditor().setText (utf8 ("主歌和弦"), juce::dontSendNotification);
+        groups.getNameEditorForTest().close (true);
+
+        // 一份数据：编组栏和钢琴窗读的是同一个 NoteGroup::name，不是两份副本
+        check (utf8 ("编组栏改完，模型里那个名字就是新的（钢琴窗画的就是它）"),
+               layerA->findGroup (g79) != nullptr
+                 && layerA->findGroup (g79)->getName() == utf8 ("主歌和弦"),
+               layerA->findGroup (g79) != nullptr ? layerA->findGroup (g79)->getName()
+                                                  : juce::String (utf8 ("组没了")));
+
+        //-- C. 音源名：面板只管报，宿主负责落地 --------------------------
+        RackPanel cards (r79);
+        cards.setSize (RackPanel::panelWidth, 720);
+
+        int          reportedSlot = -1;
+        juce::String reportedWord;
+
+        cards.onSlotRenamed = [&] (int id, juce::String word)
+        {
+            reportedSlot = id;
+            reportedWord = word;
+        };
+
+        const int firstSlot = r79.getSlotIdAt (0);
+        cards.simulateDoubleClickForTest (cards.getNameBounds (0).getCentre());
+
+        check (utf8 ("双击音源卡片的名字会就地打开改名框"),
+               cards.getRenamingSlotForTest() == 0
+                 && cards.getNameEditorForTest().isEditing()
+                 && cards.getNameEditorForTest().isVisible(),
+               juce::String (cards.getRenamingSlotForTest()) + utf8 ("（应为 0）"));
+
+        cards.getNameEditorForTest().getEditor().setText (utf8 ("垫底"), juce::dontSendNotification);
+        cards.getNameEditorForTest().close (true);
+
+        check (utf8 ("音源改名报给宿主的是（槽 id，新名），不是卡片序号"),
+               reportedSlot == firstSlot && reportedWord == utf8 ("垫底"),
+               juce::String (reportedSlot) + utf8 (":") + reportedWord
+                 + utf8 ("（应为 ") + juce::String (firstSlot) + utf8 (":垫底）"));
+
+        // 没有宿主时面板自己落地（测试夹具就是这种情况），别让改名凭空消失
+        RackPanel bare (r79);
+        bare.setSize (RackPanel::panelWidth, 720);
+        bare.simulateDoubleClickForTest (bare.getNameBounds (0).getCentre());
+        bare.getNameEditorForTest().getEditor().setText (utf8 ("自己改"), juce::dontSendNotification);
+        bare.getNameEditorForTest().close (true);
+
+        check (utf8 ("没接宿主时，面板自己把名字写进机架"),
+               r79.getSlotName (firstSlot) == utf8 ("自己改"),
+               r79.getSlotName (firstSlot));
+
+        //-- D. 空名一律拒收 ----------------------------------------------
+        r79.setSlotName (firstSlot, "   ");
+        t79.setLayerName (0, "  ");
+        t79.setGroupName (0, g79, "");
+
+        check (utf8 ("空名字被三个入口一起拒收（改不出一行找不到的东西）"),
+               r79.getSlotName (firstSlot) == utf8 ("自己改")
+                 && t79.getLayer (0)->getName() == utf8 ("弦乐")
+                 && layerA->findGroup (g79)->getName() == utf8 ("主歌和弦"),
+               r79.getSlotName (firstSlot) + " / " + t79.getLayer (0)->getName()
+                 + " / " + layerA->findGroup (g79)->getName());
+
+        //-- E. 插件槽：用户起的名字压过插件的名字 ------------------------
+        // P38 的规矩是"插件槽显示插件名"，那是对没被改过名的槽说的。用第二个
+        // 槽，别让上一步那个已经改过名的槽把这条测成恒真。
+        const int pluginSlotId = r79.getSlotIdAt (1);
+        auto* hosted = r79.findSlot (pluginSlotId);
+        hosted->pluginId   = 4242;
+        hosted->pluginName = "Serum";
+
+        const juce::String beforeName = hosted->getDisplayName();
+        r79.setSlotName (pluginSlotId, utf8 ("温暖铺底"));
+
+        check (utf8 ("插件槽被用户改名后显示用户的名字，而不是插件名"),
+               beforeName == "Serum" && hosted->getDisplayName() == utf8 ("温暖铺底"),
+               beforeName + utf8 (" -> ") + hosted->getDisplayName());
+
+        //-- F. 采样块头上那行字 ------------------------------------------
+        PianoRollComponent roll79 (t79, r79);
+        roll79.setSize (1200, 620);
+
+        SampleEvent onSampler;
+        onSampler.name         = utf8 ("拍子");
+        onSampler.path         = "kick.wav";
+        onSampler.outputSlotId = firstSlot;
+        onSampler.startBeat    = 0.0;
+        onSampler.lengthBeats  = 4.0;
+        onSampler.pitch        = 60;
+        onSampler.laneSpan     = 4;
+
+        // 这一段要的是"块名 != 槽名"，槽名自己定，不借上一步的
+        r79.setSlotName (firstSlot, utf8 ("温暖铺底"));
+
+        const int onSamplerId = layerA->addSample (onSampler);
+
+        // 块名和槽名不同才画箭头（P27）：这是"这块放的是别的音源"的提示，
+        // 改名之后两边又一致了，箭头就该消失。
+        check (utf8 ("块名和音源名不同时，块头写成「块名 → 音源名」"),
+               roll79.getSampleLabelForTest (0, onSamplerId)
+                 == utf8 ("拍子") + "  " + utf8 ("\xe2\x86\x92") + " " + utf8 ("温暖铺底"),
+               roll79.getSampleLabelForTest (0, onSamplerId));
+
+        auto* clipRef = layerA->findSample (onSamplerId);
+        clipRef->name = utf8 ("温暖铺底");
+
+        check (utf8 ("两者同名时块头只写一遍（不自己重复自己）"),
+               roll79.getSampleLabelForTest (0, onSamplerId) == utf8 ("温暖铺底"),
+               roll79.getSampleLabelForTest (0, onSamplerId));
+
+        //-- G. 改名字不许把人从打开的组里踢出去 --------------------------
+        // P73 的规矩是 layersChanged() 无条件关掉编辑中的组（撤销会把同一个 id
+        // 带回来）。改名不是那种事：用户正站在这个组里给它改名。
+        LayerStack t79b;
+        RackModel  r79b;
+        PianoRollComponent rollB (t79b, r79b);
+        rollB.setSize (1200, 620);
+
+        t79b.addLayer (utf8 ("层"), palette::layer1);
+
+        auto* layerB = t79b.getLayer (0);
+        const int gB = layerB->addGroup (utf8 ("组"), groupPalette::group1);
+        layerB->addNote ({ 201, 60, 0.0, 1.0, 0.9f });
+        layerB->assignNotesToGroup ({ 201 }, gB);
+
+        rollB.enterGroupEdit (gB);
+
+        t79b.setGroupName (0, gB, utf8 ("改过的组名"));
+        t79b.setLayerName (0, utf8 ("改过的层名"));
+
+        check (utf8 ("给正在编辑的组改名，不会把编辑态关掉"),
+               rollB.getEditingGroupId() == gB
+                 && layerB->findGroup (gB) != nullptr
+                 && layerB->findGroup (gB)->getName() == utf8 ("改过的组名")
+                 && layerB->getName() == utf8 ("改过的层名"),
+               juce::String (rollB.getEditingGroupId()) + utf8 ("（应为 ")
+                 + juce::String (gB) + utf8 ("）"));
+
+        //-- H. 宿主：采样音源改名，块跟着走 ------------------------------
+        MainComponent host;
+        auto& hostRack  = host.getRack();
+        auto& hostStack = host.getLayerStack();
+
+        const int samplerId  = hostRack.addSynth();
+        const auto samplerName = hostRack.getSlotName (samplerId);
+
+        SampleEvent follows     = onSampler;
+        follows.name            = samplerName;      // 抄来的名字：该跟着走
+        follows.outputSlotId    = samplerId;
+        follows.pitch           = 72;
+        const int followsId     = hostStack.getLayer (0)->addSample (follows);
+
+        SampleEvent namedByHand = follows;
+        namedByHand.name        = utf8 ("我的拍子");   // 自己起的名：不该动
+        namedByHand.pitch       = 76;
+        const int namedId       = hostStack.getLayer (0)->addSample (namedByHand);
+
+        host.renameSynthSlot (samplerId, utf8 ("鼓组"));
+
+        const auto* followed  = hostStack.getLayer (0)->findSample (followsId);
+        const auto* untouched = hostStack.getLayer (0)->findSample (namedId);
+
+        check (utf8 ("采样音源改名：抄着它名字的块跟着改，自己起过名的块不动"),
+               hostRack.getSlotName (samplerId) == utf8 ("鼓组")
+                 && followed != nullptr && followed->name == utf8 ("鼓组")
+                 && untouched != nullptr && untouched->name == utf8 ("我的拍子"),
+               (followed != nullptr ? followed->name : juce::String())
+                 + " / " + (untouched != nullptr ? untouched->name : juce::String()));
+
+        check (utf8 ("块头现在写的就是槽的名字（采样器上那行字跟着变）"),
+               host.pianoRollForTest().getSampleLabelForTest (0, followsId) == utf8 ("鼓组"),
+               host.pianoRollForTest().getSampleLabelForTest (0, followsId));
+
+        //-- I. 改名进撤销历史 --------------------------------------------
+        // 两个历史点：建槽建块之后一个、改名之后一个。只 commit 一次的话，
+        // undo 回到的是构造时的空工程，测的就成了"撤销能删掉一切"。
+        host.commitHistory();
+        host.renameSynthSlot (samplerId, utf8 ("鼓组二"));
+        host.commitHistory();
+        host.undo();
+
+        check (utf8 ("撤销能把音源改名和块头一起还回去"),
+               hostRack.getSlotName (samplerId) == utf8 ("鼓组")
+                 && hostStack.getLayer (0)->findSample (followsId) != nullptr
+                 && hostStack.getLayer (0)->findSample (followsId)->name == utf8 ("鼓组"),
+               hostRack.getSlotName (samplerId) + " / "
+                 + (hostStack.getLayer (0)->findSample (followsId) != nullptr
+                      ? hostStack.getLayer (0)->findSample (followsId)->name
+                      : juce::String (utf8 ("块没了"))));
+    }
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

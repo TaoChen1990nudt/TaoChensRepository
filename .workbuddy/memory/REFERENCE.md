@@ -617,6 +617,30 @@
 - 输出行写 `outputSlotId`，由 `routing::resolveSample` 解释（不自己算路由）；badge 三态：
   采样器 / 跟随图层 / 采样器失效。
 
+## 改名（P79：一份数据，三处入口）
+- **三个名字各有唯一字段**：`Layer::name`、`NoteGroup::name`、`SynthSlot::name`。面板、钢琴窗
+  组框标题、菜单里的组名、混音台的轨名全都每次读同一个 getter——所以"改完别处跟着变"没有同步
+  代码可写，写了就是错的。
+- **入口只有双击那行名字**：`LayerPanel::beginRenameLayer` / `GroupPanel::beginRenameGroup` /
+  `RackPanel::beginRenameSlot`，共用 `UI/NameEditor`（位置取各自 `getNameBounds(index)`，与绘制
+  同一份数字；回车/失焦提交，Esc 取消，空名不收）。hover 名字变 I-beam，因为可编辑的标签和
+  不可编辑的标签长得一模一样。
+- **记住的是 id，不是行号**：`renamingLayerId` / `renamingSlotId` / (`renamingLayerId`,
+  `renamingGroupId`)。改名框开着时删层、删卡、重排都会让索引指向别人。
+- **`LayerStack::Listener::namesChanged()` 默认转发 `layersChanged()`**：漏通知（某个面板不刷新）
+  比多清场糟糕。只有 `PianoRollComponent::namesChanged()` override 成纯 `repaint()`——
+  `layersChanged()` 会无条件关掉编辑中的组（P73），而"站在组里给组改名"是常态。
+- **采样块头是唯一需要同步的副本**：`SampleEvent::name` 是导入时抄的槽名，`handlePress` 拖
+  另一个采样器上来时也会重抄（`sample->name = slot->name`）。所以 `MainComponent::renameSynthSlot()`
+  在改名后遍历所有层，只改 `outputSlotId == slotId && name == 旧槽名` 的块。判据是"还穿着旧名字"，
+  不是"挂在这个槽上"——自己起过名的块（或从别的采样器转过来的）有自己的名字。
+- **块头怎么拼**：`PianoRollComponent::sampleLabelText()` = `sample.name`，仅当挂载槽的 `name`
+  与之不同才加 `"  → 槽名"`（P27）。改名后两者又一致，箭头自己消失。
+- **`SynthSlot::userName`**：用户起的名字压过 `pluginName`（P38 的派生命名只对没被改过名的槽
+  生效）。`replaceWithNative` / `replaceWithPlugin` 清掉它——换了乐器就是另一种东西。
+  存为可选属性 `<Synth userName="1">`，缺省 false，**不升 `formatVersion`**。
+- 改名进撤销：`captureState()` 是整份 XML，`namesChanged` → `MainComponent::modelChanged()` 即可。
+
 ## 采样音源（P27）
 - 拖入采样 → `RackModel::addSampler(...)` 长出 sampler 槽，块 `outputSlotId` 指向它；
   **同一 path 复用已有槽**。

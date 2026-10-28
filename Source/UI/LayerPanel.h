@@ -11,6 +11,7 @@
 #include "Model/HardwareRack.h"
 #include "Model/LayerModel.h"
 #include "UI/AutomationLaneComponent.h"
+#include "UI/NameEditor.h"
 
 namespace atomic
 {
@@ -96,9 +97,35 @@ public:
         "复位 N" pill, and the self-test reads it to prove the reset worked. */
     int getOverrideCount (int index) const;
 
+    //-- P79: renaming --------------------------------------------------------
+    /** Where a row prints its name. Public because the paint code and the
+        double-click test must be the same rectangle: a rename box that opens
+        two pixels off the word it is renaming is the bug this exists to avoid,
+        and it is the kind of bug that only appears in the folded state. */
+    juce::Rectangle<int> getNameBounds (int index) const;
+
+    /** Opens the in-place editor on that row's name. Also the self-test's way
+        in (the panel is driven through the same call the double click makes,
+        so the test cannot pass on a path the user does not have).
+
+        Returns false for an out-of-range row or a row scrolled out of view —
+        editing something you cannot see would put a text box over another row. */
+    bool beginRenameLayer (int index);
+
+    /** -1 when nothing is being renamed. Reports the row INDEX (what the panels
+        address rows by), while the member itself is the layer's stable ID. */
+    int  getRenamingLayerForTest() const noexcept;
+
+    /** P79: the real double click, driven by the one fact it needs. Same reason
+        PianoRollComponent has one: the interesting question ("is the pointer on
+        the word or just on the row?") is about a coordinate, not about JUCE. */
+    void simulateDoubleClickForTest (juce::Point<int> at) { handleDoubleClick (at); }
+    NameEditor& getNameEditorForTest() noexcept { return nameEditor; }
+
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     void mouseMove (const juce::MouseEvent&) override;
@@ -175,6 +202,26 @@ private:
 
     Part dragPart = Part::none;
     int  dragRow  = -1;
+
+    //-- P79 ------------------------------------------------------------------
+    NameEditor nameEditor;
+
+    /** The LAYER ID being renamed, not its index.
+
+        Rows are addressed by index everywhere else, and that is exactly why a
+        rename cannot store one: deleting a sheet above the one being renamed
+        slides a different layer into that index, and a commit would then type
+        the new name onto the wrong sheet. Ids are stable; -1 means "nothing is
+        being renamed". */
+    int        renamingLayerId = -1;
+
+    /** The row whose bounds contain this point, or -1. Used by the double click
+        and the hover cursor; both must agree on what "this row" means, and both
+        must respect the scroll offset — hence one function, not two loops. */
+    int rowAt (juce::Point<int>) const;
+
+    /** P79: the double click without the event around it. */
+    void handleDoubleClick (juce::Point<int> position);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LayerPanel)
 };

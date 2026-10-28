@@ -257,6 +257,13 @@ int RackModel::replaceWithNative (int slotId, Waveform waveform)
 
     const int droppedInstance = slot->pluginId;
 
+    // P79: the user's name belonged to the sound that was in here. Swapping the
+    // instrument is the moment the slot becomes a different thing, so the name
+    // goes back to being derived — a "Serum" card that now plays a saw wave is
+    // the exact confusion SynthSlot::getDisplayName's derived naming exists to
+    // prevent. Everything else is still left alone.
+    slot->userName = false;
+
     slot->pluginId = 0;
     slot->pluginName.clear();
     slot->plugin.reset();
@@ -278,12 +285,34 @@ int RackModel::replaceWithPlugin (int slotId, const juce::PluginDescription& des
 
     const int droppedInstance = slot->pluginId;
 
+    // P79: same rule as replaceWithNative — a name typed for the old instrument
+    // does not survive the new one.
+    slot->userName = false;
+
     slot->pluginId   = instanceId;
     slot->pluginName = description.name;
     slot->plugin     = std::make_shared<const juce::PluginDescription> (description);
 
     notify();
     return droppedInstance;
+}
+
+void RackModel::setSlotName (int slotId, juce::String newName)
+{
+    auto* slot = findSlot (slotId);
+
+    if (slot == nullptr || newName.trim().isEmpty())
+        return;
+
+    // Already his name and the same word: the editor was opened and closed
+    // without an edit, which must not cost an undo step.
+    if (slot->userName && slot->name == newName)
+        return;
+
+    slot->name     = newName;
+    slot->userName = true;
+
+    notify();
 }
 
 void RackModel::setMixerChannel (int slotId, int channel)

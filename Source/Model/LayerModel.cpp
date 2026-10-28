@@ -1185,9 +1185,54 @@ void LayerStack::touchLayers()
     notifyLayersChanged();
 }
 
+//==============================================================================
+void LayerStack::setLayerName (int index, juce::String newName)
+{
+    auto* layer = getLayer (index);
+
+    if (layer == nullptr || layer->getName() == newName)
+        return;      // Editor opened and closed on the same word: no undo step.
+
+    const auto before = layer->getName();
+    layer->setName (std::move (newName));
+
+    // Refused (empty) by the model: nothing to announce, and announcing a
+    // change that did not happen would cost an undo step for a no-op.
+    if (layer->getName() == before)
+        return;
+
+    notifyNamesChanged();
+}
+
+void LayerStack::setGroupName (int layerIndex, int groupId, juce::String newName)
+{
+    auto* layer = getLayer (layerIndex);
+
+    if (layer == nullptr)
+        return;
+
+    auto* group = layer->findGroup (groupId);
+
+    if (group == nullptr || group->getName() == newName)
+        return;
+
+    const auto before = group->getName();
+    group->setName (std::move (newName));
+
+    if (group->getName() == before)
+        return;
+
+    notifyNamesChanged();
+}
+
 void LayerStack::notifyLayersChanged()
 {
     listeners.call ([] (Listener& l) { l.layersChanged(); });
+}
+
+void LayerStack::notifyNamesChanged()
+{
+    listeners.call ([] (Listener& l) { l.namesChanged(); });
 }
 
 } // namespace atomic

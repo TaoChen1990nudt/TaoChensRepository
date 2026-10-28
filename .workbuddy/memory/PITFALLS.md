@@ -1883,3 +1883,32 @@ pitch 快得多。改成 78 之后立刻通过。
 Windows 允许**重命名**正在运行的可执行文件，所以：`mv AtomicDAW.exe
 AtomicDAW.running-0544.exe`，再构建就写出了新的 exe，用户的进程继续用它已经映射的
 旧文件，互不干扰。之后提醒用户关掉旧实例再重开，别去删那个改名文件（他还占着）。
+
+## P79-A：`addChildComponent` 加进来的组件是**隐藏**的
+
+`NameEditor` 由三个面板 `addChildComponent()` 加入（省掉空闲面板的一次绘制）。`begin()` 里
+`editor.setVisible (true)` —— 只显示了里面的 `TextEditor`，父组件仍然是 hidden，于是
+**一个像素都不画**：数据改了、`isEditing()` 是真、自检全绿、屏幕上什么都没有。
+
+这一条特别毒的地方在于**它的症状是"全对"**：模型对了，断言过了，截图还是一行普通文字。
+发现它靠的是 `--snapshot` 截图 + 放大看名字那一行，而不是任何断言。
+
+修法：`begin()` 里 `setVisible (true)`，`close()` 里 `setVisible (false)`（可见性归组件自己管，
+宿主只 `addChildComponent`）。**并且**把 `isVisible()` 加进那三条"双击打开改名框"的断言里
+（咬测：删掉 `setVisible(true)` → 3 条挂，`可见 0`）。
+
+## P79-B：`--snapshot` 传绝对路径不会写文件
+
+`Main.cpp` 用 `getCurrentWorkingDirectory().getChildFile (args[i+1])`。传
+`F:/PLSMStudio/Atomic DAW/docs/p79.png` 时拼出来的路径是错的，`createOutputStream()`
+返回 nullptr，程序**静默成功**、退出码 0，旧图原样躺着。
+
+症状是我盯着旧图看了四轮，还以为"框画不出来"。判据：`ls -la` 看 mtime，或者先 `rm` 再跑。
+正确用法是 `cd` 到项目根目录传相对路径：`./build/.../AtomicDAW.exe --snapshot docs/p79.png`。
+
+## P79-C：改名框记行号 = 改错人
+
+编辑器开着的时候列表会动（删一层、删一张卡、组被剪掉）。用 `getLayer(index)` 提交，删掉第 0 层
+之后这个 index 指向的是**原来第 1 层**，名字就落到别人头上。三个面板都存 id：
+`indexOfLayerId` / `indexOfSlot` / (层 id + 组 id)，提交和自愈（行没了就 `close(false)`）
+都先换回索引。

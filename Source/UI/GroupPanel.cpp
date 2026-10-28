@@ -42,6 +42,21 @@ GroupPanel::GroupPanel (LayerStack& layerStackToUse, RackModel& rackToUse)
     setOpaque (true);
     stack.addListener (this);
     rack.addListener (this);
+
+    // P79: double click a row's name to rename the group. One field on the
+    // model, so the frame the roll draws over those notes says the same word
+    // the instant this box closes.
+    addChildComponent (nameEditor);
+    nameEditor.onCommit = [this] (const juce::String& newName)
+    {
+        const int index = stack.indexOfLayerId (renamingLayerId);
+
+        if (index < 0 || renamingGroupId < 0)
+            return;
+
+        stack.setGroupName (index, renamingGroupId, newName);
+    };
+    nameEditor.onClosed = [this] { renamingLayerId = -1; renamingGroupId = -1; };
 }
 
 GroupPanel::~GroupPanel()
@@ -180,6 +195,73 @@ juce::Rectangle<int> GroupPanel::getRowBounds (int rowIndex) const
     }
 
     return { 0, y, getWidth(), height };
+}
+
+juce::Rectangle<int> GroupPanel::getNameBounds (int rowIndex) const
+{
+    const auto row = getRowBounds (rowIndex);
+
+    // 46 / -106: the numbers drawRow prints the name in. A folded row puts the
+    // title on the same line, so there is only one rectangle to get wrong.
+    return { ui::px (46), row.getY() + ui::px (4),
+             juce::jmax (ui::px (24), getWidth() - ui::px (106)), ui::px (18) };
+}
+
+int GroupPanel::rowIndexForRenaming() const
+{
+    if (renamingLayerId < 0 || renamingGroupId < 0)
+        return -1;
+
+    const auto rows = getRows();
+
+    for (int i = 0; i < (int) rows.size(); ++i)
+    {
+        auto* layer = stack.getLayer (rows[(size_t) i].layerIndex);
+
+        if (layer != nullptr && layer->getId() == renamingLayerId
+              && rows[(size_t) i].groupId == renamingGroupId)
+            return i;
+    }
+
+    return -1;
+}
+
+bool GroupPanel::beginRenameGroup (int rowIndex)
+{
+    const auto rows = getRows();
+
+    if (! juce::isPositiveAndBelow (rowIndex, (int) rows.size()))
+        return false;
+
+    const auto row    = rows[(size_t) rowIndex];
+    auto*      layer  = stack.getLayer (row.layerIndex);
+
+    if (layer == nullptr)
+        return false;
+
+    const auto* group = layer->findGroup (row.groupId);
+
+    if (group == nullptr)
+        return false;
+
+    const auto nameBounds = getNameBounds (rowIndex);
+
+    if (! getViewArea().contains (nameBounds))
+        return false;
+
+    nameEditor.close (false);
+
+    renamingLayerId = layer->getId();
+    renamingGroupId = row.groupId;
+
+    nameEditor.begin (nameBounds, group->getName(), 11.5f,
+                      juce::Colours::white.withAlpha (0.92f));
+    return true;
+}
+
+int GroupPanel::getRenamingRowForTest() const
+{
+    return rowIndexForRenaming();
 }
 
 juce::Rectangle<int> GroupPanel::getCollapseBounds (int rowIndex) const
@@ -343,9 +425,7 @@ void GroupPanel::drawRow (juce::Graphics& g, int rowIndex)
 
     g.setColour (juce::Colours::white.withAlpha (0.92f));
     g.setFont (boldFont (11.5f));
-    g.drawText (group->getName(),
-                juce::Rectangle<int> (ui::px (46), bounds.getY() + ui::px (4),
-                                      getWidth() - ui::px (46 + 60), ui::px (18)),
+    g.drawText (group->getName(), getNameBounds (rowIndex),
                 juce::Justification::centredLeft, false);
 
     g.setColour (juce::Colours::white.withAlpha (0.26f));
@@ -513,6 +593,15 @@ void GroupPanel::paint (juce::Graphics& g)
 void GroupPanel::resized()
 {
     clampScroll();
+
+    // P79: a width change while a name is being typed — the box follows.
+    if (renamingGroupId >= 0 && nameEditor.isEditing())
+    {
+        const int row = rowIndexForRenaming();
+
+        if (row >= 0)
+            nameEditor.reposition (getNameBounds (row));
+    }
 }
 
 //==============================================================================
@@ -722,6 +811,27 @@ void GroupPanel::mouseDrag (const juce::MouseEvent& e)
         setPanFromMouse (*group, getPanBounds (dragRow), (float) e.getPosition().x);
 }
 
+void GroupPanel::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    handleDoubleClick (e.getPosition());
+}
+
+void GroupPanel::handleDoubleClick (juce::Point<int> pos)
+{
+    Part part = Part::none;
+    const int row = rowAt (pos, &part);
+
+    if (row < 0)
+        return;
+
+    // P78: a double click opens what is under the pointer. On a row that is the
+    // name — not the fader (two nudges), not the chevron (two folds).
+    if (! getNameBounds (row).contains (pos))
+        return;
+
+    beginRenameGroup (row);
+}
+
 void GroupPanel::mouseUp (const juce::MouseEvent&)
 {
     // Phase 58/60: a body press that never became a drag is a click, and a click
@@ -770,11 +880,18 @@ void GroupPanel::mouseMove (const juce::MouseEvent& e)
     Part part = Part::none;
     const int row = rowAt (e.getPosition(), &part);
 
-    if (row != hoveredRow || part != hoveredPart)
+    // P79: the group's name is typable, and says so — a label looks exactly
+    // like the labels that cannot be edited.
+    const bool overName = row >= 0 && getNameBounds (row).contains (e.getPosition());
+
+    if (row != hoveredRow || part != hoveredPart || overName != hoveredName)
     {
         hoveredRow  = row;
         hoveredPart = part;
-        setMouseCursor (part == Part::volume ? juce::MouseCursor::LeftRightResizeCursor
+        hoveredName = overName;
+
+        setMouseCursor (overName ? juce::MouseCursor::IBeamCursor
+                       : part == Part::volume ? juce::MouseCursor::LeftRightResizeCursor
                        : part == Part::pan  ? juce::MouseCursor::LeftRightResizeCursor
                                             : juce::MouseCursor::NormalCursor);
         repaint();
@@ -806,6 +923,26 @@ void GroupPanel::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheel
 //==============================================================================
 void GroupPanel::layersChanged()
 {
+    // P79: the group being renamed can be gone — an undo, a load, a regroup.
+    // `rowIndexForRenaming` answers -1 for "it no longer exists", which is also
+    // the question the reposition needs: a row that moved (another group
+    // folded, the list scrolled) has to take the box with it.
+    if (renamingGroupId >= 0)
+    {
+        const int row = rowIndexForRenaming();
+
+        if (row < 0)
+        {
+            renamingLayerId = -1;
+            renamingGroupId = -1;
+            nameEditor.close (false);
+        }
+        else
+        {
+            nameEditor.reposition (getNameBounds (row));
+        }
+    }
+
     clampScroll();
     repaint();
 }
@@ -817,6 +954,25 @@ void GroupPanel::notesChanged()
     // is this notification. Clamp first: grouping can also PRUNE an emptied
     // group, which makes the list shorter under a scrolled viewport.
     clampScroll();
+
+    // P79: an emptied group is pruned on this notification, so this is where
+    // the row being renamed can have just ceased to exist.
+    if (renamingGroupId >= 0)
+    {
+        const int row = rowIndexForRenaming();
+
+        if (row < 0)
+        {
+            renamingLayerId = -1;
+            renamingGroupId = -1;
+            nameEditor.close (false);
+        }
+        else
+        {
+            nameEditor.reposition (getNameBounds (row));
+        }
+    }
+
     repaint();
 }
 

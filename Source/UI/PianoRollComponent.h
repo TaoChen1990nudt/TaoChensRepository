@@ -907,6 +907,13 @@ public:
     /** Local-space bounds of a clip block. Empty when it does not exist. */
     juce::Rectangle<float> getSampleScreenBounds (int layerIndex, int sampleId) const;
 
+    /** P79: the words a block prints on its name strip.
+
+        Public and shared with drawSampleBlock, because "the block follows the
+        sampler's name" is a claim about those words and nothing else — a test
+        that reassembled the string would be checking its own copy. */
+    juce::String getSampleLabelForTest (int layerIndex, int sampleId) const;
+
     /** Phase 27: the buffer a clip actually plays — its sampler's, or its own
         when it is not mounted. Routing::resolveSample is the rule; this is the
         UI's one call into it, so the drawn waveform cannot disagree with what
@@ -1440,6 +1447,17 @@ public:
     void notesChanged() override;
     void rackChanged() override;
 
+    /** P79: a name changed and nothing else.
+
+        Overridden because layersChanged() below tears down the open group on
+        purpose (P73: an undo can bring the SAME group id back, so "does it
+        still exist" is not a safe test). A rename is not that kind of event —
+        the user types a new name for the group he is standing inside, and being
+        thrown out of it by his own keystroke would be the panel changing the
+        subject. Nothing about a name affects geometry, selection or routing, so
+        a repaint is the whole of what this view owes. */
+    void namesChanged() override;
+
     /** Phase 20: local bounds of toolbar button `index`.
 
         Public because the self-test uses it to prove the row really fits: a
@@ -1611,6 +1629,11 @@ private:
     void drawNotes (juce::Graphics&);
 
     //-- Phase 17: audio clips ------------------------------------------------
+    /** P79: `sample.name`, plus "→ sampler" when the block is mounted somewhere
+        whose name differs. One function, because two callers now want the same
+        sentence: the paint, and the rename rule's own check. */
+    juce::String sampleLabelText (const SampleEvent&) const;
+
     void drawSamples (juce::Graphics&);
     void drawSampleBlock (juce::Graphics&, int layerIndex, const SampleEvent&,
                           juce::Colour, float alpha, bool selected);

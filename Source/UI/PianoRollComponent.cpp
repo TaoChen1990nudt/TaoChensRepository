@@ -349,6 +349,49 @@ void PianoRollComponent::rackChanged()
     repaint();
 }
 
+void PianoRollComponent::namesChanged()
+{
+    // P79: nothing but words moved. Deliberately does NOT go through
+    // layersChanged() — that one closes the open group, and the group being
+    // renamed is very often the one being edited.
+    repaint();
+}
+
+juce::String PianoRollComponent::sampleLabelText (const SampleEvent& sample) const
+{
+    juce::String label = sample.name;
+
+    // Phase 27: the block says which sampler plays it — but only when that is
+    // news. A clip dropped from a file is mounted on a sampler grown FOR it, so
+    // the two names start identical and the arrow would just repeat itself; it
+    // earns its space the moment the clip points at a DIFFERENT sampler, which
+    // is exactly when the sound changes without the block moving.
+    //
+    // P79: this is also why renaming a sampler has to rename the block. The
+    // two are the same word by construction, so a rename that updated only one
+    // of them would make the block claim it is mounted somewhere else.
+    if (sample.outputSlotId >= 0)
+        if (const auto* slot = rack.findSlot (sample.outputSlotId);
+            slot != nullptr && slot->name != sample.name)
+            label += juce::String ("  ") + utf8 ("\xe2\x86\x92") + " " + slot->name;
+
+    return label;
+}
+
+juce::String PianoRollComponent::getSampleLabelForTest (int layerIndex, int sampleId) const
+{
+    const auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr || sampleId < 0)
+        return {};
+
+    for (const auto& sample : layer->getSamples())
+        if (sample.id == sampleId)
+            return sampleLabelText (sample);
+
+    return {};
+}
+
 void PianoRollComponent::setPlayheadBeat (double beats)
 {
     if (juce::approximatelyEqual (beats, playheadBeat))
@@ -11647,12 +11690,7 @@ void PianoRollComponent::drawSampleBlock (juce::Graphics& g, int layerIndex,
         // repeat itself; the label earns its space the moment the clip is
         // pointed at a DIFFERENT sampler, which is exactly when the sound
         // changes without the block moving.
-        juce::String label = sample.name;
-
-        if (sample.outputSlotId >= 0)
-            if (const auto* slot = rack.findSlot (sample.outputSlotId);
-                slot != nullptr && slot->name != sample.name)
-                label += juce::String ("  ") + utf8 ("\xe2\x86\x92") + " " + slot->name;
+        juce::String label = sampleLabelText (sample);
 
         //-- Phase 31: the stretch badge --------------------------------------
         // A mode that changes the sound but says nothing on screen is a setting

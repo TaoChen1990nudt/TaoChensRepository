@@ -107,6 +107,21 @@ RackPanel::RackPanel (RackModel& rackToUse)
     setOpaque (true);
     rack.addListener (this);
 
+    // P79: double click a card's name to rename it. The panel reports, the host
+    // applies — see onSlotRenamed.
+    addChildComponent (nameEditor);
+    nameEditor.onCommit = [this] (const juce::String& newName)
+    {
+        if (renamingSlotId < 0)
+            return;
+
+        if (onSlotRenamed != nullptr)
+            onSlotRenamed (renamingSlotId, newName);
+        else
+            rack.setSlotName (renamingSlotId, newName);
+    };
+    nameEditor.onClosed = [this] { renamingSlotId = -1; };
+
     syncLaneEditors();
 }
 
@@ -270,6 +285,60 @@ juce::Rectangle<int> RackPanel::getSendBounds (int index) const
     auto card = getCardBounds (index);
     return { card.getX() + ui::px (12), card.getY() + ui::px (106),
              card.getWidth() - ui::px (24), ui::px (16) };
+}
+
+juce::Rectangle<int> RackPanel::getNameBounds (int index) const
+{
+    const auto card = getCardBounds (index);
+
+    // Folded, the card IS the name plus a dB readout, so the word is centred in
+    // an 18-unit band instead of the whole 40 — the rename box then sits on the
+    // text rather than on the card, which is what it is replacing.
+    if (isCollapsed (index))
+        return { card.getX() + ui::px (36),
+                 card.getY() + (card.getHeight() - ui::px (18)) / 2,
+                 card.getWidth() - ui::px (130), ui::px (18) };
+
+    return { card.getX() + ui::px (26), card.getY() + ui::px (6),
+             card.getWidth() - ui::px (134), ui::px (18) };
+}
+
+int RackPanel::cardAt (juce::Point<int> position) const
+{
+    if (! getViewArea().contains (position))
+        return -1;
+
+    for (int i = 0; i < rack.getNumSlots(); ++i)
+        if (getCardBounds (i).contains (position))
+            return i;
+
+    return -1;
+}
+
+bool RackPanel::beginRenameSlot (int index)
+{
+    auto* slot = rack.getSlot (index);
+
+    if (slot == nullptr)
+        return false;
+
+    const auto nameBounds = getNameBounds (index);
+
+    if (! getViewArea().contains (nameBounds))
+        return false;
+
+    nameEditor.close (false);
+
+    renamingSlotId = slot->id;
+    nameEditor.begin (nameBounds, slot->getDisplayName(),
+                      isCollapsed (index) ? 12.5f : 13.0f,
+                      juce::Colours::white.withAlpha (slot->muted ? 0.45f : 0.95f));
+    return true;
+}
+
+int RackPanel::getRenamingSlotForTest() const
+{
+    return renamingSlotId < 0 ? -1 : rack.indexOfSlot (renamingSlotId);
 }
 
 juce::Rectangle<int> RackPanel::getAddButtonBounds() const
@@ -504,9 +573,7 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
         g.setColour (juce::Colours::white.withAlpha (slot->muted ? 0.40f : 0.92f));
         g.setFont (juce::Font (juce::FontOptions{}.withHeight (atomic::ui::sp (12.5f))
                                  .withStyle ("Bold")));
-        g.drawText (slot->getDisplayName(),
-                    juce::Rectangle<int> (cardX + ui::px (36), cardY,
-                                          cardW - ui::px (130), (int) card.getHeight()),
+        g.drawText (slot->getDisplayName(), getNameBounds (index),
                     juce::Justification::centredLeft, true);
 
         g.setColour (juce::Colours::white.withAlpha (0.30f));
@@ -524,9 +591,7 @@ void RackPanel::drawCard (juce::Graphics& g, int index)
 
     g.setColour (juce::Colours::white.withAlpha (slot->muted ? 0.45f : 0.95f));
     g.setFont (boldFont (13.0f));
-    g.drawText (slot->getDisplayName(),
-                juce::Rectangle<int> (cardX + ui::px (26), cardY + ui::px (6),
-                                      cardW - ui::px (134), ui::px (18)),
+    g.drawText (slot->getDisplayName(), getNameBounds (index),
                 juce::Justification::centredLeft, false);
 
     //-- S / M / close ---------------------------------------------------------
@@ -1003,6 +1068,24 @@ void RackPanel::rackChanged()
     hoveredCard = -1;
     hoveredPart = Part::none;
 
+    // P79: same rule as the sheet list — the card being renamed may be gone, or
+    // may have moved under the box. By id, because the index means a different
+    // synth after a delete.
+    if (renamingSlotId >= 0)
+    {
+        const int index = rack.indexOfSlot (renamingSlotId);
+
+        if (index < 0)
+        {
+            renamingSlotId = -1;
+            nameEditor.close (false);
+        }
+        else
+        {
+            nameEditor.reposition (getNameBounds (index));
+        }
+    }
+
     // Phase 27: a card is usually grown by dropping a file into the ROLL, which
     // means the user is not looking at the rack when it happens. Scrolling to
     // the new card is the difference between "my sample is in the rack" and
@@ -1027,6 +1110,16 @@ void RackPanel::resized()
 {
     lastSlotCount = rack.getNumSlots();
     updateLayout();     // also re-clamps the scroll offset — see updateLayout()
+
+    // P79: a width change while a name is being typed — the box follows the
+    // word, since no model notification is sent by a resize.
+    if (renamingSlotId >= 0 && nameEditor.isEditing())
+    {
+        const int index = rack.indexOfSlot (renamingSlotId);
+
+        if (index >= 0)
+            nameEditor.reposition (getNameBounds (index));
+    }
 }
 
 //==============================================================================
@@ -1409,6 +1502,27 @@ void RackPanel::mouseDrag (const juce::MouseEvent& e)
     }
 }
 
+void RackPanel::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    handleDoubleClick (e.getPosition());
+}
+
+void RackPanel::handleDoubleClick (juce::Point<int> pos)
+{
+    const int index = cardAt (pos);
+
+    if (index < 0)
+        return;
+
+    // P78: a double click opens what is under the pointer. On a card that is
+    // the name, so it opens as a name. Every other control keeps its own
+    // meaning — a double click on the fader is two nudges, not a rename.
+    if (! getNameBounds (index).contains (pos))
+        return;
+
+    beginRenameSlot (index);
+}
+
 void RackPanel::mouseUp (const juce::MouseEvent&)
 {
     dragPart     = Part::none;
@@ -1453,7 +1567,11 @@ void RackPanel::mouseMove (const juce::MouseEvent& e)
 
     const bool newAdd = getAddButtonBounds().contains (pos) && getHeight() > 200;
 
-    setMouseCursor ((newPart == Part::volume || newPart == Part::pan
+    // P79: the card title is typable, and says so.
+    const bool overName = newCard >= 0 && getNameBounds (newCard).contains (pos);
+
+    setMouseCursor (overName ? juce::MouseCursor::IBeamCursor
+                             : (newPart == Part::volume || newPart == Part::pan
                        || newPart == Part::pitchRange)
                       ? juce::MouseCursor::LeftRightResizeCursor
                       : (newPart == Part::none || newPart == Part::body)

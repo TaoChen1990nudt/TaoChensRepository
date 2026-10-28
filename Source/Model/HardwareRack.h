@@ -104,11 +104,31 @@ struct SynthSlot
         overwritten. */
     juce::String getDisplayName() const
     {
+        // P79: a name the USER typed outranks everything derived. Before this
+        // flag existed, renaming a hosted slot did nothing visible: the field
+        // was written and `getDisplayName()` kept answering `pluginName`, so
+        // the card, the menus and the roll all still said "Serum". "I typed a
+        // name and nothing happened" is the one outcome a rename must never
+        // have, so the flag is checked first and the derived names only answer
+        // for a slot nobody has named.
+        if (userName && name.isNotEmpty())
+            return name;
+
         if (isPlugin() && pluginName.isNotEmpty())
             return pluginName;
 
         return name;
     }
+
+    /** P79: set when the user typed the name himself.
+
+        Not cleared by anything except loading a project or replacing the
+        instrument: those two are the moments where the slot becomes a
+        different thing, and a name the old instrument earned would be a lie
+        about the new one. (Built-in and sampler slots never needed the flag —
+        their display name IS `name` — but they carry it too so there is one
+        rule instead of three.) */
+    bool userName = false;
 
     //-- Phase 27: a slot that holds a sample instead of an instrument --------
     /** A sampler slot is a CONTAINER, not a player.
@@ -279,6 +299,17 @@ public:
     void setMuted (int slotId, bool shouldBeMuted);
     void setLevelDb (int slotId, float newLevelDb);
     void setWaveform (int slotId, Waveform newWaveform);
+
+    /** P79: the name the user typed. Sets `userName` too, so it outranks the
+        hosted plugin's own name (see SynthSlot::getDisplayName).
+
+        An empty name is refused, and so is a name identical to the current one:
+        the first would leave an unlabelled card nobody can find in a menu, and
+        the second would cost an undo step for a gesture that changed nothing.
+        Whether the sample blocks mounted on this slot follow the new name is
+        NOT decided here — the rack knows nothing about layers; the host does
+        (MainComponent::renameSynthSlot). */
+    void setSlotName (int slotId, juce::String newName);
 
     //-- Phase 5 mixture controls ---------------------------------------------
     void setPan (int slotId, float pan);

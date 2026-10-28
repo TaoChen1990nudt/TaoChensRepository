@@ -83,6 +83,11 @@ namespace
         component.prepareSnapshotBrowser();
         component.showDemoMixedSelection();
 
+        // P79: the rename box on a sheet name — the one state of this feature
+        // that leaves no trace in the model, so a screenshot is the only proof
+        // it lands on the word it is renaming.
+        component.openDemoRename();
+
         pngFile.getParentDirectory().createDirectory();
 
         if (auto stream = pngFile.createOutputStream())

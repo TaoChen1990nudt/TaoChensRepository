@@ -356,6 +356,15 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
             if (slot->collapsed)
                 xml->setAttribute ("collapsed", 1);
 
+            // P79: "the user typed this name" — written only when true, so
+            // every file made before this existed reads back with the flag off
+            // and behaves exactly as it did (built-ins answer with `name`,
+            // hosted slots with the plugin's). Deliberately NOT a version
+            // bump: an optional attribute an older build ignores costs the old
+            // build nothing but a rename it would not have shown anyway.
+            if (slot->userName)
+                xml->setAttribute ("userName", 1);
+
             // Phase 11. Only written when the synth actually feeds a console
             // channel; a missing attribute reads back as -1, which is "direct to
             // master" — so a v4 file keeps sounding exactly as it did.
@@ -800,6 +809,7 @@ bool fromXmlText (const juce::String& xmlText,
             slot.muted    = child->getBoolAttribute ("muted", false);
             slot.soloed   = child->getBoolAttribute ("soloed", false);
             slot.collapsed = child->getBoolAttribute ("collapsed", false);
+            slot.userName  = child->getBoolAttribute ("userName", false);
             slot.mixerChannel = juce::isPositiveAndBelow (child->getIntAttribute ("mixer", -1),
                                                           SynthSlot::maxMixerChannels)
                                   ? child->getIntAttribute ("mixer", -1)

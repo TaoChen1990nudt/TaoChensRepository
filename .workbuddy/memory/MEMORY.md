@@ -53,6 +53,18 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
     `handleDoubleClick()` 里采样那一问必须排在 `hitTestActiveLayer` **之后**——`drawSamples` 先画、
     块在音符**下面**，压在块上的音符才是指针看着的东西。闭组里的块那一击仍旧是「让我进去」（P73），
     进组后再双击才开窗。
+
+13. **名字是一份数据，不是一个副本**（P79）：图层 / 编组 / 音源三个名字只有一处字段
+    （`Layer::name` / `NoteGroup::name` / `SynthSlot::name`），三处入口（图层栏、编组栏、机架卡）
+    都是**双击那行名字**就地改（`NameEditor`，位置 = 那行画名字的矩形，`getNameBounds()` 一处
+    说了算）。所以"改完钢琴窗跟着变"不需要同步代码；**唯一例外是采样块的 `SampleEvent::name`**
+    ——它是导入时从槽名抄来的副本，所以 `MainComponent::renameSynthSlot()` 只改「还穿着旧名字」
+    的块（`name == 旧槽名`），自己起过名的不动。改名按 **id** 记住改谁（层 id / 槽 id / 层 id + 组 id），
+    行索引在框开着时会因为删层、重排指向别人。
+    **通知分两种**：`Listener::namesChanged()` 默认转发 `layersChanged()`（漏通知比多清场更糟），
+    只有钢琴窗 override 成纯 `repaint()`——`layersChanged()` 会无条件关掉编辑中的组（P73），
+    而"站在组里给组改名"是最常见的用法。**`SynthSlot::userName`**（可选属性，不升版本）让
+    用户起的名字压过 `pluginName`，替换乐器时清掉。
 ## 目录
 - `Source/Model/` 数据与路由（LayerModel / RackModel / MixerModel / Routing / ProjectIO / Gain）
 - `Source/Audio/` 引擎与纯函数 DSP（PlaybackEngine / ClipStretch / 导出）

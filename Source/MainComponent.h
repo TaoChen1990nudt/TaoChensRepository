@@ -180,8 +180,20 @@ public:
         panel above. */
     void openSampleEnvelopePanel (int layerIndex, int sampleId);
 
+    /** P79: rename a synth slot AND the sample blocks that carry its name.
+
+        The rack cannot do this itself — it knows nothing about layers — and the
+        roll must not do it either, because a block can live on a sheet the roll
+        is not showing. So the host does it, once, for every sheet. */
+    void renameSynthSlot (int slotId, const juce::String& newName);
+
     /** Parks the playhead somewhere visible; used by --snapshot. */
     void setDemoPlayheadBeats (double beats);
+
+    /** P79: opens the in-place rename box on a sheet name; used by --snapshot.
+        A rename box is the whole feature and it only exists while a gesture is
+        in progress, so a still frame is the only way to show it. */
+    void openDemoRename();
 
     /** Opens the roll's inline automation box on a long demo note, so the
         screenshot shows the box and its parameter menu. */
@@ -339,6 +351,11 @@ public:
 
     LayerStack&  getLayerStack() { return stack; }
     RackModel&   getRack()       { return rack; }
+
+    /** P79: the roll itself, so a test can read what a block actually prints
+        on its name strip. Reading the model instead would only prove the model
+        changed, not that the words on screen did. */
+    PianoRollComponent& pianoRollForTest() { return pianoRoll; }
 
     //-- Phase 9: VST3 --------------------------------------------------------
     /** The session's plugin host. Main.cpp adds extra search paths here before

@@ -403,6 +403,26 @@ public:
     const juce::String& getName() const noexcept  { return name; }
     juce::Colour getColour() const noexcept       { return colour; }
 
+    /** P79: the name the group list and the roll's frame both print.
+
+        One field, because the two are the same sentence about the same object —
+        the frame over the notes is not a label ON the notes, it is this group
+        placed somewhere. A second copy would be a second thing to keep in step,
+        and the sign of that bug would be a frame with the old name on it while
+        the list already showed the new one.
+
+        An empty name is refused rather than stored: a nameless group is a row
+        you cannot find again, and every menu that lists groups would print a
+        blank line. The caller (the rename editor) treats empty as "cancel"
+        anyway, so this is the second door on the same rule. */
+    void setName (juce::String newName)
+    {
+        if (newName.trim().isEmpty())
+            return;
+
+        name = newName;
+    }
+
     /** Synth slot this group is mounted on, or -1 for "whatever the layer
         uses". A dangling id is tolerated: routing::resolve() falls back to the
         layer and reports it, rather than silently dropping the group. */
@@ -550,6 +570,17 @@ public:
 
     const juce::String& getName() const noexcept  { return name; }
     juce::Colour        getColour() const noexcept { return colour; }
+
+    /** P79: what the sheet list, the group list's "which sheet" column and the
+        roll's own readouts call this layer. Same one-field rule as
+        NoteGroup::setName, and the same refusal of an empty name. */
+    void setName (juce::String newName)
+    {
+        if (newName.trim().isEmpty())
+            return;
+
+        name = newName;
+    }
 
     /** Only project load changes a layer's colour; the palette assigns the rest. */
     void setColour (juce::Colour newColour) noexcept { colour = newColour; }
@@ -762,6 +793,11 @@ public:
     /** Clips live on the layer for the same reason notes do: deleting a sheet
         must take its content with it, and a clip has to be drawn in the same
         coordinate space as the notes around it. */
+    /** Both versions, exactly like getNotes(): the const one for every read
+        path, the other for the in-place edits the host makes on a clip it has
+        already identified (P79 renames the blocks of one sampler). Membership
+        still goes through addSample / removeSample. */
+    std::vector<SampleEvent>&       getSamples() noexcept       { return samples; }
     const std::vector<SampleEvent>& getSamples() const noexcept { return samples; }
 
     SampleEvent*       findSample (int sampleId) noexcept;
@@ -836,6 +872,22 @@ public:
 
         /** Note geometry or content changed (moves, resizes, deletions). */
         virtual void notesChanged() {}
+
+        /** P79: a layer or a group was RENAMED — a word changed, nothing moved.
+
+            Why this is not just layersChanged(): that notification is how a
+            project load, an undo and a sheet switch arrive, and every view is
+            allowed to treat it as "everything I knew about this layer may be
+            gone". The roll acts on exactly that reading — it closes the group
+            being edited (P73). A rename must not do that: the user types a new
+            name for the group he is standing INSIDE, and being thrown out of it
+            by his own keystroke would be the panel changing the subject.
+
+            Default forwards to layersChanged(), because "a view missed the
+            rename" is a worse bug than "a view cleared too much", and this way
+            no listener has to be touched to stay correct. The one view that
+            cares overrides it. */
+        virtual void namesChanged() { layersChanged(); }
     };
 
     LayerStack() = default;
@@ -870,6 +922,18 @@ public:
         view and the audio engine get told in one place. */
     void setLayerOutputSlot (int index, int slotId);
 
+    //-- P79: renaming --------------------------------------------------------
+    /** Renames a layer, or a group of one layer. Both go through the stack for
+        the same reason every other setter does: the panels are children of the
+        model, not owners of it, and an edit that skipped the notification would
+        paint in one panel and not the other.
+
+        An out-of-range index or an unknown group id is a no-op rather than an
+        assertion — the rename editor can be open across an undo, and "the thing
+        I was naming is gone" has to be survivable. */
+    void setLayerName (int index, juce::String newName);
+    void setGroupName (int layerIndex, int groupId, juce::String newName);
+
     //-- Phase 5 mix controls -------------------------------------------------
     void setLayerLevelDb (int index, float db);
     void setLayerPan (int index, float pan);
@@ -890,6 +954,7 @@ public:
 
 private:
     void notifyLayersChanged();
+    void notifyNamesChanged();
 
     std::vector<std::unique_ptr<Layer>> layers;
     juce::ListenerList<Listener> listeners;
