@@ -816,6 +816,7 @@ void PianoRollComponent::setGhostAlpha (float alpha)
 void PianoRollComponent::setScrollBeats (double beats)
 {
     const double visible = getVisibleBeats();
+    const double lengthBefore = timelineBeats;
 
     // Phase 11: no wall at 64 beats. Scrolling past the end adds another chunk
     // (bounded per call), so the view can keep going as long as the user keeps
@@ -826,11 +827,21 @@ void PianoRollComponent::setScrollBeats (double beats)
     const double maxBeats = juce::jmax (0.0, timelineBeats - visible);
     const double clamped = juce::jlimit (0.0, maxBeats, beats);
 
-    if (juce::approximatelyEqual (clamped, scrollBeats))
+    const bool moved = ! juce::approximatelyEqual (clamped, scrollBeats);
+
+    if (! moved && juce::approximatelyEqual (lengthBefore, timelineBeats))
         return;
 
     scrollBeats = clamped;
-    noteUserScroll();          // Phase 58: this is the window the user wants
+
+    if (moved)
+        noteUserScroll();      // Phase 58: this is the window the user wants
+
+    // Phase 60: scrolling BACK is what has to give the empty tail up again. The
+    // grow above is the other half of the same sentence — the roll extends when
+    // you push into nowhere, and it stops being long once you leave.
+    trimTimelineToView();
+
     repaint();
 
     if (onScrollChanged != nullptr)
@@ -904,6 +915,11 @@ void PianoRollComponent::clampScroll()
 
     const double maxBeats = juce::jmax (0.0, timelineBeats - visibleBeats);
     scrollBeats = juce::jlimit (0.0, maxBeats, scrollBeats);
+
+    // Phase 60: and the other way. Every caller of clampScroll — resize, zoom,
+    // wheel, a jumped-to track click — lands here, so "the roll is exactly as
+    // long as it needs to be" is settled in one place instead of in each of them.
+    trimTimelineToView();
 }
 
 //==============================================================================
@@ -918,6 +934,45 @@ void PianoRollComponent::ensureTimelineExtendsTo (double beats)
 
     timelineBeats = juce::jlimit (totalBeats, maxTimelineBeats,
                                   std::ceil (target / beatChunk) * beatChunk);
+
+    if (onTimelineChanged != nullptr)
+        onTimelineChanged();
+}
+
+void PianoRollComponent::trimTimelineToView()
+{
+    const double visible = getVisibleBeats();
+
+    // What the roll must still be able to show. Three things, and all three are
+    // somebody's anchor:
+    //
+    //   * the music, plus a little air past the last note;
+    //   * the window the user is looking through — trimming under it would drag
+    //     the view left while the user was scrolling;
+    //   * the playhead. A ruler that stops before the playhead is a ruler you
+    //     cannot click on the beat you are listening to.
+    //
+    // Rounded UP to a chunk, which is the same grid ensureTimelineExtendsTo
+    // grows on: a trim that landed on a non-chunk boundary would make the next
+    // scroll grow again immediately, and the ruler would breathe on every wheel
+    // tick.
+    const double needed = juce::jmax (juce::jmax (getContentEndBeat() + 4.0,
+                                                  scrollBeats + visible),
+                                      playheadBeat + 4.0);
+
+    const double length = juce::jlimit (totalBeats, maxTimelineBeats,
+                                        std::ceil (needed / beatChunk) * beatChunk);
+
+    if (length >= timelineBeats)
+        return;
+
+    timelineBeats = length;
+
+    // `needed` already covers scrollBeats + visible, so this cannot move the
+    // view; it is here so the invariant holds even if one of the three anchors
+    // is ever changed above without the others.
+    const double maxBeats = juce::jmax (0.0, timelineBeats - visible);
+    scrollBeats = juce::jlimit (0.0, maxBeats, scrollBeats);
 
     if (onTimelineChanged != nullptr)
         onTimelineChanged();

@@ -4,6 +4,7 @@
 #include "Util/Metrics.h"
 #include "Util/SharedRules.h"     // Phase 52: the sampler drag payload
 
+#include "UI/CardLook.h"
 #include "UI/MixerLook.h"
 #include "Util/Text.h"
 #include "Util/Theme.h"
@@ -421,14 +422,11 @@ void RackPanel::drawCardRing (juce::Graphics& g, juce::Rectangle<float> card, fl
     // depending on how you got there — and the dashed version read as "a weaker
     // highlight", which is exactly what it looked like.
     //
-    // Alpha is the only thing `strength` touches: a selection ring has to give
-    // way when a hand-lit spotlight is on screen, or the two rings look equally
-    // load-bearing and neither is.
-    g.setColour (theme::accent.withAlpha (0.22f * strength));
-    g.drawRoundedRectangle (card.expanded (ui::pf (3)), ui::pf (6), ui::pf (3));
-
-    g.setColour (theme::accent.withAlpha (0.95f * strength));
-    g.drawRoundedRectangle (card.reduced (ui::pf (0.5)), ui::pf (7.5), ui::pf (1.8));
+    // Phase 60: the numbers moved to cardlook::drawSelectionRing, because the
+    // group list's rows now answer to the same ring. The user asked for the
+    // three frames to match; three copies of the same four constants is how
+    // they stop matching.
+    cardlook::drawSelectionRing (g, card, strength);
 }
 
 void RackPanel::drawRoutingMarks (juce::Graphics& g, int index, juce::Rectangle<float> card)

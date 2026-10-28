@@ -73,6 +73,21 @@ public:
         them. */
     void setSelectedGroups (const std::vector<RowRef>& rows);
 
+    /** Phase 60: the row was clicked. The host turns this into "select that
+        group in the roll", which then comes back through setSelectedGroups —
+        one selection, two views. A pointer to the roll from here would be a
+        second owner of the same fact. */
+    std::function<void (int layerIndex, int groupId)> onGroupSelected;
+
+    /** Phase 60: click a row. Also the self-test's window into the gesture —
+        the press/release pair that calls this is one line of dispatch, and a
+        test that re-implemented the dispatch would be testing itself.
+
+        The row is marked selected here as well, optimistically: if nothing is
+        listening (a bare panel in a test), the click still shows. When a host IS
+        listening, its push replaces this with the truth. */
+    bool selectRow (int rowIndex);
+
     /** Phase 59: is this group one of the mirror rows? Also the self-test's
         window into the mirror — the paint alone cannot be read back. */
     bool isRowSelected (int layerIndex, int groupId) const;
@@ -147,14 +162,20 @@ private:
     int   dragRow  = -1;
     Part  dragPart = Part::none;
 
-    /** Phase 58: a press on the row BODY may become "drag this group out".
+    /** Phase 58/60: a press on the row BODY may become "drag this group out",
+        or — if the pointer never moved — "select this group".
 
-        It cannot also fold on press, because the two gestures share the press:
-        folding there would leave a collapsed row behind every time you dragged
-        a group onto the roll. So a body press only arms, mouseDrag turns the
-        arm into a real drag, and mouseUp folds if the pointer never moved. */
-    bool dragMayStart  = false;
-    bool foldOnRelease = false;
+        Neither can happen on press, because the press is shared with the drag:
+        selecting there would be harmless, but folding there left a collapsed row
+        behind every time you dragged a group onto the roll. So a body press only
+        arms, mouseDrag turns the arm into a real drag, and mouseUp does the
+        click action if the pointer never moved.
+
+        Phase 60: the click action is SELECT, not fold. Folding is the chevron's
+        job and only the chevron's — a row you cannot click because clicking
+        folds it is a row you cannot select. */
+    bool dragMayStart   = false;
+    bool selectOnRelease = false;
 
     int   focusSlotId = -1;
 

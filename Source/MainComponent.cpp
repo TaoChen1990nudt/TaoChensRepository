@@ -792,6 +792,18 @@ MainComponent::MainComponent()
                             });
     };
 
+    //-- Phase 60: clicking a row SELECTS the group ---------------------------
+    // The panel lists groups; a list you can look at but not click is a report,
+    // not a list. Selecting goes through the roll (which owns the selection and
+    // will push the answer straight back through syncGroupPanelSelection), so
+    // there is still exactly one selected group in the app, not one per view.
+    groupPanel.onGroupSelected = [this] (int layerIndex, int groupId)
+    {
+        juce::ignoreUnused (layerIndex);   // the roll finds the sheet itself
+
+        pianoRoll.selectGroup (groupId);
+    };
+
     filePanel.onFoldersChanged = [this]
     {
         // Nothing downstream caches the folder list today; the hook exists so a

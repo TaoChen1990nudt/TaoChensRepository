@@ -10,6 +10,7 @@
 
 #include "MainComponent.h"
 #include "Util/SharedRules.h"
+#include "Util/Theme.h"
 
 namespace atomic
 {
@@ -10708,6 +10709,201 @@ juce::String MainComponent::runSelfTest()
                utf8 ("选中时亮=") + (lit ? "yes" : "no")
                  + utf8 ("，半选时灭=") + (cleared ? "yes" : "no"));
     } ();
+
+    //-- Phase 60: 编组栏能点、可选中，且长得跟机架卡一样 --------------------
+    {
+        LayerStack t60;
+        RackModel  r60;
+        t60.addLayer (utf8 ("P60"), palette::layer1);
+
+        if (auto* l60 = t60.getLayer (0))
+        {
+            NoteEvent n60;
+            n60.pitch = 60; n60.startBeat = 0.0; n60.lengthBeats = 1.0;
+            const int a60 = l60->addNote (n60);
+            n60.pitch = 64;
+            const int b60 = l60->addNote (n60);
+            n60.pitch = 67;
+            const int c60 = l60->addNote (n60);
+
+            const int gA = l60->addGroup (utf8 ("甲组"), groupPalette::group1);
+            const int gB = l60->addGroup (utf8 ("乙组"), groupPalette::group2);
+
+            l60->assignNotesToGroup ({ a60, b60 }, gA);
+            l60->assignNotesToGroup ({ c60 },       gB);
+
+            GroupPanel panel (t60, r60);
+            panel.setSize (ui::px (300), ui::px (420));
+
+            int heardLayer = -1;
+            int heardGroup = -1;
+            int shouts     = 0;
+
+            panel.onGroupSelected = [&] (int layerIndex, int groupId)
+            {
+                heardLayer = layerIndex;
+                heardGroup = groupId;
+                ++shouts;
+            };
+
+            const bool first  = panel.selectRow (0);
+            const bool onA    = panel.isRowSelected (0, gA) && ! panel.isRowSelected (0, gB);
+
+            // A second click on the other row: the first one is a selection only
+            // if the selection can move. Both checks in one, because "it lit the
+            // row" alone would also pass if the panel just lit everything.
+            const bool second = panel.selectRow (1);
+            const bool moved  = panel.isRowSelected (0, gB) && ! panel.isRowSelected (0, gA);
+
+            check ("Clicking a group row selects that group, and only that one",
+                   first && second && onA && moved
+                     && heardLayer == 0 && heardGroup == gB && shouts == 2,
+                   juce::String (shouts) + utf8 (" 次点击，最后回传 ") + juce::String (heardLayer)
+                     + "/" + juce::String (heardGroup));
+
+            // The mark itself. The user asked for the group frame to look like a
+            // sampler / synth card, so the row's frame has to carry the shared
+            // ring in theme::accent — NOT a tint of the group's own colour.
+            //
+            // A style is a picture, so this reads the picture back: "it calls the
+            // shared helper" is not something a call can prove, and a screenshot
+            // nobody diffs is not a test.
+            panel.setSelectedGroups ({ GroupPanel::RowRef { 0, gA } });
+
+            const auto shot   = panel.createComponentSnapshot (panel.getLocalBounds(), true);
+            const int  plateX = ui::px (4);      // the row plate starts here
+            const int  rowA   = panel.getMuteBounds (0).getCentreY();
+            const int  rowB   = panel.getMuteBounds (1).getCentreY();
+
+            const auto closestToAccent = [&] (int y)
+            {
+                float best = 1.0e9f;
+
+                for (int x = plateX - 3; x <= plateX + 7; ++x)
+                {
+                    const auto p = shot.getPixelAt (juce::jlimit (0, shot.getWidth()  - 1, x),
+                                                    juce::jlimit (0, shot.getHeight() - 1, y));
+
+                    // Manhattan distance in RGB: accent is (0x4f, 0xd1, 0xc5), and
+                    // the plate colour is nowhere near it, so no colour space
+                    // argument is needed to tell them apart.
+                    const float distance = (float) (std::abs ((int) p.getRed()   - (int) theme::accent.getRed())
+                                                 + std::abs ((int) p.getGreen() - (int) theme::accent.getGreen())
+                                                 + std::abs ((int) p.getBlue()  - (int) theme::accent.getBlue()));
+
+                    best = juce::jmin (best, distance);
+                }
+
+                return best;
+            };
+
+            const float selectedRow = closestToAccent (rowA);
+            const float plainRow    = closestToAccent (rowB);
+
+            check ("The selected row wears the same ring as a rack card",
+                   shot.isValid() && selectedRow < 60.0f && plainRow > 150.0f,
+                   utf8 ("选中行最接近 accent 的像素差 ") + juce::String (selectedRow, 0)
+                     + utf8 ("，未选中行 ") + juce::String (plainRow, 0));
+        }
+    }
+
+    //-- Phase 60: the wiring — a click on the REAL panel selects in the roll --
+    [&]
+    {
+        auto* liveLayer = stack.getActiveLayer();
+
+        if (liveLayer == nullptr)
+            return;
+
+        const auto previousSelection = pianoRoll.getSelection();
+        const int  layerIndex        = stack.getActiveLayerIndex();
+
+        NoteEvent note;
+        note.pitch       = 79;
+        note.startBeat   = 0.0;
+        note.lengthBeats = 1.0;
+        const int a = liveLayer->addNote (note);
+        note.pitch  = 81;
+        const int b = liveLayer->addNote (note);
+
+        const int tempGroup = liveLayer->addGroup (utf8 ("点击接线"), groupPalette::group5);
+        liveLayer->assignNotesToGroup ({ a, b }, tempGroup);
+        stack.notifyNotesChanged();
+
+        pianoRoll.setSelection ({});
+
+        int rowIndex = -1;
+        const auto rows = groupPanel.getRows();
+
+        for (int i = 0; i < (int) rows.size(); ++i)
+            if (rows[(size_t) i].layerIndex == layerIndex && rows[(size_t) i].groupId == tempGroup)
+                rowIndex = i;
+
+        const bool clicked = rowIndex >= 0 && groupPanel.selectRow (rowIndex);
+        const auto selectedNotes = pianoRoll.getSelection();
+
+        const bool bothNotes = std::find (selectedNotes.begin(), selectedNotes.end(), a) != selectedNotes.end()
+                            && std::find (selectedNotes.begin(), selectedNotes.end(), b) != selectedNotes.end();
+
+        const bool lit = groupPanel.isRowSelected (layerIndex, tempGroup);
+
+        pianoRoll.setSelection (previousSelection);
+
+        liveLayer->assignNotesToGroup ({ a, b }, -1);
+        liveLayer->removeNote (a);
+        liveLayer->removeNote (b);
+        liveLayer->removeGroup (tempGroup);
+
+        stack.notifyNotesChanged();
+
+        check ("Clicking a row on the real group panel selects that group in the roll",
+               clicked && bothNotes && lit,
+               juce::String ((int) selectedNotes.size()) + utf8 (" 个音符入选，行亮=")
+                 + (lit ? "yes" : "no"));
+    } ();
+
+    //-- Phase 60: the empty tail comes back when the view leaves it -----------
+    {
+        LayerStack t60b;
+        RackModel  r60b;
+        PianoRollComponent roll (t60b, r60b);
+        roll.setSize (1200, 520);
+
+        t60b.addLayer (utf8 ("P60 滚动"), palette::layer1);
+
+        NoteEvent n60b;
+        n60b.pitch = 60; n60b.startBeat = 0.0; n60b.lengthBeats = 2.0;
+        t60b.getLayer (0)->addNote (n60b);
+
+        roll.resetTimeline();
+
+        const double baseLength = roll.getTimelineBeats();
+        const float  baseThumb  = roll.getScrollThumbBounds().getWidth();
+
+        // Pushing the view into empty space still extends the roll (Phase 11)...
+        roll.setScrollBeats (140.0);
+
+        const double grownLength = roll.getTimelineBeats();
+        const float  grownThumb  = roll.getScrollThumbBounds().getWidth();
+
+        // ...and coming back has to give BOTH back: the space on the ruler and
+        // the length of the scroll thumb. Phase 11 only ever grew, so the thumb
+        // stayed a stub for the rest of the session.
+        roll.setScrollBeats (0.0);
+
+        const double backLength = roll.getTimelineBeats();
+        const float  backThumb  = roll.getScrollThumbBounds().getWidth();
+
+        check ("Scrolling into the empty tail lengthens the roll, and scrolling back gives it up",
+               grownLength > baseLength
+                 && grownThumb < baseThumb - 1.0f
+                 && std::abs (backLength - baseLength) < 1.0e-9
+                 && std::abs (backThumb - baseThumb) < 1.0f,
+               juce::String (baseLength, 0) + utf8 (" -> ") + juce::String (grownLength, 0)
+                 + utf8 (" -> ") + juce::String (backLength, 0) + utf8 (" beats，滑块宽 ")
+                 + juce::String (baseThumb, 0) + utf8 (" -> ") + juce::String (grownThumb, 0)
+                 + utf8 (" -> ") + juce::String (backThumb, 0));
+    }
 
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after

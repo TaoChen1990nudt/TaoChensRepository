@@ -237,6 +237,11 @@ public:
         where "the music" starts. */
     juce::Rectangle<float> getGridBounds() const { return getGridArea(); }
 
+    /** Phase 60: where the horizontal scroll thumb is, so a test can read the
+        thing the user actually complained about — "the scrollbar never gets its
+        length back" IS this rectangle's width. */
+    juce::Rectangle<float> getScrollThumbBounds() const { return getScrollThumb(); }
+
     //-- Phase 8: the inline note automation box ------------------------------
     /** Every note carries a small "v" handle at its tail. Clicking it opens a
         curve editor UNDER the note, as wide as the note itself, with a menu at
@@ -1410,6 +1415,12 @@ private:
         than four chunks per call (so one runaway scroll cannot allocate five
         hours of ruler). */
     void ensureTimelineExtendsTo (double beats);
+
+    /** Phase 60: the other direction. Scroll back and the empty tail the view no
+        longer needs is given back, so the scroll thumb returns to the length it
+        had before the user pushed into nowhere. Never trims below the music, the
+        visible window, the playhead, or `totalBeats`. */
+    void trimTimelineToView();
     void drawNoteAutomationBox (juce::Graphics&);
 
     /** The parameter's icon, used by the narrow variant of the box's bottom

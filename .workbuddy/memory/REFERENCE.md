@@ -182,6 +182,18 @@
 - **`PopupMenu` 的 id 空间是扁平的**，子菜单不占 id。新加一组 id 前先数一遍已用的区间
   （`10..13 / 20 / 30..41 / 200+n / 1000+ch / 9001 / 10000+`）。空白子菜单要给一条禁用项。
 
+## 钢琴窗的时间线长度（P11 增长 / P60 回收）
+- `timelineBeats` 是滚动的上界，`totalBeats = 64` 是最短长度，`beatChunk = 64` 是增长/回收的步长。
+- **增长**：`ensureTimelineExtendsTo(beats)`，每次最多四块，一次离谱的调用不会造出五小时的标尺。
+- **回收**（P60）：`trimTimelineToView()`，凡是 `clampScroll()` 或 `setScrollBeats()` 跑过都会问一遍
+  "现在还需要多长"。三个锚点一个都不能少：**内容末 + 4、`scrollBeats + visible`、`playheadBeat + 4`**。
+  少第一个会把音乐截掉，少第二个回滚会把视野拖走，少第三个标尺会比播放头短、播放头点不到。
+  结果同样按 `beatChunk` **向上取整**——落在非块边界上的长度会让下一格滚轮立刻再长一次，标尺会呼吸。
+- 不变量：**任意时刻 `timelineBeats == max(totalBeats, ceil(needed / beatChunk) * beatChunk)`**。
+  滚进空白 → 长；滚回来 → 短，滚动条滑块宽度自己恢复到移动之前（用户 P60 的原话）。
+- 只回滚一半的典型 bug：`setPlayheadBeat` 的跟随分支直接写 `scrollBeats`（不经过这两个口子），
+  它**故意不回收**——播放头还在那儿，标尺不该在它脚下缩。位置回滚由 P58 的 `userScrollBeats` 负责。
+
 ## 分栏（P25：绝对位移）
 - `VerticalSplitter` **不传增量**：`onDragBegin` 记起始高度，`onDragTravel(totalTravel)` 用
   `e.getScreenY() - 锚点`；增量会把被 clamp 掉的越界量永久丢掉。组件自己会动，必须屏幕坐标。
@@ -294,8 +306,18 @@
   任一出现整体入选就算这个组被选中（选区只在激活图层，所以只需要看一层）。
   主窗体 `onSelectionChanged` → `syncGroupPanelSelection()` → `GroupPanel::setSelectedGroups()`，
   面板**没有**自己的 `selectedGroupId`（存一份就要在删除/撤销/切图层三处各自清理）。
-  绘制：`accent.withAlpha(0.15)` 圆角填充 + `0.6` 描边，**左竖条留给"喂给聚光灯音源"**——
+  绘制：`cardlook::drawSelectionRing()`（P60，见下），**左竖条留给"喂给聚光灯音源"**——
   两个标记可以同时出现，所以必须长得不一样。
+- **编组行可点选（P60）**：`GroupPanel::selectRow(i)` 是唯一实现，`mouseUp` 在"按下后没拖动"
+  时调它。它做两件事——①把本面板的 `selectedRows` 乐观地设成这一行（没接线的裸面板也亮）；
+  ②`onGroupSelected(layerIndex, groupId)` 交给主窗体 → `pianoRoll.selectGroup(groupId)`（整组）。
+  选中仍然只有钢琴窗一个 owner，面板那一下会被 `setSelectedGroups` 覆盖成真相。
+  **折叠不再是点击 body 的动作**：body 的点击含义被"选中"占用了，折叠只剩左侧 chevron
+  （`Part::collapse`）和右键菜单两项。一个矩形上的一个按下事件只能有一个点击含义。
+- **选中环只有一份（P60）**：`Source/UI/CardLook.h` 的 `cardlook::drawSelectionRing()`。
+  机架卡（`RackPanel::drawCardRing`）、编组行都调它：外圈 `accent@0.22` 扩 3px 线宽 3，
+  内圈 `accent@0.95` 缩 0.5px 圆角 7.5 线宽 1.8。用户要求"编组框的选中样式跟采样/VST 音源框
+  一致"——一致性只能是同一个函数，三份同样的常数迟早会漂。
 - **折叠行只写组名**（P59）：折叠分支以前把 `0.0 dB · C` 画在**和组名同一个矩形**里，于是每个
   折叠组背后都有一行幽灵字。现在 `if (collapsed) return;`——折叠 = 一行，那一行是标题；
   fader / 声相 / 挂载展开才有。

@@ -1,6 +1,7 @@
 #include "GroupPanel.h"
 
 #include "Model/Routing.h"
+#include "UI/CardLook.h"
 #include "UI/MixerLook.h"
 #include "Util/SharedRules.h"
 #include "Util/Text.h"
@@ -312,21 +313,17 @@ void GroupPanel::drawRow (juce::Graphics& g, int rowIndex)
         g.fillRect (bounds.reduced (ui::px (4), ui::px (2)));
     }
 
-    //-- Phase 59: a row whose group is selected in the roll ------------------
+    //-- Phase 59/60: a row whose group is selected in the roll ---------------
     // The roll owns the selection; this is its mirror, so "the group I am
-    // dragging in the piano roll" is findable in a list of twenty. A tint plus
-    // an outline, because the left bar below already means something else
-    // (the group feeds the spotlighted synth) and two marks may coincide.
+    // selecting in the piano roll" is findable in a list of twenty.
+    //
+    // Phase 60: the mark is the rack's selection ring, not a tint of the group
+    // colour. The user asked for the group frame and the sampler / synth frames
+    // to look the same, and one function draws all three (cardlook::). A tinted
+    // plate read as "this row is highlighted for some reason"; the ring reads as
+    // "this is the selected object", which is what it is.
     if (selected)
-    {
-        const auto plate = bounds.reduced (ui::px (4), ui::px (2)).toFloat();
-
-        g.setColour (accent.withAlpha (0.15f));
-        g.fillRoundedRectangle (plate, ui::pf (3));
-
-        g.setColour (accent.withAlpha (0.6f));
-        g.drawRoundedRectangle (plate, ui::pf (3), 1.0f);
-    }
+        cardlook::drawSelectionRing (g, bounds.reduced (ui::px (4), ui::px (2)).toFloat());
 
     // A focused group gets a left edge in the synth's colour, matching what the
     // layer list does for a sheet that feeds the spotlighted synth.
@@ -563,8 +560,8 @@ void GroupPanel::mouseDown (const juce::MouseEvent& e)
 
     dragRow  = row;
     dragPart = part;
-    dragMayStart  = false;      // every press re-decides; nothing is inherited
-    foldOnRelease = false;
+    dragMayStart    = false;    // every press re-decides; nothing is inherited
+    selectOnRelease = false;
 
     if (row < 0)
         return;
@@ -648,13 +645,12 @@ void GroupPanel::mouseDown (const juce::MouseEvent& e)
             break;
 
         case Part::body:
-            // Phase 58: arm "drag this group onto the roll". The fold that used
-            // to happen here happens on release instead — see dragMayStart.
-            // A collapsed row is a 30 px title bar, so anywhere on it folds
-            // back open; an expanded one only folds from its title line.
-            dragMayStart  = true;
-            foldOnRelease = group->isCollapsed()
-                              || e.getPosition().getY() < getRowBounds (row).getY() + ui::px (26);
+            // Phase 58: arm "drag this group onto the roll". Phase 60: the click
+            // that a drag is not — selecting the group — happens on release, for
+            // the same reason. Folding is the chevron's job now (Part::collapse):
+            // a row that folds when you click it cannot be selected by clicking.
+            dragMayStart    = true;
+            selectOnRelease = true;
             break;
 
         case Part::volume:
@@ -687,8 +683,8 @@ void GroupPanel::mouseDrag (const juce::MouseEvent& e)
     // gesture never set dragPart to a fader part.
     if (dragMayStart && dragRow >= 0 && e.getDistanceFromDragStart() > ui::px (4))
     {
-        dragMayStart  = false;
-        foldOnRelease = false;      // it was a drag, not a click
+        dragMayStart    = false;
+        selectOnRelease = false;      // it was a drag, not a click
 
         const auto rows = getRows();
 
@@ -728,26 +724,45 @@ void GroupPanel::mouseDrag (const juce::MouseEvent& e)
 
 void GroupPanel::mouseUp (const juce::MouseEvent&)
 {
-    // Phase 58: a body press that never became a drag is still a click, and a
-    // click on the title folds the row. Doing it here (not on press) is what
-    // lets the same press also be the start of a drag.
-    if (dragMayStart && foldOnRelease && dragRow >= 0)
-    {
-        const auto rows = getRows();
+    // Phase 58/60: a body press that never became a drag is a click, and a click
+    // selects the row. Doing it here (not on press) is what lets the same press
+    // also be the start of a drag.
+    if (dragMayStart && selectOnRelease && dragRow >= 0)
+        selectRow (dragRow);
 
-        if (juce::isPositiveAndBelow (dragRow, (int) rows.size()))
-            if (auto* group = groupFor (rows[(size_t) dragRow]))
-            {
-                group->setCollapsed (! group->isCollapsed());
-                clampScroll();
-                stack.touchLayers();
-            }
-    }
-
-    dragMayStart  = false;
-    foldOnRelease = false;
+    dragMayStart    = false;
+    selectOnRelease = false;
     dragRow  = -1;
     dragPart = Part::none;
+}
+
+bool GroupPanel::selectRow (int rowIndex)
+{
+    const auto rows = getRows();
+
+    if (! juce::isPositiveAndBelow (rowIndex, (int) rows.size()))
+        return false;
+
+    const auto ref = rows[(size_t) rowIndex];
+
+    // Optimistic, and deliberately so: a panel with no listener still shows the
+    // click. A listening host answers with setSelectedGroups on the next
+    // selection change and replaces this with the real selection (which is this
+    // row, unless the group has gone).
+    const std::vector<RowRef> justThis { ref };
+
+    if (selectedRows.size() != 1
+         || selectedRows.front().layerIndex != ref.layerIndex
+         || selectedRows.front().groupId != ref.groupId)
+    {
+        selectedRows = justThis;
+        repaint();
+    }
+
+    if (onGroupSelected != nullptr)
+        onGroupSelected (ref.layerIndex, ref.groupId);
+
+    return true;
 }
 
 void GroupPanel::mouseMove (const juce::MouseEvent& e)
