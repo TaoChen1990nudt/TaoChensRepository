@@ -7,7 +7,7 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
 编组、采样、走带、文件树、波形、伸缩、缩放、电平表）；平台陷阱与自检夹具在 `PITFALLS.md`。
 动代码前按主题查这两份，本文件只留跨主题硬规则。
 
-## 十五条硬规则
+## 十六条硬规则
 1. **中文一律 `atomic::utf8("...")`**，自检的失败信息也算。裸中文 = 乱码。
 2. **几何走 `ui::px()/pf()`、字号 `ui::sp()`**，唯一密度旋钮 `ui::scale = 1.3f`，禁止裸像素。
    `numPitches` / gutter / 内联自动化框最小宽度不缩放。
@@ -83,8 +83,20 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
     **那个组**的 lane（CC 7/11→level、CC 10→pan，其余丢弃不猜）。写 lane 前必须
     `decimateRecordedCurve`（lane 上限 32 点，一次推子两百个 CC），**少于两点不写**。
 
+16. **一条曲线 = 一个形状 + 一个去处，两件事分开说**（P82）：`Model/CurveBank<CurveType>` 是
+    音符 / 采样 / 编组共用的有序表（`CurveSlot{id, name, target, pluginParam, curve}`），
+    `target = -1` 就是**空**——画着、存着、不驱动任何东西。三条不变量：**目标至多归一条曲线**
+    （`route()` 从别人手里夺走；插件目标按 `pluginParam` 区分，参数 3 和 17 是两个去处）、
+    **列表永不为空**（`remove()` 拒绝最后一条）、**用 id 不用下标**（框开着时增删不该把编辑器
+    指到别人的形状上）。**const 读永不创建**：缺了返回 `idleCurve` / `idleLane`，不能返回默认
+    构造的 `NoteEnvelope`（那是启用的 ADSR），也不能在 painter 里 `ensure…`。
+    **「空」在磁盘上是「没有 `target` 属性」**，不是一个词——未知词会被读回成 level，
+    「空」就悄悄变成「音量」。新建曲线默认不路由、且是扁平的：点「新建」是在要白纸。
+    旧访问器（`envelope()` / `volumeCurve()` / `automationFor()` / `getLevelAutomation()`）
+    必须保住原语义，否则引擎、三个编辑窗、撤销、剪贴板全要跟着改。
+
 ## 目录
-- `Source/Model/` 数据与路由（LayerModel / RackModel / MixerModel / TempoMap / TempoModel / Routing / ProjectIO / Gain）
+- `Source/Model/` 数据与路由（LayerModel / **CurveBank** / RackModel / MixerModel / TempoMap / TempoModel / Routing / ProjectIO / Gain）
 - `Source/Audio/` 引擎与纯函数 DSP（PlaybackEngine / Recorder / ClipStretch / 导出）
 - `Source/UI/` 时间线、机架、混音台、文件树、自动化、分栏
 - `Source/MainComponent.*` 装配、走带、撤销、快照与自检
@@ -95,6 +107,6 @@ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + JUCE 8.0.4（FetchContent）。PATH �
 否则 MSB6001 谎报找不到编译器。
 
 ## 工程文件
-`.atomic`，`formatVersion = 25`（逐版字段见 `REFERENCE.md`）。老版本必须仍能开。
+`.atomic`，`formatVersion = 26`（逐版字段见 `REFERENCE.md`）。老版本必须仍能开。
 **"选中哪条自动化 lane"这类状态必须显式写属性**，不能靠元素顺序或别的属性推断。
 先解析到临时对象、末尾一次性提交，坏文件绝不破坏当前会话。

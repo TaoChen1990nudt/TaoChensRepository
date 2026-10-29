@@ -679,25 +679,63 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             scheduled.startSeconds = map.secondsAtBeat (note.startBeat);
             scheduled.endSeconds   = juce::jmax (scheduled.startSeconds + 0.01,
                                                  map.secondsAtBeat (note.endBeat()));
-            scheduled.envelope     = note.envelope;      // snapshot by value
             scheduled.overridden   = route.overridden;
-            scheduled.modTarget    = note.modTarget;
             scheduled.groupId      = note.groupId;
             scheduled.groupOccurrence = note.groupOccurrence;
+
+            //-- Phase 82: every routed curve, snapshotted ---------------------
+            // A note may drive level, pan, pitch and a plugin parameter at the
+            // same time now, so this is a fan-out instead of one copy. A PARKED
+            // curve (target -1) is skipped on purpose: it holds a shape, and a
+            // shape nobody pointed anywhere is not a statement about playback.
+            for (const auto& curveSlot : note.curves.getCurves())
+            {
+                if (curveSlot.target < 0 || ! curveSlot.curve.isEnabled())
+                    continue;
+
+                switch (curveSlot.target)
+                {
+                    case (int) NoteModTarget::level:
+                        scheduled.levelCurve   = curveSlot.curve;
+                        scheduled.levelCurveOn = true;
+                        break;
+
+                    case (int) NoteModTarget::pan:
+                        scheduled.panCurve   = curveSlot.curve;
+                        scheduled.panCurveOn = true;
+                        break;
+
+                    case (int) NoteModTarget::pitch:
+                        scheduled.pitchCurve   = curveSlot.curve;
+                        scheduled.pitchCurveOn = true;
+                        break;
+
+                    case NoteEvent::curveTargetPlugin:
+                        if (curveSlot.pluginParam >= 0)
+                        {
+                            scheduled.pluginCurve      = curveSlot.curve;
+                            scheduled.pluginParamIndex = curveSlot.pluginParam;
+                        }
+                        break;
+
+                    default:
+                        break;
+                }
+            }
 
             // Tabulate the pitch integral once, here, so the audio thread only
             // ever does a table lookup. See ScheduledNote::pitchIntegral for why
             // a pitch curve needs an integral at all.
-            if (note.modTarget == NoteModTarget::pitch && note.envelope.isEnabled())
+            if (scheduled.pitchCurveOn)
             {
                 constexpr int steps = ScheduledNote::pitchIntegralSteps;
 
                 scheduled.pitchIntegral.assign ((size_t) steps + 1, 0.0f);
 
-                auto bendAt = [&note] (float u)
+                auto bendAt = [&scheduled] (float u)
                 {
                     // env 1.0 -> no bend, env 0.0 -> one octave down.
-                    return std::pow (2.0f, note.envelope.valueAt (u) - 1.0f) - 1.0f;
+                    return std::pow (2.0f, scheduled.pitchCurve.valueAt (u) - 1.0f) - 1.0f;
                 };
 
                 for (int i = 1; i <= steps; ++i)
@@ -720,17 +758,16 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             // The note's curve is normalised; the schedule speaks absolute
             // beats. Converting here (once) instead of on the audio thread is
             // the same trade the pitch integral makes: pay it at publish time.
-            if (note.drivesPluginParam() && note.envelope.isEnabled()
-                  && slot->pluginId > 0)
+            if (scheduled.pluginParamIndex >= 0 && slot->pluginId > 0)
             {
                 PluginParamCurve curve;
                 curve.pluginId   = slot->pluginId;
-                curve.paramIndex = note.modPluginParam;
+                curve.paramIndex = scheduled.pluginParamIndex;
                 curve.startBeat  = note.startBeat;
                 curve.endBeat    = note.endBeat();
                 curve.priority   = 2;                  // the finer curve; multiplies #1
 
-                for (const auto& p : note.envelope.getPoints())
+                for (const auto& p : scheduled.pluginCurve.getPoints())
                     curve.points.push_back ({ note.startBeat
                                                 + (double) p.time * juce::jmax (1.0e-6, note.lengthBeats),
                                               p.value });
@@ -785,9 +822,16 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             // the render loop measures elapsed time in seconds and must not
             // know what a beat is. A curve with fewer than two points cannot
             // interpolate and is left as unity rather than half-published.
-            if (clip.volumeCurve.isEnabled())
+            // Phase 82: the block's curves are looked up BY TARGET now, not
+            // read off two fixed members. A curve the user parked is null here,
+            // which reads exactly like "no automation" — and is different from
+            // a curve sitting at unity, because a curve at unity still costs a
+            // multiply and still says the user asked for something.
+            const auto* volumeCurve = clip.curveDriving (SampleAutomationTarget::volume);
+
+            if (volumeCurve != nullptr && volumeCurve->isEnabled())
             {
-                for (const auto& p : clip.volumeCurve.getPoints())
+                for (const auto& p : volumeCurve->getPoints())
                     scheduled.gainCurve.push_back ({ (double) p.time * blockSeconds, p.value });
 
                 scheduled.gainAutomated = scheduled.gainCurve.size() >= 2;
@@ -797,9 +841,11 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             // clip is the reason this exists; keeping its x in seconds means the
             // render loop's only clock is `elapsed`, exactly like the gain
             // curve, and neither curve has to know what a beat is.
-            if (clip.panCurve.isEnabled())
+            const auto* panCurve = clip.curveDriving (SampleAutomationTarget::pan);
+
+            if (panCurve != nullptr && panCurve->isEnabled())
             {
-                for (const auto& p : clip.panCurve.getPoints())
+                for (const auto& p : panCurve->getPoints())
                     scheduled.panCurve.push_back ({ (double) p.time * blockSeconds,
                                                     juce::jlimit (0.0f, 1.0f, p.value) });
 
@@ -1214,13 +1260,12 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
             float* busL = bus.getWritePointer (0);
             float* busR = bus.getWritePointer (1);
 
-            // Hoisted out of the sample loop: which parameter this note's curve
-            // is allowed to touch is a property of the note, not of the sample.
-            const bool curveOn   = note.envelope.isEnabled();
-            const bool modLevel  = curveOn && note.modTarget == NoteModTarget::level;
-            const bool modPan    = curveOn && note.modTarget == NoteModTarget::pan;
-            const bool modPitch  = curveOn && note.modTarget == NoteModTarget::pitch
-                                      && ! note.pitchIntegral.empty();
+            // Hoisted out of the sample loop: which parameters this note's
+            // curves are allowed to touch is a property of the note, not of the
+            // sample. Phase 82: three independent answers, not one switch.
+            const bool modLevel = note.levelCurveOn;
+            const bool modPan   = note.panCurveOn;
+            const bool modPitch = note.pitchCurveOn && ! note.pitchIntegral.empty();
 
             for (int i = first; i < last; ++i)
             {
@@ -1229,9 +1274,11 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
 
                 const float u   = (float) juce::jlimit (0.0, 1.0, elapsed / length);
 
-                // THE micro envelope, still bound to the note by value. What it
-                // modulates is the note's own choice (Phase 8).
-                const float env = curveOn ? note.envelope.valueAt (u) : 1.0f;
+                // THE micro envelopes, still bound to the note by value. Each
+                // one has its own neutral point, which is why they cannot be
+                // one variable: level idles at 1.0, pan at 0.5.
+                const float levelEnv = modLevel ? note.levelCurve.valueAt (u) : 1.0f;
+                const float panEnv   = modPan   ? note.panCurve.valueAt (u)   : 0.5f;
 
                 // 2.5 ms de-click at both ends, so a flat curve cannot start or
                 // stop on a step.
@@ -1246,7 +1293,7 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
                 const float slotGain  = slotGain0 + (slotGain1 - slotGain0) * t;
                 const float groupGain = groupGain0 + (groupGain1 - groupGain0) * t;
 
-                float amp   = modLevel ? env : 1.0f;
+                float amp   = levelEnv;
                 float panL  = panL0 + (panL1 - panL0) * t;
                 float panR  = panR0 + (panR1 - panR0) * t;
                 double phase = frequency * elapsed;
@@ -1259,7 +1306,7 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
                     // Phase 36: and the addition is `stackPan`'s, with the note
                     // as its own term. A curve sitting at 0.5 contributes 0, so
                     // an armed-but-flat note pan cannot move a panned group.
-                    const float spread = juce::jlimit (0.0f, 1.0f, env) * 2.0f - 1.0f;
+                    const float spread = juce::jlimit (0.0f, 1.0f, panEnv) * 2.0f - 1.0f;
                     const float pp     = automation::stackPan (macroPan0, groupPan0, spread);
 
                     panL = std::cos ((pp + 1.0f) * kPiOver4);

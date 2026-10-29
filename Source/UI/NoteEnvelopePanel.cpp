@@ -516,7 +516,7 @@ NoteEnvelopePanel::NoteEnvelopePanel (LayerStack& layerStackToUse, RackModel& ra
     editor.setEnvelopeSource ([this]() -> NoteEnvelope*
     {
         if (auto* note = getNote())
-            return &note->envelope;
+            return &note->envelope();
 
         return nullptr;
     });
@@ -623,7 +623,7 @@ void NoteEnvelopePanel::rebuildOverlay()
         // Only a level curve multiplies the level. A note bending pitch or
         // sweeping pan through the same box is doing real work, but folding it
         // into this product would draw a level change that nobody hears.
-        overlay.noteLive = note->envelope.isEnabled() && note->modTarget == NoteModTarget::level;
+        overlay.noteLive = note->envelope().isEnabled() && (note->modTarget() == NoteModTarget::level);
     }
 
     editor.setOverlay (overlay);
@@ -786,7 +786,7 @@ void NoteEnvelopePanel::paint (juce::Graphics& g)
              << separatorDot() << noteName (note->pitch)
              << separatorDot() << "beat " << juce::String (note->startBeat, 2)
              << separatorDot() << "len " << juce::String (note->lengthBeats, 2)
-             << separatorDot() << juce::String ((int) note->envelope.getPoints().size()) << " pts";
+             << separatorDot() << juce::String ((int) note->envelope().getPoints().size()) << " pts";
     }
     else
     {
@@ -912,9 +912,9 @@ void NoteEnvelopePanel::applyPreset (int index)
 
     switch (index)
     {
-        case 1:  note->envelope = NoteEnvelope::makeFadeOut(); break;
-        case 2:  note->envelope = NoteEnvelope::makeFlat();    break;
-        default: note->envelope = NoteEnvelope::makeADSR();    break;
+        case 1:  note->envelope() = NoteEnvelope::makeFadeOut(); break;
+        case 2:  note->envelope() = NoteEnvelope::makeFlat();    break;
+        default: note->envelope() = NoteEnvelope::makeADSR();    break;
     }
 
     editor.repaint();

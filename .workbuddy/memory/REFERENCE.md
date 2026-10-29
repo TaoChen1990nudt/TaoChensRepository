@@ -97,7 +97,7 @@
 - 窗口门写作 `if (audio.isPlaying() || audio.getPlayback().hasMeters())`，**放在
   `if (! audio.isPlaying()) return;` 之前**——放后面就漏掉"停止后还在落"那一段，而那正是用户会看的。
 
-## 工程文件（`.atomic`，`formatVersion` = 25）
+## 工程文件（`.atomic`，`formatVersion` = 26）
 - **先解析到临时对象、末尾一次性提交**，坏文件绝不破坏当前会话。载入后重置
   `nextNoteId`/`nextSlotId`/组 id（max+1）。
 - 老文件必须仍能开：v3 `mod=`、v4 插件（标签 **"PLUGIN"** 全大写）、v5 `mixer=`、
@@ -118,6 +118,9 @@
   它是 **root 的兄弟节点，不是 `<Mixer>` 的子节点**（速度不属于混音台，`resetToDefault()` 也不该抹掉它）。
   缺失 = 平坦 120 + 自动化关，且**必须显式 `resetToDefault`**，否则打开老工程会继承上一个工程的速度图。
   **新 lane 一律追加在枚举末尾**，老文件不需要映射表。
+  v26（P82）把每个对象的一组曲线写成 **`<Curve id="1" name="音量" target="level" pluginparam="3" enabled="1">` + `<Point …>` 子元素，末尾一条 `<CurveState active="2"/>`**；三处（`<Sample>` / `<Group>` / `<Note>`）同一套词汇。
+  **`target` 缺失 = 「空」**（曲线留着，不驱动任何东西）——绝不能写成一个词，未知词会被 `routeFromText` 读回 level，"空"就悄悄变成"音量"。v25 及更老的 `<Envelope>` / `<PanEnvelope>` / `<Automation target>` / `mod` / `pluginparam` / `autotarget` **读取分支全部保留**：
+  `childHasCurveBank(parent)` 为真才走 bank 读取，否则按老形状迁移进 bank。只有重新保存才写 v26。
 - **选中哪条 lane 显式写 `autotarget`，不靠元素顺序推断**：三条 lane 都写出来之后，
   "最后读到的那条算选中"恒把 target 变成 `plugin`。回退规则只在 `autotarget` **缺失**时启用。
 - **P70：`<Layer autotarget>` 同理**。图层只有 volume/pan 两条 lane，所以后果不是
@@ -152,6 +155,32 @@
   按 Ctrl+Z = 取消这次拖拽）；`beginUndoGesture()` 里**先 commit 再置标志**，否则自己也被拦住。
   唯一一个例外是异步提交的"非鼠标编辑"（键盘删除等）：它们在下一个消息循环里照常落一步。
 - 混音台在 `MixerWindow`，面板归 MainComponent：关窗不销毁状态。
+
+## 曲线库（P82：一个形状 + 一个去处）
+- **`Model/CurveBank<CurveType>` 是唯一的曲线容器**：音符 / 采样 / 编组三个对象各持一份，
+  `CurveSlot{id, name, target, pluginParam, curve}`，`target = -1` 即**空**。以前"哪条曲线"和
+  "驱动哪个参数"是同一个答案（曲线集合就是枚举），所以「留着形状、先不驱动」这句话说不出来。
+- **三条不变量**（写在类注释里，改动前先读）：
+  ①**目标至多归一条曲线**——`route()` 会从原来那条手里夺走并把它的 `target` 置 -1；
+  插件目标例外地按 `pluginParam` 区分（同一台音源的参数 3 和 17 是两个去处）。
+  ②**列表永不为空**——`remove()` 拒绝最后一条，因为引擎里每个读者都直接解引用"当前那条"。
+  ③**用 id 不用下标**——框开着的时候可能增删，下标会把编辑器悄悄指到别人的形状上。
+- **const 读永不创建**：`volumeCurve()` / `automationFor()` / `activeAutomation()` 找不到就返回
+  `idleCurve` / `idleLane`。`NoteEnvelope` 的默认构造是**启用的 ADSR**，替身必须用
+  `NoteEnvelope::makeIdle()`（扁平 + 禁用）；`AutomationLane` 默认 `enabled = false`，直接默认构造即可。
+  任何 `ensure…` 只能在写路径上调，painter 里调一次就等于"看一眼就改模型"。
+- **新建曲线不路由、且是扁平的**：`add()` 之后 `target = -1`、形状是 `makeIdle()`。点「新建」是在要
+  一张白纸，不是要接管别人正在驱动的参数——顺手 `route` 到 level 是过去那条 `add` 咬测挂掉的原因。
+- **旧访问器必须保语义**：`NoteEvent::envelope()/modTarget()/setModTarget()/modPluginParam()`、
+  `SampleEvent::volumeCurve()/panCurve()/curveDriving()/ensureCurveDriving()`、
+  `NoteGroup::automationFor()/getLevelAutomation()/ensureAutomationFor()/laneDriving()` 全是
+  bank 上的薄壳。改它们之前先数一遍调用点：引擎、三个编辑窗、撤销、剪贴板都在用。
+- **UI 一侧**：三个自动化框的底部是**两个下拉**，`splitCurveRow()` 一处定义、paint 与命中测试
+  都调它（左格 56% 给"哪条曲线"，右格给"去哪"）；hover 是一个 `int`（0/1/2）而不是两个 bool，
+  否则相邻两格会同时点亮。左菜单是曲线列表 + 新建/重命名/删除，右菜单第一项是**空**。
+- **不要给"当前是哪条曲线 / 哪个目标"建缓存字段**：`PianoRollComponent::expandedGroupTarget`
+  曾经就是这样一个第二真相（P73 同类 bug 的源头），现在只有 `getExpandedGroupTarget()`
+  每次去问 `group->curveTarget()`。
 
 ## 自动化
 - 每个 owner 常驻 `std::array<AutomationLane, N>` + `automationFor(target)`；

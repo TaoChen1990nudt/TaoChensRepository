@@ -339,7 +339,14 @@ public:
     bool isGroupAutomationOpen() const noexcept { return expandedGroupId >= 0; }
     int  getExpandedGroupId() const noexcept    { return expandedGroupId; }
     int  getExpandedGroupLayerIndex() const noexcept { return expandedGroupLayerIndex; }
-    int  getExpandedGroupTarget() const noexcept { return expandedGroupTarget; }
+    /** Phase 82: what the OPEN curve of the open group drives, read from the
+        group itself. -1 = 空.
+
+        The field this used to read is gone on purpose. With a curve bank,
+        "which lane is on screen" is answered by the group's active curve id;
+        a copy in the component would be a second answer to a question that
+        already has one — the exact shape of bug P73 spent a phase on. */
+    int  getExpandedGroupTarget() const noexcept;
 
     /** `occurrence` picks WHICH appearance of the group the box surrounds
         (Phase 58). All appearances share the one curve — that is what "the same
@@ -1669,8 +1676,13 @@ private:
     juce::Rectangle<float> getSampleCloseArea (int layerIndex, int sampleId) const;
 
     /** Phase 50: the menu row has three parts now — the target button on the
-        left, the enable switch on the right, the close cross in the corner. */
+        left, the enable switch on the right, the close cross in the corner.
+
+        Phase 82: the enable switch went away in Phase 65 and the row became two
+        buttons — which curve (left) and where it goes (right). */
     juce::Rectangle<float> getSampleTargetArea (int layerIndex, int sampleId) const;
+    juce::Rectangle<float> getSampleCurveMenuArea (int layerIndex, int sampleId) const;
+    juce::Rectangle<float> getSampleRouteMenuArea (int layerIndex, int sampleId) const;
 
     SampleEvent*       getExpandedSample();
     const SampleEvent* getExpandedSample() const;
@@ -1681,6 +1693,10 @@ private:
     bool handleSampleAutomationMouseDown (juce::Point<float> pos, juce::ModifierKeys mods,
                                           int layerIndex, int sampleId);
     void showSampleCurveMenu (int layerIndex, int sampleId, juce::Point<int> screenPosition);
+    /** Phase 82: the left-hand dropdown — the block's curves plus new/delete.
+        `showSampleCurveMenu` stayed what it always was: the shape presets and
+        the target list, now minus its target half. */
+    void showSampleCurveListMenu (int layerIndex, int sampleId, juce::Point<int> screenPosition);
     void drawSampleAutomationBox (juce::Graphics&);
 
     /** Phase 30: the maths behind the waveform, in one place.
@@ -1883,9 +1899,30 @@ private:
                             juce::Colour) const;
     void notifySelectionChanged();
 
+    //-- Phase 82: the two-button row -----------------------------------------
+    /** Every automation box's bottom row is TWO buttons: the left one says
+        which curve, the right one says where it goes. Splitting the row in one
+        place is what keeps the paint and the hit area from disagreeing — the
+        rule this file learned the hard way (P75) is that the thing you press
+        has to be the thing that is drawn. */
+    static std::pair<juce::Rectangle<float>, juce::Rectangle<float>>
+    splitCurveRow (juce::Rectangle<float> row);
+
+    /** One dropdown cell: background, one line of text, a caret. `parked`
+        (空) dims the text, because a curve that drives nothing should look
+        like it drives nothing. */
+    void drawMenuCell (juce::Graphics&, juce::Rectangle<float>, const juce::String& text,
+                       juce::Colour accent, bool hot, bool parked) const;
+
+    /** The little curve glyph a curve picker shows when it is too narrow for
+        its own name. */
+    void drawCurveGlyph (juce::Graphics&, juce::Rectangle<float>, juce::Colour) const;
+
     //-- Phase 8: the inline box ----------------------------------------------
     juce::Rectangle<float> getAutomationCurveArea (const NoteEvent&) const;
     juce::Rectangle<float> getAutomationMenuArea (const NoteEvent&) const;
+    juce::Rectangle<float> getAutomationCurveMenuArea (const NoteEvent&) const;
+    juce::Rectangle<float> getAutomationRouteMenuArea (const NoteEvent&) const;
     juce::Rectangle<float> getAutomationCloseArea (const NoteEvent&) const;
 
     /** The note the inline box is currently pointed at, or null. Never cached. */
@@ -1893,6 +1930,10 @@ private:
     const NoteEvent* getExpandedNote() const;
 
     void showModTargetMenu (const NoteEvent&, juce::Point<int> screenPosition);
+
+    /** Phase 82: the left-hand dropdown — the list of this note's curves, plus
+        "new" and "delete". */
+    void showNoteCurveMenu (const NoteEvent&, juce::Point<int> screenPosition);
     bool handleAutomationMouseDown (juce::Point<float> pos, juce::ModifierKeys mods,
                                     NoteEvent&);
     void dragAutomationPoint (NoteEvent&, juce::Point<float> position);
@@ -1909,6 +1950,8 @@ private:
         Addressed by (layer, groupId) for the same reason notes are addressed by
         id: groups live in a vector and any add/remove can move them. */
     juce::Rectangle<float> getGroupMenuArea() const;
+    juce::Rectangle<float> getGroupCurveMenuArea() const;
+    juce::Rectangle<float> getGroupRouteMenuArea() const;
     juce::Rectangle<float> getGroupCloseArea() const;
 
     /** The group the inline box is pointed at, or null. Never cached. */
@@ -1919,10 +1962,14 @@ private:
         group has no notes in this layer. */
     juce::Range<double> getGroupBeatSpan (const Layer&, const NoteGroup&, int occurrence = -1) const;
 
-    AutomationLane&       groupLaneFor (NoteGroup&, int target);
-    const AutomationLane& groupLaneFor (const NoteGroup&, int target) const;
+    /** Phase 82: `groupLaneFor (group, target)` is gone with the fixed lane
+        array it indexed. The box edits ONE curve — the bank's active one — and
+        "the lane for a target" no longer has a single answer now that a curve
+        can be parked and a target can change owner. Asking the bank directly
+        (`findRoutedTo` / `activeAutomation`) is the only way to stay honest. */
 
     void showGroupTargetMenu (juce::Point<int> screenPosition);
+    void showGroupCurveMenu (juce::Point<int> screenPosition);
     bool handleGroupAutomationMouseDown (juce::Point<float> pos, juce::ModifierKeys mods);
     void dragGroupCurvePoint (juce::Point<float> position);
     int  findGroupCurvePointAt (juce::Point<float>) const;
@@ -2089,7 +2136,10 @@ private:
     int    expandedLayerIndex = -1;
     int    dragEnvelopePoint  = -1;
     int    hoveredEnvelopePoint = -1;
-    bool   hoveredAutomationMenu = false;
+    /** Phase 82: 0 = neither, 1 = the curve cell, 2 = the route cell. One int
+        and not two bools, because the two cells are adjacent and a hover that
+        lit both would be a lie about which button the click is aimed at. */
+    int    hoveredAutomationMenu = 0;
     bool   snapEnabled          = true;
     float  ghostAlphaValue      = ghostAlpha;
 
@@ -2097,12 +2147,11 @@ private:
     int    expandedGroupLayerIndex = -1;
     int    expandedGroupId         = -1;
     int    expandedGroupOccurrence = 0;      // Phase 58: which appearance's box
-    int    expandedGroupTarget     = 0;      // (int) GroupAutomationTarget
     int    dragGroupPoint          = -1;
     bool   hoveredGroupHandle      = false;
     int    hoveredHandleGroupId    = -1;
     int    hoveredHandleLayer      = -1;
-    bool   hoveredGroupMenu        = false;
+    int    hoveredGroupMenu        = 0;      // Phase 82: 1 = curve, 2 = route
 
     //-- Phase 11 -------------------------------------------------------------
     /** What the pencil stamps. A whole NoteEvent minus its pitch and start: the
@@ -2168,7 +2217,7 @@ private:
     int  hoveredSampleCurvePoint  = -1;
     bool hoveredSampleHandle      = false;
     int  hoveredSampleHandleId    = -1;
-    bool hoveredSampleCurveMenu   = false;
+    int  hoveredSampleCurveMenu   = 0;      // Phase 82: 1 = curve, 2 = route
 
     //-- Phase 22 -------------------------------------------------------------
     /** The key held down on the piano column, or -1 — both a paint state and

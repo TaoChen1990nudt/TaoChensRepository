@@ -203,8 +203,30 @@ namespace project
         Only the ORIGIN travels. The members are on the timeline with absolute
         beats, and a v24 file (no `<Occurrence>`) reads perfectly: the first
         time the origin is needed it is inferred from the earliest member and
-        stored, so no project moves on load. */
-inline constexpr int formatVersion = 25;
+        stored, so no project moves on load.
+
+    v26 (Phase 82): curves become a bank — a note, a clip and a group may each
+    hold several, each pointed somewhere or nowhere.
+
+      * `<Curve id="n" name="…" target="…" pluginparam="n" enabled="0|1">` with
+        `<Point>` children, plus one `<CurveState active="id"/>` beside them.
+        The tag replaces three different shapes that each said their own fixed
+        set: a note's `<Envelope>`, a clip's `<Envelope>`/`<PanEnvelope>` pair,
+        and a group's `<Automation target="…">` lanes.
+
+      * **No `target` means parked**: the curve keeps its shape and drives
+        nothing. That is a state the old tags could not express at all, so it is
+        written by leaving the attribute out rather than by inventing a word for
+        it — an unknown word would read as "level" in a v25 reader, and "空" must
+        never silently become "音量".
+
+      * Every older tag still reads, through a migration branch per object:
+        `<Envelope>` becomes the curve driving level (note) or volume (clip),
+        `<PanEnvelope>` the one driving pan, `<Automation target="…">` the lane
+        driving that target, and a note's `mod` / `pluginparam` attributes say
+        where its single curve points. A v25 project therefore opens sounding
+        exactly as it did; it is only re-WRITTEN in the new shape. */
+inline constexpr int formatVersion = 26;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";

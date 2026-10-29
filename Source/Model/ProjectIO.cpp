@@ -269,6 +269,210 @@ namespace
         envelope.setEnabled (xml.getBoolAttribute ("enabled", true));
     }
 
+    //-- Phase 82: a curve bank on disk --------------------------------------
+    /** One <Curve> per shape, plus one <CurveState> saying which is on screen.
+
+        The three objects used to write their curves in three different shapes —
+        a bare <Envelope> for a note, <Envelope>/<PanEnvelope> for a clip, one
+        <Automation target="…"> per lane for a group — because each of them had a
+        FIXED set and the tag could afford to name it. A bank cannot: the set is
+        open, so the tag has to carry the identity instead. Old files still read
+        through the old tags; each reader keeps a migration branch for them.
+
+        A curve whose `target` is absent is PARKED — it holds a shape and drives
+        nothing. That is why the attribute is written only when there is a
+        target: "no target" and "target level" have to be different on disk,
+        exactly as they are in memory. */
+
+    void writeShapeInto (juce::XmlElement& element, const NoteEnvelope& curve)
+    {
+        element.setAttribute ("enabled", (int) curve.isEnabled());
+
+        for (const auto& point : curve.getPoints())
+        {
+            auto* p = element.createNewChildElement ("Point");
+            p->setAttribute ("time",  number (point.time));
+            p->setAttribute ("value", number (point.value));
+        }
+    }
+
+    void writeShapeInto (juce::XmlElement& element, const AutomationLane& lane)
+    {
+        element.setAttribute ("enabled", (int) lane.isEnabled());
+
+        for (const auto& point : lane.getPoints())
+        {
+            auto* p = element.createNewChildElement ("Point");
+            p->setAttribute ("beat",  number (point.beat, 8));
+            p->setAttribute ("value", number (point.value));
+        }
+    }
+
+    void readShapeInto (const juce::XmlElement& element, NoteEnvelope& curve)
+    {
+        std::vector<EnvelopePoint> points;
+
+        for (auto* child = element.getFirstChildElement(); child != nullptr; child = child->getNextElement())
+            if (child->hasTagName ("Point"))
+                points.push_back ({ (float) child->getDoubleAttribute ("time", 0.0),
+                                    (float) child->getDoubleAttribute ("value", 1.0) });
+
+        curve.loadPoints (std::move (points));
+        curve.setEnabled (element.getBoolAttribute ("enabled", true));
+    }
+
+    void readShapeInto (const juce::XmlElement& element, AutomationLane& lane)
+    {
+        std::vector<AutomationPoint> points;
+
+        for (auto* child = element.getFirstChildElement(); child != nullptr; child = child->getNextElement())
+            if (child->hasTagName ("Point"))
+                points.push_back ({ child->getDoubleAttribute ("beat", 0.0),
+                                    (float) child->getDoubleAttribute ("value", 1.0) });
+
+        lane.loadPoints (std::move (points));
+        lane.setEnabled (element.getBoolAttribute ("enabled", true));
+    }
+
+    //-- Routing words, one pair per object ---------------------------------
+    // A group and a note both have a "level" and a "pan"; a clip's volume is
+    // not a level. Keeping three pairs instead of one shared vocabulary is what
+    // stops a note's "pitch" from being read as a clip's second parameter.
+    juce::String noteRouteText (int target)
+    {
+        if (target == NoteEvent::curveTargetPlugin) return "plugin";
+        if (target == (int) NoteModTarget::pan)     return "pan";
+        if (target == (int) NoteModTarget::pitch)   return "pitch";
+        if (target == (int) NoteModTarget::level)   return "level";
+
+        return {};
+    }
+
+    int noteRouteFromText (const juce::String& text)
+    {
+        if (text == "pan")    return (int) NoteModTarget::pan;
+        if (text == "pitch")  return (int) NoteModTarget::pitch;
+        if (text == "plugin") return NoteEvent::curveTargetPlugin;
+        if (text == "level")  return (int) NoteModTarget::level;
+
+        return -1;
+    }
+
+    juce::String sampleRouteText (int target)
+    {
+        if (target == (int) SampleAutomationTarget::volume) return "volume";
+        if (target == (int) SampleAutomationTarget::pan)    return "pan";
+
+        return {};
+    }
+
+    int sampleRouteFromText (const juce::String& text)
+    {
+        if (text == "volume") return (int) SampleAutomationTarget::volume;
+        if (text == "pan")    return (int) SampleAutomationTarget::pan;
+
+        return -1;
+    }
+
+    juce::String groupRouteText (int target)
+    {
+        if (target == (int) GroupAutomationTarget::level)  return "level";
+        if (target == (int) GroupAutomationTarget::pan)    return "pan";
+        if (target == (int) GroupAutomationTarget::plugin) return "plugin";
+
+        return {};
+    }
+
+    int groupRouteFromText (const juce::String& text)
+    {
+        if (text == "level")  return (int) GroupAutomationTarget::level;
+        if (text == "pan")    return (int) GroupAutomationTarget::pan;
+        if (text == "plugin") return (int) GroupAutomationTarget::plugin;
+
+        return -1;
+    }
+
+    bool childHasCurveBank (const juce::XmlElement& parent)
+    {
+        return parent.getChildByName ("Curve") != nullptr;
+    }
+
+    /** `writePluginParam` is false for groups: a group's plugin ADDRESS lives on
+        <Group pluginparam="…"> and has done since v10, so writing it twice would
+        create two answers to one question. */
+    template <typename CurveType>
+    void writeCurveBank (juce::XmlElement& parent,
+                         const CurveBank<CurveType>& bank,
+                         juce::String (*routeText) (int),
+                         bool writePluginParam = true)
+    {
+        for (const auto& slot : bank.getCurves())
+        {
+            auto* element = parent.createNewChildElement ("Curve");
+            element->setAttribute ("id", slot.id);
+
+            if (slot.name.isNotEmpty())
+                element->setAttribute ("name", slot.name);
+
+            const auto route = routeText (slot.target);
+
+            if (route.isNotEmpty())
+                element->setAttribute ("target", route);
+
+            if (writePluginParam && slot.pluginParam >= 0)
+                element->setAttribute ("pluginparam", slot.pluginParam);
+
+            writeShapeInto (*element, slot.curve);
+        }
+
+        parent.createNewChildElement ("CurveState")
+              ->setAttribute ("active", bank.getActiveId());
+    }
+
+    template <typename CurveType>
+    void readCurveBank (const juce::XmlElement& parent,
+                        CurveBank<CurveType>& bank,
+                        int (*routeFromText) (const juce::String&))
+    {
+        bank.clear();
+
+        int activeId = -1;
+
+        for (auto* child = parent.getFirstChildElement(); child != nullptr; child = child->getNextElement())
+        {
+            if (child->hasTagName ("CurveState"))
+            {
+                // Which curve the box shows is state, not something to infer
+                // from the order the children happened to be written in (P42).
+                activeId = child->getIntAttribute ("active", -1);
+                continue;
+            }
+
+            if (! child->hasTagName ("Curve"))
+                continue;
+
+            CurveType curve;
+            readShapeInto (*child, curve);
+
+            const int id = bank.addWithId (child->getIntAttribute ("id", 0), std::move (curve),
+                                           child->getStringAttribute ("name"));
+
+            if (id < 0)
+                continue;                       // 满员：多出来的曲线丢弃
+
+            bank.route (id, routeFromText (child->getStringAttribute ("target")),
+                        child->getIntAttribute ("pluginparam", -1));
+        }
+
+        // A bank is never empty. A file that named a <CurveState> but no curve
+        // is broken, not a licence to hand out an object with no shape.
+        if (bank.isEmpty())
+            bank.add (CurveType {});
+
+        if (activeId >= 0)
+            bank.setActiveId (activeId);
+    }
+
     /** Phase 49: the v14-v20 fade pair, rebuilt as the curve that replaced it.
 
         The old audio multiplied two linear ramps measured in beats inwards
@@ -591,27 +795,18 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                     if (group.isCollapsed())
                         groupXml->setAttribute ("collapsed", 1);
 
-                    // Phase 24: which plugin parameter the third lane drives.
-                    // Written before the lanes so a reader knows what the
-                    // `<Automation target="plugin">` below is pointed at.
+                    // Phase 24: which plugin parameter the plugin curve drives.
+                    // Still an attribute of <Group> rather than of the curve: it
+                    // is the group's ADDRESS (Phase 24's rule — an index alone
+                    // names nothing), and a v10 reader already looks for it here.
                     if (group.drivesPluginParam())
                         groupXml->setAttribute ("pluginparam", group.getPluginParam());
 
-                    writeLane (*groupXml, group.getLevelAutomation(), "level", false);
-
-                    // Phase 20: the pan lane, only when it carries something.
-                    // A disabled-but-drawn curve is still worth saving (it is
-                    // what "automation off, curve kept" means), so enabled is
-                    // not the test — having points with a non-flat shape is.
-                    if (group.getPanAutomation().isEnabled()
-                          || group.getPanAutomation().getPoints().size() > 2)
-                        writeLane (*groupXml, group.getPanAutomation(), "pan", false);
-
-                    // Phase 24: the plugin lane. Same rule: save it when it is
-                    // live or when it has a shape worth keeping.
-                    if (group.getPluginAutomation().isEnabled()
-                          || group.getPluginAutomation().getPoints().size() > 2)
-                        writeLane (*groupXml, group.getPluginAutomation(), "plugin", false);
+                    // Phase 82 (v26): the group's curves as a bank. v25 wrote one
+                    // <Automation target="…"> per resident lane; the set is open
+                    // now, so the target rides on each <Curve> and a curve with
+                    // no target is parked rather than deleted.
+                    writeCurveBank (*groupXml, group.getCurveBank(), groupRouteText, false);
 
                     // Phase 62 (v25): where each appearance sits. Written as
                     // children rather than attributes because the set is open —
@@ -672,22 +867,11 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                     if (sample.sourceOffsetSeconds > 0.0)
                         sampleXml->setAttribute ("offset", number (sample.sourceOffsetSeconds, 8));
 
-                    // Phase 49 (v21): the volume curve, same element a note
-                    // carries. Always written when the block has one, so
-                    // toggling the curve off keeps its shape on disk.
-                    writeEnvelope (*sampleXml, sample.volumeCurve);
-
-                    // Phase 50 (v22): the pan curve gets its own tag. It cannot
-                    // share <Envelope> — a reader that took the first child
-                    // would read whichever happened to be written first, which
-                    // is exactly the "element order is the state" mistake P42
-                    // made with automation lanes.
-                    writeEnvelope (*sampleXml, sample.panCurve, "PanEnvelope");
-
-                    // Always written: which curve the box was showing is state,
-                    // not something to infer from which child exists.
-                    sampleXml->setAttribute ("autotarget",
-                                             sampleAutomationTargetKey (sample.automationTarget));
+                    // Phase 82 (v26): the block's curves as a bank. v21-v25
+                    // wrote exactly two, as <Envelope> and <PanEnvelope>; a
+                    // bank has an open set, so each curve states its own name
+                    // and target, and <CurveState> says which one is on screen.
+                    writeCurveBank (*sampleXml, sample.curves, sampleRouteText);
 
                     if (sample.reversed)
                         sampleXml->setAttribute ("reversed", 1);
@@ -724,17 +908,6 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                 if (note.outputSlotOverride >= 0)
                     noteXml->setAttribute ("output", note.outputSlotOverride);
 
-                // Phase 8. Only written when it is not the default, so a v3
-                // file whose notes are all plain level curves stays readable as
-                // if it were v2.
-                if (note.modTarget != NoteModTarget::level)
-                    noteXml->setAttribute ("mod", noteModTargetKey (note.modTarget));
-
-                // Phase 24: the note's curve drives a plugin parameter instead
-                // of `mod`. Absent = the built-in target owns the curve.
-                if (note.drivesPluginParam())
-                    noteXml->setAttribute ("pluginparam", note.modPluginParam);
-
                 if (note.groupId >= 0)
                     noteXml->setAttribute ("group", note.groupId);
 
@@ -743,7 +916,11 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                 if (note.groupId >= 0 && note.groupOccurrence != 0)
                     noteXml->setAttribute ("groupocc", note.groupOccurrence);
 
-                writeEnvelope (*noteXml, note.envelope);
+                // Phase 82 (v26): the note's curves as a bank. The `mod` and
+                // `pluginparam` attributes a v25 file carries are still read
+                // below; a v26 file states the route on each <Curve> instead,
+                // because one attribute cannot describe four curves.
+                writeCurveBank (*noteXml, note.curves, noteRouteText);
             }
         }
     }
@@ -995,6 +1172,12 @@ bool fromXmlText (const juce::String& xmlText,
                     bool enabled = false, expanded = false;
                     juce::String groupTargetText;
 
+                    // Phase 82 (v26): a bank of <Curve> children, or the fixed
+                    // set a v25 file wrote as <Automation target="…">. Both
+                    // mean "the group's curves"; only one of them can say how
+                    // many there are.
+                    const bool bankForm = childHasCurveBank (*g);
+
                     for (auto* autoXml = g->getFirstChildElement(); autoXml != nullptr;
                          autoXml = autoXml->getNextElement())
                     {
@@ -1008,15 +1191,14 @@ bool fromXmlText (const juce::String& xmlText,
                             continue;
                         }
 
-                        if (! autoXml->hasTagName ("Automation"))
+                        if (bankForm || ! autoXml->hasTagName ("Automation"))
                             continue;
 
-                        // Phase 20: a group can carry two lanes now, so the
-                        // target attribute decides which one this element is.
-                        // v6 files have exactly one, and it never said its
-                        // name — "level" is the only thing v6 could have meant.
-                        // Phase 24 adds a third, and anything unrecognised
-                        // still lands on level rather than being dropped.
+                        // Phase 20: a group could carry two lanes, and Phase 24
+                        // a third, so the target attribute decided which one
+                        // this element was. v6 files have exactly one and it
+                        // never said its name — "level" is the only thing v6
+                        // could have meant.
                         const auto laneTargetText = autoXml->getStringAttribute ("target");
                         const auto laneTarget = laneTargetText == "pan"    ? GroupAutomationTarget::pan
                                               : laneTargetText == "plugin" ? GroupAutomationTarget::plugin
@@ -1027,6 +1209,9 @@ bool fromXmlText (const juce::String& xmlText,
                         readLane (*autoXml, lane, enabled, groupTargetText, expanded);
                         lane.setEnabled (enabled);
                     }
+
+                    if (bankForm)
+                        readCurveBank (*g, group.getCurveBank(), groupRouteFromText);
 
                     groups.push_back (std::move (group));
                 }
@@ -1064,21 +1249,36 @@ bool fromXmlText (const juce::String& xmlText,
                     // an <Envelope> child; older files carried the two fade
                     // attributes, which migrate onto the same curve here so
                     // the ramps they saved still sound when played.
-                    if (auto* envXml = sm->getChildByName ("Envelope"))
-                        readEnvelope (*envXml, sample.volumeCurve);
+                    //
+                    // Phase 82 (v26): a v26 file has a <Curve> bank instead,
+                    // and the branch above this one took it. Everything below
+                    // is the migration path, and it reads the old tags into the
+                    // slots that drive what those tags used to name — a v21
+                    // block still opens with a volume curve and a pan curve,
+                    // pointed where they were always pointed.
+                    if (childHasCurveBank (*sm))
+                    {
+                        readCurveBank (*sm, sample.curves, sampleRouteFromText);
+                    }
                     else
-                        migrateFadesToCurve (*sm, sample.volumeCurve);
+                    {
+                        if (auto* envXml = sm->getChildByName ("Envelope"))
+                            readEnvelope (*envXml, sample.ensureCurveDriving (SampleAutomationTarget::volume));
+                        else
+                            migrateFadesToCurve (*sm, sample.ensureCurveDriving (SampleAutomationTarget::volume));
 
-                    // Phase 50 (v22). A v21 file has neither child nor
-                    // attribute, and both defaults are the honest reading of
-                    // "this block was never asked": a flat 0.5 pan curve that is
-                    // switched off, and a box that shows the volume curve —
-                    // which is the only curve a v21 block had.
-                    if (auto* panXml = sm->getChildByName ("PanEnvelope"))
-                        readEnvelope (*panXml, sample.panCurve);
+                        if (auto* panXml = sm->getChildByName ("PanEnvelope"))
+                            readEnvelope (*panXml, sample.ensureCurveDriving (SampleAutomationTarget::pan));
 
-                    sample.automationTarget = sampleAutomationTargetFromKey (
-                        sm->getStringAttribute ("autotarget", "volume"));
+                        // v25 wrote which of the two the box showed as an enum.
+                        // v26 stores the id of a curve, so the enum is mapped
+                        // through the route table rather than trusted as an id.
+                        const auto shown = sampleAutomationTargetFromKey (
+                            sm->getStringAttribute ("autotarget", "volume"));
+
+                        if (const auto* slot = sample.curves.findRoutedTo ((int) shown))
+                            sample.curves.setActiveId (slot->id);
+                    }
                     sample.reversed = sm->getBoolAttribute ("reversed", false);
 
                     // Phase 31: clamped, not trusted. A stray 9 in the file must
@@ -1132,11 +1332,29 @@ bool fromXmlText (const juce::String& xmlText,
                     note.outputSlotOverride = n->getIntAttribute ("output", -1);
                     note.groupId  = n->getIntAttribute ("group", -1);
                     note.groupOccurrence = juce::jmax (0, n->getIntAttribute ("groupocc", 0));
-                    note.modTarget = noteModTargetFromKey (n->getStringAttribute ("mod", "level"));
-                    note.modPluginParam = n->getIntAttribute ("pluginparam", -1);
 
-                    if (auto* envXml = n->getChildByName ("Envelope"))
-                        readEnvelope (*envXml, note.envelope);
+                    if (childHasCurveBank (*n))
+                    {
+                        readCurveBank (*n, note.curves, noteRouteFromText);
+                    }
+                    else
+                    {
+                        // v25 and earlier: exactly one curve, plus attributes
+                        // saying what it drove. Same meaning, said as a bank:
+                        // the single curve becomes slot 1, pointed where the
+                        // attributes pointed. A `pluginparam` beats `mod`
+                        // because that is what the old reader did (Phase 24
+                        // made the plugin address the stronger statement).
+                        if (auto* envXml = n->getChildByName ("Envelope"))
+                            readEnvelope (*envXml, note.envelope());
+
+                        const int pluginParam = n->getIntAttribute ("pluginparam", -1);
+                        const int target = pluginParam >= 0
+                                             ? NoteEvent::curveTargetPlugin
+                                             : (int) noteModTargetFromKey (n->getStringAttribute ("mod", "level"));
+
+                        note.curves.route (note.curves.getActiveId(), target, pluginParam);
+                    }
 
                     notes.push_back (std::move (note));
                 }

@@ -1429,7 +1429,9 @@ juce::Image MainComponent::createClipAutomationSnapshot (int width, int height,
     // the user's project. `getSamples()` hands out const views, so the edit
     // goes through findSample — the same door every gesture uses.
     NoteEnvelope previousCurve;
-    SampleAutomationTarget previousTarget = SampleAutomationTarget::volume;
+    int  previousActiveCurveId = -1;
+    int  stagedCurveId         = -1;
+    bool hadStagedCurve        = true;
 
     if (clip != nullptr)
     {
@@ -1438,25 +1440,33 @@ juce::Image MainComponent::createClipAutomationSnapshot (int width, int height,
 
         if (block != nullptr)
         {
-            previousCurve  = block->curveFor (target);
-            previousTarget = block->automationTarget;
+            // Phase 82: the box shows a CURVE, not a parameter. Staging the
+            // demo therefore means "make sure the curve driving this target
+            // exists, borrow it, put it back on the way out" — and delete it
+            // again if the demo is what created it.
+            hadStagedCurve        = block->curveDriving (target) != nullptr;
+            previousCurve         = hadStagedCurve ? *block->curveDriving (target) : NoteEnvelope();
+            previousActiveCurveId = block->curves.getActiveId();
+
+            auto& staged = block->ensureCurveDriving (target);
+            stagedCurveId = block->curves.findRoutedTo ((int) target)->id;
 
             if (target == SampleAutomationTarget::pan)
             {
                 // A sweep across the field: the shape reads as "left, then
                 // right", which is what a pan lane is for. Half-way is centre,
                 // marked by the box's own centre hairline.
-                block->panCurve.loadPoints ({ { 0.0f, 0.15f }, { 0.35f, 0.75f },
-                                              { 0.70f, 0.25f }, { 1.0f, 0.62f } });
+                staged.loadPoints ({ { 0.0f, 0.15f }, { 0.35f, 0.75f },
+                                     { 0.70f, 0.25f }, { 1.0f, 0.62f } });
             }
             else
             {
-                block->volumeCurve.loadPoints ({ { 0.0f, 0.0f }, { 0.30f, 1.0f },
-                                                 { 0.62f, 0.55f }, { 1.0f, 0.85f } });
+                staged.loadPoints ({ { 0.0f, 0.0f }, { 0.30f, 1.0f },
+                                     { 0.62f, 0.55f }, { 1.0f, 0.85f } });
             }
 
-            block->curveFor (target).setEnabled (true);
-            block->automationTarget = target;
+            staged.setEnabled (true);
+            block->showCurveDriving (target);
         }
 
         pianoRoll.setScrollBeats (juce::jmax (0.0, clip->startBeat - 0.6));
@@ -1470,8 +1480,12 @@ juce::Image MainComponent::createClipAutomationSnapshot (int width, int height,
     if (clip != nullptr)
         if (auto* block = layer->findSample (clip->id))
         {
-            block->curveFor (target) = previousCurve;
-            block->automationTarget  = previousTarget;
+            *block->curveDriving (target) = previousCurve;
+
+            if (! hadStagedCurve)
+                block->curves.remove (stagedCurveId);      // 演示造出来的，收回去
+
+            block->curves.setActiveId (previousActiveCurveId);
         }
 
     pianoRoll.setBounds (previousBounds);
@@ -1828,8 +1842,8 @@ juce::Image MainComponent::createAutomationStackSnapshot (int width, int height)
         savedSlotOn     = lane.isEnabled();
     }
 
-    const auto savedEnvelope = chosen->envelope;
-    const auto savedTarget   = chosen->modTarget;
+    const auto savedEnvelope = chosen->envelope();
+    const auto savedTarget   = chosen->modTarget();
 
     //-- Three shapes a reader can tell apart --------------------------------
     // Placed inside the note's own span (it is one beat long), because a lane
@@ -1866,9 +1880,9 @@ juce::Image MainComponent::createAutomationStackSnapshot (int width, int height)
         lane.setEnabled (true);
     }
 
-    chosen->modTarget = NoteModTarget::level;
-    chosen->envelope = NoteEnvelope::makeADSR();
-    chosen->envelope.setEnabled (true);
+    chosen->setModTarget (NoteModTarget::level);
+    chosen->envelope() = NoteEnvelope::makeADSR();
+    chosen->envelope().setEnabled (true);
 
     //-- The frame -----------------------------------------------------------
     envelopePanel.openFor (layerIndex, chosen->id);
@@ -1894,8 +1908,8 @@ juce::Image MainComponent::createAutomationStackSnapshot (int width, int height)
         lane.setEnabled (savedSlotOn);
     }
 
-    chosen->envelope = savedEnvelope;
-    chosen->modTarget = savedTarget;
+    chosen->envelope() = savedEnvelope;
+    chosen->setModTarget (savedTarget);
 
     stack.touchLayers();
 
@@ -4413,11 +4427,11 @@ void MainComponent::buildDemoContent()
             // feature with no example in the demo is a feature nobody
             // discovers. A ramp up and a longer ramp down — the same shape the
             // old fades drew, so the demo sounds like it always did.
-            clip.volumeCurve.loadPoints ({ { 0.00f, 0.0f },
+            clip.ensureCurveDriving (SampleAutomationTarget::volume).loadPoints ({ { 0.00f, 0.0f },
                                            { 0.12f, 1.0f },
                                            { 0.70f, 1.0f },
                                            { 1.00f, 0.0f } });
-            clip.volumeCurve.setEnabled (true);
+            clip.ensureCurveDriving (SampleAutomationTarget::volume).setEnabled (true);
 
             const int clipId = layer->addSample (std::move (clip));
 
@@ -7322,28 +7336,50 @@ void MainComponent::openDemoGroupAutomation()
 
     // Widest group gives the most readable curve, because the box is as wide as
     // the group's own beat span.
+    //
+    // P82: "widest" is now "widest that fits". The box is exactly the span, so a
+    // group wider than the roll produces a box whose right edge — and with it
+    // the route dropdown's caret — is clipped off the edge of the component.
+    // A frame that documents two dropdowns cannot afford to show one and a half.
+    const double visible = pianoRoll.getVisibleBeats();
+    const double fitCap  = visible * 0.80;
+
     int    bestGroup = groups.front().getId();
-    double bestSpan  = 0.0;
+    double bestSpan  = -1.0;
+    double bestLo    = 0.0;
 
-    for (const auto& group : groups)
+    for (int pass = 0; pass < 2 && bestSpan < 0.0; ++pass)
     {
-        double lo = 1.0e9, hi = -1.0e9;
-
-        for (const auto& note : layer->getNotes())
-            if (note.groupId == group.getId())
-            {
-                lo = juce::jmin (lo, note.startBeat);
-                hi = juce::jmax (hi, note.endBeat());
-            }
-
-        if (hi - lo > bestSpan)
+        for (const auto& group : groups)
         {
-            bestSpan  = hi - lo;
-            bestGroup = group.getId();
+            double lo = 1.0e9, hi = -1.0e9;
+
+            for (const auto& note : layer->getNotes())
+                if (note.groupId == group.getId())
+                {
+                    lo = juce::jmin (lo, note.startBeat);
+                    hi = juce::jmax (hi, note.endBeat());
+                }
+
+            const double span = hi - lo;
+
+            if (span <= 0.0 || (pass == 0 && span > fitCap))
+                continue;
+
+            if (span > bestSpan)
+            {
+                bestSpan  = span;
+                bestGroup = group.getId();
+                bestLo    = lo;
+            }
         }
     }
 
     pianoRoll.openGroupAutomation (index, bestGroup, 0);
+
+    // Put the head of the chosen group just inside the left edge, so the box
+    // lands centred-ish instead of running out of the right side.
+    pianoRoll.setScrollBeats (juce::jmax (0.0, bestLo - visible * 0.08));
 
     if (auto* group = layer->findGroup (bestGroup))
     {
@@ -7366,6 +7402,41 @@ void MainComponent::openDemoGroupAutomation()
             lane.addPoint (lo + (hi - lo) * 0.5, 0.55f, pianoRoll.getTimelineBeats());
             lane.addPoint (hi, 0.95f, pianoRoll.getTimelineBeats());
             lane.setEnabled (true);
+        }
+    }
+    
+    // P82: a SECOND curve, parked on 空 and made the one on screen. The frame
+    // has to show two independent facts in one row — the name on the left and
+    // the destination on the right — and "a curve that drives nothing" is the
+    // state that proves the two are not the same statement written twice.
+    if (auto* group = layer->findGroup (bestGroup))
+    {
+        auto& bank = group->getCurveBank();
+
+        // Idempotent: this function runs once per snapshot frame, and eight
+        // copies of one demo curve would be a worse picture than none.
+        if (bank.getNumCurves() < 4)
+        {
+            const int extraId = bank.add (AutomationLane(), utf8 ("手绘"));
+
+            if (extraId >= 0)
+            {
+                double lo = 0.0, hi = 4.0;
+
+                for (const auto& note : layer->getNotes())
+                    if (note.groupId == bestGroup)
+                    {
+                        lo = note.startBeat;
+                        hi = juce::jmax (hi, note.endBeat());
+                    }
+
+                auto& lane = bank.find (extraId)->curve;
+                lane.resetFlat (0.25f, pianoRoll.getTimelineBeats());
+                lane.addPoint (lo + (hi - lo) * 0.35, 0.90f, pianoRoll.getTimelineBeats());
+                lane.addPoint (lo + (hi - lo) * 0.70, 0.20f, pianoRoll.getTimelineBeats());
+                lane.setEnabled (true);
+                bank.setActiveId (extraId);
+            }
         }
     }
 

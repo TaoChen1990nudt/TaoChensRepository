@@ -765,7 +765,10 @@ void AutomationWindow::drawTrackRow (juce::Graphics& g, int index,
         // whole timeline (64 beats), most of which is scrolled out of view, so a
         // right-aligned label on the row lands off-screen and gets clipped.
         g.drawText (utf8 ("60 / 120 / 240 BPM"),
-                    row.withTrimmedTop (ui::px (2))
+                    // `ui::px` answers in device pixels, which are ints, while
+                    // the row is a float rectangle — the casts are the density
+                    // knob meeting the geometry type, not a rounding decision.
+                    row.withTrimmedTop ((float) ui::px (2))
                        .withRight ((float) getWidth() - (float) ui::px (8)),
                     juce::Justification::topRight, false);
     }

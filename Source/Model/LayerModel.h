@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "AutomationLane.h"
+#include "CurveBank.h"
 #include "Gain.h"
 #include "Media/SampleLibrary.h"
 #include "NoteEnvelope.h"
@@ -31,35 +32,64 @@ struct NoteEvent
     double lengthBeats = 1.0;
     float  velocity    = 0.8f;
 
-    /** Phase 2: the note's own automation curve.
+    /** Phase 82: the note's curves, in a bank.
 
-        Stored BY VALUE inside the note, on purpose. Move the note -> the curve
-        moves with it. Copy the note (Layer::addNote takes a copy) -> the curve
-        is duplicated with it. There is no map<noteId, curve> to keep in sync,
-        which means there is no way for automation to get detached. */
-    NoteEnvelope envelope;
+        Phase 2 stored ONE envelope here and Phase 8 added a selector saying
+        what it drove. That made "load level" and "load pitch" two alternatives
+        for the same note — you could have a pitch glide or a level fade, never
+        both, which is a limitation nobody asked for and nobody could see.
 
-    /** Phase 8: which parameter `envelope` drives.
+        The bank keeps the old accessors meaning exactly what they meant: the
+        OPEN curve (`envelope()`) and what it drives (`modTarget()`). What
+        changes is that a note may now carry several, each pointed somewhere
+        else, and any of them can be parked on 空 without losing its shape.
 
-        Stored by value next to the curve for the same reason the curve is: the
-        target is part of the note's identity, not a property of whatever editor
-        happened to be open when it was set. */
-    NoteModTarget modTarget = NoteModTarget::level;
+        Stored BY VALUE, still. Move the note -> the curves move with it. Copy
+        the note -> the curves are duplicated. No map<noteId, curve> to sync. */
+    CurveBank<NoteEnvelope> curves = CurveBank<NoteEnvelope>::withOne (
+        NoteEnvelope::makeADSR(), utf8 ("音量"), (int) NoteModTarget::level);
 
-    /** Phase 24: when >= 0, `envelope` drives parameter `modPluginParam` of the
-        HOSTED instrument this note resolves to, and `modTarget` is dormant.
+    /** 3 in the bank's numbering = a parameter of the HOSTED instrument. 0..2
+        are NoteModTarget's own values, so `(NoteModTarget) target` stays valid
+        for everything the built-in synths understand, and a plugin index still
+        rides in `pluginParam` because an index alone names nothing. */
+    static constexpr int curveTargetPlugin = 3;
 
-        A separate field instead of extra enum values because a plugin's
-        parameters are not a fixed set: they are a list the vendor defines, and
-        an enum cannot name them. Keeping `modTarget` untouched means switching
-        to a plugin parameter and back is lossless — the built-in choice you had
-        before is still there.
+    NoteEnvelope&       envelope()       noexcept { return curves.getActive().curve; }
+    const NoteEnvelope& envelope() const noexcept { return curves.getActive().curve; }
 
-        -1 means "drive the built-in target". A note mounted on an internal
-        synth always has -1 in practice; routing can change afterwards, so this
-        is a request, not a guarantee — the schedule publisher is what checks
-        that the resolved synth actually has a plugin. */
-    int modPluginParam = -1;
+    /** What the OPEN curve drives. -1 = 空（画着，但不驱动任何东西）. */
+    int curveTarget() const noexcept { return curves.getActive().target; }
+
+    NoteModTarget modTarget() const noexcept
+    {
+        const int t = curves.getActive().target;
+
+        return t == (int) NoteModTarget::pan   ? NoteModTarget::pan
+             : t == (int) NoteModTarget::pitch ? NoteModTarget::pitch
+                                               : NoteModTarget::level;
+    }
+
+    void setModTarget (NoteModTarget target) noexcept
+    {
+        const int curveId = curves.getActiveId();
+        const int param   = curves.getActive().pluginParam;
+        curves.route (curveId, (int) target, param);
+    }
+
+    int modPluginParam() const noexcept { return curves.getActive().pluginParam; }
+
+    void setModPluginParam (int index) noexcept
+    {
+        curves.route (curves.getActiveId(), curveTargetPlugin, index);
+    }
+
+    /** True when the OPEN curve drives a parameter of the hosted instrument. */
+    bool drivesPluginParam() const noexcept
+    {
+        return curves.getActive().target == curveTargetPlugin
+                 && curves.getActive().pluginParam >= 0;
+    }
 
     /** Phase 3: the note's own output, bypassing its layer.
 
@@ -100,7 +130,6 @@ struct NoteEvent
 
     bool followsLayerOutput() const noexcept { return outputSlotOverride < 0; }
     bool belongsToGroup() const noexcept     { return groupId >= 0; }
-    bool drivesPluginParam() const noexcept  { return modPluginParam >= 0; }
     void clearOutputOverride() noexcept      { outputSlotOverride = -1; }
 
     double endBeat() const noexcept { return startBeat + lengthBeats; }
@@ -182,6 +211,14 @@ inline float sampleAutomationNeutral (SampleAutomationTarget target) noexcept
     return target == SampleAutomationTarget::pan ? 0.5f : 1.0f;
 }
 
+/** Phase 82: the two curves a new block starts with.
+
+    Defined in the .cpp because it needs `utf8` and the factory's shape is not
+    something a header reader needs to see. It is a free function rather than a
+    static member so that SampleEvent stays an aggregate with a default member
+    initialiser, which is what lets `SampleEvent s;` keep meaning what it did. */
+CurveBank<NoteEnvelope> makeSampleCurveBank();
+
 //==============================================================================
 /**
     Phase 17: an audio clip lying in the roll.
@@ -249,48 +286,93 @@ struct SampleEvent
         is the one thing a trim must not sound like. */
     double sourceOffsetSeconds = 0.0;
 
-    //-- Phase 49: the block's own volume curve -------------------------------
-    /** Normalised 0..1 across the block, by value, exactly like a note's
-        envelope: move the block and the curve moves with it, copy the block and
-        the curve is duplicated, and no map<clipId, curve> can ever detach.
+    //-- Phase 82: the block's curves -----------------------------------------
+    /** Phase 49 gave the block a volume curve, Phase 50 a pan curve, and both
+        were MEMBERS with an enum selector saying which one the box showed. Two
+        fixed curves and a ceiling of two was the ceiling of the enum.
 
-        The value multiplies the clip's gain, so 1.0 is "the file, untouched" —
-        which is also what the disabled idle curve evaluates to. The old
-        fade-in/fade-out ramps (Phase 29) were a two-point special case of this
-        and are gone; a reader meets them in ProjectIO and migrates them onto
-        this curve, so an old project sounds the same without keeping two ways
-        to shape a block alive in the model. */
-    NoteEnvelope volumeCurve = NoteEnvelope::makeIdle();
+        A bank says the same thing without the ceiling: a new block owns two
+        curves to begin with — a unity volume curve pointed at volume, a centred
+        pan curve pointed at pan — and the user may add a third and point it
+        anywhere, or park either of the first two on 空 and keep its shape.
 
-    //-- Phase 50: the second curve, and which one the box is editing ---------
-    /** Normalised 0..1 across the block; 0.5 is centre, so the idle curve is a
-        flat 0.5 line. Added as a separate member rather than a
-        map<target, curve> for the same reason the volume curve is a member:
-        copying a block must copy both shapes, and there is nothing to detach.
+        By value, for the same reason a note's curves are: copy the block and
+        the shapes come with it. */
+    CurveBank<NoteEnvelope> curves = makeSampleCurveBank();
 
-        Like the volume curve it is an OFFSET applied on top of the layer / synth
-        / group pan, because that is what the layer's own pan lane does — one
-        arithmetic for "pan is a sum of statements" instead of two. */
-    NoteEnvelope panCurve = NoteEnvelope::makeIdle (0.5f);
+    /** The curve driving `target`, or null.
 
-    /** Which curve the floating box shows. Always written to the project file:
-        P42's lesson was that "the last lane read wins" is not a selection rule,
-        it is an accident of element order. */
-    SampleAutomationTarget automationTarget = SampleAutomationTarget::volume;
-
-    NoteEnvelope& curveFor (SampleAutomationTarget target) noexcept
+        Null is a real state now: "nothing is pointed at pan" is different from
+        "the pan curve is flat at centre", and the engine treats them the same
+        way only because a missing curve cannot argue with the block's own gain.
+        Callers that want to WRITE use `ensureCurveDriving`. */
+    NoteEnvelope* curveDriving (SampleAutomationTarget target) noexcept
     {
-        return target == SampleAutomationTarget::pan ? panCurve : volumeCurve;
+        auto* slot = curves.findRoutedTo ((int) target);
+        return slot != nullptr ? &slot->curve : nullptr;
     }
 
-    const NoteEnvelope& curveFor (SampleAutomationTarget target) const noexcept
+    const NoteEnvelope* curveDriving (SampleAutomationTarget target) const noexcept
     {
-        return target == SampleAutomationTarget::pan ? panCurve : volumeCurve;
+        const auto* slot = curves.findRoutedTo ((int) target);
+        return slot != nullptr ? &slot->curve : nullptr;
+    }
+
+    /** The curve driving `target`, creating one when nobody does. This is the
+        "automate this" door, not a read — it changes the model. */
+    NoteEnvelope& ensureCurveDriving (SampleAutomationTarget target)
+    {
+        if (auto* existing = curveDriving (target))
+            return *existing;
+
+        const int curveId = curves.add (NoteEnvelope::makeIdle (sampleAutomationNeutral (target)));
+        curves.route (curveId, (int) target);
+        curves.setActiveId (curveId);
+        return curves.find (curveId)->curve;
+    }
+
+    /** Read-only: the curve driving volume / pan, or a disabled stand-in so a
+        reader that only asks `isEnabled()` never has to check for null. */
+    const NoteEnvelope& volumeCurve() const noexcept { return constCurveFor (SampleAutomationTarget::volume); }
+    const NoteEnvelope& panCurve()    const noexcept { return constCurveFor (SampleAutomationTarget::pan); }
+
+    /** What the OPEN curve drives, in SampleAutomationTarget's numbering.
+        -1 = 空. Kept as an int (not the enum) so "parked" has a value. */
+    int curveTarget() const noexcept { return curves.getActive().target; }
+
+    /** Points the box at the curve driving `target`. Does nothing when nothing
+        drives it — "show me a curve that does not exist" has no answer, and
+        creating one here would turn a mis-click into a model edit. */
+    void showCurveDriving (SampleAutomationTarget target) noexcept
+    {
+        if (const auto* slot = curves.findRoutedTo ((int) target))
+            curves.setActiveId (slot->id);
     }
 
     /** The curve the box edits right now. */
-    NoteEnvelope&       activeCurve()       noexcept { return curveFor (automationTarget); }
-    const NoteEnvelope& activeCurve() const noexcept { return curveFor (automationTarget); }
+    NoteEnvelope&       activeCurve()       noexcept { return curves.getActive().curve; }
+    const NoteEnvelope& activeCurve() const noexcept { return curves.getActive().curve; }
+
+private:
+    const NoteEnvelope& constCurveFor (SampleAutomationTarget target) const noexcept
+    {
+        if (const auto* curve = curveDriving (target))
+            return *curve;
+
+        return idleCurve;
+    }
+
+    /** Where a const reader lands when nothing drives the target it asked for.
+
+        `makeIdle`, NOT a default-constructed envelope: NoteEnvelope's default
+        is an ENABLED ADSR (a new note should sound like a synth note), and
+        handing that to a reader that only asked "is anything automating pan?"
+        would answer yes — the block would grow a volume shape nobody drew. The
+        idle curve is flat AND disabled, which is the only honest answer to
+        "nobody is driving this". */
+    NoteEnvelope idleCurve = NoteEnvelope::makeIdle();
+
+public:
 
     //-- Phase 50: playing the file backwards --------------------------------
     /** True = play the window right to left.
@@ -478,28 +560,70 @@ public:
     bool isCollapsed() const noexcept              { return collapsed; }
     void setCollapsed (bool shouldCollapse) noexcept { collapsed = shouldCollapse; }
 
-    AutomationLane&       getLevelAutomation() noexcept       { return automationLanes[0]; }
-    const AutomationLane& getLevelAutomation() const noexcept { return automationLanes[0]; }
+    //-- Phase 82: the group's curves ----------------------------------------
+    /** Phase 16 shipped one lane, Phase 20 a second, Phase 24 a third — and all
+        three were RESIDENT, an array indexed by the enum. That made the enum the
+        answer to "how many curves can a group hold", which is the wrong
+        question: a group with four shape ideas and one destination had nowhere
+        to put the other three, and no way to park a shape without destroying it.
 
-    /** Phase 20: the two macro lanes, indexed by GroupAutomationTarget, for the
-        same reason Layer keeps both resident — the automation window lists
-        "组 A · 音量" and "组 A · 声相" as independent tracks that are both live
-        at once, and neither of them has to be "the selected one". */
+        A bank answers it. The old accessors keep exactly their old meaning —
+        "the lane driving this target" — because that is what every caller of
+        them actually wanted; what changes is that the target can now be empty
+        (the lane is parked, drawn, and inert) and that a group can hold more
+        shapes than it has destinations. */
+    CurveBank<AutomationLane>&       getCurveBank()       noexcept { return curves; }
+    const CurveBank<AutomationLane>& getCurveBank() const noexcept { return curves; }
+
+    int  getActiveCurveId() const noexcept { return curves.getActiveId(); }
+    void setActiveCurveId (int curveId) noexcept { curves.setActiveId (curveId); }
+
+    AutomationLane&       activeAutomation()       noexcept { return curves.getActive().curve; }
+    const AutomationLane& activeAutomation() const noexcept { return curves.getActive().curve; }
+
+    /** What the OPEN curve drives, in GroupAutomationTarget's numbering.
+        -1 = 空（画着，但不驱动任何东西）. */
+    int curveTarget() const noexcept { return curves.getActive().target; }
+
+    /** The lane driving `target`, or null when it is parked. */
+    AutomationLane* laneDriving (GroupAutomationTarget target) noexcept
+    {
+        auto* slot = curves.findRoutedTo ((int) target);
+        return slot != nullptr ? &slot->curve : nullptr;
+    }
+
+    const AutomationLane* laneDriving (GroupAutomationTarget target) const noexcept
+    {
+        const auto* slot = curves.findRoutedTo ((int) target);
+        return slot != nullptr ? &slot->curve : nullptr;
+    }
+
+    /** The lane driving `target`, creating and routing one when nobody does.
+        This is the "automate this" door, not a read: it changes the model, so
+        no painter may call it. */
+    AutomationLane& ensureAutomationFor (GroupAutomationTarget target);
+
     AutomationLane& automationFor (GroupAutomationTarget target) noexcept
     {
-        return automationLanes[(size_t) target];
+        return ensureAutomationFor (target);
     }
 
+    /** Const: never creates. A target nobody drives answers with a disabled
+        stand-in, which every reader already treats as "no automation". */
     const AutomationLane& automationFor (GroupAutomationTarget target) const noexcept
     {
-        return automationLanes[(size_t) target];
+        if (const auto* lane = laneDriving (target))
+            return *lane;
+
+        return idleLane;
     }
+
+    AutomationLane&       getLevelAutomation() noexcept       { return automationFor (GroupAutomationTarget::level); }
+    const AutomationLane& getLevelAutomation() const noexcept { return automationFor (GroupAutomationTarget::level); }
 
     AutomationLane&       getPanAutomation() noexcept       { return automationFor (GroupAutomationTarget::pan); }
     const AutomationLane& getPanAutomation() const noexcept { return automationFor (GroupAutomationTarget::pan); }
 
-    /** Phase 24: the lane that drives NoteGroup::getPluginParam(). Same value
-        range and same absolute-beat time base as the other two. */
     AutomationLane&       getPluginAutomation() noexcept       { return automationFor (GroupAutomationTarget::plugin); }
     const AutomationLane& getPluginAutomation() const noexcept { return automationFor (GroupAutomationTarget::plugin); }
 
@@ -535,10 +659,18 @@ private:
     bool  collapsed = false;
     bool  muted     = false;      // Phase 35: silences notes AND sample blocks
 
-    /** 0..1 multiplier over project time, indexed by GroupAutomationTarget.
-        Disabled means "identity": 1.0 for level, 0.0 for pan, and for the
-        plugin lane the parameter simply is not written at all. */
-    std::array<AutomationLane, numGroupAutomationTargets> automationLanes;
+    /** Phase 82: 0..1 multipliers over project time, as a bank.
+
+        Disabled still means "identity": 1.0 for level, 0.0 for pan, and for the
+        plugin lane the parameter is simply not written at all. What the bank
+        adds is that "which curve is that" is now a stable id instead of an
+        index into a fixed array. */
+    CurveBank<AutomationLane> curves;
+
+    /** Where a const reader lands when nothing drives the target it asked for:
+        disabled, so `isEnabled()` answers false and nothing is applied. Never
+        written back — a read must not create a curve. */
+    AutomationLane idleLane;
 
     /** Phase 62: occurrence number -> start beat of that appearance. Only
         appearances that exist are meaningful; Layer::pruneOccurrenceStarts()

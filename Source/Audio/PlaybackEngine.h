@@ -48,8 +48,31 @@ struct ScheduledNote
     double endSeconds   = 0.0;
     float  gain         = 0.0f;        // velocity only
     Waveform waveform   = Waveform::saw;
-    NoteEnvelope envelope;
     bool   overridden   = false;       // reached this synth by bypassing its layer
+
+    //-- Phase 82: one snapshot per routed curve ------------------------------
+    /** A note can carry a level curve AND a pan curve AND a pitch curve at the
+        same time now, so "the note's envelope" is no longer one object.
+
+        Each slot is inert unless its flag is set, and the flag is what a
+        disabled curve used to be: an un-routed curve must cost nothing on the
+        audio thread, and it must not be mistaken for a flat one — a flat LEVEL
+        curve is 1.0 (no change) while a flat PAN curve is 0.5 (centre), so the
+        two cannot share a single "no curve" value.
+
+        Snapshotted by value at publish time, like every other curve that
+        reaches the audio thread: the renderer never looks at the note. */
+    NoteEnvelope levelCurve;
+    NoteEnvelope panCurve;
+    NoteEnvelope pitchCurve;
+    NoteEnvelope pluginCurve;
+
+    bool levelCurveOn = false;
+    bool panCurveOn   = false;
+    bool pitchCurveOn = false;
+
+    /** >= 0 when `pluginCurve` drives parameter N of this note's synth. */
+    int  pluginParamIndex = -1;
 
     /** Phase 16: which note group this came from, or -1.
 
@@ -74,7 +97,6 @@ struct ScheduledNote
         on u, so it is tabulated once at publish time and linearly interpolated
         per sample. Stateless, cheap, and the offline render walks the exact
         same code as the live one. */
-    NoteModTarget      modTarget = NoteModTarget::level;
     std::vector<float> pitchIntegral;
 
     /** 0..1 at 1/64 steps: [0] is the note head, [64] the tail. */

@@ -133,6 +133,97 @@ namespace
         addPluginParamSubmenu() for why this is not "all of them". */
     constexpr int kMaxListedPluginParams = 64;
 
+    //-- Phase 82: the two dropdowns -----------------------------------------
+    /** Ids for the LEFT dropdown ("which curve"). Each box builds its own menu,
+        so these only have to avoid each other inside one menu — keeping them
+        shared anyway means reading the third box is reading something already
+        known. */
+    constexpr int kCurveItemBase   = 200;   // + index → activate that curve
+    constexpr int kCurveMenuNew    = 290;
+    constexpr int kCurveMenuDelete = 291;
+    constexpr int kCurveMenuReset  = 292;   // flatten and park what is open
+
+    /** Ids for the RIGHT dropdown ("where it goes"). `none` is 空: the curve
+        keeps its shape and drives nothing. */
+    constexpr int kRouteMenuNone = 1;
+    constexpr int kRouteItemBase = 10;      // + the target's own ordinal
+
+    /** One row of a box's curve list, in a form the menu builder can read. */
+    struct CurveMenuItem
+    {
+        int          id;
+        juce::String name;
+        juce::String route;      // empty = 空
+    };
+
+    /** The "which curve" half of the left dropdown. Shared by all three boxes
+        so the three lists cannot drift apart — same words, same order, same
+        verbs at the bottom. Returns nothing: the caller maps `result` back to
+        an id through `items`. */
+    void addCurveItems (juce::PopupMenu& menu, const std::vector<CurveMenuItem>& items,
+                        int activeId)
+    {
+        menu.addSectionHeader (utf8 ("曲线"));
+
+        for (int i = 0; i < (int) items.size(); ++i)
+        {
+            const auto& item = items[(size_t) i];
+
+            juce::String text = item.name.isNotEmpty() ? item.name
+                                                       : utf8 ("曲线 ") + juce::String (i + 1);
+
+            // The route is shown next to the name because the list's whole job
+            // is answering "which of these is the one on pan?" without opening
+            // five of them in turn.
+            text << "   ·   " << (item.route.isEmpty() ? utf8 ("空") : "→ " + item.route);
+
+            menu.addItem (kCurveItemBase + i, text, true, item.id == activeId);
+        }
+    }
+
+    void addCurveVerbs (juce::PopupMenu& menu, bool canDelete)
+    {
+        menu.addSeparator();
+        menu.addItem (kCurveMenuNew, utf8 ("新建曲线…"));
+        menu.addItem (kCurveMenuDelete, utf8 ("删除这条曲线"), canDelete);
+    }
+
+    /** What a note's curve is pointed at, in words. `curveTargetPlugin` is a
+        fourth value that is NOT a NoteModTarget, so casting it would name the
+        wrong thing — this is the only place allowed to translate it. */
+    juce::String noteRouteLabel (const CurveSlot<NoteEnvelope>& slot)
+    {
+        if (slot.target < 0)
+            return {};
+
+        if (slot.target == NoteEvent::curveTargetPlugin)
+            return utf8 ("音源参数");
+
+        return modTargetLabel ((NoteModTarget) slot.target);
+    }
+
+    juce::String sampleRouteLabel (const CurveSlot<NoteEnvelope>& slot)
+    {
+        if (slot.target < 0)
+            return {};
+
+        return slot.target == (int) SampleAutomationTarget::pan ? utf8 ("声相") : utf8 ("音量");
+    }
+
+    juce::String groupRouteLabel (const CurveSlot<AutomationLane>& slot)
+    {
+        if (slot.target < 0)
+            return {};
+
+        switch ((GroupAutomationTarget) slot.target)
+        {
+            case GroupAutomationTarget::pan:    return utf8 ("组声相");
+            case GroupAutomationTarget::plugin: return utf8 ("音源参数");
+            case GroupAutomationTarget::level:
+            default:                            return utf8 ("组音量");
+        }
+    }
+
     /** A knob: ring plus pointer. The universal "this is a synth parameter, not
         a fader of ours" glyph, used wherever a curve drives a plugin. */
     void drawKnobGlyph (juce::Graphics& g, juce::Rectangle<float> area, juce::Colour colour)
@@ -1600,10 +1691,17 @@ juce::String PianoRollComponent::pluginParamName (int slotId, int paramIndex) co
 
 juce::String PianoRollComponent::noteTargetLabel (const NoteEvent& note) const
 {
-    if (! note.drivesPluginParam())
-        return modTargetLabel (note.modTarget);
+    // Phase 82: 空 is a destination too. Naming it matters twice over — an
+    // empty cell beside a caret reads as a rendering bug, and a cell that said
+    // "音量" while the curve drove nothing would be a lie about the only thing
+    // this cell exists to say.
+    if (note.curveTarget() < 0)
+        return utf8 ("空");
 
-    const auto name = pluginParamName (resolvedSlotForNote (note), note.modPluginParam);
+    if (! note.drivesPluginParam())
+        return modTargetLabel (note.modTarget());
+
+    const auto name = pluginParamName (resolvedSlotForNote (note), note.modPluginParam());
 
     // The plugin is gone, or its parameter list changed under the project. The
     // curve is still there and still says what it says; it just cannot be
@@ -1613,9 +1711,13 @@ juce::String PianoRollComponent::noteTargetLabel (const NoteEvent& note) const
 
 juce::String PianoRollComponent::groupTargetLabel (const NoteGroup& group) const
 {
-    if (expandedGroupTarget != (int) GroupAutomationTarget::plugin)
-        return expandedGroupTarget == (int) GroupAutomationTarget::pan ? utf8 ("组声相")
-                                                                      : utf8 ("组音量");
+    const int target = group.curveTarget();      // Phase 82: read, never cached
+
+    if (target < 0)
+        return utf8 ("空");
+
+    if (target != (int) GroupAutomationTarget::plugin)
+        return target == (int) GroupAutomationTarget::pan ? utf8 ("组声相") : utf8 ("组音量");
 
     const auto name = pluginParamName (resolvedSlotForGroup (expandedGroupLayerIndex, group.getId()),
                                        group.getPluginParam());
@@ -2966,7 +3068,7 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
             if (expandedGroupId == group.getId() && expandedGroupLayerIndex == i)
                 closeGroupAutomation();
             else
-                openGroupAutomation (i, group.getId(), expandedGroupTarget);
+                openGroupAutomation (i, group.getId(), getExpandedGroupTarget());
 
             return;
         }
@@ -4600,7 +4702,11 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
 
             if (box.contains (e.position))
             {
-                const bool overMenu = getAutomationMenuArea (*expanded).contains (e.position);
+                // Phase 82: which of the two cells, not "somewhere on the row".
+                // Two adjacent buttons that both light up would be a hover that
+                // lies about what the click is aimed at.
+                const int overMenu = getAutomationCurveMenuArea (*expanded).contains (e.position) ? 1
+                                   : getAutomationRouteMenuArea (*expanded).contains (e.position) ? 2 : 0;
                 const int  overPoint = getAutomationCurveArea (*expanded).contains (e.position)
                                          ? findEnvelopePointAt (*expanded, e.position) : -1;
 
@@ -4611,17 +4717,17 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
                     repaint (box.expanded (6.0f).getSmallestIntegerContainer());
                 }
 
-                setMouseCursor (overMenu ? juce::MouseCursor::PointingHandCursor
-                                         : (overPoint >= 0 ? juce::MouseCursor::DraggingHandCursor
-                                                           : juce::MouseCursor::CrosshairCursor));
+                setMouseCursor (overMenu != 0 ? juce::MouseCursor::PointingHandCursor
+                                              : (overPoint >= 0 ? juce::MouseCursor::DraggingHandCursor
+                                                                : juce::MouseCursor::CrosshairCursor));
                 return;
             }
         }
     }
 
-    if (hoveredAutomationMenu || hoveredEnvelopePoint != -1)
+    if (hoveredAutomationMenu != 0 || hoveredEnvelopePoint != -1)
     {
-        hoveredAutomationMenu = false;
+        hoveredAutomationMenu = 0;
         hoveredEnvelopePoint  = -1;
         repaint();
     }
@@ -4635,7 +4741,8 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
 
             if (box.contains (e.position))
             {
-                const bool overMenu = getGroupMenuArea().contains (e.position);
+                const int overMenu = getGroupCurveMenuArea().contains (e.position) ? 1
+                                   : getGroupRouteMenuArea().contains (e.position) ? 2 : 0;
                 const int  overPoint = getGroupCurveBounds().contains (e.position)
                                          ? findGroupCurvePointAt (e.position) : -1;
 
@@ -4645,17 +4752,17 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
                     repaint (box.expanded (6.0f).getSmallestIntegerContainer());
                 }
 
-                setMouseCursor (overMenu ? juce::MouseCursor::PointingHandCursor
-                                         : (overPoint >= 0 ? juce::MouseCursor::DraggingHandCursor
-                                                           : juce::MouseCursor::CrosshairCursor));
+                setMouseCursor (overMenu != 0 ? juce::MouseCursor::PointingHandCursor
+                                              : (overPoint >= 0 ? juce::MouseCursor::DraggingHandCursor
+                                                                : juce::MouseCursor::CrosshairCursor));
                 return;
             }
         }
     }
 
-    if (hoveredGroupMenu)
+    if (hoveredGroupMenu != 0)
     {
-        hoveredGroupMenu = false;
+        hoveredGroupMenu = 0;
         repaint();
     }
 
@@ -4669,8 +4776,11 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
 
             if (box.contains (e.position))
             {
-                const bool  overMenu  = getSampleMenuArea (expandedSampleLayerIndex,
-                                                           expandedSampleId).contains (e.position);
+                const int   overMenu  = getSampleCurveMenuArea (expandedSampleLayerIndex,
+                                                                expandedSampleId).contains (e.position) ? 1
+                                      : getSampleRouteMenuArea (expandedSampleLayerIndex,
+                                                                expandedSampleId).contains (e.position) ? 2
+                                      : 0;
                 const int   overPoint = getSampleCurveArea (expandedSampleLayerIndex,
                                                             expandedSampleId).contains (e.position)
                                           ? findSampleCurvePointAt (expandedSampleLayerIndex,
@@ -4684,17 +4794,17 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
                     repaint (box.expanded (6.0f).getSmallestIntegerContainer());
                 }
 
-                setMouseCursor (overMenu ? juce::MouseCursor::PointingHandCursor
-                                         : (overPoint >= 0 ? juce::MouseCursor::DraggingHandCursor
-                                                           : juce::MouseCursor::CrosshairCursor));
+                setMouseCursor (overMenu != 0 ? juce::MouseCursor::PointingHandCursor
+                                              : (overPoint >= 0 ? juce::MouseCursor::DraggingHandCursor
+                                                                : juce::MouseCursor::CrosshairCursor));
                 return;
             }
         }
     }
 
-    if (hoveredSampleCurveMenu || hoveredSampleCurvePoint != -1)
+    if (hoveredSampleCurveMenu != 0 || hoveredSampleCurvePoint != -1)
     {
-        hoveredSampleCurveMenu  = false;
+        hoveredSampleCurveMenu  = 0;
         hoveredSampleCurvePoint = -1;
         repaint();
     }
@@ -4881,22 +4991,22 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
 void PianoRollComponent::mouseExit (const juce::MouseEvent&)
 {
     if (hoveredNoteId != -1 || hoveredTool != -1
-         || hoveredAutomationMenu || hoveredEnvelopePoint != -1
-         || hoveredGroupId != -1 || hoveredGroupHandle || hoveredGroupMenu
-         || hoveredSampleHandle || hoveredSampleCurveMenu
+         || hoveredAutomationMenu != 0 || hoveredEnvelopePoint != -1
+         || hoveredGroupId != -1 || hoveredGroupHandle || hoveredGroupMenu != 0
+         || hoveredSampleHandle || hoveredSampleCurveMenu != 0
          || hoveredSampleCurvePoint != -1)
     {
         hoveredNoteId = -1;
         hoveredTool = -1;
-        hoveredAutomationMenu = false;
+        hoveredAutomationMenu = 0;
         hoveredEnvelopePoint  = -1;
         hoveredGroupId        = -1;
         hoveredGroupLayer     = -1;
         hoveredGroupHandle    = false;
-        hoveredGroupMenu      = false;
+        hoveredGroupMenu      = 0;
         hoveredSampleHandle     = false;
         hoveredSampleHandleId   = -1;
-        hoveredSampleCurveMenu  = false;
+        hoveredSampleCurveMenu  = 0;
         hoveredSampleCurvePoint = -1;
         repaint();
     }
@@ -5286,7 +5396,7 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
         g.drawText (utf8 ("画笔状态：")
                       + juce::String (paintState.lengthBeats, 2) + utf8 (" 拍 · vel ")
                       + juce::String (paintState.velocity, 2)
-                      + (paintState.envelope.isEnabled() ? utf8 (" · 带包络") : juce::String())
+                      + (paintState.envelope().isEnabled() ? utf8 (" · 带包络") : juce::String())
                       + (paintState.outputSlotOverride >= 0
                            ? utf8 (" · 越级 ") + rack.getSlotName (paintState.outputSlotOverride)
                            : juce::String())
@@ -5879,7 +5989,7 @@ void PianoRollComponent::drawNote (juce::Graphics& g, const NoteEvent& note, juc
     // This is the visual proof of the binding: move or copy the block and the
     // curve moves with it. While the playhead is inside the note, the curve is
     // the thing being *played*, so it shows how far it has got.
-    if (note.envelope.isEnabled() && note.envelope.getPoints().size() >= 2
+    if (note.envelope().isEnabled() && note.envelope().getPoints().size() >= 2
          && bounds.getWidth() >= 10.0f)
     {
         const auto inner = bounds.reduced (1.5f, 2.0f);
@@ -5897,7 +6007,7 @@ void PianoRollComponent::drawNote (juce::Graphics& g, const NoteEvent& note, juc
             {
                 const float t = from + (to - from) * (float) i / (float) (steps - 1);
                 const float x = xForTime (t);
-                const float y = yForValue (note.envelope.valueAt (t));
+                const float y = yForValue (note.envelope().valueAt (t));
 
                 if (i == 0) path.startNewSubPath (x, y);
                 else        path.lineTo (x, y);
@@ -5934,7 +6044,7 @@ void PianoRollComponent::drawNote (juce::Graphics& g, const NoteEvent& note, juc
 
             // The head: a dot riding the curve at exactly the level the engine
             // is applying to this note right now.
-            const float v  = note.envelope.valueAt (p);
+            const float v  = note.envelope().valueAt (p);
             const float cx = xForTime (p);
             const float cy = yForValue (v);
 
@@ -6512,7 +6622,7 @@ void PianoRollComponent::closeNoteAutomation()
     expandedLayerIndex = -1;
     dragEnvelopePoint  = -1;
     hoveredEnvelopePoint = -1;
-    hoveredAutomationMenu = false;
+    hoveredAutomationMenu = 0;
 
     if (curveSelection == CurveSelection::noteEnvelope)
         curveSelection = CurveSelection::none;
@@ -6582,6 +6692,98 @@ juce::Rectangle<float> PianoRollComponent::getNoteAutomationHandleBounds (const 
              juce::jmax (ui::pf (8), bounds.getHeight() - ui::pf (2)) };
 }
 
+//==============================================================================
+//  Phase 82: one row, two buttons
+//==============================================================================
+namespace
+{
+    /** Below this width a cell carries a glyph instead of its own name: the
+        same rule the one-button row already had, because a 1/16 note is 12 px
+        wide and "音量" is not 12 px of anything. One predicate, used by the
+        paint and by the painter of the narrow variant, so the two cannot end
+        up disagreeing about where the word stops and the shape starts. */
+    bool curveCellFitsText (juce::Rectangle<float> cell)
+    {
+        return cell.getWidth() >= 34.0f && cell.getHeight() >= ui::pf (14);
+    }
+}
+
+std::pair<juce::Rectangle<float>, juce::Rectangle<float>>
+PianoRollComponent::splitCurveRow (juce::Rectangle<float> row)
+{
+    // The left cell is the wider one: it holds a curve's NAME, while the right
+    // holds a target's name, which is one or two characters ("声相", "空").
+    // Both keep room for a caret, and the gap is a finger's width so a click
+    // meant for one cannot land in the other.
+    const float gap  = ui::pf (3);
+    const float left = juce::jmax (1.0f, (row.getWidth() - gap) * 0.56f);
+
+    auto curves = row.withWidth (juce::jmin (left, row.getWidth()));
+    auto route  = row.withTrimmedLeft (juce::jmin (left + gap, row.getWidth()));
+
+    if (route.getWidth() < 1.0f)
+        route.setWidth (1.0f);
+
+    return { curves, route };
+}
+
+void PianoRollComponent::drawMenuCell (juce::Graphics& g, juce::Rectangle<float> area,
+                                       const juce::String& text, juce::Colour accent,
+                                       bool hot, bool parked) const
+{
+    if (area.getWidth() < 1.0f || area.getHeight() < 1.0f)
+        return;
+
+    g.setColour (accent.withAlpha (hot ? 0.30f : 0.13f));
+    g.fillRoundedRectangle (area, 3.0f);
+
+    if (! curveCellFitsText (area))
+        return;             // the caller draws a glyph instead
+
+    // A parked curve (空) keeps its name but loses its brightness: the shape is
+    // still there, it just does not do anything, and the cell should say so
+    // before the menu explains it.
+    g.setColour (juce::Colours::white.withAlpha (parked ? 0.45f : 0.9f));
+    g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.0f)).withStyle ("Bold")));
+    g.drawText (text, area.reduced (5.0f, 0.0f).withTrimmedRight (9.0f),
+                juce::Justification::centredLeft, true);
+
+    const float cx = area.getRight() - 6.5f;
+    const float cy = area.getCentreY();
+
+    juce::Path chevron;
+    chevron.startNewSubPath (cx - 3.0f, cy - 1.6f);
+    chevron.lineTo (cx, cy + 1.8f);
+    chevron.lineTo (cx + 3.0f, cy - 1.6f);
+
+    g.setColour (juce::Colours::white.withAlpha (0.7f));
+    g.strokePath (chevron, juce::PathStrokeType (1.3f, juce::PathStrokeType::curved,
+                                                 juce::PathStrokeType::rounded));
+}
+
+void PianoRollComponent::drawCurveGlyph (juce::Graphics& g, juce::Rectangle<float> area,
+                                         juce::Colour colour) const
+{
+    // A line that rises and falls: "this button is about a curve", said in the
+    // eight pixels the narrow variant has. Deliberately not the mod-target
+    // icons — those belong to the RIGHT cell, and the two cells must not be
+    // mistakable for each other at a glance.
+    const float x0 = area.getX() + 1.0f;
+    const float x1 = area.getRight() - 1.0f;
+    const float w  = juce::jmax (1.0f, x1 - x0);
+    const float y0 = area.getCentreY();
+
+    juce::Path squiggle;
+    squiggle.startNewSubPath (x0, y0 + area.getHeight() * 0.22f);
+    squiggle.cubicTo (x0 + w * 0.30f, y0 - area.getHeight() * 0.42f,
+                      x0 + w * 0.70f, y0 + area.getHeight() * 0.42f,
+                      x1, y0 - area.getHeight() * 0.22f);
+
+    g.setColour (colour);
+    g.strokePath (squiggle, juce::PathStrokeType (1.3f, juce::PathStrokeType::curved,
+                                                  juce::PathStrokeType::rounded));
+}
+
 juce::Rectangle<float> PianoRollComponent::getNoteAutomationBoxBounds (const NoteEvent& note) const
 {
     const auto grid = getGridArea();
@@ -6632,6 +6834,16 @@ juce::Rectangle<float> PianoRollComponent::getAutomationMenuArea (const NoteEven
     return inner.removeFromBottom (ui::pf (26));
 }
 
+juce::Rectangle<float> PianoRollComponent::getAutomationCurveMenuArea (const NoteEvent& note) const
+{
+    return splitCurveRow (getAutomationMenuArea (note)).first;
+}
+
+juce::Rectangle<float> PianoRollComponent::getAutomationRouteMenuArea (const NoteEvent& note) const
+{
+    return splitCurveRow (getAutomationMenuArea (note)).second;
+}
+
 juce::Rectangle<float> PianoRollComponent::getAutomationCloseArea (const NoteEvent& note) const
 {
     const auto  box  = getNoteAutomationBoxBounds (note);
@@ -6643,7 +6855,7 @@ juce::Rectangle<float> PianoRollComponent::getAutomationCloseArea (const NoteEve
 int PianoRollComponent::findEnvelopePointAt (const NoteEvent& note, juce::Point<float> position) const
 {
     const auto inner = getAutomationCurveArea (note);
-    const auto& points = note.envelope.getPoints();
+    const auto& points = note.envelope().getPoints();
 
     for (int i = 0; i < (int) points.size(); ++i)
     {
@@ -6667,7 +6879,7 @@ void PianoRollComponent::dragAutomationPoint (NoteEvent& note, juce::Point<float
     const float t = juce::jlimit (0.0f, 1.0f, (position.x - inner.getX()) / juce::jmax (1.0f, inner.getWidth()));
     const float v = juce::jlimit (0.0f, 1.0f, (inner.getBottom() - position.y) / juce::jmax (1.0f, inner.getHeight()));
 
-    note.envelope.movePoint (dragEnvelopePoint, t, v);
+    note.envelope().movePoint (dragEnvelopePoint, t, v);
 
     // Phase 62: same rule for a note's own curve — one shape, every place.
     syncShapeOfMember (note.id);
@@ -6688,7 +6900,13 @@ bool PianoRollComponent::handleAutomationMouseDown (juce::Point<float> pos,
         return true;
     }
 
-    if (getAutomationMenuArea (note).contains (pos))
+    if (getAutomationCurveMenuArea (note).contains (pos))
+    {
+        showNoteCurveMenu (note, localPointToGlobal (pos.roundToInt()));
+        return true;
+    }
+
+    if (getAutomationRouteMenuArea (note).contains (pos))
     {
         showModTargetMenu (note, localPointToGlobal (pos.roundToInt()));
         return true;
@@ -6706,7 +6924,7 @@ bool PianoRollComponent::handleAutomationMouseDown (juce::Point<float> pos,
         // Right-click removes a point; the curve always keeps two.
         if (hit >= 0)
         {
-            note.envelope.removePoint (hit);
+            note.envelope().removePoint (hit);
 
             if (onNoteEdited != nullptr)
                 onNoteEdited();
@@ -6726,7 +6944,7 @@ bool PianoRollComponent::handleAutomationMouseDown (juce::Point<float> pos,
         const float t = juce::jlimit (0.0f, 1.0f, (pos.x - inner.getX()) / juce::jmax (1.0f, inner.getWidth()));
         const float v = juce::jlimit (0.0f, 1.0f, (inner.getBottom() - pos.y) / juce::jmax (1.0f, inner.getHeight()));
 
-        const int added = note.envelope.addPoint (t, v);
+        const int added = note.envelope().addPoint (t, v);
 
         if (added < 0)
             return true;    // envelope is full
@@ -6746,7 +6964,7 @@ void PianoRollComponent::showModTargetMenu (const NoteEvent& note, juce::Point<i
 {
     const int layerIndex = expandedLayerIndex;
     const int noteId     = note.id;
-    const int current    = (int) note.modTarget;
+    const int current    = note.curveTarget();      // Phase 82: -1 = 空
 
     // Phase 24: the synth this note plays through decides whether there is a
     // second menu half at all. A hosted instrument has a parameter list; the
@@ -6759,18 +6977,27 @@ void PianoRollComponent::showModTargetMenu (const NoteEvent& note, juce::Point<i
         paramIndices.push_back (info.index);
 
     juce::PopupMenu menu;
-    menu.addSectionHeader (utf8 ("调制的参数"));
+    menu.addSectionHeader (utf8 ("这条曲线驱动什么"));
+
+    // Phase 82: 空 comes first and is never disabled. "Draw it, do not use it"
+    // is a real thing to want — a shape kept for later, a curve being built —
+    // and it has to be reachable from every state, including from 空 itself.
+    menu.addItem (kRouteMenuNone, utf8 ("空") + "  ·  " + utf8 ("曲线留着，不驱动任何东西"),
+                  true, current < 0);
+
+    menu.addSeparator();
 
     for (auto target : { NoteModTarget::level, NoteModTarget::pan, NoteModTarget::pitch })
-        menu.addItem ((int) target + 1, modTargetLabel (target) + "  ·  " + modTargetHint (target),
-                      true, ! note.drivesPluginParam() && (int) target == current);
+        menu.addItem (kRouteItemBase + (int) target,
+                      modTargetLabel (target) + "  ·  " + modTargetHint (target),
+                      true, current == (int) target);
 
     if (! paramIndices.empty())
     {
         menu.addSeparator();
-        addPluginParamSubmenu (menu, slotId, note.modPluginParam, kPluginParamItemBase);
+        addPluginParamSubmenu (menu, slotId, note.modPluginParam(), kPluginParamItemBase);
     }
-    else if (resolvedSlotForNote (note) >= 0)
+    else if (slotId >= 0)
     {
         menu.addSeparator();
         menu.addItem (-1, utf8 ("挂到外部音源后可选它的参数"), false, false);
@@ -6795,24 +7022,106 @@ void PianoRollComponent::showModTargetMenu (const NoteEvent& note, juce::Point<i
         if (target == nullptr)
             return;
 
-        if (result >= kPluginParamItemBase)
+        if (result == kRouteMenuNone)
+        {
+            // The curve is NOT deleted: parking is a routing statement, and
+            // the shape that was under this menu is still the shape the box
+            // draws. `route(-1)` is the only door that says so.
+            target->curves.route (target->curves.getActiveId(), -1);
+        }
+        else if (result >= kPluginParamItemBase)
         {
             const int which = result - kPluginParamItemBase;
 
             if (! juce::isPositiveAndBelow (which, (int) paramIndices.size()))
                 return;
 
-            target->modPluginParam = paramIndices[(size_t) which];
+            target->setModPluginParam (paramIndices[(size_t) which]);
 
             // Switching to a plugin parameter has to make the curve audible
             // for the same reason opening a box does: a curve you can see and
             // cannot hear is the classic way automation gets taught wrong.
-            target->envelope.setEnabled (true);
+            target->envelope().setEnabled (true);
+        }
+        else if (result >= kRouteItemBase && result < kRouteItemBase + 3)
+        {
+            // Exclusive by construction: `route` takes the target away from
+            // whoever had it (P82's "the later one wins"), so two curves can
+            // never end up shaping one parameter.
+            target->curves.route (target->curves.getActiveId(), result - kRouteItemBase);
+            target->envelope().setEnabled (true);
         }
         else
         {
-            target->modPluginParam = -1;          // back to the built-in target
-            target->modTarget = (NoteModTarget) (result - 1);
+            return;
+        }
+
+        if (safe->onNoteEdited != nullptr)
+            safe->onNoteEdited();
+
+        safe->repaint();
+    });
+}
+
+void PianoRollComponent::showNoteCurveMenu (const NoteEvent& note, juce::Point<int> screenPosition)
+{
+    const int layerIndex = expandedLayerIndex;
+    const int noteId     = note.id;
+
+    std::vector<CurveMenuItem> items;
+
+    for (const auto& slot : note.curves.getCurves())
+        items.push_back ({ slot.id, slot.name, noteRouteLabel (slot) });
+
+    juce::PopupMenu menu;
+    addCurveItems (menu, items, note.curves.getActiveId());
+    addCurveVerbs (menu, note.curves.getNumCurves() > 1);
+
+    juce::Component::SafePointer<PianoRollComponent> safe (this);
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (
+                            juce::Rectangle<int> (screenPosition.x, screenPosition.y, 1, 1)),
+                        [safe, layerIndex, noteId] (int result)
+    {
+        if (safe == nullptr || result <= 0)
+            return;
+
+        auto* layer = safe->stack.getLayer (layerIndex);
+
+        if (layer == nullptr)
+            return;
+
+        auto* target = layer->findNote (noteId);
+
+        if (target == nullptr)
+            return;
+
+        if (result >= kCurveItemBase && result < kCurveItemBase + target->curves.getNumCurves())
+        {
+            // Only the view changes. Which curve is on screen has to be a
+            // stored fact (P42), not something inferred from the drawing order.
+            target->curves.setActiveId (target->curves.getCurves()[(size_t) (result - kCurveItemBase)].id);
+        }
+        else if (result == kCurveMenuNew)
+        {
+            // Flat and parked: a brand-new curve must not steal a target from
+            // the curve that is already driving it, and a default-shaped ADSR
+            // would be a shape nobody drew. It becomes live the moment it is
+            // routed or first edited.
+            const int added = target->curves.add (NoteEnvelope::makeIdle());
+
+            if (added < 0)
+                return;     // 满员
+
+            target->curves.setActiveId (added);
+        }
+        else if (result == kCurveMenuDelete)
+        {
+            target->curves.remove (target->curves.getActiveId());
+        }
+        else
+        {
+            return;
         }
 
         if (safe->onNoteEdited != nullptr)
@@ -6881,48 +7190,44 @@ void PianoRollComponent::drawNoteAutomationBox (juce::Graphics& g)
         g.drawVerticalLine ((int) x, inner.getY(), inner.getBottom());
     }
 
-    //-- Parameter cell ------------------------------------------------------
-    // Wide box: the parameter's name and a chevron. Narrow box: just the
-    // parameter's icon. "音量" needs 24 px and a 1/16 note is 12 px wide, so
-    // text would be clipped into a single unreadable glyph anyway — but the
-    // cell still opens the same menu.
-    const auto menuArea = getAutomationMenuArea (*note);
-    const bool menuHot  = hoveredAutomationMenu;
-    const bool iconOnly = menuArea.getWidth() < 52.0f;
+    //-- Two dropdowns ------------------------------------------------------
+    // Phase 82: which curve (left), and what it drives (right). A note can now
+    // carry several shapes, so "the parameter" stopped being one question.
+    //
+    // Wide box: both names and two carets. Narrow box: two glyphs. "音量"
+    // needs 24 px and a 1/16 note is 12 px wide, so text would be clipped into
+    // an unreadable glyph anyway — but both cells still open their menus.
+    const auto curveCell = getAutomationCurveMenuArea (*note);
+    const auto routeCell = getAutomationRouteMenuArea (*note);
+    const auto& active   = note->curves.getActive();
 
-    g.setColour (colour.withAlpha (menuHot ? 0.26f : 0.13f));
-    g.fillRoundedRectangle (menuArea, 3.0f);
+    drawMenuCell (g, curveCell,
+                  active.name.isNotEmpty() ? active.name : utf8 ("曲线"),
+                  colour, hoveredAutomationMenu == 1, ! active.isRouted());
 
-    if (iconOnly)
+    if (! curveCellFitsText (curveCell))
     {
-        const float side  = juce::jmin (12.0f, juce::jmin (menuArea.getWidth(), menuArea.getHeight()));
-        const auto  glyph = juce::Rectangle<float> (side, side).withCentre (menuArea.getCentre());
+        const float side  = juce::jmin (12.0f, juce::jmin (curveCell.getWidth(),
+                                                           curveCell.getHeight()));
+        drawCurveGlyph (g, juce::Rectangle<float> (side, side).withCentre (curveCell.getCentre()),
+                        juce::Colours::white.withAlpha (0.92f));
+    }
+
+    drawMenuCell (g, routeCell, noteTargetLabel (*note), colour,
+                  hoveredAutomationMenu == 2, note->curveTarget() < 0);
+
+    if (! curveCellFitsText (routeCell))
+    {
+        const float side  = juce::jmin (12.0f, juce::jmin (routeCell.getWidth(),
+                                                           routeCell.getHeight()));
+        const auto  glyph = juce::Rectangle<float> (side, side).withCentre (routeCell.getCentre());
 
         if (note->drivesPluginParam())
             drawKnobGlyph (g, glyph, juce::Colours::white.withAlpha (0.92f));
+        else if (note->curveTarget() < 0)
+            g.drawText (utf8 ("空"), routeCell, juce::Justification::centred, false);
         else
-            drawModTargetIcon (g, note->modTarget, glyph, juce::Colours::white.withAlpha (0.92f));
-    }
-    else
-    {
-        g.setColour (juce::Colours::white.withAlpha (0.9f));
-        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.0f)).withStyle ("Bold")));
-        g.drawText (noteTargetLabel (*note),
-                    menuArea.reduced (6.0f, 0.0f).withTrimmedRight (12.0f),
-                    juce::Justification::centredLeft, true);
-
-        // The "v" that says "this opens a menu".
-        juce::Path chevron;
-        const float cx = menuArea.getRight() - 9.0f;
-        const float cy = menuArea.getCentreY();
-
-        chevron.startNewSubPath (cx - 3.5f, cy - 1.8f);
-        chevron.lineTo (cx, cy + 2.0f);
-        chevron.lineTo (cx + 3.5f, cy - 1.8f);
-
-        g.setColour (juce::Colours::white.withAlpha (0.75f));
-        g.strokePath (chevron, juce::PathStrokeType (1.4f, juce::PathStrokeType::curved,
-                                                     juce::PathStrokeType::rounded));
+            drawModTargetIcon (g, note->modTarget(), glyph, juce::Colours::white.withAlpha (0.92f));
     }
 
     //-- Close ---------------------------------------------------------------
@@ -6988,7 +7293,7 @@ void PianoRollComponent::drawModTargetIcon (juce::Graphics& g, NoteModTarget tar
 void PianoRollComponent::drawCurveInBox (juce::Graphics& g, const NoteEvent& note,
                                          juce::Colour colour, juce::Rectangle<float> inner)
 {
-    const auto& envelope = note.envelope;
+    const auto& envelope = note.envelope();
     const auto& points   = envelope.getPoints();
 
     auto toPoint = [&inner] (const EnvelopePoint& p)
@@ -7057,6 +7362,18 @@ const NoteGroup* PianoRollComponent::getExpandedGroup() const
     return nullptr;
 }
 
+int PianoRollComponent::getExpandedGroupTarget() const noexcept
+{
+    // One reading, no cache: the group's active curve IS the answer. A field
+    // holding a copy would need syncing after every route change, every curve
+    // switch, every undo — and one missed sync would paint a different lane
+    // from the one the mouse edits.
+    if (const auto* group = getExpandedGroup())
+        return group->curveTarget();
+
+    return 0;
+}
+
 void PianoRollComponent::openGroupAutomation (int layerIndex, int groupId, int target,
                                               int occurrence)
 {
@@ -7067,26 +7384,39 @@ void PianoRollComponent::openGroupAutomation (int layerIndex, int groupId, int t
     expandedGroupLayerIndex = layerIndex;
     expandedGroupId         = groupId;
     expandedGroupOccurrence = juce::jmax (0, occurrence);
-    expandedGroupTarget     = juce::jlimit (0, numGroupAutomationTargets - 1, target);
     dragGroupPoint          = -1;
 
+    // Phase 82: `target` now names WHICH CURVE to open, looked up through the
+    // routing table — a group may hold several shapes and two of them cannot
+    // drive one parameter, so "the lane for level" is unambiguous while "the
+    // third lane" is not.
+    //
     // A group that was never given a plugin parameter cannot be edited on the
-    // plugin lane: opening the box there would show a curve with nothing behind
-    // it (the publisher skips a lane with `pluginParam < 0`). Falling back to
-    // the level lane is the honest default — the menu is one click away.
-    if (auto* group = getExpandedGroup())
-        if (expandedGroupTarget == (int) GroupAutomationTarget::plugin
-              && ! group->drivesPluginParam())
-            expandedGroupTarget = (int) GroupAutomationTarget::level;
-
-    // Opening the box means "I am editing this curve", so the lane goes on with
-    // it. A curve you can see and cannot hear is the single most common way a
-    // DAW teaches the wrong thing about automation. The notification only fires
-    // when the flag really flips: opening a box on a live curve must not push an
-    // undo step for doing nothing.
+    // plugin lane: opening the box there would show a curve with nothing
+    // behind it (the publisher skips a lane with `pluginParam < 0`). Falling
+    // back to the level curve is the honest default — the menu is one click
+    // away.
     if (auto* group = getExpandedGroup())
     {
-        auto& lane = group->automationFor ((GroupAutomationTarget) expandedGroupTarget);
+        int wanted = juce::jlimit (-1, numGroupAutomationTargets - 1, target);
+
+        if (wanted == (int) GroupAutomationTarget::plugin && ! group->drivesPluginParam())
+            wanted = (int) GroupAutomationTarget::level;
+
+        if (wanted >= 0)
+        {
+            if (const auto* slot = group->getCurveBank().findRoutedTo (wanted))
+                group->setActiveCurveId (slot->id);
+            else
+                group->ensureAutomationFor ((GroupAutomationTarget) wanted);  // creates + activates
+        }
+
+        // Opening the box means "I am editing this curve", so the lane goes on
+        // with it — a curve you can see and cannot hear is the single most
+        // common way a DAW teaches the wrong thing about automation. The
+        // notification only fires when the flag really flips: opening a box on
+        // a live curve must not push an undo step for doing nothing.
+        auto& lane = group->activeAutomation();
 
         if (! lane.isEnabled())
         {
@@ -7108,7 +7438,7 @@ void PianoRollComponent::closeGroupAutomation()
     expandedGroupLayerIndex = -1;
     expandedGroupId         = -1;
     dragGroupPoint          = -1;
-    hoveredGroupMenu        = false;
+    hoveredGroupMenu        = 0;
 
     if (curveSelection == CurveSelection::groupLane)
         curveSelection = CurveSelection::none;
@@ -7152,18 +7482,6 @@ juce::Range<double> PianoRollComponent::getGroupBeatSpan (const Layer& layer,
         return {};
 
     return { lo, hi };
-}
-
-AutomationLane& PianoRollComponent::groupLaneFor (NoteGroup& group, int target)
-{
-    return group.automationFor ((GroupAutomationTarget) juce::jlimit (0, numGroupAutomationTargets - 1,
-                                                                    target));
-}
-
-const AutomationLane& PianoRollComponent::groupLaneFor (const NoteGroup& group, int target) const
-{
-    return group.automationFor ((GroupAutomationTarget) juce::jlimit (0, numGroupAutomationTargets - 1,
-                                                                    target));
 }
 
 juce::Rectangle<float> PianoRollComponent::getGroupAutomationBoxBounds (int layerIndex,
@@ -7248,6 +7566,20 @@ juce::Rectangle<float> PianoRollComponent::getGroupMenuArea() const
     const float padX = juce::jlimit (ui::pf (2), ui::pf (7), box.getWidth() * 0.10f);
 
     return box.reduced (padX, ui::pf (6)).removeFromBottom (ui::pf (26));
+}
+
+juce::Rectangle<float> PianoRollComponent::getGroupCurveMenuArea() const
+{
+    const auto row = getGroupMenuArea();
+
+    return row.isEmpty() ? row : splitCurveRow (row).first;
+}
+
+juce::Rectangle<float> PianoRollComponent::getGroupRouteMenuArea() const
+{
+    const auto row = getGroupMenuArea();
+
+    return row.isEmpty() ? row : splitCurveRow (row).second;
 }
 
 juce::Rectangle<float> PianoRollComponent::getGroupCloseArea() const
@@ -7344,7 +7676,10 @@ int PianoRollComponent::findGroupCurvePointAt (juce::Point<float> position) cons
         return -1;
 
     const auto span = getGroupBeatSpan (*layer, *group);
-    const auto& points = groupLaneFor (*group, expandedGroupTarget).getPoints();
+
+    // Phase 82: the OPEN curve, not "the lane for a target". The box edits one
+    // curve at a time and that curve is whatever the left dropdown says.
+    const auto& points = group->activeAutomation().getPoints();
 
     for (int i = 0; i < (int) points.size(); ++i)
     {
@@ -7374,8 +7709,9 @@ void PianoRollComponent::showGroupTargetMenu (juce::Point<int> screenPosition)
 
     const int layerIndex = expandedGroupLayerIndex;
     const int groupId    = expandedGroupId;
+    const int current    = group->curveTarget();        // Phase 82: -1 = 空
 
-    // Phase 24: the third lane drives a parameter of the synth the group is
+    // Phase 24: the third target drives a parameter of the synth the group is
     // mounted on. Which parameters exist is a question only the plugin can
     // answer, so the list is built here, on the message thread, once.
     const int slotId = resolvedSlotForGroup (layerIndex, groupId);
@@ -7385,15 +7721,20 @@ void PianoRollComponent::showGroupTargetMenu (juce::Point<int> screenPosition)
     for (const auto& info : pluginParamsForSlot (slotId))
         paramIndices.push_back (info.index);
 
-    const bool onPluginLane = expandedGroupTarget == (int) GroupAutomationTarget::plugin;
-
     juce::PopupMenu menu;
-    menu.addSectionHeader (group->getName() + utf8 (" · 自动化参数"));
+    menu.addSectionHeader (group->getName() + utf8 (" · 这条曲线驱动什么"));
 
-    menu.addItem (1, utf8 ("组音量") + "  ·  " + utf8 ("整组的推子，乘进每个成员"),
-                  true, expandedGroupTarget == (int) GroupAutomationTarget::level);
-    menu.addItem (2, utf8 ("组声相") + "  ·  " + utf8 ("整组的声相，加到每个成员"),
-                  true, expandedGroupTarget == (int) GroupAutomationTarget::pan);
+    menu.addItem (kRouteMenuNone, utf8 ("空") + "  ·  " + utf8 ("曲线留着，不驱动任何东西"),
+                  true, current < 0);
+
+    menu.addSeparator();
+
+    menu.addItem (kRouteItemBase + (int) GroupAutomationTarget::level,
+                  utf8 ("组音量") + "  ·  " + utf8 ("整组的推子，乘进每个成员"),
+                  true, current == (int) GroupAutomationTarget::level);
+    menu.addItem (kRouteItemBase + (int) GroupAutomationTarget::pan,
+                  utf8 ("组声相") + "  ·  " + utf8 ("整组的声相，加到每个成员"),
+                  true, current == (int) GroupAutomationTarget::pan);
 
     if (! paramIndices.empty())
     {
@@ -7404,11 +7745,8 @@ void PianoRollComponent::showGroupTargetMenu (juce::Point<int> screenPosition)
         // Saying why beats a menu that silently lists two thirds of itself.
         menu.addItem (-1, group->getPluginParam() >= 0 ? utf8 ("音源参数：音源已不在，曲线保留")
                                                        : utf8 ("挂到外部音源后可选它的参数"),
-                      false, onPluginLane);
+                      false, current == (int) GroupAutomationTarget::plugin);
     }
-
-    menu.addSeparator();
-    menu.addItem (3, utf8 ("从曲线中移除…"), true);
 
     juce::Component::SafePointer<PianoRollComponent> safe (this);
 
@@ -7429,16 +7767,15 @@ void PianoRollComponent::showGroupTargetMenu (juce::Point<int> screenPosition)
         if (target == nullptr)
             return;
 
-        if (result == 3)
+        auto& bank = target->getCurveBank();
+        const int curveId = bank.getActiveId();
+
+        if (result == kRouteMenuNone)
         {
-            // "Remove" means the lane is switched off AND flattened: an emptied
-            // curve that still carried old breakpoints would come back the
-            // moment the lane was switched on again.
-            target->automationFor ((GroupAutomationTarget) safe->expandedGroupTarget)
-                  .resetFlat (neutralCurveValue (safe->expandedGroupTarget, true),
-                              safe->timelineBeats);
-            target->automationFor ((GroupAutomationTarget) safe->expandedGroupTarget)
-                  .setEnabled (false);
+            // Parked, not deleted: the shape stays on screen and stops
+            // driving anything. That is what makes 空 different from "remove
+            // this curve", which is the left dropdown's business.
+            bank.route (curveId, -1);
         }
         else if (result >= kPluginParamItemBase)
         {
@@ -7447,10 +7784,13 @@ void PianoRollComponent::showGroupTargetMenu (juce::Point<int> screenPosition)
             if (! juce::isPositiveAndBelow (which, (int) paramIndices.size()))
                 return;
 
+            // The group's plugin ADDRESS lives on the group (v10), so it is
+            // written there; the bank only records that this curve is the one
+            // pointing at it.
             target->setPluginParam (paramIndices[(size_t) which]);
-            safe->expandedGroupTarget = (int) GroupAutomationTarget::plugin;
+            bank.route (curveId, (int) GroupAutomationTarget::plugin);
 
-            auto& lane = target->getPluginAutomation();
+            auto& lane = target->activeAutomation();
 
             // A lane that has never been drawn starts flat at the centre:
             // 1.0 would slam a cutoff wide open the first time you look at it.
@@ -7459,11 +7799,103 @@ void PianoRollComponent::showGroupTargetMenu (juce::Point<int> screenPosition)
 
             lane.setEnabled (true);
         }
+        else if (result >= kRouteItemBase && result < kRouteItemBase + 2)
+        {
+            bank.route (curveId, result - kRouteItemBase);
+            target->activeAutomation().setEnabled (true);
+        }
         else
         {
-            safe->expandedGroupTarget = juce::jlimit (0, 1, result - 1);
-            target->automationFor ((GroupAutomationTarget) safe->expandedGroupTarget)
-                  .setEnabled (true);
+            return;
+        }
+
+        safe->stack.notifyNotesChanged();
+        safe->repaint();
+    });
+}
+
+void PianoRollComponent::showGroupCurveMenu (juce::Point<int> screenPosition)
+{
+    auto* group = getExpandedGroup();
+
+    if (group == nullptr)
+        return;
+
+    const int layerIndex = expandedGroupLayerIndex;
+    const int groupId    = expandedGroupId;
+    const int numCurves  = group->getCurveBank().getNumCurves();
+
+    std::vector<CurveMenuItem> items;
+
+    for (const auto& slot : group->getCurveBank().getCurves())
+        items.push_back ({ slot.id, slot.name, groupRouteLabel (slot) });
+
+    juce::PopupMenu menu;
+    addCurveItems (menu, items, group->getActiveCurveId());
+
+    // Phase 82 kept the old verb, but it acts on the OPEN curve now instead of
+    // on "the lane the box happens to show" — same words, one fewer concept.
+    menu.addSeparator();
+    menu.addItem (kCurveMenuReset, utf8 ("清空这条曲线…"));
+
+    addCurveVerbs (menu, numCurves > 1);
+
+    juce::Component::SafePointer<PianoRollComponent> safe (this);
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (
+                            juce::Rectangle<int> (screenPosition.x, screenPosition.y, 1, 1)),
+                        [safe, layerIndex, groupId] (int result)
+    {
+        if (safe == nullptr || result <= 0)
+            return;
+
+        auto* layer = safe->stack.getLayer (layerIndex);
+
+        if (layer == nullptr)
+            return;
+
+        auto* target = layer->findGroup (groupId);
+
+        if (target == nullptr)
+            return;
+
+        auto& bank = target->getCurveBank();
+
+        if (result >= kCurveItemBase && result < kCurveItemBase + bank.getNumCurves())
+        {
+            bank.setActiveId (bank.getCurves()[(size_t) (result - kCurveItemBase)].id);
+        }
+        else if (result == kCurveMenuNew)
+        {
+            const int added = bank.add (AutomationLane());      // flat and parked
+
+            if (added < 0)
+                return;                                         // 满员
+
+            bank.setActiveId (added);
+        }
+        else if (result == kCurveMenuDelete)
+        {
+            bank.remove (bank.getActiveId());
+        }
+        else if (result == kCurveMenuReset)
+        {
+            // "Clear" means switched off AND flattened: an emptied curve that
+            // still carried old breakpoints would come back the moment it was
+            // switched on again. A parked curve has no neutral of its own, so
+            // it falls back to level's.
+            const int route = target->curveTarget();
+            auto& lane = target->activeAutomation();
+
+            lane.resetFlat (neutralCurveValue (route >= 0 ? route
+                                                          : (int) GroupAutomationTarget::level,
+                                               true),
+                            safe->timelineBeats);
+            lane.setEnabled (false);
+        }
+        else
+        {
+            return;
         }
 
         safe->stack.notifyNotesChanged();
@@ -7486,7 +7918,13 @@ bool PianoRollComponent::handleGroupAutomationMouseDown (juce::Point<float> pos,
         return true;
     }
 
-    if (getGroupMenuArea().contains (pos))
+    if (getGroupCurveMenuArea().contains (pos))
+    {
+        showGroupCurveMenu (localPointToGlobal (pos.roundToInt()));
+        return true;
+    }
+
+    if (getGroupRouteMenuArea().contains (pos))
     {
         showGroupTargetMenu (localPointToGlobal (pos.roundToInt()));
         return true;
@@ -7497,7 +7935,7 @@ bool PianoRollComponent::handleGroupAutomationMouseDown (juce::Point<float> pos,
     if (inner.isEmpty() || ! inner.contains (pos))
         return true;        // inside the box but between the parts: swallow it
 
-    auto& lane = groupLaneFor (*group, expandedGroupTarget);
+    auto& lane = group->activeAutomation();
 
     auto* layer = stack.getLayer (expandedGroupLayerIndex);
 
@@ -7578,7 +8016,7 @@ void PianoRollComponent::dragGroupCurvePoint (juce::Point<float> position)
     const float t = juce::jlimit (0.0f, 1.0f, (position.x - inner.getX()) / juce::jmax (1.0f, inner.getWidth()));
     const float v = juce::jlimit (0.0f, 1.0f, (inner.getBottom() - position.y) / juce::jmax (1.0f, inner.getHeight()));
 
-    auto& lane = groupLaneFor (*group, expandedGroupTarget);
+    auto& lane = group->activeAutomation();
 
     // Phase 24: a dragged point obeys the snap toggle too, otherwise snapping
     // would only ever apply to the first point of a curve.
@@ -7640,7 +8078,7 @@ void PianoRollComponent::drawGroupAutomationBox (juce::Graphics& g)
     // decorative quarter-marks here, which lined up with nothing.
     drawGridInside (g, inner);
 
-    const auto& lane = groupLaneFor (*group, expandedGroupTarget);
+    const auto& lane = group->activeAutomation();
     const auto  span = getGroupBeatSpan (*layer, *group);
 
     if (! span.isEmpty())
@@ -7706,45 +8144,44 @@ void PianoRollComponent::drawGroupAutomationBox (juce::Graphics& g)
         }
     }
 
-    //-- Parameter cell ------------------------------------------------------
-    const auto menuArea = getGroupMenuArea();
-    const bool iconOnly = menuArea.getWidth() < 62.0f;
+    //-- Two dropdowns ------------------------------------------------------
+    // Phase 82: which curve, and what it drives. Two cells, two menus, one row
+    // — the group used to name only the target because there was exactly one
+    // curve to name.
+    const auto curveCell = getGroupCurveMenuArea();
+    const auto routeCell = getGroupRouteMenuArea();
+    const auto& active   = group->getCurveBank().getActive();
 
-    g.setColour (colour.withAlpha (hoveredGroupMenu ? 0.26f : 0.13f));
-    g.fillRoundedRectangle (menuArea, 3.0f);
+    const int   route    = group->curveTarget();
 
-    const juce::String targetName = groupTargetLabel (*group);
-    const bool pluginTarget = expandedGroupTarget == (int) GroupAutomationTarget::plugin;
+    drawMenuCell (g, curveCell,
+                  active.name.isNotEmpty() ? active.name : utf8 ("曲线"),
+                  colour, hoveredGroupMenu == 1, route < 0);
 
-    if (iconOnly)
+    if (! curveCellFitsText (curveCell))
     {
         const auto glyph = juce::Rectangle<float> (ui::pf (11), ui::pf (11))
-                             .withCentre (menuArea.getCentre());
+                             .withCentre (curveCell.getCentre());
 
-        if (pluginTarget)
-            drawKnobGlyph (g, glyph, juce::Colours::white.withAlpha (0.92f));
-        else
-            drawModTargetIcon (g, expandedGroupTarget == 1 ? NoteModTarget::pan : NoteModTarget::level,
-                               glyph, juce::Colours::white.withAlpha (0.92f));
+        drawCurveGlyph (g, glyph, juce::Colours::white.withAlpha (0.92f));
     }
-    else
+
+    drawMenuCell (g, routeCell, groupTargetLabel (*group), colour,
+                  hoveredGroupMenu == 2, route < 0);
+
+    if (! curveCellFitsText (routeCell))
     {
-        g.setColour (juce::Colours::white.withAlpha (0.9f));
-        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.0f)).withStyle ("Bold")));
-        g.drawText (targetName, menuArea.reduced (6.0f, 0.0f).withTrimmedRight (12.0f),
-                    juce::Justification::centredLeft, true);
+        const auto glyph = juce::Rectangle<float> (ui::pf (11), ui::pf (11))
+                             .withCentre (routeCell.getCentre());
 
-        juce::Path chevron;
-        const float cx = menuArea.getRight() - 9.0f;
-        const float cy = menuArea.getCentreY();
-
-        chevron.startNewSubPath (cx - 3.5f, cy - 1.8f);
-        chevron.lineTo (cx, cy + 2.0f);
-        chevron.lineTo (cx + 3.5f, cy - 1.8f);
-
-        g.setColour (juce::Colours::white.withAlpha (0.75f));
-        g.strokePath (chevron, juce::PathStrokeType (1.4f, juce::PathStrokeType::curved,
-                                                     juce::PathStrokeType::rounded));
+        if (route == (int) GroupAutomationTarget::plugin)
+            drawKnobGlyph (g, glyph, juce::Colours::white.withAlpha (0.92f));
+        else if (route < 0)
+            g.drawText (utf8 ("空"), routeCell, juce::Justification::centred, false);
+        else
+            drawModTargetIcon (g, route == (int) GroupAutomationTarget::pan ? NoteModTarget::pan
+                                                                            : NoteModTarget::level,
+                               glyph, juce::Colours::white.withAlpha (0.92f));
     }
 
     //-- Close ---------------------------------------------------------------
@@ -7774,12 +8211,12 @@ std::vector<AutomationPoint> PianoRollComponent::readSelectedCurve (double& leng
         // note's curve can be pasted onto a group at all.
         std::vector<AutomationPoint> out;
 
-        for (const auto& p : note->envelope.getPoints())
+        for (const auto& p : note->envelope().getPoints())
             out.push_back ({ (double) p.time * juce::jmax (gridDivision, note->lengthBeats),
                              p.value });
 
         lengthBeats = juce::jmax (gridDivision, note->lengthBeats);
-        target      = (int) note->modTarget;
+        target      = (int) note->modTarget();
 
         return out;
     }
@@ -7802,12 +8239,12 @@ std::vector<AutomationPoint> PianoRollComponent::readSelectedCurve (double& leng
         // than the thing they copied.
         std::vector<AutomationPoint> out;
 
-        for (const auto& p : groupLaneFor (*group, expandedGroupTarget).getPoints())
+        for (const auto& p : group->activeAutomation().getPoints())
             if (p.beat >= span.getStart() - 1.0e-9 && p.beat <= span.getEnd() + 1.0e-9)
                 out.push_back ({ p.beat - span.getStart(), p.value });
 
         lengthBeats = juce::jmax (1.0e-6, span.getLength());
-        target      = expandedGroupTarget;
+        target      = group->curveTarget();      // -1 = 空, carried as -1
 
         return out;
     }
@@ -7861,17 +8298,22 @@ bool PianoRollComponent::cutAutomationCurve()
     {
         if (auto* note = getExpandedNote())
         {
-            const float flat = neutralCurveValue ((int) note->modTarget, false);
-            note->envelope.loadPoints ({ { 0.0f, flat }, { 1.0f, flat } });
-            note->envelope.setEnabled (true);
+            const float flat = neutralCurveValue ((int) note->modTarget(), false);
+            note->envelope().loadPoints ({ { 0.0f, flat }, { 1.0f, flat } });
+            note->envelope().setEnabled (true);
         }
     }
     else if (curveSelection == CurveSelection::groupLane)
     {
         if (auto* group = getExpandedGroup())
         {
-            auto& lane = groupLaneFor (*group, expandedGroupTarget);
-            lane.resetFlat (neutralCurveValue (expandedGroupTarget, true), timelineBeats);
+            auto& lane = group->activeAutomation();
+            const int route = group->curveTarget();
+
+            lane.resetFlat (neutralCurveValue (route >= 0 ? route
+                                                          : (int) GroupAutomationTarget::level,
+                                               true),
+                            timelineBeats);
             lane.setEnabled (true);
         }
     }
@@ -7963,9 +8405,9 @@ bool PianoRollComponent::pasteAutomationCurve (bool stretch)
             out.push_back ({ 1.0f, 0.0f });
         }
 
-        note->envelope.loadPoints (std::move (out));
-        note->envelope.setEnabled (true);
-        note->modTarget = (NoteModTarget) juce::jlimit (0, 2, target);
+        note->envelope().loadPoints (std::move (out));
+        note->envelope().setEnabled (true);
+        note->setModTarget ((NoteModTarget) juce::jlimit (0, 2, target));
     }
     else if (curveSelection == CurveSelection::groupLane)
     {
@@ -8008,15 +8450,24 @@ bool PianoRollComponent::pasteAutomationCurve (bool stretch)
         // The pasted curve IS the lane: replacing it wholesale is the only
         // behaviour that makes "paste" mean the same thing for a group as it
         // does for a note, where the whole envelope is replaced.
-        const int laneTarget = juce::jlimit (0, 1, target);
+        //
+        // Phase 82: the destination is a CURVE, not a slot in a fixed array.
+        // The clip's target only names one when it fits this box (level / pan);
+        // a note's pitch curve has no group equivalent, so it lands on whatever
+        // is open rather than being silently mislabelled as pan.
+        const int route = (target >= 0 && target < 2) ? target : group->curveTarget();
 
-        auto& lane = groupLaneFor (*group, laneTarget);
+        auto& lane = route >= 0 ? group->ensureAutomationFor ((GroupAutomationTarget) route)
+                                : group->activeAutomation();
+
         lane.loadPoints (std::move (out));
         lane.setEnabled (true);
 
-        // Show the lane that was just written, or the box would keep displaying
-        // a curve the paste did not touch.
-        expandedGroupTarget = laneTarget;
+        // Show the curve that was just written, or the box would keep
+        // displaying one the paste did not touch.
+        if (route >= 0)
+            if (const auto* slot = group->getCurveBank().findRoutedTo (route))
+                group->setActiveCurveId (slot->id);
     }
     else
     {
@@ -9137,7 +9588,7 @@ void PianoRollComponent::openSampleAutomation (int layerIndex, int sampleId)
     expandedSampleId         = sampleId;
     dragSampleCurveIndex     = -1;
     hoveredSampleCurvePoint  = -1;
-    hoveredSampleCurveMenu   = false;
+    hoveredSampleCurveMenu   = 0;
 
     // Phase 65: opening the box is the moment a bypassed curve comes back.
     // The switch that used to do this is gone, so a curve left disabled by an
@@ -9161,7 +9612,7 @@ void PianoRollComponent::closeSampleAutomation()
     expandedSampleLayerIndex = -1;
     dragSampleCurveIndex     = -1;
     hoveredSampleCurvePoint  = -1;
-    hoveredSampleCurveMenu   = false;
+    hoveredSampleCurveMenu   = 0;
 
     repaint();
 }
@@ -9293,7 +9744,26 @@ juce::Rectangle<float> PianoRollComponent::getSampleTargetArea (int layerIndex, 
     // end is gone (it was the only thing separating the label from "a control
     // that does nothing"), so naming the target gets the full width instead of
     // sharing it with a toggle nobody asked for.
+    //
+    // Phase 82: the row is two buttons now — this is their union, which is what
+    // "somewhere on the row" has to mean for the swallow-it fallback below it.
     return getSampleMenuArea (layerIndex, sampleId);
+}
+
+juce::Rectangle<float> PianoRollComponent::getSampleCurveMenuArea (int layerIndex,
+                                                                 int sampleId) const
+{
+    const auto row = getSampleMenuArea (layerIndex, sampleId);
+
+    return row.isEmpty() ? row : splitCurveRow (row).first;
+}
+
+juce::Rectangle<float> PianoRollComponent::getSampleRouteMenuArea (int layerIndex,
+                                                                 int sampleId) const
+{
+    const auto row = getSampleMenuArea (layerIndex, sampleId);
+
+    return row.isEmpty() ? row : splitCurveRow (row).second;
 }
 
 juce::Rectangle<float> PianoRollComponent::getSampleCloseArea (int layerIndex, int sampleId) const
@@ -9391,10 +9861,17 @@ bool PianoRollComponent::handleSampleAutomationMouseDown (juce::Point<float> pos
         return true;
     }
 
-    // Phase 50: the row is the target menu. Phase 65 removed the enable switch
-    // that used to split it: the label is now the whole row, and a click
-    // anywhere on it opens the target list.
-    if (getSampleTargetArea (layerIndex, sampleId).contains (pos))
+    // Phase 82: the row is two buttons. Left = which curve, right = where it
+    // goes. Phase 65's "the row is the target menu" survives as the RIGHT half;
+    // the left half is new, and it is the half that makes a second curve
+    // reachable at all.
+    if (getSampleCurveMenuArea (layerIndex, sampleId).contains (pos))
+    {
+        showSampleCurveListMenu (layerIndex, sampleId, localPointToGlobal (pos.roundToInt()));
+        return true;
+    }
+
+    if (getSampleRouteMenuArea (layerIndex, sampleId).contains (pos))
     {
         showSampleCurveMenu (layerIndex, sampleId, localPointToGlobal (pos.roundToInt()));
         return true;
@@ -9467,23 +9944,32 @@ void PianoRollComponent::showSampleCurveMenu (int layerIndex, int sampleId,
     if (sample == nullptr)
         return;
 
-    const auto target = sample->automationTarget;
-    const bool onPan  = target == SampleAutomationTarget::pan;
+    const int  target = sample->curveTarget();     // Phase 82: -1 = 空
+    const bool onPan  = target == (int) SampleAutomationTarget::pan;
 
     juce::PopupMenu menu;
 
-    //-- Which parameter this box edits --------------------------------------
-    // Part of the same menu as the curve commands, because "switch to pan" and
-    // "make it a left-to-right sweep" are two answers to one question and the
-    // user is already looking at this row.
-    menu.addSectionHeader (utf8 ("自动化目标"));
-    menu.addItem (11, utf8 ("音量"), true, ! onPan);
-    menu.addItem (12, utf8 ("声相"), true, onPan);
+    //-- Where this curve goes ------------------------------------------------
+    // Phase 82: this used to be "which of the two curves the block has" and
+    // "which of the two parameters" in one menu. Those are two questions now —
+    // the left dropdown picks the curve, this one picks the destination — so
+    // what is left here is the destination, plus 空.
+    menu.addSectionHeader (utf8 ("这条曲线驱动什么"));
+
+    menu.addItem (kRouteMenuNone, utf8 ("空") + "  ·  " + utf8 ("曲线留着，不驱动任何东西"),
+                  true, target < 0);
+
     menu.addSeparator();
 
+    menu.addItem (kRouteItemBase + (int) SampleAutomationTarget::volume, utf8 ("音量"), true,
+                  target == (int) SampleAutomationTarget::volume);
+    menu.addItem (kRouteItemBase + (int) SampleAutomationTarget::pan, utf8 ("声相"), true, onPan);
+
+    //-- Shape presets --------------------------------------------------------
     // Phase 65: no 启用 / 停用 item. The box's switch was removed for the same
     // reason — a drawn curve plays — and a menu item that brings the bypass back
     // would only move the lie one click away.
+    menu.addSeparator();
     menu.addSectionHeader (onPan ? utf8 ("声相曲线") : utf8 ("音量曲线"));
 
     // "Flat" means the target's own neutral point: unity for volume, dead
@@ -9510,46 +9996,116 @@ void PianoRollComponent::showSampleCurveMenu (int layerIndex, int sampleId,
         if (s == nullptr)
             return;
 
-        // Switching the target is a view change, not a curve change: it must
-        // not touch either shape, and it must be written down so reopening the
-        // box shows the same curve (P42's "selection is state" rule).
-        if (result == 11 || result == 12)
+        const int curveId = s->curves.getActiveId();
+
+        if (result == kRouteMenuNone)
         {
-            s->automationTarget = result == 12 ? SampleAutomationTarget::pan
-                                               : SampleAutomationTarget::volume;
+            // Parked, not deleted: the shape stays and stops driving anything.
+            s->curves.route (curveId, -1);
+        }
+        else if (result >= kRouteItemBase && result < kRouteItemBase + 2)
+        {
+            // Exclusive: `route` takes the target away from whoever had it, so
+            // two curves can never shape one parameter at once.
+            s->curves.route (curveId, result - kRouteItemBase);
+            s->activeCurve().setEnabled (true);
+        }
+        else
+        {
+            // Shapes, not routes. Still the same two ramps the v21 fade handles
+            // drew, and still keyed off the target the OPEN curve drives.
+            const float neutral = sampleAutomationNeutral (
+                s->curveTarget() == (int) SampleAutomationTarget::pan ? SampleAutomationTarget::pan
+                                                                     : SampleAutomationTarget::volume);
 
-            if (safe->onNoteEdited != nullptr)
-                safe->onNoteEdited();
+            switch (result)
+            {
+                case 2:
+                    s->activeCurve().loadPoints ({ { 0.0f, neutral }, { 1.0f, neutral } });
+                    break;
 
-            safe->repaint();
+                case 3:
+                    s->activeCurve().loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 1.0f } });
+                    break;
+
+                case 4:
+                    s->activeCurve().loadPoints ({ { 0.0f, 1.0f }, { 1.0f, 0.0f } });
+                    break;
+
+                default:
+                    return;
+            }
+
+            s->activeCurve().setEnabled (true);
+        }
+
+        if (safe->onNoteEdited != nullptr)
+            safe->onNoteEdited();
+
+        safe->repaint();
+    });
+}
+
+void PianoRollComponent::showSampleCurveListMenu (int layerIndex, int sampleId,
+                                                 juce::Point<int> screenPosition)
+{
+    auto* layer = stack.getLayer (layerIndex);
+    auto* sample = layer != nullptr ? layer->findSample (sampleId) : nullptr;
+
+    if (sample == nullptr)
+        return;
+
+    std::vector<CurveMenuItem> items;
+
+    for (const auto& slot : sample->curves.getCurves())
+        items.push_back ({ slot.id, slot.name, sampleRouteLabel (slot) });
+
+    juce::PopupMenu menu;
+    addCurveItems (menu, items, sample->curves.getActiveId());
+    addCurveVerbs (menu, sample->curves.getNumCurves() > 1);
+
+    juce::Component::SafePointer<PianoRollComponent> safe (this);
+    const int layerCapture = layerIndex;
+    const int idCapture    = sampleId;
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (
+                            juce::Rectangle<int> (screenPosition.x, screenPosition.y, 1, 1)),
+                        [safe, layerCapture, idCapture] (int result)
+    {
+        if (safe == nullptr || result <= 0)
+            return;
+
+        auto* l = safe->stack.getLayer (layerCapture);
+        auto* s = l != nullptr ? l->findSample (idCapture) : nullptr;
+
+        if (s == nullptr)
+            return;
+
+        if (result >= kCurveItemBase && result < kCurveItemBase + s->curves.getNumCurves())
+        {
+            // View state only: which curve is open is a stored fact (P42).
+            s->curves.setActiveId (s->curves.getCurves()[(size_t) (result - kCurveItemBase)].id);
+        }
+        else if (result == kCurveMenuNew)
+        {
+            // A new curve starts flat at unity and PARKED: it must not take a
+            // target away from the curve already driving it, and an untouched
+            // shape should not look like something the user drew.
+            const int added = s->curves.add (NoteEnvelope::makeIdle());
+
+            if (added < 0)
+                return;     // 满员
+
+            s->curves.setActiveId (added);
+        }
+        else if (result == kCurveMenuDelete)
+        {
+            s->curves.remove (s->curves.getActiveId());
+        }
+        else
+        {
             return;
         }
-
-        const float neutral = sampleAutomationNeutral (s->automationTarget);
-
-        switch (result)
-        {
-            case 2:
-                s->activeCurve().loadPoints ({ { 0.0f, neutral }, { 1.0f, neutral } });
-                break;
-
-            // The two shapes the old fade handles drew, kept as one-click
-            // presets: the ramps that used to be the ONLY way to shape a block
-            // are now two menu items, and a third point is free. On the pan
-            // lane the same two ramps read as a sweep across the stereo field.
-            case 3:
-                s->activeCurve().loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 1.0f } });
-                break;
-
-            case 4:
-                s->activeCurve().loadPoints ({ { 0.0f, 1.0f }, { 1.0f, 0.0f } });
-                break;
-
-            default:
-                return;
-        }
-
-        s->activeCurve().setEnabled (true);
 
         if (safe->onNoteEdited != nullptr)
             safe->onNoteEdited();
@@ -9588,7 +10144,7 @@ void PianoRollComponent::drawSampleAutomationBox (juce::Graphics& g)
 
         const auto& points = sample->activeCurve().getPoints();
         const bool  live   = sample->activeCurve().isEnabled();
-        const bool  onPan  = sample->automationTarget == SampleAutomationTarget::pan;
+        const bool  onPan  = sample->curveTarget() == (int) SampleAutomationTarget::pan;
 
         // Pan has a meaningful middle, so its area gets a centre hairline: a
         // flat line at 0.5 is silence of movement, and without the reference the
@@ -9682,43 +10238,51 @@ void PianoRollComponent::drawSampleAutomationBox (juce::Graphics& g)
         }
     }
 
-    //-- Menu row ------------------------------------------------------------
-    auto menuArea = getSampleMenuArea (layerIndex, sample->id);
+    //-- Two dropdowns ------------------------------------------------------
+    // Phase 82: the row used to name the target and nothing else, which was
+    // fine while a block had exactly two curves and the "which one" question
+    // was answered by that name. With a bank the two questions separate: left
+    // picks the curve, right picks where it goes.
+    const auto curveCell = getSampleCurveMenuArea (layerIndex, sample->id);
+    const auto routeCell = getSampleRouteMenuArea (layerIndex, sample->id);
 
-    if (! menuArea.isEmpty())
+    if (! curveCell.isEmpty() && ! routeCell.isEmpty())
     {
-        const bool hot = hoveredSampleCurveMenu;
+        const auto& active = sample->curves.getActive();
+        const int   route  = sample->curveTarget();
 
-        // Phase 65: the row is the target button and nothing else. The enable
-        // switch is gone — a curve you drew is a curve that plays, and a switch
-        // that can silently make the drawing a lie was the one thing in this
-        // box that could turn the shape into decoration.
-        const auto target = getSampleTargetArea (layerIndex, sample->id);
+        drawMenuCell (g, curveCell,
+                      active.name.isNotEmpty() ? active.name : utf8 ("曲线"),
+                      colour, hoveredSampleCurveMenu == 1, route < 0);
 
-        // The label names the target and carries a caret: a static word next to
-        // nothing reads as decoration, and "there is a second curve" would be
-        // invisible without something that looks pressable.
-        const juce::String label = sample->automationTarget == SampleAutomationTarget::pan
-                                     ? utf8 ("声相") : utf8 ("音量");
-        const auto labelFont = atomic::ui::bold (9.0f);
+        if (! curveCellFitsText (curveCell))
+            drawCurveGlyph (g, juce::Rectangle<float> (ui::pf (11), ui::pf (11))
+                                   .withCentre (curveCell.getCentre()),
+                            juce::Colours::white.withAlpha (0.9f));
 
-        g.setColour ((hot ? juce::Colours::white : colour).withAlpha (0.9f));
-        g.setFont (labelFont);
-        g.drawText (label,
-                    target.withTrimmedRight (ui::pf (12)),
-                    juce::Justification::centredLeft, true);
+        const juce::String routeName = route < 0 ? utf8 ("空")
+                                      : route == (int) SampleAutomationTarget::pan ? utf8 ("声相")
+                                                                                  : utf8 ("音量");
 
-        juce::Path caret;
-        const float cx = target.getRight() - ui::pf (8);
-        const float cy = target.getCentreY();
+        drawMenuCell (g, routeCell, routeName, colour, hoveredSampleCurveMenu == 2, route < 0);
 
-        caret.startNewSubPath (cx - ui::pf (2.5f), cy - ui::pf (1.2f));
-        caret.lineTo (cx, cy + ui::pf (1.6f));
-        caret.lineTo (cx + ui::pf (2.5f), cy - ui::pf (1.2f));
-
-        g.setColour ((hot ? juce::Colours::white : colour).withAlpha (0.75f));
-        g.strokePath (caret, juce::PathStrokeType (ui::pf (1.2f), juce::PathStrokeType::curved,
-                                                  juce::PathStrokeType::rounded));
+        if (! curveCellFitsText (routeCell))
+        {
+            if (route < 0)
+            {
+                g.setColour (juce::Colours::white.withAlpha (0.45f));
+                g.setFont (atomic::ui::bold (9.0f));
+                g.drawText (utf8 ("空"), routeCell, juce::Justification::centred, false);
+            }
+            else
+            {
+                drawModTargetIcon (g, route == (int) SampleAutomationTarget::pan ? NoteModTarget::pan
+                                                                                : NoteModTarget::level,
+                                   juce::Rectangle<float> (ui::pf (11), ui::pf (11))
+                                     .withCentre (routeCell.getCentre()),
+                                   juce::Colours::white.withAlpha (0.9f));
+            }
+        }
     }
 
     //-- Close ---------------------------------------------------------------
@@ -10023,13 +10587,20 @@ int PianoRollComponent::splitSamplesAt (const std::vector<int>& ids, double at)
 
         if (auto* clipCurve = layer->findSample (id))
         {
-            clipCurve->volumeCurve = subEnvelope (clipCurve->volumeCurve, 0.0f, seam);
-            clipCurve->panCurve    = subEnvelope (clipCurve->panCurve,    0.0f, seam);
+            // Phase 82: a split copies the curves that EXIST. ensureCurveDriving
+            // is the write door — the read accessors are const on purpose, so a
+            // painter cannot accidentally create a curve by looking at it.
+            auto& leftVolume = clipCurve->ensureCurveDriving (SampleAutomationTarget::volume);
+            auto& leftPan    = clipCurve->ensureCurveDriving (SampleAutomationTarget::pan);
+            leftVolume = subEnvelope (leftVolume, 0.0f, seam);
+            leftPan    = subEnvelope (leftPan,    0.0f, seam);
             clipCurve->lengthBeats = at - clipCurve->startBeat;
         }
 
-        right.volumeCurve = subEnvelope (right.volumeCurve, seam, 1.0f);
-        right.panCurve    = subEnvelope (right.panCurve,    seam, 1.0f);
+        auto& rightVolume = right.ensureCurveDriving (SampleAutomationTarget::volume);
+        auto& rightPan    = right.ensureCurveDriving (SampleAutomationTarget::pan);
+        rightVolume = subEnvelope (rightVolume, seam, 1.0f);
+        rightPan    = subEnvelope (rightPan,    seam, 1.0f);
 
         const int newId = layer->addSample (std::move (right));
 
@@ -10084,9 +10655,9 @@ int PianoRollComponent::splitNotesAt (const std::vector<int>& ids, double at)
         NoteEvent right = *note;          // pitch, velocity, mount, group all copy
         right.startBeat   = at;
         right.lengthBeats = note->endBeat() - at;
-        right.envelope    = subEnvelope (right.envelope, (float) u, 1.0f);
+        right.envelope()    = subEnvelope (right.envelope(), (float) u, 1.0f);
 
-        note->envelope    = subEnvelope (note->envelope, 0.0f, (float) u);
+        note->envelope()    = subEnvelope (note->envelope(), 0.0f, (float) u);
         note->lengthBeats = at - note->startBeat;
 
         // Both halves stay in the group: cutting one member of a group makes

@@ -125,8 +125,16 @@ namespace
                 return;
             }
 
-            if (auto stream = pngFile.getSiblingFile (pngFile.getFileNameWithoutExtension() + suffix + ".png")
-                                   .createOutputStream())
+            const auto target = pngFile.getSiblingFile (pngFile.getFileNameWithoutExtension()
+                                                          + suffix + ".png");
+
+            // Same trap the hero image above documents: createOutputStream
+            // appends, so a second run left the new frame behind the old one
+            // and every reader kept seeing the FIRST run's pixels. Deleting
+            // first is the only version that survives a rebuild.
+            target.deleteFile();
+
+            if (auto stream = target.createOutputStream())
             {
                 juce::PNGImageFormat png;
                 png.writeImageToStream (image, *stream);

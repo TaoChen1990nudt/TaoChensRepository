@@ -39,9 +39,73 @@ Layer::Layer (juce::String layerName, juce::Colour layerColour, int initialOutpu
 }
 
 //==============================================================================
+namespace
+{
+    /** Phase 82: the name a curve gets when it is created implicitely — either
+        because the group is new or because a caller asked to automate a target
+        nobody was driving. Named after what it drives, because that is what the
+        user is looking at in the menu; a parked curve keeps the name it had. */
+    juce::String defaultGroupCurveName (GroupAutomationTarget target)
+    {
+        switch (target)
+        {
+            case GroupAutomationTarget::pan:    return utf8 ("声相");
+            case GroupAutomationTarget::plugin: return utf8 ("音源参数");
+            case GroupAutomationTarget::level:
+            default:                            return utf8 ("音量");
+        }
+    }
+}
+
 NoteGroup::NoteGroup (int groupId, juce::String groupName, juce::Colour groupColour)
     : id (groupId), name (std::move (groupName)), colour (groupColour)
 {
+    // Phase 82: three curves to begin with — exactly the three things a group
+    // could automate before this existed, each still pointed at what it is named
+    // after. A group created tomorrow therefore behaves like one created
+    // yesterday, and only the user's own edits ever make them differ.
+    const int levelId = curves.add (AutomationLane(), defaultGroupCurveName (GroupAutomationTarget::level));
+    curves.route (levelId, (int) GroupAutomationTarget::level);
+
+    const int panId = curves.add (AutomationLane(), defaultGroupCurveName (GroupAutomationTarget::pan));
+    curves.route (panId, (int) GroupAutomationTarget::pan);
+
+    const int pluginId = curves.add (AutomationLane(), defaultGroupCurveName (GroupAutomationTarget::plugin));
+    curves.route (pluginId, (int) GroupAutomationTarget::plugin);
+
+    curves.setActiveId (levelId);
+}
+
+AutomationLane& NoteGroup::ensureAutomationFor (GroupAutomationTarget target)
+{
+    if (auto* lane = laneDriving (target))
+        return *lane;
+
+    const int curveId = curves.add (AutomationLane(), defaultGroupCurveName (target));
+
+    if (curveId < 0)                  // 满员：给当前这条，而不是返回悬空引用
+        return curves.getActive().curve;
+
+    curves.route (curveId, (int) target);
+    curves.setActiveId (curveId);
+
+    return curves.find (curveId)->curve;
+}
+
+//==============================================================================
+CurveBank<NoteEnvelope> makeSampleCurveBank()
+{
+    // Phase 82: the two curves a block has always had, built the way a block
+    // has always had them — unity volume, centred pan — so an untouched clip
+    // still sounds like an untouched file.
+    auto bank = CurveBank<NoteEnvelope>::withOne (NoteEnvelope::makeIdle(), utf8 ("音量"),
+                                                 (int) SampleAutomationTarget::volume);
+
+    const int panId = bank.add (NoteEnvelope::makeIdle (sampleAutomationNeutral (SampleAutomationTarget::pan)),
+                                utf8 ("声相"));
+    bank.route (panId, (int) SampleAutomationTarget::pan);
+
+    return bank;
 }
 
 //==============================================================================
@@ -378,6 +442,35 @@ void Layer::materialiseOccurrenceStarts()
 
 namespace
 {
+    /** Phase 82: shape equality for a whole bank.
+
+        Names are NOT compared: they are labels the user typed, not part of what
+        a note sounds like, and two appearances that disagree about a name are
+        still the same music. Routing and each curve's shape ARE compared — a
+        copy whose level curve moved to pan is not the same appearance. */
+    bool sameEnvBank (const CurveBank<NoteEnvelope>& a, const CurveBank<NoteEnvelope>& b)
+    {
+        if (a.getNumCurves() != b.getNumCurves())
+            return false;
+
+        for (int i = 0; i < a.getNumCurves(); ++i)
+        {
+            const auto& sa = a.getCurves()[(size_t) i];
+            const auto& sb = b.getCurves()[(size_t) i];
+
+            if (sa.target != sb.target || sa.pluginParam != sb.pluginParam)
+                return false;
+
+            if (sa.curve.isEnabled() != sb.curve.isEnabled())
+                return false;
+
+            if (! sa.curve.hasSameShapeAs (sb.curve))
+                return false;
+        }
+
+        return true;
+    }
+
     /** Everything about a note that a sibling appearance has to copy. Position
         is included because the caller passes the already-anchored start. */
     bool sameNoteShape (const NoteEvent& a, const NoteEvent& b)
@@ -386,11 +479,8 @@ namespace
                 && std::abs (a.startBeat - b.startBeat) < 1.0e-9
                 && std::abs (a.lengthBeats - b.lengthBeats) < 1.0e-9
                 && std::abs (a.velocity - b.velocity) < 1.0e-6f
-                && a.modTarget == b.modTarget
-                && a.modPluginParam == b.modPluginParam
                 && a.outputSlotOverride == b.outputSlotOverride
-                && a.envelope.isEnabled() == b.envelope.isEnabled()
-                && a.envelope.hasSameShapeAs (b.envelope);
+                && sameEnvBank (a.curves, b.curves);
     }
 
     bool sameClipShape (const SampleEvent& a, const SampleEvent& b)
@@ -407,10 +497,8 @@ namespace
                 && a.stretchMode == b.stretchMode
                 && a.pitchRangeSemitones == b.pitchRangeSemitones
                 && std::abs (a.sourceOffsetSeconds - b.sourceOffsetSeconds) < 1.0e-9
-                && a.automationTarget == b.automationTarget
                 && a.audio == b.audio
-                && a.volumeCurve.hasSameShapeAs (b.volumeCurve)
-                && a.panCurve.hasSameShapeAs (b.panCurve);
+                && sameEnvBank (a.curves, b.curves);
     }
 
     /** One order for every appearance of a group: start, then pitch, then id.

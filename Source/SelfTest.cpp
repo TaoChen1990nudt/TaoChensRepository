@@ -241,7 +241,7 @@ juce::String MainComponent::runSelfTest()
         const int tempId = active->addNote ({ 0, 40, 60.0, 1.0, 0.8f });
 
         if (auto* temp = active->findNote (tempId))
-            temp->envelope = NoteEnvelope::makeFadeOut();
+            temp->envelope() = NoteEnvelope::makeFadeOut();
 
         pianoRoll.setSelection ({ tempId });
 
@@ -258,15 +258,15 @@ juce::String MainComponent::runSelfTest()
             auto* dup = active->findNote (copies.front());
 
             check ("Duplicated note carries an identical envelope",
-                   src != nullptr && dup != nullptr && src->envelope.hasSameShapeAs (dup->envelope),
+                   src != nullptr && dup != nullptr && src->envelope().hasSameShapeAs (dup->envelope()),
                    "2-point fade-out curve");
 
             if (src != nullptr && dup != nullptr)
             {
-                dup->envelope.addPoint (0.4f, 0.1f);
+                dup->envelope().addPoint (0.4f, 0.1f);
 
                 check ("Editing the copy leaves the original untouched",
-                       ! src->envelope.hasSameShapeAs (dup->envelope), "independent value copies");
+                       ! src->envelope().hasSameShapeAs (dup->envelope()), "independent value copies");
             }
         }
 
@@ -346,7 +346,7 @@ juce::String MainComponent::runSelfTest()
         juce::AudioBuffer<float> buffer (2, 48000);   // the note is 2 beats = 1.0 s
 
         if (auto* note = testLayer->findNote (noteViaBypass))
-            note->envelope = NoteEnvelope::makeFadeOut();
+            note->envelope() = NoteEnvelope::makeFadeOut();
 
         engine.publishSchedule (testStack, testRack, 120.0);
         engine.renderWindow (0.0, 48000, buffer, nullptr);
@@ -359,7 +359,7 @@ juce::String MainComponent::runSelfTest()
                "late/early " + juce::String (fadeLate / juce::jmax (1.0e-6f, fadeEarly), 2));
 
         if (auto* note = testLayer->findNote (noteViaBypass))
-            note->envelope = NoteEnvelope::makeFlat();
+            note->envelope() = NoteEnvelope::makeFlat();
 
         engine.publishSchedule (testStack, testRack, 120.0);
         engine.renderWindow (0.0, 48000, buffer, nullptr);
@@ -406,7 +406,7 @@ juce::String MainComponent::runSelfTest()
         const int nid = l4->addNote ({ 0, 60, 4.0, 4.0, 0.9f });
 
         if (auto* n = l4->findNote (nid))
-            n->envelope = NoteEnvelope::makeFlat();
+            n->envelope() = NoteEnvelope::makeFlat();
 
         PlaybackEngine pe;
         pe.setSampleRate (48000.0);
@@ -632,12 +632,12 @@ juce::String MainComponent::runSelfTest()
             const int id = layer->addNote ({ 0, layer == l5 ? 48 : 60, 0.0, 24.0, 1.0f });
 
             if (auto* note = layer->findNote (id))
-                note->envelope = NoteEnvelope::makeFlat();
+                note->envelope() = NoteEnvelope::makeFlat();
 
             const int top = layer->addNote ({ 0, layer == l5 ? 72 : 67, 0.0, 24.0, 0.8f });
 
             if (auto* note = layer->findNote (top))
-                note->envelope = NoteEnvelope::makeFlat();
+                note->envelope() = NoteEnvelope::makeFlat();
         }
 
         PlaybackEngine e5;
@@ -918,8 +918,8 @@ juce::String MainComponent::runSelfTest()
 
         const int na = layerA->addNote ({ 0, 61, 1.25, 2.75, 0.66f });
         auto* noteA = layerA->findNote (na);
-        noteA->envelope = NoteEnvelope::makeFadeOut();
-        noteA->envelope.addPoint (0.5f, 0.42f);
+        noteA->envelope() = NoteEnvelope::makeFadeOut();
+        noteA->envelope().addPoint (0.5f, 0.42f);
         noteA->outputSlotOverride = slotB;
 
         layerB->addNote ({ 0, 84, 8.0, 0.5, 0.9f });
@@ -971,7 +971,7 @@ juce::String MainComponent::runSelfTest()
         check ("A note's envelope and output override survive",
                t6b.getLayer (0)->findNote (na) != nullptr
                  && t6b.getLayer (0)->findNote (na)->outputSlotOverride == slotB
-                 && t6b.getLayer (0)->findNote (na)->envelope.hasSameShapeAs (noteA->envelope)
+                 && t6b.getLayer (0)->findNote (na)->envelope().hasSameShapeAs (noteA->envelope())
                  && std::abs (t6b.getLayer (0)->findNote (na)->startBeat - 1.25) < 1.0e-6
                  && std::abs (t6b.getLayer (0)->findNote (na)->lengthBeats - 2.75) < 1.0e-6,
                "note id " + juce::String (na));
@@ -1059,10 +1059,10 @@ juce::String MainComponent::runSelfTest()
             auto* bounceLayer = tx.getLayer (lx);
 
             const int bn1 = bounceLayer->addNote ({ 0, 69, 0.0, 4.0, 0.9f });
-            bounceLayer->findNote (bn1)->envelope = NoteEnvelope::makeFlat();
+            bounceLayer->findNote (bn1)->envelope() = NoteEnvelope::makeFlat();
 
             const int bn2 = bounceLayer->addNote ({ 0, 72, 6.0, 2.0, 0.9f });
-            bounceLayer->findNote (bn2)->envelope = NoteEnvelope::makeFlat();
+            bounceLayer->findNote (bn2)->envelope() = NoteEnvelope::makeFlat();
 
             PlaybackEngine stage;
             stage.setSampleRate (bounce::exportSampleRate);
@@ -1163,7 +1163,7 @@ juce::String MainComponent::runSelfTest()
         t7.setLayerLevelDb (0, 0.0f);
 
         const int note7 = layer7->addNote ({ 0, 72, 0.0, 4.0, 0.9f });
-        layer7->findNote (note7)->envelope = NoteEnvelope::makeFlat();
+        layer7->findNote (note7)->envelope() = NoteEnvelope::makeFlat();
 
         PlaybackEngine e7;
         e7.setSampleRate (44100.0);
@@ -1431,7 +1431,7 @@ juce::String MainComponent::runSelfTest()
         t11.setLayerLevelDb (0, 0.0f);
 
         const int note11 = t11.getLayer (0)->addNote ({ 0, 60, 0.0, 4.0, 0.9f });
-        t11.getLayer (0)->findNote (note11)->envelope = NoteEnvelope::makeFlat();
+        t11.getLayer (0)->findNote (note11)->envelope() = NoteEnvelope::makeFlat();
 
         PlaybackEngine e11;
         e11.setSampleRate (44100.0);
@@ -1498,14 +1498,14 @@ juce::String MainComponent::runSelfTest()
 
         const int king = l12->addNote ({ 0, 64, 8.0, 2.5, 0.42f });
         auto* source = l12->findNote (king);
-        source->modTarget = NoteModTarget::pitch;
-        source->envelope = NoteEnvelope::makeFadeOut();
+        source->setModTarget (NoteModTarget::pitch);
+        source->envelope() = NoteEnvelope::makeFadeOut();
         source->outputSlotOverride = r12.getSlotIdAt (1);
 
         // Snapshot what the template must carry BEFORE drawing: addNote()
         // push_backs into the same vector, so `source` is not a safe pointer to
         // compare against afterwards.
-        const NoteEnvelope sourceEnvelope = source->envelope;
+        const NoteEnvelope sourceEnvelope = source->envelope();
         const int          sourceOverride = source->outputSlotOverride;
 
         roll.setSelection ({ king });
@@ -1526,8 +1526,8 @@ juce::String MainComponent::runSelfTest()
                made != nullptr
                  && std::abs (made->lengthBeats - 2.5) < 1.0e-9
                  && std::abs (made->velocity - 0.42f) < 1.0e-5f
-                 && made->envelope.hasSameShapeAs (sourceEnvelope)
-                 && made->modTarget == NoteModTarget::pitch
+                 && made->envelope().hasSameShapeAs (sourceEnvelope)
+                 && made->modTarget() == NoteModTarget::pitch
                  && made->outputSlotOverride == sourceOverride
                  && made->pitch == 67
                  && made->startBeat > 200.0,
@@ -1558,9 +1558,9 @@ juce::String MainComponent::runSelfTest()
                plainNote != nullptr
                  && std::abs (plainNote->lengthBeats - 1.0) < 1.0e-9
                  && std::abs (plainNote->velocity - 0.8f) < 1.0e-5f
-                 && plainNote->modTarget == NoteModTarget::level
+                 && plainNote->modTarget() == NoteModTarget::level
                  && plainNote->outputSlotOverride < 0
-                 && plainNote->envelope.hasSameShapeAs (NoteEvent{}.envelope),
+                 && plainNote->envelope().hasSameShapeAs (NoteEvent{}.envelope()),
                plainNote != nullptr ? juce::String (plainNote->lengthBeats, 2) + utf8 (" beats / vel ")
                                           + juce::String (plainNote->velocity, 2)
                                     : juce::String ("no note"));
@@ -1609,12 +1609,12 @@ juce::String MainComponent::runSelfTest()
         check ("Closing the box forgets the note", ! roll.isNoteAutomationOpen(), "closed");
 
         // The parameter menu writes the model, which is what the engine reads.
-        wide->modTarget = NoteModTarget::pitch;
-        NoteEnvelope savedShape = wide->envelope;
+        wide->setModTarget (NoteModTarget::pitch);
+        NoteEnvelope savedShape = wide->envelope();
 
         check ("The menu's target is part of the note, not of the editor",
-               wide->modTarget == NoteModTarget::pitch
-                 && wide->envelope.hasSameShapeAs (savedShape),
+               wide->modTarget() == NoteModTarget::pitch
+                 && wide->envelope().hasSameShapeAs (savedShape),
                "pitch");
     }
 
@@ -1970,8 +1970,8 @@ juce::String MainComponent::runSelfTest()
         const int note8 = l8->addNote ({ 0, 69, 0.0, 4.0, 0.9f });
         auto* n8 = l8->findNote (note8);
 
-        n8->envelope.loadPoints ({ { 0.0f, 1.0f }, { 1.0f, 1.0f } });
-        n8->envelope.setEnabled (true);
+        n8->envelope().loadPoints ({ { 0.0f, 1.0f }, { 1.0f, 1.0f } });
+        n8->envelope().setEnabled (true);
 
         PlaybackEngine e8;
         e8.setSampleRate (44100.0);
@@ -1986,7 +1986,7 @@ juce::String MainComponent::runSelfTest()
         };
 
         juce::AudioBuffer<float> levelBuf;
-        n8->modTarget = NoteModTarget::level;
+        n8->setModTarget (NoteModTarget::level);
         renderLR (levelBuf);
 
         const float levelL = levelBuf.getRMSLevel (0, 0, 44100);
@@ -1998,7 +1998,7 @@ juce::String MainComponent::runSelfTest()
 
         // Same curve, now aimed at pan: a flat 1.0 means "hard right".
         juce::AudioBuffer<float> panBuf;
-        n8->modTarget = NoteModTarget::pan;
+        n8->setModTarget (NoteModTarget::pan);
         renderLR (panBuf);
 
         const float panL = panBuf.getRMSLevel (0, 0, 44100);
@@ -2011,15 +2011,18 @@ juce::String MainComponent::runSelfTest()
         // Same curve, now aimed at pitch: 1.0 at the head bending to 0.0 is one
         // octave down by the tail, so the tail must cross zero far less often.
         juce::AudioBuffer<float> pitchBuf;
-        n8->envelope.loadPoints ({ { 0.0f, 1.0f }, { 1.0f, 0.0f } });
-        n8->modTarget = NoteModTarget::pitch;
+        n8->envelope().loadPoints ({ { 0.0f, 1.0f }, { 1.0f, 0.0f } });
+        n8->setModTarget (NoteModTarget::pitch);
         renderLR (pitchBuf);
 
         {
             const auto published = e8.getSchedule();
 
-            const int publishedTarget = (published != nullptr && ! published->notes.empty())
-                                          ? (int) published->notes.front().modTarget : -1;
+            // Phase 82: "what does the published note drive" is no longer one
+            // number — it publishes a flag per curve. For a pitch test the
+            // question is only whether the pitch slot came through.
+            const bool publishedPitch = published != nullptr && ! published->notes.empty()
+                                          && published->notes.front().pitchCurveOn;
             const size_t tableSize = (published != nullptr && ! published->notes.empty())
                                        ? published->notes.front().pitchIntegral.size() : 0;
             const float bendEnd = (published != nullptr && ! published->notes.empty()
@@ -2027,10 +2030,10 @@ juce::String MainComponent::runSelfTest()
                                     ? published->notes.front().pitchIntegral.back() : 0.0f;
 
             check ("Publishing a pitch curve builds its bend table",
-                   publishedTarget == (int) NoteModTarget::pitch
+                   publishedPitch
                      && tableSize == (size_t) ScheduledNote::pitchIntegralSteps + 1
                      && bendEnd < -0.1f,
-                   "target " + juce::String (publishedTarget) + " / table "
+                   utf8 ("pitch 槽 ") + (publishedPitch ? "on" : "off") + " / table "
                      + juce::String ((int) tableSize) + " / bend "
                      + juce::String (bendEnd, 3));
         }
@@ -2185,8 +2188,8 @@ juce::String MainComponent::runSelfTest()
                 dip.loadPoints ({ { 0.0f, 1.0f }, { 0.25f, 1.0f }, { 0.35f, 0.0f }, { 1.0f, 0.0f } });
                 dip.setEnabled (true);
 
-                hostedNote->envelope       = dip;
-                hostedNote->modPluginParam = 0;
+                hostedNote->envelope()       = dip;
+                hostedNote->setModPluginParam (0);
 
                 juce::AudioBuffer<float> autoBuffer;
                 autoBuffer.setSize (2, 44100);
@@ -2200,8 +2203,8 @@ juce::String MainComponent::runSelfTest()
                 closedHalf = autoBuffer.getRMSLevel (0, 22050, 22050);
                 dipRatio  = openHalf > 1.0e-4f ? closedHalf / openHalf : 1.0f;
 
-                hostedNote->modPluginParam = -1;
-                hostedNote->envelope = NoteEnvelope::makeFlat();
+                hostedNote->setModPluginParam (-1);
+                hostedNote->envelope() = NoteEnvelope::makeFlat();
             }
 
             check ("A note's curve moves a hosted instrument's parameter",
@@ -3839,7 +3842,7 @@ juce::String MainComponent::runSelfTest()
         t.setLayerLevelDb (0, 0.0f);
 
         const int noteId = t.getLayer (0)->addNote ({ 0, 60, 0.0, 4.0, 0.9f });
-        t.getLayer (0)->findNote (noteId)->envelope = NoteEnvelope::makeFlat();
+        t.getLayer (0)->findNote (noteId)->envelope() = NoteEnvelope::makeFlat();
         r.setMixerChannel (slot, 0);
 
         PlaybackEngine engine;
@@ -4062,12 +4065,12 @@ juce::String MainComponent::runSelfTest()
         const int noteId = layer->addNote ({ 0, 60, 0.0, 4.0, 0.9f });
 
         auto* note = layer->findNote (noteId);
-        note->modPluginParam = 7;
+        note->setModPluginParam (7);
 
         NoteEnvelope curve;
         curve.loadPoints ({ { 0.0f, 0.2f }, { 0.5f, 1.0f }, { 1.0f, 0.1f } });
         curve.setEnabled (true);
-        note->envelope = curve;
+        note->envelope() = curve;
 
         const int groupId = layer->addGroup (utf8 ("外部组"), groupPalette::group2);
         layer->assignNotesToGroup ({ noteId }, groupId);
@@ -4426,7 +4429,7 @@ juce::String MainComponent::runSelfTest()
         t.setLayerPan (0, -1.0f);        // hard left
 
         const int noteId = t.getLayer (0)->addNote ({ 0, 60, 0.0, 4.0, 0.9f });
-        t.getLayer (0)->findNote (noteId)->envelope = NoteEnvelope::makeFlat();
+        t.getLayer (0)->findNote (noteId)->envelope() = NoteEnvelope::makeFlat();
 
         r.setMixerChannel (slot, 0);
 
@@ -4546,7 +4549,7 @@ juce::String MainComponent::runSelfTest()
         t.setLayerPan (0, -1.0f);            // hard left, through a real strip
 
         const int noteId = t.getLayer (0)->addNote ({ 0, 60, 0.0, 4.0, 0.9f });
-        t.getLayer (0)->findNote (noteId)->envelope = NoteEnvelope::makeFlat();
+        t.getLayer (0)->findNote (noteId)->envelope() = NoteEnvelope::makeFlat();
 
         r.setMixerChannel (slot, 0);
 
@@ -6503,11 +6506,11 @@ juce::String MainComponent::runSelfTest()
         // untouched", and the first edit is what switches it on — the same
         // path a click in the box runs.
         check ("A fresh block's curve is idle: disabled and flat at unity",
-               ! clip->volumeCurve.isEnabled()
-                 && clip->volumeCurve.getPoints().size() == 2
-                 && std::abs (clip->volumeCurve.valueAt (0.25f) - 1.0f) < 1.0e-6,
-               juce::String (clip->volumeCurve.isEnabled() ? 1 : 0) + ", n="
-                 + juce::String ((int) clip->volumeCurve.getPoints().size()));
+               ! clip->volumeCurve().isEnabled()
+                 && clip->volumeCurve().getPoints().size() == 2
+                 && std::abs (clip->volumeCurve().valueAt (0.25f) - 1.0f) < 1.0e-6,
+               juce::String (clip->volumeCurve().isEnabled() ? 1 : 0) + ", n="
+                 + juce::String ((int) clip->volumeCurve().getPoints().size()));
 
         // Down-ramp then back to unity: two points MOVED onto new values, the
         // gesture path the box's drags take.
@@ -6516,12 +6519,12 @@ juce::String MainComponent::runSelfTest()
         // A block saved by an older build can still carry enabled = false. With
         // the switch deleted there is no way back from that state, so opening
         // the box has to be the way back.
-        clip->volumeCurve.setEnabled (false);
+        clip->ensureCurveDriving (SampleAutomationTarget::volume).setEnabled (false);
         pianoRoll.openSampleAutomation (index, a);
 
         check (utf8 ("采样自动化框没有开关：打开框就把曲线恢复成生效"),
-               clip->volumeCurve.isEnabled(),
-               clip->volumeCurve.isEnabled() ? "enabled" : "still bypassed");
+               clip->volumeCurve().isEnabled(),
+               clip->volumeCurve().isEnabled() ? "enabled" : "still bypassed");
 
         // The edits run as their own statement, not inside the check's
         // condition: argument evaluation order is unspecified, and on the
@@ -6536,13 +6539,13 @@ juce::String MainComponent::runSelfTest()
 
         check ("The curve edits like the note envelope: move, not rebuild",
                curveEdited
-                 && clip->volumeCurve.isEnabled()
-                 && std::abs (clip->volumeCurve.valueAt (0.0f)) < 1.0e-6
-                 && std::abs (clip->volumeCurve.valueAt (0.5f) - 0.75f) < 1.0e-6
-                 && std::abs (clip->volumeCurve.valueAt (1.0f)) < 1.0e-6,
-               "f(0)=" + juce::String (clip->volumeCurve.valueAt (0.0f), 3)
-                 + " f(0.5)=" + juce::String (clip->volumeCurve.valueAt (0.5f), 3)
-                 + " f(1)=" + juce::String (clip->volumeCurve.valueAt (1.0f), 3));
+                 && clip->volumeCurve().isEnabled()
+                 && std::abs (clip->volumeCurve().valueAt (0.0f)) < 1.0e-6
+                 && std::abs (clip->volumeCurve().valueAt (0.5f) - 0.75f) < 1.0e-6
+                 && std::abs (clip->volumeCurve().valueAt (1.0f)) < 1.0e-6,
+               "f(0)=" + juce::String (clip->volumeCurve().valueAt (0.0f), 3)
+                 + " f(0.5)=" + juce::String (clip->volumeCurve().valueAt (0.5f), 3)
+                 + " f(1)=" + juce::String (clip->volumeCurve().valueAt (1.0f), 3));
 
         // The box is the whole point of P49: exactly as wide as the block, at
         // the zoom the assertion runs at. If these drift, the curve you edit
@@ -6624,7 +6627,7 @@ juce::String MainComponent::runSelfTest()
         {
             const SampleEvent copy = *clip;
             check ("Copying the clip carries the curve",
-                   copy.volumeCurve.hasSameShapeAs (clip->volumeCurve), "shape mismatch");
+                   copy.volumeCurve().hasSameShapeAs (clip->volumeCurve()), "shape mismatch");
         }
 
         //-- 2: one sweep, both kinds ----------------------------------------
@@ -6719,22 +6722,26 @@ juce::String MainComponent::runSelfTest()
 
         const int sampleTag = xml.indexOf ("<Sample ");
         const int tagEnd    = xml.indexOfChar (sampleTag, '>');
-        const int envStart  = xml.indexOf ("<Envelope");
-        const juce::String envClose = "</Envelope>";
-        const int envEnd    = xml.indexOf (envStart, envClose) + envClose.length();
 
-        check ("The v21 writer emits an envelope where v20 wrote fades",
+        // Phase 82 (v26): the shape a block writes is now a bank of <Curve>
+        // elements, and the last of them is followed by a <CurveState>. Both
+        // tags are what a v20 reader has never seen, so both are what this
+        // surgery has to remove to make the file look old again.
+        const int curveStart = xml.indexOf ("<Curve ");
+        const int curveEnd   = xml.lastIndexOf ("</Curve>") + (int) juce::String ("</Curve>").length();
+
+        check ("The v26 writer emits a curve bank where v20 wrote fades",
                sampleTag >= 0 && tagEnd > sampleTag
-                 && envStart > tagEnd && envEnd > envStart,
-               "sample " + juce::String (sampleTag) + ", envelope " + juce::String (envStart));
+                 && curveStart > tagEnd && curveEnd > curveStart,
+               "sample " + juce::String (sampleTag) + ", curve " + juce::String (curveStart));
 
-        if (sampleTag < 0 || tagEnd <= sampleTag || envStart <= tagEnd || envEnd <= envStart)
+        if (sampleTag < 0 || tagEnd <= sampleTag || curveStart <= tagEnd || curveEnd <= curveStart)
             return;
 
         juce::String legacy = xml.substring (0, tagEnd)
                                 + " fadein=\"0.25\" fadeout=\"0.5\""
-                                + xml.substring (tagEnd, envStart)
-                                + xml.substring (envEnd);
+                                + xml.substring (tagEnd, curveStart)
+                                + xml.substring (curveEnd);
 
         LayerStack s2;
         RackModel  r2;
@@ -6751,17 +6758,17 @@ juce::String MainComponent::runSelfTest()
         // the shape the old audio multiplied, or an old project changes sound.
         check ("A v20 project's fades open as the same ramp on the curve",
                ok && back != nullptr
-                 && back->volumeCurve.isEnabled()
-                 && back->volumeCurve.getPoints().size() == 4
-                 && std::abs (back->volumeCurve.valueAt (0.0f)) < 1.0e-6
-                 && std::abs (back->volumeCurve.valueAt (0.5f) - 1.0f) < 1.0e-6
-                 && std::abs (back->volumeCurve.valueAt (1.0f)) < 1.0e-6
-                 && std::abs (back->volumeCurve.getPoints()[(size_t) 1].time - 0.125f) < 1.0e-5
-                 && std::abs (back->volumeCurve.getPoints()[(size_t) 2].time - 0.75f)  < 1.0e-5,
+                 && back->volumeCurve().isEnabled()
+                 && back->volumeCurve().getPoints().size() == 4
+                 && std::abs (back->volumeCurve().valueAt (0.0f)) < 1.0e-6
+                 && std::abs (back->volumeCurve().valueAt (0.5f) - 1.0f) < 1.0e-6
+                 && std::abs (back->volumeCurve().valueAt (1.0f)) < 1.0e-6
+                 && std::abs (back->volumeCurve().getPoints()[(size_t) 1].time - 0.125f) < 1.0e-5
+                 && std::abs (back->volumeCurve().getPoints()[(size_t) 2].time - 0.75f)  < 1.0e-5,
                ok && back != nullptr
-                 ? "n=" + juce::String ((int) back->volumeCurve.getPoints().size())
-                     + " t1=" + juce::String (back->volumeCurve.getPoints()[(size_t) 1].time, 4)
-                     + " t2=" + juce::String (back->volumeCurve.getPoints()[(size_t) 2].time, 4)
+                 ? "n=" + juce::String ((int) back->volumeCurve().getPoints().size())
+                     + " t1=" + juce::String (back->volumeCurve().getPoints()[(size_t) 1].time, 4)
+                     + " t2=" + juce::String (back->volumeCurve().getPoints()[(size_t) 2].time, 4)
                  : error);
     } ();
 
@@ -6830,8 +6837,8 @@ juce::String MainComponent::runSelfTest()
         // version of this test.
         if (auto* c = layer->findSample (clipId))
         {
-            c->volumeCurve.loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 1.0f } });
-            c->volumeCurve.setEnabled (true);
+            c->ensureCurveDriving (SampleAutomationTarget::volume).loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 1.0f } });
+            c->ensureCurveDriving (SampleAutomationTarget::volume).setEnabled (true);
         }
 
         juce::AudioBuffer<float> withRamp (2, (int) (2.0 * sr));
@@ -6859,8 +6866,8 @@ juce::String MainComponent::runSelfTest()
         // so the block is silent rather than producing a discontinuity spike.
         if (auto* c = layer->findSample (clipId))
         {
-            c->volumeCurve.loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 0.0f } });
-            c->volumeCurve.setEnabled (true);
+            c->ensureCurveDriving (SampleAutomationTarget::volume).loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 0.0f } });
+            c->ensureCurveDriving (SampleAutomationTarget::volume).setEnabled (true);
         }
 
         juce::AudioBuffer<float> withMute (2, (int) (2.0 * sr));
@@ -6874,7 +6881,7 @@ juce::String MainComponent::runSelfTest()
 
         // Switching the curve off puts the file back, shape kept.
         if (auto* c = layer->findSample (clipId))
-            c->volumeCurve.setEnabled (false);
+            c->ensureCurveDriving (SampleAutomationTarget::volume).setEnabled (false);
 
         juce::AudioBuffer<float> restored (2, (int) (2.0 * sr));
         renderTo (restored);
@@ -7898,7 +7905,7 @@ juce::String MainComponent::runSelfTest()
         const int noteId = layer->addNote ({ 0, 57, 8.0, 4.0, 0.8f });
 
         if (auto* note = layer->findNote (noteId))
-            note->envelope = NoteEnvelope::makeFlat();
+            note->envelope() = NoteEnvelope::makeFlat();
 
         const int gid = layer->addGroup (utf8 ("P35 组"), groupPalette::group1);
         layer->assignSamplesToGroup ({ clipId }, gid);
@@ -8058,8 +8065,8 @@ juce::String MainComponent::runSelfTest()
         NoteEnvelope halfCurve;
         halfCurve.loadPoints ({ { 0.0f, 0.5f }, { 1.0f, 0.5f } });
         halfCurve.setEnabled (false);
-        note->envelope = halfCurve;
-        note->modTarget = NoteModTarget::level;
+        note->envelope() = halfCurve;
+        note->setModTarget (NoteModTarget::level);
 
         PlaybackEngine engine;
         engine.setSampleRate (44100.0);
@@ -8115,9 +8122,9 @@ juce::String MainComponent::runSelfTest()
         check ("The group layer alone halves the note",
                std::abs (groupOnly - 0.5f) < 0.02f, "x" + juce::String (groupOnly, 3));
 
-        note->envelope.setEnabled (true);
+        note->envelope().setEnabled (true);
         const float noteOnly = peakNow() / plain;
-        note->envelope.setEnabled (false);
+        note->envelope().setEnabled (false);
 
         check ("The note's own curve alone halves the note",
                std::abs (noteOnly - 0.5f) < 0.02f, "x" + juce::String (noteOnly, 3));
@@ -8128,7 +8135,7 @@ juce::String MainComponent::runSelfTest()
         // margin has to be tight enough to tell those apart.
         layerLane.setEnabled (true);
         groupLane.setEnabled (true);
-        note->envelope.setEnabled (true);
+        note->envelope().setEnabled (true);
 
         const float allThree = peakNow() / plain;
 
@@ -8151,7 +8158,7 @@ juce::String MainComponent::runSelfTest()
         //-- Pan: three angles added, not three gains multiplied ---------------
         layerLane.setEnabled (false);
         groupLane.setEnabled (false);
-        note->envelope.setEnabled (false);
+        note->envelope().setEnabled (false);
 
         layer->setPan (0.3f);
         group->setPan (0.3f);
@@ -8182,9 +8189,9 @@ juce::String MainComponent::runSelfTest()
         group->setPan (0.0f);
 
         //-- The note's pan curve joins the same sum ---------------------------
-        note->modTarget = NoteModTarget::pan;
-        note->envelope.setEnabled (true);
-        note->envelope.loadPoints ({ { 0.0f, 1.0f }, { 1.0f, 1.0f } });   // +1 offset
+        note->setModTarget (NoteModTarget::pan);
+        note->envelope().setEnabled (true);
+        note->envelope().loadPoints ({ { 0.0f, 1.0f }, { 1.0f, 1.0f } });   // +1 offset
 
         renderSides (panL, panR);
 
@@ -8212,14 +8219,14 @@ juce::String MainComponent::runSelfTest()
         }
 
         //-- The overlay's product is the renderer's product -------------------
-        note->modTarget = NoteModTarget::level;
-        note->envelope.loadPoints ({ { 0.0f, 0.5f }, { 1.0f, 0.5f } });
-        note->envelope.setEnabled (true);
+        note->setModTarget (NoteModTarget::level);
+        note->envelope().loadPoints ({ { 0.0f, 0.5f }, { 1.0f, 0.5f } });
+        note->envelope().setEnabled (true);
 
         layerLane.setEnabled (true);
         groupLane.setEnabled (true);
 
-        note->modTarget = NoteModTarget::level;
+        note->setModTarget (NoteModTarget::level);
 
         {
             NoteEnvelopePanel panel (t, r);
@@ -8230,7 +8237,7 @@ juce::String MainComponent::runSelfTest()
 
             const float drawn = automation::stackLevel (overlay.macroAt (0.5f),
                                                         overlay.groupAt (0.5f),
-                                                        note->envelope.valueAt (0.5f));
+                                                        note->envelope().valueAt (0.5f));
 
             const float rendered = peakNow() / plain;
 
@@ -8695,9 +8702,9 @@ juce::String MainComponent::runSelfTest()
 
         if (auto* c = layer->findSample (clipId))
         {
-            c->panCurve.loadPoints ({ { 0.0f, 1.0f }, { 1.0f, 1.0f } });   // hard right
-            c->panCurve.setEnabled (true);
-            c->automationTarget = SampleAutomationTarget::pan;
+            c->ensureCurveDriving (SampleAutomationTarget::pan).loadPoints ({ { 0.0f, 1.0f }, { 1.0f, 1.0f } });   // hard right
+            c->ensureCurveDriving (SampleAutomationTarget::pan).setEnabled (true);
+            c->showCurveDriving (SampleAutomationTarget::pan);
         }
 
         juce::AudioBuffer<float> panned (2, (int) (4.0 * sr));
@@ -8717,7 +8724,7 @@ juce::String MainComponent::runSelfTest()
                  + utf8 (" → 声相 ") + juce::String (pannedL, 4) + "/" + juce::String (pannedR, 4));
 
         if (auto* c = layer->findSample (clipId))
-            c->panCurve.setEnabled (false);
+            c->ensureCurveDriving (SampleAutomationTarget::pan).setEnabled (false);
 
         //-- Reverse ----------------------------------------------------------
         juce::AudioBuffer<float> forward (2, (int) (4.0 * sr));
@@ -8764,8 +8771,8 @@ juce::String MainComponent::runSelfTest()
         cutClip.sourceOffsetSeconds = 0.4;
         cutClip.pitch               = 60;
         cutClip.laneSpan            = 2;
-        cutClip.volumeCurve.loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 1.0f } });
-        cutClip.volumeCurve.setEnabled (true);
+        cutClip.ensureCurveDriving (SampleAutomationTarget::volume).loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 1.0f } });
+        cutClip.ensureCurveDriving (SampleAutomationTarget::volume).setEnabled (true);
 
         const int cutId = cutLayer->addSample (cutClip);
 
@@ -8799,13 +8806,13 @@ juce::String MainComponent::runSelfTest()
         // value the original had there (2/6 = 0.333).
         check ("The curve is cut at the seam, not restarted",
                left != nullptr && right != nullptr
-                 && std::abs (left->volumeCurve.valueAt (1.0f) - 0.3333f) < 0.01f
-                 && std::abs (right->volumeCurve.valueAt (0.0f) - 0.3333f) < 0.01f
-                 && std::abs (right->volumeCurve.valueAt (1.0f) - 1.0f) < 0.01f,
+                 && std::abs (left->volumeCurve().valueAt (1.0f) - 0.3333f) < 0.01f
+                 && std::abs (right->volumeCurve().valueAt (0.0f) - 0.3333f) < 0.01f
+                 && std::abs (right->volumeCurve().valueAt (1.0f) - 1.0f) < 0.01f,
                left != nullptr && right != nullptr
-                 ? "l(1)=" + juce::String (left->volumeCurve.valueAt (1.0f), 3)
-                     + " r(0)=" + juce::String (right->volumeCurve.valueAt (0.0f), 3)
-                     + " r(1)=" + juce::String (right->volumeCurve.valueAt (1.0f), 3)
+                 ? "l(1)=" + juce::String (left->volumeCurve().valueAt (1.0f), 3)
+                     + " r(0)=" + juce::String (right->volumeCurve().valueAt (0.0f), 3)
+                     + " r(1)=" + juce::String (right->volumeCurve().valueAt (1.0f), 3)
                  : "no pieces");
 
         //-- Scope render -----------------------------------------------------
@@ -8954,12 +8961,12 @@ juce::String MainComponent::runSelfTest()
             saved.name             = "roundtrip";
             saved.startBeat        = 4.0;
             saved.lengthBeats      = 2.0;
-            saved.automationTarget = SampleAutomationTarget::pan;
+            saved.showCurveDriving (SampleAutomationTarget::pan);
             saved.reversed         = true;
-            saved.panCurve.loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 1.0f } });
-            saved.panCurve.setEnabled (true);
-            saved.volumeCurve.loadPoints ({ { 0.0f, 0.5f }, { 1.0f, 0.5f } });
-            saved.volumeCurve.setEnabled (true);
+            saved.ensureCurveDriving (SampleAutomationTarget::pan).loadPoints ({ { 0.0f, 0.0f }, { 1.0f, 1.0f } });
+            saved.ensureCurveDriving (SampleAutomationTarget::pan).setEnabled (true);
+            saved.ensureCurveDriving (SampleAutomationTarget::volume).loadPoints ({ { 0.0f, 0.5f }, { 1.0f, 0.5f } });
+            saved.ensureCurveDriving (SampleAutomationTarget::volume).setEnabled (true);
 
             s3.getLayer (0)->addSample (saved);
 
@@ -8978,24 +8985,81 @@ juce::String MainComponent::runSelfTest()
 
             check ("v22 keeps the pan curve, the shown target and the reverse flag",
                    ok && back != nullptr
-                     && back->automationTarget == SampleAutomationTarget::pan
+                     && back->curveTarget() == (int) SampleAutomationTarget::pan
                      && back->reversed
-                     && back->panCurve.isEnabled()
-                     && std::abs (back->panCurve.valueAt (1.0f) - 1.0f) < 1.0e-6
-                     && std::abs (back->volumeCurve.valueAt (0.5f) - 0.5f) < 1.0e-6,
+                     && back->panCurve().isEnabled()
+                     && std::abs (back->panCurve().valueAt (1.0f) - 1.0f) < 1.0e-6
+                     && std::abs (back->volumeCurve().valueAt (0.5f) - 0.5f) < 1.0e-6,
                    ok && back != nullptr
-                     ? "target " + juce::String ((int) back->automationTarget)
+                     ? "target " + juce::String (back->curveTarget())
                          + " rev " + juce::String ((int) back->reversed)
-                         + " pan(1) " + juce::String (back->panCurve.valueAt (1.0f), 3)
+                         + " pan(1) " + juce::String (back->panCurve().valueAt (1.0f), 3)
                      : error);
 
-            // A v21 file has neither the pan child nor the two attributes. It
-            // must open as "volume curve, not reversed, pan untouched".
-            juce::String legacy = xml;
-            legacy = legacy.replace ("<PanEnvelope", "<Ignored")
-                           .replace ("</PanEnvelope>", "</Ignored>")
-                           .replace ("autotarget=\"pan\"", "")
-                           .replace (" reversed=\"1\"", "");
+            // A v21 file is not "a v26 file with a curve deleted" — it has no
+            // <Curve> bank at all. It carried ONE <Envelope> child, no
+            // <CurveState>, and no "reversed" attribute (that arrived in v22).
+            // Rebuilding it through the XML tree rather than by cutting the
+            // text keeps the fixture honest: a hand-cut string that leaves
+            // half a <Curve> behind tests the scissors, not the migration.
+            juce::String legacy;
+            int         legacyCurves = -1;
+
+            {
+                auto project = juce::parseXML (xml);
+                juce::XmlElement* sampleXml = nullptr;
+
+                if (project != nullptr)
+                {
+                    std::vector<juce::XmlElement*> pending { project.get() };
+
+                    while (! pending.empty() && sampleXml == nullptr)
+                    {
+                        auto* element = pending.back();
+                        pending.pop_back();
+
+                        if (element->hasTagName ("Sample"))
+                        {
+                            sampleXml = element;
+                            break;
+                        }
+
+                        for (auto* child = element->getFirstChildElement(); child != nullptr;
+                             child = child->getNextElement())
+                            pending.push_back (child);
+                    }
+                }
+
+                if (sampleXml != nullptr)
+                {
+                    for (int i = sampleXml->getNumChildElements(); --i >= 0;)
+                    {
+                        auto* child = sampleXml->getChildElement (i);
+
+                        if (child->hasTagName ("Curve") || child->hasTagName ("CurveState"))
+                            sampleXml->removeChildElement (child, true);
+                    }
+
+                    legacyCurves = 0;
+
+                    auto* env = sampleXml->createNewChildElement ("Envelope");
+                    env->setAttribute ("enabled", 1);
+
+                    // The shape the v22 round trip above saved: a flat 0.5.
+                    const double flat[2][2] = { { 0.0, 0.5 }, { 1.0, 0.5 } };
+
+                    for (const auto& point : flat)
+                    {
+                        auto* p = env->createNewChildElement ("Point");
+                        p->setAttribute ("time",  point[0]);
+                        p->setAttribute ("value", point[1]);
+                    }
+
+                    sampleXml->removeAttribute ("reversed");
+
+                    legacy = project->toString();
+                }
+            }
 
             LayerStack s5;
             RackModel  r5;
@@ -9010,14 +9074,243 @@ juce::String MainComponent::runSelfTest()
 
             check ("A v21 file opens with the volume curve showing and nothing reversed",
                    ok5 && old != nullptr
-                     && old->automationTarget == SampleAutomationTarget::volume
+                     && old->curveTarget() == (int) SampleAutomationTarget::volume
                      && ! old->reversed
-                     && ! old->panCurve.isEnabled(),
+                     && ! old->panCurve().isEnabled()
+                     && old->volumeCurve().isEnabled()
+                     && std::abs (old->volumeCurve().valueAt (0.5f) - 0.5f) < 1.0e-6,
                    ok5 && old != nullptr
-                     ? "target " + juce::String ((int) old->automationTarget)
+                     ? "target " + juce::String (old->curveTarget())
                          + " rev " + juce::String ((int) old->reversed)
+                         + " vol " + juce::String ((int) old->volumeCurve().isEnabled())
+                         + "/" + juce::String (old->volumeCurve().valueAt (0.5f), 3)
+                         + " pan " + juce::String ((int) old->panCurve().isEnabled())
+                         + " curves " + juce::String (legacyCurves)
                      : error5);
         }
+    } ();
+
+    //-- Phase 82: the curve bank --------------------------------------------
+    // Three statements the old fixed-enum design could not make, because with
+    // one curve per parameter "which curve" and "where does it go" are the same
+    // question. A new curve must not steal a destination, a destination belongs
+    // to exactly one curve, and 空 is a place to point one — not a deletion.
+    [&]
+    {
+        LayerStack s;
+        s.addLayer (utf8 ("库"), palette::layer1);
+
+        auto* layer = s.getLayer (0);
+
+        if (layer == nullptr)
+        {
+            check ("Phase 82 needs a layer to hold a group", false, "no layer");
+            return;
+        }
+
+        const int groupId = layer->addGroup (utf8 ("组 A"), palette::layer2);
+        auto*     group   = layer->findGroup (groupId);
+
+        if (group == nullptr)
+        {
+            check ("Phase 82 needs a group to hold a bank", false, "no group");
+            return;
+        }
+
+        auto& bank = group->getCurveBank();
+
+        // The constructor already routed level / pan / plugin, so "the target is
+        // taken" is the state the 新建 has to leave alone.
+        const auto* levelBefore = bank.findRoutedTo ((int) GroupAutomationTarget::level);
+        const int   levelId     = levelBefore != nullptr ? levelBefore->id : -1;
+
+        const int scratchId = bank.add (AutomationLane(), utf8 ("手绘"));
+        auto*     scratch   = bank.find (scratchId);
+
+        check ("新建曲线是白纸：不路由、也不点亮",
+               bank.getNumCurves() == 4
+                 && levelId > 0
+                 && scratch != nullptr
+                 && scratch->target == -1
+                 && ! scratch->isRouted()
+                 && ! scratch->curve.isEnabled()
+                 && bank.findRoutedTo ((int) GroupAutomationTarget::level) != nullptr
+                 && bank.findRoutedTo ((int) GroupAutomationTarget::level)->id == levelId,
+               scratch != nullptr
+                 ? "curves " + juce::String (bank.getNumCurves())
+                     + " target " + juce::String (scratch->target)
+                     + " on " + juce::String ((int) scratch->curve.isEnabled())
+                     + " level " + juce::String (levelId)
+                 : "no scratch curve");
+
+        if (scratch == nullptr)
+            return;
+
+        // A shape, so that "parked but present" can be measured rather than
+        // asserted about an empty lane.
+        scratch->curve.resetFlat (0.25f, 8.0);
+        scratch->curve.addPoint (2.0, 0.9f, 8.0);
+        scratch->curve.setEnabled (true);
+
+        const int scratchPoints = (int) scratch->curve.getPoints().size();
+
+        //-- 独占 -------------------------------------------------------------
+        bank.route (scratchId, (int) GroupAutomationTarget::level);
+
+        const auto* levelNow = bank.findRoutedTo ((int) GroupAutomationTarget::level);
+        const auto* oldLevel = bank.find (levelId);
+
+        check ("路由是独占的：后来的顶掉前面的，前一条退回空",
+               levelNow != nullptr && levelNow->id == scratchId
+                 && oldLevel != nullptr && oldLevel->target == -1,
+               levelNow != nullptr
+                 ? "level by " + juce::String (levelNow->id)
+                     + ", old " + juce::String (oldLevel != nullptr ? oldLevel->target : -99)
+                 : "level by nobody");
+
+        //-- 空 ---------------------------------------------------------------
+        const int countBefore = bank.getNumCurves();
+
+        bank.route (scratchId, -1);
+
+        const auto* parked = bank.find (scratchId);
+
+        check ("空不是删除：曲线留着、形状留着，只是不驱动任何东西",
+               parked != nullptr
+                 && parked->target == -1
+                 && ! parked->isRouted()
+                 && bank.getNumCurves() == countBefore
+                 && bank.findRoutedTo ((int) GroupAutomationTarget::level) == nullptr
+                 && (int) parked->curve.getPoints().size() == scratchPoints,
+               parked != nullptr
+                 ? "curves " + juce::String (bank.getNumCurves())
+                     + " target " + juce::String (parked->target)
+                     + " pts " + juce::String ((int) parked->curve.getPoints().size())
+                     + "/" + juce::String (scratchPoints)
+                 : "the curve was deleted");
+
+        //-- v26 往返 ---------------------------------------------------------
+        // On a block, because a group with no members is a shape the writer is
+        // allowed to drop; a block always writes. What travels is the bank: how
+        // many curves, what they are called, which one is on screen, and the
+        // fact that one of them points nowhere.
+        SampleEvent clip;
+        clip.name        = "bank.wav";
+        clip.startBeat   = 1.0;
+        clip.lengthBeats = 2.0;
+        clip.pitch       = 60;
+        clip.laneSpan    = 2;
+
+        layer->addSample (clip);
+
+        auto* block = layer->getSampleCount() > 0 ? &layer->getSamples().back() : nullptr;
+
+        if (block == nullptr)
+        {
+            check ("Phase 82 needs a block to round trip", false, "no block");
+            return;
+        }
+
+        const int parkedId = block->curves.add (NoteEnvelope::makeIdle (0.5f), utf8 ("手绘"));
+        const auto* parkedSlot = block->curves.find (parkedId);
+        const int parkedShape  = parkedSlot != nullptr ? (int) parkedSlot->curve.getPoints().size() : -1;
+
+        block->curves.route (parkedId, -1);
+        block->curves.setActiveId (parkedId);
+
+        const juce::String xml = project::toXmlText (s, RackModel(), 120.0);
+
+        // The file must not spell 空 as a word: an unknown route word would be
+        // read back as 音量, which silently turns "parked" into "driving".
+        //
+        // Scoped to the <Sample> element on purpose: the group above also owns a
+        // curve called 手绘, and a whole-file search finds that one first and
+        // then reports on the wrong object.
+        int  parkedInFile     = 0;
+        bool parkedHasTarget  = true;
+
+        {
+            auto project = juce::parseXML (xml);
+            juce::XmlElement* blockXml = nullptr;
+
+            if (project != nullptr)
+            {
+                std::vector<juce::XmlElement*> pending { project.get() };
+
+                while (! pending.empty() && blockXml == nullptr)
+                {
+                    auto* element = pending.back();
+                    pending.pop_back();
+
+                    if (element->hasTagName ("Sample"))
+                    {
+                        blockXml = element;
+                        break;
+                    }
+
+                    for (auto* child = element->getFirstChildElement(); child != nullptr;
+                         child = child->getNextElement())
+                        pending.push_back (child);
+                }
+            }
+
+            if (blockXml != nullptr)
+            {
+                for (auto* child = blockXml->getFirstChildElement(); child != nullptr;
+                     child = child->getNextElement())
+                {
+                    if (child->hasTagName ("Curve")
+                        && child->getStringAttribute ("name") == utf8 ("手绘"))
+                    {
+                        ++parkedInFile;
+                        parkedHasTarget = child->hasAttribute ("target");
+                    }
+                }
+            }
+        }
+
+        LayerStack s2;
+        RackModel  r2;
+        double     bpm2 = 0.0;
+        juce::String error;
+
+        const bool ok = project::fromXmlText (xml, s2, r2, bpm2, error,
+                                             nullptr, nullptr, nullptr);
+
+        auto* layer2 = s2.getLayer (0);
+        auto* back2  = (layer2 != nullptr && layer2->getSampleCount() > 0)
+                         ? &layer2->getSamples().front() : nullptr;
+
+        int curves2 = -1, active2 = -1, target2 = -99, shape2 = -1;
+
+        if (back2 != nullptr)
+        {
+            curves2 = back2->curves.getNumCurves();
+            active2 = back2->curves.getActiveId();
+
+            if (const auto* slot = back2->curves.find (parkedId))
+            {
+                target2 = slot->target;
+                shape2  = (int) slot->curve.getPoints().size();
+            }
+        }
+
+        check ("v26 往返：空路由不带 target，曲线条数/名字/选中的那条都原样回来",
+               ok && back2 != nullptr
+                 && parkedInFile == 1 && ! parkedHasTarget
+                 && curves2 == 3
+                 && active2 == parkedId
+                 && target2 == -1
+                 && shape2 == parkedShape
+                 && back2->curveTarget() == -1,
+               ok && back2 != nullptr
+                 ? "in-file " + juce::String (parkedInFile)
+                     + " hasTarget " + juce::String ((int) parkedHasTarget)
+                     + " curves " + juce::String (curves2)
+                     + " active " + juce::String (active2) + "/" + juce::String (parkedId)
+                     + " target " + juce::String (target2)
+                     + " shape " + juce::String (shape2) + "/" + juce::String (parkedShape)
+                 : error);
     } ();
 
     //-- Phase 50: the "render to a block" menu items ------------------------
@@ -9232,7 +9525,7 @@ juce::String MainComponent::runSelfTest()
         if (auto* note = layer->findNote (noteId))
         {
             note->lengthBeats = 2.0;
-            note->envelope.addPoint (0.5f, 0.42f);
+            note->envelope().addPoint (0.5f, 0.42f);
             leftGroup = note->groupId;
         }
 
@@ -9265,11 +9558,11 @@ juce::String MainComponent::runSelfTest()
         // what "the ramp continues" means in numbers.
         check ("The note's curve continues across the cut",
                leftNote != nullptr && rightNote != nullptr
-                 && std::abs (leftNote->envelope.valueAt (1.0f)
-                                - rightNote->envelope.valueAt (0.0f)) < 1.0e-3,
+                 && std::abs (leftNote->envelope().valueAt (1.0f)
+                                - rightNote->envelope().valueAt (0.0f)) < 1.0e-3,
                leftNote != nullptr && rightNote != nullptr
-                 ? juce::String (leftNote->envelope.valueAt (1.0f), 3) + " vs "
-                   + juce::String (rightNote->envelope.valueAt (0.0f), 3)
+                 ? juce::String (leftNote->envelope().valueAt (1.0f), 3) + " vs "
+                   + juce::String (rightNote->envelope().valueAt (0.0f), 3)
                  : "missing half");
 
         //-- ...and blocks -----------------------------------------------------
@@ -12459,7 +12752,7 @@ juce::String MainComponent::runSelfTest()
 
         check (utf8 ("窗口打开后指着那个块，编辑器拿的是模型里那条音量曲线"),
                panel.isOpen() && panel.getEditedSampleId() == id && panel.getEditedLayerIndex() == 0
-                 && panel.getEditor().getEnvelope() == &model->volumeCurve,
+                 && panel.getEditor().getEnvelope() == &model->volumeCurve(),
                juce::String (panel.getEditedSampleId()) + utf8 ("（应为 ") + juce::String (id) + "）");
 
         //-- 切到声相：写回模型，编辑器跟着换 ----------------------------
@@ -12467,10 +12760,10 @@ juce::String MainComponent::runSelfTest()
 
         check (utf8 ("窗口切到声相：写回模型，编辑器改的也换成那条曲线"),
                panel.getTargetOrdinal() == 1
-                 && model->automationTarget == SampleAutomationTarget::pan
-                 && panel.getEditor().getEnvelope() == &model->panCurve,
+                 && model->curveTarget() == (int) SampleAutomationTarget::pan
+                 && panel.getEditor().getEnvelope() == &model->panCurve(),
                juce::String (panel.getTargetOrdinal()) + utf8 (" / 模型 ")
-                 + juce::String ((int) model->automationTarget) + utf8 ("（应为 1 / 1）"));
+                 + juce::String (model->curveTarget()) + utf8 ("（应为 1 / 1）"));
 
         //-- 声相上的「直线」是中置，不是硬右 ---------------------------
         // 两条曲线的中性点不一样（音量 1.0、声相 0.5）。一个"直线"按钮如果
@@ -12478,10 +12771,10 @@ juce::String MainComponent::runSelfTest()
         panel.applyPreset (2);
 
         check (utf8 ("声相曲线上的「直线」落在 0.5 中置，不是 1.0 硬右"),
-               juce::approximatelyEqual (model->panCurve.valueAt (0.5f), 0.5f)
-                 && model->panCurve.isEnabled(),
-               juce::String (model->panCurve.valueAt (0.5f), 3)
-                 + (model->panCurve.isEnabled() ? utf8 (" / 启用") : utf8 (" / 停用"))
+               juce::approximatelyEqual (model->panCurve().valueAt (0.5f), 0.5f)
+                 && model->panCurve().isEnabled(),
+               juce::String (model->panCurve().valueAt (0.5f), 3)
+                 + (model->panCurve().isEnabled() ? utf8 (" / 启用") : utf8 (" / 停用"))
                  + utf8 ("（应为 0.500 / 启用）"));
 
         //-- 音量上的「渐弱」从 1 落到 0 ---------------------------------
@@ -12489,11 +12782,11 @@ juce::String MainComponent::runSelfTest()
         panel.applyPreset (1);
 
         check (utf8 ("音量曲线上的「渐弱」从 1 落到 0"),
-               model->volumeCurve.valueAt (0.0f) > 0.9f
-                 && model->volumeCurve.valueAt (1.0f) < 0.1f
-                 && model->volumeCurve.isEnabled(),
-               juce::String (model->volumeCurve.valueAt (0.0f), 2) + " -> "
-                 + juce::String (model->volumeCurve.valueAt (1.0f), 2));
+               model->volumeCurve().valueAt (0.0f) > 0.9f
+                 && model->volumeCurve().valueAt (1.0f) < 0.1f
+                 && model->volumeCurve().isEnabled(),
+               juce::String (model->volumeCurve().valueAt (0.0f), 2) + " -> "
+                 + juce::String (model->volumeCurve().valueAt (1.0f), 2));
 
         //-- 换活动层：关 -----------------------------------------------
         t78b.addLayer (utf8 ("别的层"), palette::layer2);   // 新层即活动层

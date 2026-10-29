@@ -96,7 +96,7 @@ SampleEvent* SampleEnvelopePanel::getSample() const
 int SampleEnvelopePanel::getTargetOrdinal() const noexcept
 {
     if (auto* sample = getSample())
-        return sample->automationTarget == SampleAutomationTarget::pan ? 1 : 0;
+        return sample->curveTarget() == (int) SampleAutomationTarget::pan ? 1 : 0;
 
     return 0;
 }
@@ -111,13 +111,17 @@ void SampleEnvelopePanel::setTargetOrdinal (int ordinal)
     const auto target = ordinal == 1 ? SampleAutomationTarget::pan
                                      : SampleAutomationTarget::volume;
 
-    if (sample->automationTarget == target)
+    // Phase 82: the box shows a curve, so "switch to pan" means "show the curve
+    // that drives pan". Doing that is a no-op when the block has no pan curve —
+    // which is the honest answer: there is nothing to switch to.
+    const int before = sample->curves.getActiveId();
+    sample->showCurveDriving (target);
+
+    if (sample->curves.getActiveId() == before)
     {
         repaint();
         return;
     }
-
-    sample->automationTarget = target;
 
     // Phase 65's rule, applied to the window: asking to edit a curve is asking
     // to use it. A curve left disabled by an older project would otherwise be
@@ -152,7 +156,7 @@ void SampleEnvelopePanel::applyPreset (int index)
             // "Flat" has two meanings and the target decides which one: unity
             // for level, centre for pan. Flattening a pan curve to 1.0 would
             // put the clip hard right under a button labelled "直线".
-            curve = sample->automationTarget == SampleAutomationTarget::pan
+            curve = sample->curveTarget() == (int) SampleAutomationTarget::pan
                       ? NoteEnvelope::makeIdle (0.5f)
                       : NoteEnvelope::makeFlat();
             break;
