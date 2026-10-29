@@ -114,6 +114,9 @@
   （三者缺失 = 音量曲线 / 未反转 / 声相平 0.5 且禁用）、v23 `<Sample pitchrange="N">`
   （缺省 24）、v24 `<Note groupocc>` / `<Sample groupocc>`——**只在该组有多次出现时写出**
   （`groupId >= 0 && groupOccurrence != 0`），缺失读成 0，所以老文件读进来每处都是第 0 次出现。
+  v25（P80）在 root 下追加可选子元素 **`<TempoAutomation enabled="0|1"><Point beat value/>…</TempoAutomation>`**：
+  它是 **root 的兄弟节点，不是 `<Mixer>` 的子节点**（速度不属于混音台，`resetToDefault()` 也不该抹掉它）。
+  缺失 = 平坦 120 + 自动化关，且**必须显式 `resetToDefault`**，否则打开老工程会继承上一个工程的速度图。
   **新 lane 一律追加在枚举末尾**，老文件不需要映射表。
 - **选中哪条 lane 显式写 `autotarget`，不靠元素顺序推断**：三条 lane 都写出来之后，
   "最后读到的那条算选中"恒把 target 变成 `plugin`。回退规则只在 `autotarget` **缺失**时启用。
@@ -124,7 +127,8 @@
 - **组静音存在组上，不存成员上**：一个属性熬过粘贴、复制、合并；写到六十个音符上就是六十个
   可能出错的地方。
 - **`out` 的 master 哨兵随上限走**：v11 及更早 = 8，v12 起 = 127。读旧文件必须翻成 master。
-- 提交顺序：**先 `setChannelCount`，再 `restoreRouting(parsedOutputs)`**（后者拒绝非活通道）。
+- 提交顺序：**先 `setChannelCount`，再 `restoreRouting(parsedOutputs)`**（后者拒绝非活通道）；
+  速度图在最后一步提交（`haveTempo ? loadPoints + setEnabled : resetToDefault`）。
 - **P70：路由是"替换"，不是"逐条编辑"**。`restoreRouting()` 先把整张表清成主输出，再按文件
   逐条应用，最后一次性 `notify()`。旧写法 `if (parsedOutputs[ch] != master) setChannelOutput(...)`
   有两处错：新工程里"回主输出"的通道一条都不调（上一个会话的路由留下来），而且每条都在
@@ -176,6 +180,96 @@
   （`kSlotAutoParamBase = 10000`，必须避开卡片菜单已有的 10..13 / 20 / 30..41 / 200+n / 1000+ch），
   最多列 64 个，超出追加一条禁止项的「还有 N 个参数没有列出」。
 - 时间线长度变化经 `PianoRollComponent::onTimelineChanged` 灌给自动化窗。
+
+## 速度自动化（P80：时间是积分，不是一个数）
+- **`secondsPerBeat` 已经不存在了**。速度一旦会变，「一拍几秒」就是 `1/tempo` 在拍上的积分，
+  任何「当前 BPM × 拍数」的写法在变速下都是错的。时间换算的唯一出处是 `Model/TempoMap.h`。
+- 公开面：`flat(bpm)`、`fromLane(lane, manualBpm, lengthBeats)`、`bpmAtBeat`、`secondsPerBeatAt`、
+  `secondsAtBeat`、`beatAtSeconds`、`secondsBetween`、`isFlat`、`hasSameShapeAs`。
+  只读、`noexcept`、不分配 —— 音频线程可以随便调。
+- `setPoints` 是唯一入口（`flat` 与 `fromLane` 都经过它）：过滤非有限值 → clamp 到 `[0,∞)` 与
+  `[minBpm, maxBpm]` → `stable_sort` → 同 beat 去重（**后者胜**：曲线从那一拍起就是这个速度）→
+  空则补 `{0, 120}` → 首点 beat > 0 就补 `{0, 首点.bpm}` → 重建 `secondsAt` 累积表。
+- 段内积分（`q = (b.bpm - a.bpm) / span`）：
+  `secondsAt[i] = secondsAt[i-1] + (60/q)·ln(b.bpm / a.bpm)`；`|q| < 1e-9` 走 `span·60/a.bpm`。
+  反函数 `bpm(t) = a.bpm·exp(q·dt/60)`、`beat = a.beat + (bpm - a.bpm)/q`。两者互为精确反函数
+  （自检用 20 万步中点法数值积分对撞，误差 < 1e-6）。
+- **平坦分支必须走线性形式**：`|q|` 极小时 `ln(1+ε)` 的有效位比 `dt·bpm/60` 少。改这两条分支
+  别只看语法——**它们互换了也编译得过**，只是解析出来的东西是错的（第一版咬测还原时就撞上过）。
+- **曲线值 → BPM 是 `60·4^v`**（`tempo::bpmForValue`），不是线性映射：v=0 → 60、0.5 → 120、
+  1 → 240。画到一半就是「半个速度」，而 60 → 120 正好一个八度。反函数 `tempo::valueForBpm`。
+- `TempoModel` 持一条 lane + `Listener::tempoChanged()`。**它不在 `MixerModel` 里**：
+  `MixerModel::resetToDefault()` 是「重置混音台」，不该顺手抹掉速度图；工程文件里
+  `<TempoAutomation>` 也是 root 的子元素、与 `<Mixer>` 平级。
+- `TempoModel::resetToDefault` 用 `resetFlat(valueForBpm(120), len)` + `setEnabled(false)`，
+  **不是** lane 构造时的 1.0 —— 否则「打开速度自动化」这一步就把工程变成 240 BPM 了。
+- `fromLane` 的闸门是 `! lane.isEnabled() || lane.getPoints().size() < 2` → `flat(manualBpm)`，
+  也就是「关掉自动化就把控制权还给 BPM 框」。`resetFlat` 永远留两个点，所以这两条够用。
+- `AutomationOwner::tempo`：`ownerId` 与 `target` 恒为 0，`addTrack` 的 `ownerId <= 0` 校验
+  必须为它（和 master 一样）开一口。它**不是 master 的第四条 lane**：速度不在信号路径上，
+  共用一个数组等于让「主输出的声相」和「工程速度」互相挤位置。
+- 发布：`PublishedSchedule::tempo` 是一个 `TempoMap` **值**，消息线程算好、随 schedule 一起
+  发布；`renderNextBlock` 里**每段重算** `beatsPerSample = 1/(sr·map.secondsPerBeatAt(posBeats))`。
+  每块只算一次不够——渐快时整块都按块首速度爬，推一秒音频能差 4e-3 秒出来。
+- 走带与导出一并走图：`setPosition` = `beatAtSeconds`、`getPosition` = `secondsAtBeat`；
+  `AudioExport` / `ScopeRender` 的 `contentSeconds = tempo.secondsAtBeat(contentBeats)`，
+  时长读数反向走 `beatAtSeconds`。**任何地方都不该再出现 `beats * spb`。**
+- UI 入口在 **BPM 框的右键菜单**（`ui::showValueMenu` 的 `addExtra`，id `9101`）：
+  「显示速度自动化行」。速度没有卡片、没有行、没有天然归属，入口只能挂在用户已经在看的那块
+  控件上。勾选态由 `MainComponent::automationTracksChanged()` 反灌
+  （`bpmField.setTempoAutomationShown(hasTempoAutomationTrack())`），BPM 框不自己记状态。
+- 窗口里 `parameter` 只写「速度」，量程 `60 / 120 / 240 BPM` 画在**窗口右缘**：
+  row 横跨整条时间线（64 拍），右对齐到 row 就跑到视野外了。
+- 老工程的迁移是「补默认」不是「沿用」：文件里没有 `<TempoAutomation>` 就 `resetToDefault`，
+  否则打开一个 v25 老工程会继承上一个工程的速度图。
+
+## 录制（P81：一次按键，两样产物）
+
+- 录制不是一个功能，是两件：**音频**（声卡听到了什么）和 **MIDI**（手弹了什么）。
+  它们落到不同地方是因为它们是不同的事物——音频变成采样（WAV + 采样器槽 + 块），
+  音符变成一个自动命名的编组，组上那两条曲线就是同一只手拧过的旋钮。
+- **输入侧是本阶段才有的东西**：`AudioEngine::start()` 一直写 `initialise (0, 2, ...)`，
+  连输入通道都没开。现在先要 `(2, 2)`，失败回落 `(0, 2)`——"没有麦克风"不等于"没有 DAW"。
+  `hasAudioInput()` 看 `getActiveInputChannels().countNumberOfSetBits()`。
+- `Audio/Recorder.h` 两个类，各自只待在一个线程里：
+  - **`TakeCollector`**（消息线程）：`begin / noteOn / noteOff / control / finish`。
+    还按着的音符在 `finish(endBeat)` 处收尾；同音高重触发把前一个截断；没有 on 的 off
+    直接忽略；零长度敲击抬到 1/64 拍（`minRecordedNoteBeats`）。
+  - **`RecordBuffer`**（音频线程写、消息线程读）：预分配 `AudioBuffer` + 两个原子
+    （`writePos` / `armed`）。音频线程只 `copyFrom`，不分配、不加锁；满了**自己停**，
+    绝不回绕——丢尾巴读作"它停了"，覆盖开头是"整段没了"。
+    `finish()` **先读 `writePos` 再 disarm**：反过来的话，正在写的那一块会被算进 take 里，
+    交回来的是半块。
+- **时间戳在事件发生的地方取**：`MidiInputHub::onNote/onControl` 是 MIDI 线程，
+  在那里读 `playback.getPositionBeats()`（原子 relaxed），再把 beat 一起 `callAsync` 到消息线程。
+  在消息线程里问位置等于把队列延迟算成走音——每个音符都错 5 ms。
+- **CC 映射只有三条**：CC 7（channel volume）/ CC 11（expression）→ 组的 `level` lane，
+  CC 10（pan）→ 组的 `pan` lane。其余（调制轮、呼吸……）**记账但不猜**：
+  在 `Take::ignoredControls` 里数一下，不发明映射。理由：旋钮到曲线的映射一旦猜错，
+  回放听起来不对，而画面上没有任何东西能解释为什么。
+- **曲线要稀疏化**：`AutomationLane::maxPoints` 是 32，而一只手推一次推子能发两百个 CC。
+  `decimateRecordedCurve` 两趟：先按"值动了 1%"或"过了 0.5 拍"留点（第二个条件不能省，
+  慢速扫弦时单看值差会被削成两个点），再按等距抽到 30 个以内。首尾永远保留。
+  **少于两个点就不写 lane**——`loadPoints` 会把单点修成一条横贯全工程的直线，
+  那等于把工程音量悄悄改掉。
+- `MainComponent::commitTake(take, audio, sampleRate)` 是唯一落位入口，按钮与自检共用：
+  1. 音频 → `makeSampleBuffer` → `writeSampleFile`（16-bit PCM，手写 44 字节头）→
+     `rack.addSampler` → `layer->addSample`；块的**宽度走 `TempoMap`**
+     （`beatAtSeconds(secondsAtBeat(start) + lengthSeconds)`），不是 `秒 × BPM / 60`。
+  2. 音符 → `layer->addNote` × n → `addGroup("录音 N")` → `assignNotesToGroup`。
+  3. CC → `applyRecordedControls` 写组的两条 lane 并 `setEnabled(true)`。
+  4. 空 take（没音符也没音频）**什么都不做**，连编号都不加——一次没录到东西的按键
+     不该在工程里留下一个空组。
+- `recording` 是 **`std::atomic<bool>`**：MIDI 线程读它。普通 bool 在这里就是数据竞争。
+- 停止键先 `finishRecording()` 再 `parkTransportAt()`：反过来的话，take 的结束位置
+  是"跑回起点之后"的位置，最后一个音会变成长得离谱的一条。
+- 录音文件落在 `Music/AtomicDAW Recordings/录音 N.wav`（`setRecordingsFolder` 可改；
+  自检和 demo 都改到临时目录——测试不该往用户的音乐库或仓库里扔 WAV）。
+- **工程文件不升版本（仍是 25）**：录音产出用的全是已有字段——`<Sample>` 的
+  `slot / path / name / start / length`、`<Slot kind="sampler">`、`<Group>` + `<Occurrence>`。
+  没有新的运行时状态需要落盘：`recording`、`takeCollector`、`recordingCounter`（编号只影响
+  名字，下一次启动从 1 数起也不会错），`lastRecordGroupId / lastRecordClipId` 是给自检与
+  定位用的缓存。凡是"新一轮产出刚好全是旧字段"的功能，都别顺手升版本。
 
 ## 三层叠加（P36：`Model/AutomationStack.h`）
 **法则只有一份**，纯函数，引擎与界面都调它，禁止在别处再写一遍乘法链。

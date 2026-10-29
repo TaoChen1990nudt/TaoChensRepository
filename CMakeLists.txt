@@ -36,6 +36,7 @@ target_sources(AtomicDAW PRIVATE
     Source/Audio/Mp3Encoder.cpp
     Source/Audio/PlaybackEngine.cpp
     Source/Audio/PluginHost.cpp
+    Source/Audio/Recorder.cpp
     Source/Audio/ScopeRender.cpp
     Source/Audio/AudioExport.cpp
     Source/Media/SampleLibrary.cpp

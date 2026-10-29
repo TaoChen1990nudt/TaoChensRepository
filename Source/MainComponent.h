@@ -152,6 +152,48 @@ public:
         place a transport state change is written out. */
     void parkTransportAt (double target);
 
+    //-- Phase 81: recording ---------------------------------------------------
+    /** The red dot. One button for both takes: pressing it starts recording
+        (and rolling, if the transport is parked), pressing it again ends the
+        take and lays down what was captured. */
+    juce::Rectangle<int> getRecordButtonBounds() const;
+    void toggleRecording();
+    bool startRecording();
+    void finishRecording();
+    bool isRecording() const noexcept { return recording.load(); }
+
+    /** The whole landing step in one place: WAV + sampler + clip for the audio,
+        notes + group + lanes for the MIDI. Shared by the button and the
+        self-test so a take is never built two ways. */
+    int commitTake (Take take, const juce::AudioBuffer<float>& audioTake, double sampleRate);
+
+    /** Writes the recorded CC onto the group's own lanes. */
+    void applyRecordedControls (NoteGroup& group, const Take& take) const;
+
+    /** Where takes are written: `Music/AtomicDAW Recordings`. Created on the
+        first take; never inside the project folder, because a take outlives the
+        project it was recorded into. */
+    juce::File getRecordingsFolder() const;
+
+    /** Redirects takes somewhere else. The self-test uses the temp folder — a
+        test run must not leave twenty WAVs in the user's Music library. */
+    void setRecordingsFolder (juce::File folder) { recordingsFolder = std::move (folder); }
+
+    int  getLastRecordGroupId() const noexcept { return lastRecordGroupId; }
+    int  getLastRecordClipId()  const noexcept { return lastRecordClipId; }
+
+    /** Test-only seams: the same collector and the same commit path the real
+        button uses, with the audio injected instead of captured. */
+    /** The two event sinks, shared by the MIDI thread's hop and by the tests.
+        Beats are captured where the event happened, not where the message
+        thread got round to it. */
+    void recordNoteAt (int pitch, float velocity, bool on, double beat);
+    void recordControlAt (int controller, int value7, double beat);
+
+    void beginTakeForTest (double startBeat);
+    void takeAudioForTest (const juce::AudioBuffer<float>& audio, double sampleRate);
+    int  endTakeForTest (double endBeat);
+
     void setBpm (double newBpm);
     double getBpm() const { return audio.getBpm(); }
 
@@ -223,6 +265,11 @@ public:
         it on, so the screenshot shows the row — the one part of this feature
         that has no representation anywhere else. */
     void openDemoTempoAutomation();
+
+    /** Phase 81: one recorded take, in place, for the snapshot. A feature whose
+        whole output is "a group you did not draw and a curve you did not write"
+        has nothing to look at unless the demo performs the take. */
+    void openDemoRecording();
 
     /** Opens the roll's inline automation box on a long demo note, so the
         screenshot shows the box and its parameter menu. */
@@ -944,6 +991,25 @@ private:
     MixerPanel          mixerPanel       { stack, rack, mixer };
     BpmField            bpmField;
 
+    //-- Phase 81 -------------------------------------------------------------
+    TakeCollector takeCollector;
+
+    /** Atomic because the MIDI thread reads it: "is the tape rolling" is asked
+        from a real-time-ish callback, and a plain bool there is a data race. */
+    std::atomic<bool> recording { false };
+    double        recordStartBeat    = 0.0;
+    int           recordingCounter   = 0;   // "录音 N"
+    int           lastRecordGroupId  = -1;
+    int           lastRecordClipId   = -1;
+
+    /** What the self-test feeds instead of a microphone. Kept out of the real
+        path: `finishRecording()` reads the engine, `endTakeForTest()` reads this. */
+    juce::AudioBuffer<float> testTakeAudio;
+    double                   testTakeSampleRate = 44100.0;
+
+    /** Empty means "Music/AtomicDAW Recordings". */
+    juce::File recordingsFolder;
+
     /** Phase 17: the two lists the side columns grew downwards into. Both are
         siblings of the panels above them rather than children: each one owns its
         own scroll position, and the split between them is a fixed pixel height
@@ -1136,6 +1202,7 @@ private:
 
     bool hoveringPlay  = false;
     bool hoveringStop  = false;
+    bool hoveringRecord = false;      // Phase 81
 
     bool hoveringSave   = false;
     bool hoveringLoad   = false;

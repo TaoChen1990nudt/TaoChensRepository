@@ -127,6 +127,14 @@ public:
     /** pitch, velocity, isNoteOn. MIDI thread. */
     std::function<void (int pitch, float velocity, bool on)> onNote;
 
+    /** Phase 81: controller number, 0..127 value. MIDI thread — the same rule
+        as onNote applies: atomics and queues only, never the model.
+
+        Exists because recording automation needs the knob itself, not a
+        "something arrived" flag: the monitor's `lastType == 3` says a CC
+        happened, which is not enough to draw a curve. */
+    std::function<void (int controller, int value)> onControl;
+
 private:
     void handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage&) override;
 

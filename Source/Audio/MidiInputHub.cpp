@@ -154,6 +154,11 @@ void MidiInputHub::handleIncomingMidiMessage (juce::MidiInput* sourcePort,
         lastType.store (3);
         lastNote.store (message.getControllerNumber());
         lastVelocity.store (message.getControllerValue());
+
+        // Phase 81: the monitor can only say "a knob moved". Recording needs the
+        // knob and its value, and this is the only place that has both.
+        if (onControl != nullptr)
+            onControl (message.getControllerNumber(), message.getControllerValue());
     }
     else
     {

@@ -263,6 +263,87 @@ LoadedSample loadSampleFile (const juce::File& file)
 }
 
 //==============================================================================
+std::shared_ptr<SampleBuffer> makeSampleBuffer (const juce::AudioBuffer<float>& audio,
+                                                double sampleRate)
+{
+    const int channels = audio.getNumChannels();
+    const int frames   = audio.getNumSamples();
+
+    if (channels <= 0 || frames <= 0)
+        return {};
+
+    auto buffer = std::make_shared<SampleBuffer>();
+    buffer->sampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+    buffer->channels   = channels;
+    buffer->frames.resize ((size_t) frames * (size_t) channels);
+
+    for (int c = 0; c < channels; ++c)
+        for (int i = 0; i < frames; ++i)
+            buffer->frames[(size_t) i * (size_t) channels + (size_t) c] = audio.getSample (c, i);
+
+    // Same envelope, same bucket count, same walk as loadSampleFile — see the
+    // note there: painting must never scan eight million frames per repaint.
+    buffer->peaks.assign ((size_t) SampleBuffer::peakBuckets, 0.0f);
+
+    const double step = (double) frames / (double) SampleBuffer::peakBuckets;
+
+    for (int b = 0; b < SampleBuffer::peakBuckets; ++b)
+    {
+        const int from = (int) (b * step);
+        const int to   = juce::jlimit (from + 1, frames, (int) ((b + 1) * step));
+        float     peak = 0.0f;
+
+        for (int i = from; i < to; ++i)
+            for (int c = 0; c < channels; ++c)
+                peak = juce::jmax (peak, std::abs (buffer->frames[(size_t) i * (size_t) channels
+                                                                  + (size_t) c]));
+
+        buffer->peaks[(size_t) b] = juce::jlimit (0.0f, 1.0f, peak);
+    }
+
+    return buffer;
+}
+
+bool writeSampleFile (const juce::File& file, const SampleBuffer& buffer)
+{
+    const int channels = buffer.channels;
+    const int frames   = buffer.numFrames();
+
+    if (channels <= 0 || frames <= 0)
+        return false;
+
+    const int bits       = 16;
+    const int frameBytes = channels * bits / 8;
+    const int dataBytes  = frames * frameBytes;
+
+    juce::MemoryOutputStream out;
+    out.write ("RIFF", 4);
+    out.writeInt ((int) (36 + dataBytes));
+    out.write ("WAVE", 4);
+    out.write ("fmt ", 4);
+    out.writeInt (16);
+    out.writeShort (1);
+    out.writeShort ((short) channels);
+    out.writeInt ((int) buffer.sampleRate);
+    out.writeInt ((int) (buffer.sampleRate * frameBytes));
+    out.writeShort ((short) frameBytes);
+    out.writeShort ((short) bits);
+    out.write ("data", 4);
+    out.writeInt (dataBytes);
+
+    for (int i = 0; i < frames; ++i)
+        for (int c = 0; c < channels; ++c)
+        {
+            const float value = buffer.frames[(size_t) i * (size_t) channels + (size_t) c];
+            out.writeShort ((short) juce::jlimit (-32767.0f, 32767.0f, value * 32767.0f));
+        }
+
+    file.getParentDirectory().createDirectory();
+    file.deleteFile();
+    return file.replaceWithData (out.getData(), out.getDataSize());
+}
+
+//==============================================================================
 bool writeTestSampleFile (const juce::File& file, double seconds, double sampleRate,
                           int channels, double frequency)
 {

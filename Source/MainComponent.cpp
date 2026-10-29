@@ -975,11 +975,44 @@ MainComponent::MainComponent()
     // the answer to "which synth" is cached in `liveTargetSlot`.
     midiHub->onNote = [this] (int pitch, float velocity, bool on)
     {
+        // Phase 81: the beat is read HERE, on the MIDI thread. Handing the event
+        // to the message thread and asking for the position there would turn a
+        // 5 ms queue delay into 5 ms of wrong timing on every note of the take.
+        // The takeover itself has to happen on the message thread (the collector
+        // owns vectors), but the timestamp travels with the event.
+        if (recording.load (std::memory_order_relaxed))
+        {
+            const double beatNow = audio.getPlayback().getPositionBeats();
+
+            juce::MessageManager::callAsync ([this, pitch, velocity, on, beatNow]
+            {
+                if (recording.load())
+                    recordNoteAt (pitch, velocity, on, beatNow);
+            });
+        }
+
         if (on)
             audio.getPlayback().noteOnLive (liveTargetSlot.load (std::memory_order_relaxed),
                                             pitch, velocity);
         else
             audio.getPlayback().noteOffLive (pitch);
+    };
+
+    // Phase 81: the knobs. A note take records what was played; this records
+    // what the hand did while playing it, which is the only thing that can
+    // become the group's level/pan curve.
+    midiHub->onControl = [this] (int controller, int value7)
+    {
+        if (! recording.load (std::memory_order_relaxed))
+            return;
+
+        const double beatNow = audio.getPlayback().getPositionBeats();
+
+        juce::MessageManager::callAsync ([this, controller, value7, beatNow]
+        {
+            if (recording.load())
+                recordControlAt (controller, value7, beatNow);
+        });
     };
 
     // The panels that claim plain letters — the roll groups on G and erases on
@@ -3864,6 +3897,11 @@ void MainComponent::stopTransport()
     if (! stopDecision (audio.isTransportEngaged()).stop)
         return;
 
+    // Phase 81: the take ends where the playhead was when Stop was pressed, so
+    // this has to happen BEFORE the park moves it. Park first and the last note
+    // would be as long as wherever the run had begun.
+    finishRecording();
+
     parkTransportAt (stopDecision (true, playStartBeat).beat);
 }
 
@@ -3889,6 +3927,230 @@ void MainComponent::parkTransportAt (double target)
 
     rackPanel.repaint();
     repaint (topBarBounds);
+}
+
+//==============================================================================
+//-- Phase 81: recording -------------------------------------------------------
+// A take is two products of one pass of the record button: a buffer of what the
+// sound card heard, and a list of what the keyboard played. They land in
+// different places because they are different things — the audio becomes a
+// sample (a file, a sampler slot, a block), the notes become an automatically
+// named group whose level/pan lanes carry the CC the hand played at the same
+// time.
+juce::File MainComponent::getRecordingsFolder() const
+{
+    if (recordingsFolder != juce::File())
+        return recordingsFolder;
+
+    return juce::File::getSpecialLocation (juce::File::userMusicDirectory)
+             .getChildFile ("AtomicDAW Recordings");
+}
+
+juce::Rectangle<int> MainComponent::getRecordButtonBounds() const
+{
+    // Right of Stop, left of the position readout: the three things a transport
+    // has (go, stop, capture) read as one cluster, and the gap to the readout
+    // marks where the transport ends and the readouts begin.
+    return { getStopButtonBounds().getRight() + ui::px (6), topBarBounds.getY() + ui::px (12),
+             ui::px (30), ui::px (28) };
+}
+
+bool MainComponent::startRecording()
+{
+    if (recording.load())
+        return true;
+
+    recordStartBeat = audio.getPositionBeats();
+    takeCollector.begin (recordStartBeat);
+    recording.store (true);
+
+    // The audio side may refuse (no capture channel, or none free). That is not
+    // a reason to refuse the MIDI side: a keyboard take is still a take, and the
+    // button has to mean something on a machine with no microphone.
+    audio.beginRecording();
+
+    if (! audio.isPlaying())
+        playTransport();
+
+    repaint (topBarBounds);
+    return true;
+}
+
+void MainComponent::finishRecording()
+{
+    if (! recording.load())
+        return;
+
+    recording.store (false);
+
+    const double endBeat = juce::jmax (recordStartBeat, audio.getPositionBeats());
+    Take take = takeCollector.finish (endBeat);
+
+    commitTake (std::move (take), audio.endRecording(), audio.getRecordSampleRate());
+
+    repaint (topBarBounds);
+}
+
+void MainComponent::toggleRecording()
+{
+    if (recording.load())
+        finishRecording();
+    else
+        startRecording();
+}
+
+void MainComponent::applyRecordedControls (NoteGroup& group, const Take& take) const
+{
+    struct Mapping
+    {
+        RecordTarget target;
+        AutomationLane* lane;
+    };
+
+    const Mapping mappings[] { { RecordTarget::level, &group.getLevelAutomation() },
+                               { RecordTarget::pan,   &group.getPanAutomation() } };
+
+    for (const auto& mapping : mappings)
+    {
+        auto points = decimateRecordedCurve (take.controls, mapping.target);
+
+        // Fewer than two points is not a curve, and loadPoints() would turn one
+        // point into a flat line across the whole project — a take where the
+        // hand touched the knob once must not silently rewrite the level.
+        if (points.size() < 2)
+            continue;
+
+        mapping.lane->loadPoints (std::move (points));
+        mapping.lane->setEnabled (true);
+    }
+}
+
+int MainComponent::commitTake (Take take, const juce::AudioBuffer<float>& audioTake, double sampleRate)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr)
+        return -1;
+
+    lastRecordGroupId = -1;
+    lastRecordClipId  = -1;
+
+    const bool hasAudio  = audioTake.getNumSamples() > 0 && sampleRate > 0.0;
+    const bool hasNotes  = ! take.notes.empty();
+
+    // Nothing arrived: do not bump the counter and do not leave an empty group
+    // behind. A record press that captured silence is a press, not a take.
+    if (! hasAudio && ! hasNotes)
+        return -1;
+
+    // One number per take, shared by the WAV and the group: "录音 3" is one
+    // thing the user did, not two files that happen to be numbered alike.
+    ++recordingCounter;
+
+    //-- 1. the audio: file -> sampler -> block -------------------------------
+    if (hasAudio)
+    {
+        if (auto buffer = makeSampleBuffer (audioTake, sampleRate))
+        {
+            const auto name = juce::String (utf8 ("录音 ")) + juce::String (recordingCounter);
+            const auto file = getRecordingsFolder().getChildFile (name + ".wav");
+            const bool wrote = writeSampleFile (file, *buffer);
+
+            SampleEvent clip;
+            clip.name = file.getFileName();
+            clip.path = wrote ? file.getFullPathName() : juce::String();
+            clip.audio = buffer;
+            clip.startBeat = juce::jmax (0.0, take.startBeat);
+            clip.pitch = 60;
+            clip.laneSpan = 4;
+
+            // The buffer is real seconds; the block is beats. Under a tempo map
+            // those differ, so the width is measured on the map rather than
+            // divided by a BPM — the same rule the exporter follows (P80).
+            auto& playback = audio.getPlayback();
+            const double endOfTake = playback.beatAtSeconds (playback.secondsAtBeat (clip.startBeat)
+                                                             + buffer->lengthSeconds());
+            clip.lengthBeats = juce::jmax (1.0, endOfTake - clip.startBeat);
+
+            clip.outputSlotId = rack.addSampler (buffer, clip.path, clip.name);
+            lastRecordClipId  = layer->addSample (std::move (clip));
+        }
+    }
+
+    //-- 2. the notes: one group per take -------------------------------------
+    std::vector<int> noteIds;
+    noteIds.reserve (take.notes.size());
+
+    for (const auto& recorded : take.notes)
+    {
+        NoteEvent note;
+        note.pitch       = recorded.pitch;
+        note.velocity    = recorded.velocity;
+        note.startBeat   = recorded.startBeat;
+        note.lengthBeats = juce::jmax (1.0 / 64.0, recorded.endBeat - recorded.startBeat);
+
+        noteIds.push_back (layer->addNote (std::move (note)));
+    }
+
+    if (! noteIds.empty())
+    {
+        const int groupIndex = (int) layer->getGroups().size();
+        const int groupId = layer->addGroup (utf8 ("录音 ") + juce::String (recordingCounter),
+                                             groupPalette::nextGroupColour (groupIndex));
+
+        layer->assignNotesToGroup (noteIds, groupId, 0);
+        lastRecordGroupId = groupId;
+
+        if (auto* group = layer->findGroup (groupId))
+            applyRecordedControls (*group, take);
+    }
+
+    commitHistory();
+    repaint();
+    return lastRecordGroupId >= 0 ? lastRecordGroupId : lastRecordClipId;
+}
+
+//-- Test seams ---------------------------------------------------------------
+void MainComponent::beginTakeForTest (double startBeat)
+{
+    recordStartBeat = startBeat;
+    takeCollector.begin (startBeat);
+    recording.store (true);
+    lastRecordGroupId = -1;
+    lastRecordClipId  = -1;
+}
+
+void MainComponent::recordNoteAt (int pitch, float velocity, bool on, double beat)
+{
+    if (on)
+        takeCollector.noteOn (pitch, velocity, beat);
+    else
+        takeCollector.noteOff (pitch, beat);
+}
+
+void MainComponent::recordControlAt (int controller, int value7, double beat)
+{
+    takeCollector.control (controller, value7, beat);
+}
+
+void MainComponent::takeAudioForTest (const juce::AudioBuffer<float>& audioToUse, double sampleRate)
+{
+    testTakeAudio.makeCopyOf (audioToUse);
+    testTakeSampleRate = sampleRate > 0.0 ? sampleRate : 44100.0;
+}
+
+int MainComponent::endTakeForTest (double endBeat)
+{
+    if (! recording.load())
+        return -1;
+
+    recording.store (false);
+    Take take = takeCollector.finish (endBeat);
+
+    const int result = commitTake (std::move (take), testTakeAudio, testTakeSampleRate);
+
+    testTakeAudio.setSize (0, 0);
+    return result;
 }
 
 void MainComponent::setBpm (double newBpm)
@@ -5238,6 +5500,23 @@ void MainComponent::paint (juce::Graphics& g)
             g.fillRect (stopGlyph (button));
         }
 
+        //-- Record (Phase 81) -------------------------------------------------
+        // Theme.h keeps a red that means "recording", separate from the accent
+        // the play button and the playhead use. Until Phase 81 nothing was ever
+        // red for that reason; the dot is the first thing that is.
+        {
+            auto button = getRecordButtonBounds().toFloat();
+
+            drawButtonPlate (button, hoveringRecord, true, theme::record, recording.load());
+
+            auto dot = juce::Rectangle<float> (button.getCentreX() - ui::pf (5.0f),
+                                               button.getCentreY() - ui::pf (5.0f),
+                                               ui::pf (10.0f), ui::pf (10.0f));
+
+            g.setColour (theme::record.withAlpha (recording.load() ? 1.0f : (hoveringRecord ? 0.85f : 0.62f)));
+            g.fillEllipse (dot);
+        }
+
         //-- Position ----------------------------------------------------------
         {
             auto readout = getPositionReadoutBounds();
@@ -5609,6 +5888,12 @@ void MainComponent::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
+    if (getRecordButtonBounds().contains (pos))
+    {
+        toggleRecording();
+        return;
+    }
+
     if (getSaveButtonBounds().contains (pos))
     {
         askToSaveProject();
@@ -5671,6 +5956,7 @@ void MainComponent::mouseMove (const juce::MouseEvent& e)
 
     const bool newPlay   = getPlayButtonBounds().contains (pos);
     const bool newStop   = getStopButtonBounds().contains (pos);
+    const bool newRecord = getRecordButtonBounds().contains (pos);
     const bool newSave   = getSaveButtonBounds().contains (pos);
     const bool newLoad   = getLoadButtonBounds().contains (pos);
     const bool newExport = getExportButtonBounds().contains (pos);
@@ -5680,19 +5966,20 @@ void MainComponent::mouseMove (const juce::MouseEvent& e)
     const bool newMixer  = getMixerButtonBounds().contains (pos);
     const bool newGear   = getSettingsButtonBounds().contains (pos);
 
-    setMouseCursor ((newPlay || newStop || newSave || newLoad || newExport
+    setMouseCursor ((newPlay || newStop || newRecord || newSave || newLoad || newExport
                       || newNew || newUndo || newRedo || newMixer || newGear
                       || hoveredMenuItem >= 0)
                       ? juce::MouseCursor::PointingHandCursor
                       : juce::MouseCursor::NormalCursor);
 
-    if (newPlay != hoveringPlay || newStop != hoveringStop
+    if (newPlay != hoveringPlay || newStop != hoveringStop || newRecord != hoveringRecord
          || newSave != hoveringSave || newLoad != hoveringLoad || newExport != hoveringExport
          || newNew != hoveringNew || newUndo != hoveringUndo || newRedo != hoveringRedo
          || newMixer != hoveringMixer || newGear != hoveringSettings)
     {
         hoveringPlay   = newPlay;
         hoveringStop   = newStop;
+        hoveringRecord = newRecord;
         hoveringSave   = newSave;
         hoveringLoad   = newLoad;
         hoveringExport = newExport;
@@ -5713,11 +6000,11 @@ void MainComponent::mouseExit (const juce::MouseEvent&)
         repaint (menuBarBounds);
     }
 
-    if (hoveringPlay || hoveringStop
+    if (hoveringPlay || hoveringStop || hoveringRecord
          || hoveringSave || hoveringLoad || hoveringExport
          || hoveringNew || hoveringUndo || hoveringRedo || hoveringMixer || hoveringSettings)
     {
-        hoveringPlay = hoveringStop = false;
+        hoveringPlay = hoveringStop = hoveringRecord = false;
         hoveringSave = hoveringLoad = hoveringExport = false;
         hoveringNew = hoveringUndo = hoveringRedo = hoveringMixer = hoveringSettings = false;
         repaint (topBarBounds);
@@ -7167,6 +7454,81 @@ void MainComponent::openSampleEnvelopePanel (int layerIndex, int sampleId)
 
     sampleEnvelopePanel.setBounds (x, y, w, h);
     sampleEnvelopePanel.toFront (true);
+}
+
+void MainComponent::openDemoRecording()
+{
+    // The take is performed through the production path: begin, feed, commit.
+    // A demo that built the block and the group by hand would prove that the
+    // model accepts them, not that recording produces them.
+    constexpr double startBeat = 4.0;
+    constexpr double takeBeats = 3.0;
+
+    // The hero shot already has a note inspector open over beats 4-6, which is
+    // exactly where the take lands. Two "look at this" marks on one spot is
+    // none: the take gets the space.
+    envelopePanel.close();
+
+    beginTakeForTest (startBeat);
+
+    // In the middle of the visible keyboard and above the block's own rows: the
+    // demo's written notes sit between 8 and 24 beats, so beats 4-7 are free
+    // here — and a take at the very top of the window would be covered by the
+    // very automation box that proves the curve landed.
+    const int pitches[] { 67, 71, 74, 79 };
+
+    for (int i = 0; i < 4; ++i)
+    {
+        recordNoteAt (pitches[i], 0.86f, true,  startBeat + i * 0.75);
+        recordNoteAt (pitches[i], 0.86f, false, startBeat + i * 0.75 + 0.7);
+    }
+
+    // A hand on the fader: up over the first half of the take, easing back.
+    for (int i = 0; i <= 8; ++i)
+        recordControlAt (7, 78 + (i % 4) * 14, startBeat + i * (takeBeats / 8.0));
+
+    recordControlAt (10, 44, startBeat);
+    recordControlAt (10, 84, startBeat + takeBeats);
+
+    // 1.5 s of tone where the microphone would be. The snapshot has no device,
+    // and a silent take would land a block with no waveform in it.
+    constexpr double rate = 48000.0;
+    juce::AudioBuffer<float> voice (2, (int) (1.5 * rate));
+
+    for (int i = 0; i < voice.getNumSamples(); ++i)
+    {
+        const double t     = (double) i / rate;
+        const double fade  = std::exp (-2.2 * t / 1.5);
+        const double value = std::sin (2.0 * juce::MathConstants<double>::pi * 220.0 * t) * fade * 0.55;
+
+        voice.setSample (0, i, (float) value);
+        voice.setSample (1, i, (float) value);
+    }
+
+    takeAudioForTest (voice, rate);
+
+    // The demo's WAV goes to the temp folder, not to Music and not to docs/:
+    // a fixture that drops files into the repository is a fixture that keeps
+    // showing up in `git status`.
+    setRecordingsFolder (juce::File::getSpecialLocation (juce::File::tempDirectory)
+                           .getChildFile ("AtomicDAW-demo-takes"));
+
+    const int groupId = endTakeForTest (startBeat + takeBeats);
+
+    locatePlayhead (startBeat);
+
+    if (groupId > 0)
+    {
+        pianoRoll.selectGroup (groupId);
+
+        // Open the group's own curve box. A still cannot show "the automation
+        // went into the group" any other way: the lane lives in the model, and
+        // the box is the one place it is drawn as a curve.
+        pianoRoll.openGroupAutomation (stack.getActiveLayerIndex(), groupId,
+                                       (int) GroupAutomationTarget::level);
+    }
+
+    repaint();
 }
 
 void MainComponent::openDemoTempoAutomation()

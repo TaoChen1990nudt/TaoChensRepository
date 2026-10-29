@@ -92,6 +92,11 @@ namespace
         // still is the only place the row itself can be checked.
         component.openDemoTempoAutomation();
 
+        // P81: the take itself. What recording produces is a block nobody drew
+        // and a group nobody grouped, plus the curve the hand wrote into it —
+        // three things that only exist after the button was pressed twice.
+        component.openDemoRecording();
+
         pngFile.getParentDirectory().createDirectory();
 
         // The snapshot REPLACES the file. `createOutputStream` left the previous

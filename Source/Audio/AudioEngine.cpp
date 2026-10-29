@@ -29,8 +29,14 @@ bool AudioEngine::start()
     if (deviceOpen)
         return true;
 
-    // No inputs, stereo out, no saved state, fall back to the default device.
-    lastError = deviceManager.initialise (0, 2, nullptr, true);
+    // Phase 81: ask for inputs as well — recording needs a wire, and a device
+    // opened with zero inputs can never give one. The fallback matters more
+    // than the ask: plenty of machines have no capture channel at all (or have
+    // it held by another app), and "no microphone" must not mean "no DAW".
+    lastError = deviceManager.initialise (2, 2, nullptr, true);
+
+    if (lastError.isNotEmpty())
+        lastError = deviceManager.initialise (0, 2, nullptr, true);
 
     if (lastError.isNotEmpty())
     {
@@ -71,6 +77,65 @@ juce::String AudioEngine::getStatusText() const
                  + juce::String (device->getCurrentSampleRate() / 1000.0, 1) + " kHz";
 
     return lastError.isNotEmpty() ? lastError : juce::String ("audio offline");
+}
+
+//==============================================================================
+bool AudioEngine::hasAudioInput() const
+{
+    if (auto* device = deviceManager.getCurrentAudioDevice())
+        return device->getActiveInputChannels().countNumberOfSetBits() > 0;
+
+    return false;
+}
+
+bool AudioEngine::beginRecording (double maxSeconds)
+{
+    if (! deviceOpen && ! start())
+        return false;
+
+    auto* device = deviceManager.getCurrentAudioDevice();
+
+    if (device == nullptr)
+        return false;
+
+    const int inputs = device->getActiveInputChannels().countNumberOfSetBits();
+
+    if (inputs <= 0)
+    {
+        // No capture channel: arm nothing. A take of digital silence would be
+        // indistinguishable from "recorded a quiet room" and would land an empty
+        // clip on the timeline.
+        recordBuffer.prepare (0.0, 0, 0.0);
+        return false;
+    }
+
+    // Always two tracks. A mono microphone is duplicated by RecordBuffer::append
+    // — the loader downmixes to stereo for the same reason: one shape downstream.
+    recordBuffer.prepare (device->getCurrentSampleRate(), 2, maxSeconds);
+    recordBuffer.begin();
+    return recordBuffer.isRecording();
+}
+
+juce::AudioBuffer<float> AudioEngine::endRecording()
+{
+    recordBuffer.finish();
+    return recordBuffer.takeAudio();
+}
+
+void AudioEngine::appendRecordedForTest (const juce::AudioBuffer<float>& audio)
+{
+    // The self-test has no microphone. Rather than mocking the device, the tape
+    // is fed through the same entry point the callback uses, one block at a time.
+    if (! recordBuffer.isRecording() || audio.getNumSamples() <= 0)
+        return;
+
+    std::vector<const float*> channels;
+    channels.reserve ((size_t) audio.getNumChannels());
+
+    for (int ch = 0; ch < audio.getNumChannels(); ++ch)
+        channels.push_back (audio.getReadPointer (ch));
+
+    recordBuffer.append (channels.data(), (int) channels.size(), audio.getNumSamples());
 }
 
 //==============================================================================
@@ -245,7 +310,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                                     int numSamples,
                                                     const juce::AudioIODeviceCallbackContext& context)
 {
-    juce::ignoreUnused (inputChannelData, numInputChannels, context);
+    juce::ignoreUnused (context);
+
+    // Phase 81: the tape. Runs first and unconditionally (it checks its own
+    // armed flag) so a recorded take is aligned with the callbacks that produced
+    // it rather than with whenever the render path finished.
+    recordBuffer.append (inputChannelData, numInputChannels, numSamples);
 
     for (int ch = 0; ch < numOutputChannels; ++ch)
         if (outputChannelData[ch] != nullptr)

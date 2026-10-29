@@ -1,5 +1,6 @@
 #pragma once
 
+#include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
 
 #include <memory>
@@ -79,6 +80,20 @@ LoadedSample loadSampleFile (const juce::File& file);
 /** Extensions the browser offers. One list, so the panel, the drop handler and
     the self-test agree on what "a sample" is. */
 bool isSampleFile (const juce::File& file);
+
+/** Phase 81: turns a live buffer (a recording) into the same shape a decoded
+    file has — interleaved frames plus the peak envelope the waveform draws from.
+
+    Goes through the same peak code as loadSampleFile on purpose: a recorded
+    take and an imported file have to look identical on the timeline, and the
+    only way to guarantee that is to build them with the same function. */
+std::shared_ptr<SampleBuffer> makeSampleBuffer (const juce::AudioBuffer<float>& audio,
+                                                double sampleRate);
+
+/** Phase 81: writes a buffer back out as 16-bit PCM WAV, hand-rolled like the
+    reader beside it — 44-byte header, interleaved, no codec registry. Returns
+    false when the file cannot be replaced. */
+bool writeSampleFile (const juce::File& file, const SampleBuffer& buffer);
 
 //==============================================================================
 /** Writes a small, deterministic WAV.

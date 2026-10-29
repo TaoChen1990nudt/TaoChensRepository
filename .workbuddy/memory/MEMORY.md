@@ -7,7 +7,7 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
 编组、采样、走带、文件树、波形、伸缩、缩放、电平表）；平台陷阱与自检夹具在 `PITFALLS.md`。
 动代码前按主题查这两份，本文件只留跨主题硬规则。
 
-## 十二条硬规则
+## 十五条硬规则
 1. **中文一律 `atomic::utf8("...")`**，自检的失败信息也算。裸中文 = 乱码。
 2. **几何走 `ui::px()/pf()`、字号 `ui::sp()`**，唯一密度旋钮 `ui::scale = 1.3f`，禁止裸像素。
    `numPitches` / gutter / 内联自动化框最小宽度不缩放。
@@ -65,9 +65,27 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
     只有钢琴窗 override 成纯 `repaint()`——`layersChanged()` 会无条件关掉编辑中的组（P73），
     而"站在组里给组改名"是最常见的用法。**`SynthSlot::userName`**（可选属性，不升版本）让
     用户起的名字压过 `pluginName`，替换乐器时清掉。
+14. **速度一旦会变，时间就是积分，不是一个数**（P80）：`secondsPerBeat` 已经从全工程消失，
+    唯一的时间换算是 `Model/TempoMap`（`secondsAtBeat` / `beatAtSeconds` / `secondsBetween`）。
+    段内 BPM 线性 ⟹ 求秒 `(60/q)·ln(bpm/bpm0)`、反解拍 `bpm(t)=bpm0·exp(q·dt/60)`；
+    **平坦分支走线性形式，两条分支互换了照样编译得过**（第一版咬测还原时就撞上过）。
+    `renderNextBlock` **每段重算** `beatsPerSample`，每块一次会在渐快时一路落后。
+    曲线值到 BPM 是 `60·4^v`（半个高度 = 半个速度），不是线性。速度图不放进 `MixerModel`：
+    `resetToDefault()` 是"重置混音台"，不该顺手抹掉它。
+
+15. **录制的拍号在事件发生的地方取**（P81）：`MidiInputHub::onNote/onControl` 在 **MIDI 线程**，
+    而 `TakeCollector` 持有 vector、只能在消息线程动。唯一正确的顺序是在回调里读
+    `playback.getPositionBeats()`（原子 relaxed），**把 beat 随事件一起** `callAsync` 过桥；
+    在消息线程里问位置，等于把队列延迟算成走音（每个音符错 5 ms）。`recording` 因此是
+    `std::atomic<bool>`。**音频线程只往预分配的 buffer 里 `copyFrom`**（`RecordBuffer` 只有
+    `writePos`/`armed` 两个原子），满了**自己停**不回绕；`finish()` **先读 `writePos` 再 disarm**。
+    一次录制落两样东西：音频 → 采样块（当前图层）+ 采样器槽，音符 → **新编组**，手拧的旋钮 →
+    **那个组**的 lane（CC 7/11→level、CC 10→pan，其余丢弃不猜）。写 lane 前必须
+    `decimateRecordedCurve`（lane 上限 32 点，一次推子两百个 CC），**少于两点不写**。
+
 ## 目录
-- `Source/Model/` 数据与路由（LayerModel / RackModel / MixerModel / Routing / ProjectIO / Gain）
-- `Source/Audio/` 引擎与纯函数 DSP（PlaybackEngine / ClipStretch / 导出）
+- `Source/Model/` 数据与路由（LayerModel / RackModel / MixerModel / TempoMap / TempoModel / Routing / ProjectIO / Gain）
+- `Source/Audio/` 引擎与纯函数 DSP（PlaybackEngine / Recorder / ClipStretch / 导出）
 - `Source/UI/` 时间线、机架、混音台、文件树、自动化、分栏
 - `Source/MainComponent.*` 装配、走带、撤销、快照与自检
 

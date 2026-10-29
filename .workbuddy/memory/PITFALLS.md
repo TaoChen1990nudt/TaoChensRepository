@@ -1912,3 +1912,231 @@ AtomicDAW.running-0544.exe`，再构建就写出了新的 exe，用户的进程�
 之后这个 index 指向的是**原来第 1 层**，名字就落到别人头上。三个面板都存 id：
 `indexOfLayerId` / `indexOfSlot` / (层 id + 组 id)，提交和自愈（行没了就 `close(false)`）
 都先换回索引。
+
+## P80-A：`--snapshot` 写图是**追加**，不是替换
+
+`createOutputStream()` 在一个已经存在的 PNG 上会**从末尾接着写**。于是 `docs/p80.png`
+里堆了 **18 个 PNG 头**，而 `PIL.Image.open` / 一切看图工具只读**第一张**——第一张是最早
+那次还没有速度行的图。代码、模型、打印、`row 0 = 工程速度` 全对，屏幕上是旧画面。
+
+这一条和 P79-B 是同一个入口的两种死法：一个没写进去（路径错），一个写了但排在旧图后面。
+
+判据（可信的、不看像素的）：`open(png,'rb').read().count(b'\x89PNG') == 1`。
+修法：`Main.cpp` 里写图**之前** `pngFile.deleteFile()`——一次运行一张图。
+
+这个坑把我困了整整一轮：`PRINT` 探针、红色标记块、`PAINT tracks=7` 全都"证明代码对"，
+因为代码确实对，是文件不对。**先数文件里的 PNG 头，再看像素。**
+
+## P80-B：paint 时打印的探针，不是"写图那次 paint"的读数
+
+为了查 P80-A，我在 `drawTrackRow` 里加了打印。它顺带编出一个错误结论：探针说
+`tracks=7`、`row 0 = 工程速度`，而截图里表头写「6 轨」。两者其实说的是**不同的两次 paint**
+（窗口在快照前重绘过好几轮），探针报的是最后一次。
+
+教训：像素级判据要写在**写图之前**那一刻的状态里，或者干脆换成"数文件里的字节"。
+拿"paint 期间打印的变量"去核对"文件里的像素"，中间隔着一次你不知道的绘制。
+
+## P80-C：74 设计单位的列表列，`速度 60–240 BPM` 被裁成 `速度 60–24`
+
+自动化窗左侧名字列宽是固定的 74 设计单位，`速度` 这个短标签本来就是为它挑的；把量程
+一起塞进去就溢出——而且**溢出不是省略号，是硬裁**，读起来像另一个数字（`60–24`）。
+
+量程属于画布，不属于列表：列表只写「速度」，`60 / 120 / 240 BPM` 画在该行的画布右上角。
+
+## P80-D：量程标注贴 row 的右缘，等于贴到视野外
+
+`row` 是一条**横跨整条时间线**的条（64 拍 ≈ 3072 px），不是"窗口那么宽"。`.withRight(row.getRight())`
+把文字送到 3072 px 处，而窗口只有 1160 px 宽——标注画了，一个像素都看不见。
+
+要对齐的是**看得见的那条边**：`.withRight((float) getWidth() - (float) ui::px (8))`。
+凡是"贴在行尾/条目右侧"的装饰，先问一句这一行是不是比窗口宽。
+
+## P80-E：咬测的还原**不能按字符串换回**
+
+第一版脚本植入缺陷后，用 `text.replace(new, old)` 撤销。植入文本一旦与原文件里**已有的某行**
+重合，`replace` 就命中第一处——而那多半不是被改的那一处：
+
+- 「反函数用线性解」把两行换成一行 `return a.beat + dt * a.bpm / 60.0;`，而平坦分支本来就有
+  一模一样的一行（只是缩进不同），还原把**平坦分支**换回了指数解 → 两条分支互换，
+  编译得过、行为全错。
+- 「积分退化成直线」同样：还原后 `secondsAtBeat` 里平坦分支拿到 log、常速分支拿到线性。
+- 还有一条把 `const double bpmHere` 的声明和使用一起换掉，只换回后半段 → `C2065: 未声明的标识符`，
+  构建失败、`restored` 照样打印。
+
+症状：`FINAL: 688 PASS / 3 FAIL`，而代码"看起来"已经还原了。
+
+修法（已写进脚本）：**咬之前读原始字节，咬之后写回原始字节，并逐字节比对**，
+`raise SystemExit` 不一致；锚点带足上下文保证 `count == 1`；`new` **不要复刻文件里已有的行**。
+七次还原全部 `restored ok`，收尾 691/0 才算数。
+
+## P80-F：demo 曲线的拐点在 125 px/拍下全在视野外
+
+`openDemoTempoAutomation()` 原本把断点放在 0 / 16 / 32 / 64 拍（"bar 5"、"halfway"）。
+自动化窗跟着钢琴窗缩放，快照时视野只有约 **9 拍**——图上只看得见"升上去"，
+看不到峰和回落，一条"先升后降"的曲线在截图里变成一条上坡。
+
+演示曲线的作用是**证明形状**，所以断点必须落在视野里：改成 0 / 2 / 4 / 64。
+这不是功能缺陷，是"用来当证据的那张图"没说服力——同样是"代码对、图上没有"的第三种死法。
+
+## P81-A：`AudioEngine::start()` 从来没向系统要过输入通道
+
+`deviceManager.initialise (0, 2, nullptr, true)` 从 P1 起就长这样——两个参数是**输入/输出通道数**，
+一直是 `0`。所以"这个软件能录音吗"这个问题在引擎里根本没有入口：哪怕插着声卡、系统里麦克风
+权限全开，`inputChannelData` 也永远是空指针。
+
+修法不是加界面，是先把 `(2, 2)` 要过来，失败再回落 `(0, 2)`：
+
+```cpp
+lastError = deviceManager.initialise (2, 2, nullptr, true);
+if (lastError.isNotEmpty())
+    lastError = deviceManager.initialise (0, 2, nullptr, true);   // 没麦的机器也要能开
+```
+
+**回落这一步不能省**：不写它，任何人只要没有可用输入设备，整个引擎（包括播放）就起不来。
+凡是"这功能要有硬件"的判断，先看引擎有没有向系统要过这件硬件——界面上的灰按钮骗人，
+`initialise` 的第一个参数不骗人。
+
+## P81-B：在消息线程里问走带位置 = 把队列延迟算成走音
+
+`MidiInputHub::onNote` 跑在 **MIDI 线程**。而采集器 `TakeCollector` 持有 `std::vector`，
+只能在消息线程动，所以事件必须过桥。第一版自然的写法是这样：
+
+```cpp
+// 错的：拍号在 lambda 里取
+juce::MessageManager::callAsync ([this, pitch, velocity, on]
+{ takeCollector.noteOn (pitch, velocity, audio.getPlayback().getPositionBeats()); });
+```
+
+`callAsync` 是**排队**，不是立刻执行。排队期间走带在推进，于是位置读数比事件晚一个队列延迟
+（实测几十毫秒量级，48 kHz 下每拍 0.5 秒时约 5 ms 就是 1% 的音高错位感；连续弹奏时它表现为
+"整体往后飘一点"，而不是某个音错——所以很难听出来是 bug）。正确写法是**在哪发生就在哪读**：
+
+```cpp
+const double beatNow = audio.getPlayback().getPositionBeats();   // MIDI 线程里读
+juce::MessageManager::callAsync ([this, pitch, velocity, on, beatNow]
+{ ... recordNoteAt (pitch, velocity, on, beatNow); });
+```
+
+`getPositionBeats()` 是 `std::atomic<double>`（relaxed）——MIDI 线程读它是安全的，这一点是这条
+写法成立的前提。`recording` 同理必须是 `std::atomic<bool>`，因为 MIDI 线程要读它。
+
+## P81-C：`RecordBuffer::finish()` 先 disarm 再读 `writePos`，交回半块
+
+`getNumSamples()` 的语义是"`armed` 时看 `writePos`，停了看 `frozenSamples`"。所以 `finish()`
+里两步的顺序就是**契约**：
+
+```cpp
+frozenSamples = writePos.load (std::memory_order_acquire);   // 先快照
+armed.store (false, std::memory_order_release);              // 再停
+```
+
+写反（先停再读）在"读 `writePos` 那一刻还没人再写"的情况下也常常侥幸对，但音频回调随时可能在
+两步之间进来把 `writePos` 再推一格——于是交回的样本数比真实的多一帧，WAV 尾部多一个样本，
+块宽算出 2.0001 拍。这类差一帧不会崩，只是让断言偶尔红一次。
+
+同理 `append()` 满了要**自己停**（`armed.store(false)` 后 return），不能回绕：回绕会把开头盖掉，
+用户按满 5 分钟之后拿到的是一段"从 4 分钟开始"的音频。
+
+## P81-D：`AudioBuffer (2, 24000)` 在 48 kHz 下是 0.5 秒，不是 1 秒
+
+自检里造测试音频时写了 `juce::AudioBuffer<float> voice (2, 24000)`，注释写"1 秒"，
+然后用它断言采样块宽 2 拍。48 kHz 下 24000 帧 = **0.5 秒** = 1 拍（120 BPM），于是
+`8.00 + 1.0000 拍` 报了 FAIL——看起来像 `commitTake` 的块宽算错了。
+
+诊断路径是加一个 `getPlaybackForTest()` 探针，直接印 `秒@8 / 拍@5 / len`：`len=0.500` 一出来
+就清楚了，是测试的算术错，不是产品的。**断言里凡是出现"秒↔拍""帧↔秒"的手算常数，先把它打印
+出来**；探针用完要删（这一轮删了两个访问器）。
+
+## P81-E：demo 的音高落在视野外，还被组自动化框压着
+
+`openDemoRecording()` 第一版把录进来的音符放在音高 84–96（"听着亮一点"）。快照上什么都看不到：
+钢琴窗快照视野约 4 个八度且以中音区为中心，96 在顶上之外；就算在视野里，它也被随后打开的
+**组自动化框**盖住（框画在组的上方）。
+
+演示数据的职责是**证明形状**，所以它必须落在"这张图看得见的那一小块"里：改成
+`{ 67, 71, 74, 79 }`（G3–G5），落在 demo 自己那段 8–24 拍音符的左边（4–7 拍），
+并且捏一段**先升后降**的曲线——平的一条在图上等于没有。
+
+## P81-F：`juce::File` 相对路径的基准是**当前工作目录**，不是 exe 也不是工程
+
+demo 第一版把录音文件夹设成 `docs`（相对路径），快照跑起来 cwd 是
+`build/AtomicDAW_artefacts/Release`，于是 WAV 落到 `build/.../Release/docs/录音 1.wav`——
+一个仓库里的垃圾文件，而且 `docs/` 这个名字长得像"工程根目录的 docs"，很容易被 `git add .` 带进去。
+
+落盘位置必须显式：demo 用 `File::getSpecialLocation (tempDirectory).getChildFile ("AtomicDAW-demo-takes")`，
+自检用 `temp/atomic-p81-take` 并在结尾 `deleteRecursively()`。**任何"写文件"的测试都要先问
+一句"cwd 是谁"**。
+
+## P81-G：走带停着时 `stopTransport()` 是空操作（P32 规则），自检别指望它收尾
+
+"停止键要结束录音"这条断言，第一版写成：`beginTakeForTest(4.0)` → 录几个音符 → 调
+`host.stopTransport()` → 断言组已建好。红了。
+
+原因不是新代码：P32 定下"停止时若已停着就什么都不做"，而 `beginTakeForTest` 是纯数据入口
+（它不开走带），所以那一刻走带是停的，`stopTransport()` 直接 return，`finishRecording()` 一次都没跑。
+
+夹具要先把状态摆对：`host.playTransport (false)` 再开始录。**测"某个键会收尾"就得先让那个键
+真的有事情可做**——否则测的是提前返回的分支。
+
+## P81-H：只写一个点的曲线，`loadPoints` 会把它撑成横贯全工程的直线
+
+`AutomationLane::loadPoints` 的既有约定是"至少两点"，单点会被补成一条贯穿全工程的直线
+（读侧必须有个"前后都取这个值"的意思）。录制侧如果照直写——推子只动了一次、或只收到一个 CC——
+用户就会看到自己的组音量突然被一条直线钉死到工程末尾，而且**撤销之前它一直是生效的**。
+
+所以 `applyRecordedControls` 里写 lane 前先数：
+
+```cpp
+if (points.size() < 2) continue;    // 一次推子不算一条曲线
+```
+
+同一条道理往上追一层：`decimateRecordedCurve` 的第一趟漏斗会把"值没变"的点全丢，
+只按值差（1%）和音量差**同时**判断就会把慢速扫弦削成一个点——两趟漏斗 + 首尾钉住才稳。
+
+## P81-I：断言的**消息参数**是无条件求值的，它比断言本身更容易崩
+
+`check (cond, msg)` 里 `cond` 会短路，`msg` **不会**。于是：
+
+```cpp
+check (utf8 ("两百个 CC 点稀疏到 30 个以内…"),
+       ! points.empty() && (int) points.size() <= maxRecordedCurvePoints && …,
+       juce::String (points.size()) + utf8 (" 个点 / 末值 ")
+         + juce::String (points.back().value, 3));      // ← 空 vector 上照样执行
+```
+
+植入"CC 7 不映射"之后 `decimateRecordedCurve` 返回空 vector——这**正是**这条断言本该红的时候。
+`std::vector::back()` 在空 vector 上是 `*(end() - 1)`，而没有分配过的 vector `end()` 就是 `nullptr`，
+于是读 `0xFFFF…F8` → **段错误**。
+
+后果比"少一条断言"严重得多：
+
+- 自检进程崩在"报红"这一步，一条 FAIL 都没打印出来；
+- Windows 错误报告在无头会话里把进程挂住，`ps` 上只剩一个活着的 exe，看上去是**死循环**；
+- 第一版咬测脚本没有 `timeout`，于是卡在第一次植入上 **26 分钟**没有输出。
+
+修法两条一起用：
+
+1. 消息里不要直接下标取值，走一个带边界检查的取值器：
+
+   ```cpp
+   const auto pointAt = [] (const std::vector<AutomationPoint>& p, int index)
+   { return index >= 0 && index < (int) p.size() ? p[(size_t) index] : AutomationPoint {}; };
+   ```
+
+   同一个段落里的 `noteAt` / `controlAt` 是同一件事（`take.notes[0]` 在"一个音符都没录到"
+   的时候同样越界）。
+2. **咬测脚本必须给每次运行一个超时**，并把 `timeout / 非 0-1 退出码` 单独记成一档
+   （`TIMEOUT` / `CRASH rc=`）：崩溃不是"红了"，它连红了几条都答不出来。
+
+一句话：**断言要先能报，再谈判对错。** 一条会在失败路径上崩溃的断言，等于在失败时删掉自己。
+
+## P81-J：`ramp` 遮蔽 `ramp`——P80 留下的 C4456，这一轮才被看见
+
+P80 自检里原本有一条 `TempoMap ramp;`（算好的图），后面又写了 `TempoModel ramp;`（会画曲线的
+模型）。内层同名只是 `C4456` 警告，行为完全正确——所以它从 P80 一直活到 P81，直到这一轮重编
+`SelfTest.cpp` 才在输出里露头（STATUS 里"零 warning"这句话因此是假的）。
+
+改成 `rampCurve`，并在注释里写清两者不是一回事。
+**教训不在命名，在"零 warning"这句话怎么核对**：增量构建只重编改过的 Translation Unit，
+没被重编的文件里的警告不会出现在 `tail` 里。要断言"零 warning"，得看**全量**构建输出，
+或者至少在你改过那份文件的那一次看全。

@@ -14285,11 +14285,13 @@ juce::String MainComponent::runSelfTest()
         // 渐快时"一秒走几拍"没有闭式解，只有"秒数对应的那一拍"：这一步量的
         // 是走带推进（按段的积分）与图的积分是不是同一条曲线。
         {
-            TempoModel ramp;
-            ramp.getAutomation().resetFlat (tempo::valueForBpm (60.0), 64.0);
-            ramp.getAutomation().addPoint (32.0, tempo::valueForBpm (240.0), 64.0);
-            ramp.getAutomation().movePoint (2, 64.0, tempo::valueForBpm (240.0), 64.0);
-            ramp.setAutomated (true);
+            // 名字不能叫 `ramp`：上面那条 TempoMap 已经叫这个，内层同名会遮住它
+            // （C4456），而两者是不同的东西——一个是算好的图，一个是会画曲线的模型。
+            TempoModel rampCurve;
+            rampCurve.getAutomation().resetFlat (tempo::valueForBpm (60.0), 64.0);
+            rampCurve.getAutomation().addPoint (32.0, tempo::valueForBpm (240.0), 64.0);
+            rampCurve.getAutomation().movePoint (2, 64.0, tempo::valueForBpm (240.0), 64.0);
+            rampCurve.setAutomated (true);
 
             RackModel  rackR;
             LayerStack stackR;
@@ -14298,7 +14300,7 @@ juce::String MainComponent::runSelfTest()
 
             PlaybackEngine e;
             e.setSampleRate (48000.0);
-            e.publishSchedule (stackR, rackR, 120.0, 0.0, nullptr, &ramp);
+            e.publishSchedule (stackR, rackR, 120.0, 0.0, nullptr, &rampCurve);
             e.setPositionBeats (0.0);
 
             // 真按 512 的块推：整秒一块会把"段首速度"的误差放大 100 倍，
@@ -14309,7 +14311,7 @@ juce::String MainComponent::runSelfTest()
                 e.renderNextBlock (block, juce::jmin (512, 48000 - done));
 
             const double travelled = e.getPositionBeats();
-            const auto   map       = ramp.buildMap (120.0, 64.0);
+            const auto   map       = rampCurve.buildMap (120.0, 64.0);
 
             // 一秒之后走了多少拍，没有简单公式；但"图上这一拍正是 1.0 秒"是
             // 判据：走带推进出来的位置反算回去必须落回一秒。允许一点点误差，
@@ -14419,6 +14421,403 @@ juce::String MainComponent::runSelfTest()
                  && std::abs (host.getTempoModel().getAutomation().valueAtBeat (32.0) - 0.5f) < 1.0e-6f,
                juce::String (host.getTempoModel().getAutomation().valueAtBeat (32.0), 3)
                  + (host.getTempoModel().isAutomated() ? utf8 (" 还开着") : utf8 (" 关着")));
+    }
+
+    //-- P81: 录制 -----------------------------------------------------------
+    // 一次按键产出两样东西：声卡听到的一段音频，和键盘弹的一串音符。它们落到
+    // 不同地方是因为它们是不同的事物——音频变成采样（文件 + 采样器槽 + 块），
+    // 音符变成自动命名的编组，而组上那两条曲线就是这只手同时拧过的旋钮。
+    {
+        // 断言的消息是**无条件求值**的：`check (cond, msg)` 里 cond 会短路，msg
+        // 不会。消息里写 `take.notes[0]`，在"本来就该红"的那一刻先越界读——P81
+        // 的第一次咬测就是这么崩的：空 vector 的 back() 取到 nullptr-1，段错误，
+        // Windows 错误报告把进程挂住，看上去像死循环。断言必须先能**报**，再谈判对错。
+        const auto noteAt = [] (const Take& t, int index)
+        {
+            return index >= 0 && index < (int) t.notes.size() ? t.notes[(size_t) index]
+                                                              : RecordedNote {};
+        };
+
+        const auto controlAt = [] (const Take& t, int index)
+        {
+            return index >= 0 && index < (int) t.controls.size() ? t.controls[(size_t) index]
+                                                                 : RecordedControl {};
+        };
+
+        const auto pointAt = [] (const std::vector<AutomationPoint>& p, int index)
+        {
+            return index >= 0 && index < (int) p.size() ? p[(size_t) index] : AutomationPoint {};
+        };
+
+        //-- A. 采集器：音符 ---------------------------------------------------
+        {
+            TakeCollector collector;
+            collector.begin (4.0);
+            collector.noteOn (60, 0.9f, 4.0);
+            collector.noteOff (60, 5.0);
+            collector.noteOn (64, 0.5f, 5.5);
+            collector.noteOff (64, 6.5);
+
+            const Take take = collector.finish (8.0);
+
+            check (utf8 ("录两个音符：起止、力度按原样留下"),
+                   take.notes.size() == 2
+                     && std::abs (take.notes[0].startBeat - 4.0) < 1.0e-9
+                     && std::abs (take.notes[0].endBeat - 5.0) < 1.0e-9
+                     && std::abs (take.notes[1].startBeat - 5.5) < 1.0e-9
+                     && std::abs (take.notes[1].endBeat - 6.5) < 1.0e-9
+                     && std::abs (take.notes[0].velocity - 0.9f) < 1.0e-6f,
+                   juce::String (take.notes.size()) + utf8 (" 个音符"));
+        }
+
+        {
+            // 停手时还按着的那一个：必须以 endBeat 收尾，否则它会一路长到
+            // 用户按下停止之后做的事里。
+            TakeCollector collector;
+            collector.begin (0.0);
+            collector.noteOn (48, 0.7f, 1.0);
+
+            const Take take = collector.finish (3.25);
+
+            check (utf8 ("还按着的音符在停止处结束，不拖到停止之后"),
+                   take.notes.size() == 1
+                     && std::abs (take.notes[0].endBeat - 3.25) < 1.0e-9,
+                   juce::String (noteAt (take, 0).endBeat, 3) + utf8 (" 拍"));
+        }
+
+        {
+            // 有些键盘重触发不发 note-off。第一个音必须在这里被截断，否则整段
+            // take 的最后会多出一个从第一次按键一路连过去的长音。
+            TakeCollector collector;
+            collector.begin (0.0);
+            collector.noteOn (60, 0.8f, 0.0);
+            collector.noteOn (60, 0.8f, 2.0);       // 没有 off
+            collector.noteOff (60, 4.0);
+
+            const Take take = collector.finish (4.0);
+
+            check (utf8 ("同音高重触发：前一个在第二次按下处截断（共 2 个音符）"),
+                   take.notes.size() == 2
+                     && std::abs (take.notes[0].endBeat - 2.0) < 1.0e-9
+                     && std::abs (take.notes[1].startBeat - 2.0) < 1.0e-9,
+                   juce::String (take.notes.size()) + utf8 (" 个 / 第一个到 ")
+                     + juce::String (noteAt (take, 0).endBeat, 2));
+        }
+
+        {
+            // 两件"坏输入"：按下录制按钮时手已经按在键上（off 没有 on），以及
+            // 快到没有长度的敲击。前者不该凭空造出一个音符，后者要短到看得见。
+            TakeCollector collector;
+            collector.begin (0.0);
+            collector.noteOff (72, 1.0);
+            collector.noteOn (74, 0.8f, 2.0);
+            collector.noteOff (74, 2.0);
+
+            const Take take = collector.finish (4.0);
+
+            check (utf8 ("没有 on 的 off 不产生音符；零长度的敲击抬到 1/64 拍"),
+                   take.notes.size() == 1
+                     && take.notes[0].pitch == 74
+                     && std::abs ((take.notes[0].endBeat - take.notes[0].startBeat)
+                                    - 1.0 / 64.0) < 1.0e-9,
+                   juce::String (take.notes.size()) + utf8 (" 个 / 长 ")
+                     + juce::String (noteAt (take, 0).endBeat - noteAt (take, 0).startBeat, 5)
+                     + utf8 (" 拍"));
+        }
+
+
+    //-- B. 采集器：旋钮到曲线 ---------------------------------------------
+        check (utf8 ("CC 7/11 走组音量，CC 10 走组声相，其余不猜"),
+               recordTargetFor (7)  == RecordTarget::level
+                 && recordTargetFor (11) == RecordTarget::level
+                 && recordTargetFor (10) == RecordTarget::pan
+                 && recordTargetFor (1)  == RecordTarget::none,
+               juce::String ((int) recordTargetFor (7)) + " / "
+                 + juce::String ((int) recordTargetFor (10)) + " / "
+                 + juce::String ((int) recordTargetFor (1)));
+
+        {
+            TakeCollector collector;
+            collector.begin (0.0);
+            collector.control (7, 100, 1.0);
+            collector.control (1, 64, 1.5);          // 调制轮：不猜
+            collector.control (10, 32, 2.0);
+
+            const Take take = collector.finish (4.0);
+
+            check (utf8 ("录进来的 CC 只留量和声相，调制轮记账但不写曲线"),
+                   take.controls.size() == 2
+                     && take.ignoredControls == 1
+                     && std::abs (take.controls[0].value - 100.0f / 127.0f) < 1.0e-6f,
+                   juce::String (take.controls.size()) + utf8 (" 条 / 忽略 ")
+                     + juce::String (take.ignoredControls) + utf8 (" / 首值 ")
+                     + juce::String (controlAt (take, 0).value, 3));
+        }
+
+        {
+            // 一只手从 0 推到 127，推了两百下：lane 只有 32 个点。
+            std::vector<RecordedControl> controls;
+
+            for (int i = 0; i < 200; ++i)
+                controls.push_back ({ 7, (float) i / 199.0f, (double) i * 0.01 });
+
+            const auto points = decimateRecordedCurve (controls, RecordTarget::level);
+
+            bool ascending = true;
+
+            for (size_t i = 1; i < points.size(); ++i)
+                if (points[i].value < points[i - 1].value - 1.0e-6f)
+                    ascending = false;
+
+            check (utf8 ("两百个 CC 点稀疏到 30 个以内，首尾保住、爬升不破"),
+                   ! points.empty()
+                     && (int) points.size() <= maxRecordedCurvePoints
+                     && std::abs (points.front().beat - 0.0) < 1.0e-9
+                     && std::abs (points.back().beat - 1.99) < 1.0e-9
+                     && std::abs (points.back().value - 1.0f) < 1.0e-6f
+                     && ascending,
+                   juce::String (points.size()) + utf8 (" 个点 / 末值 ")
+                     + juce::String (pointAt (points, (int) points.size() - 1).value, 3));
+        }
+
+        {
+            // 只碰了一下旋钮：一个点不是曲线。写进 lane 会被 loadPoints 修成一条
+            // 横贯全工程的直线——那是把工程音量悄悄改掉。
+            const std::vector<RecordedControl> one { { 7, 0.4f, 2.0 } };
+
+            check (utf8 ("只录到一个 CC 就不写曲线（一个点会被修成横线）"),
+                   decimateRecordedCurve (one, RecordTarget::level).empty(),
+                   juce::String (decimateRecordedCurve (one, RecordTarget::level).size()));
+        }
+
+
+        //-- C. 录音带 ---------------------------------------------------------
+        {
+            RecordBuffer tape;
+            tape.prepare (48000.0, 2, 1.0);
+
+            juce::AudioBuffer<float> block (2, 480);
+
+            for (int i = 0; i < 480; ++i)
+            {
+                block.setSample (0, i, 0.5f);
+                block.setSample (1, i, -0.25f);
+            }
+
+            tape.begin();
+
+            std::vector<const float*> channels { block.getReadPointer (0), block.getReadPointer (1) };
+
+            for (int i = 0; i < 3; ++i)
+                tape.append (channels.data(), 2, 480);
+
+            tape.finish();
+
+            const auto taken = tape.takeAudio();
+
+            check (utf8 ("录音带：三块进、1440 帧出，样本一个不差"),
+                   taken.getNumSamples() == 1440
+                     && taken.getNumChannels() == 2
+                     && std::abs (taken.getSample (0, 700) - 0.5f) < 1.0e-7f
+                     && std::abs (taken.getSample (1, 1439) + 0.25f) < 1.0e-7f,
+                   juce::String (taken.getNumSamples()) + utf8 (" 帧"));
+        }
+
+        {
+            RecordBuffer tape;
+            tape.prepare (1000.0, 2, 0.005);           // 只有 5 帧
+            tape.begin();
+
+            juce::AudioBuffer<float> tiny (2, 4);
+
+            std::vector<const float*> channels { tiny.getReadPointer (0), tiny.getReadPointer (1) };
+
+            tape.append (channels.data(), 2, 4);
+            tape.append (channels.data(), 2, 4);       // 满了
+            tape.append (channels.data(), 2, 4);       // 自动停
+
+            tape.finish();
+
+            check (utf8 ("录音带满了就自己停，不回头覆盖开头"),
+                   tape.takeAudio().getNumSamples() == 5
+                     && tape.getNumSamples() == 5,
+                   juce::String (tape.takeAudio().getNumSamples()) + utf8 (" 帧"));
+        }
+
+        {
+            // 单声道麦克风：两轨都拿到同一份信号，下游只有"立体声"一种形状。
+            RecordBuffer tape;
+            tape.prepare (1000.0, 2, 1.0);
+            tape.begin();
+
+            juce::AudioBuffer<float> mono (1, 10);
+            mono.setSample (0, 3, 0.75f);
+
+            const float* one[] { mono.getReadPointer (0) };
+            tape.append (one, 1, 10);
+            tape.finish();
+
+            const auto taken = tape.takeAudio();
+
+            check (utf8 ("单声道输入复制到两轨（录音只有一种形状）"),
+                   taken.getNumChannels() == 2
+                     && std::abs (taken.getSample (1, 3) - 0.75f) < 1.0e-7f,
+                   juce::String (taken.getSample (1, 3), 3));
+        }
+
+
+        //-- D. 端到端：一次 take 落到工程里 --------------------------------
+        {
+            MainComponent host;
+
+            const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                  .getChildFile ("atomic-p81-take");
+            folder.deleteRecursively();
+            host.setRecordingsFolder (folder);
+
+            auto& stack81 = host.getLayerStack();
+            auto* layer81 = stack81.getActiveLayer();
+
+            const int notesBefore  = (int) layer81->getNotes().size();
+            const int clipsBefore  = (int) layer81->getSamples().size();
+            const int groupsBefore = (int) layer81->getGroups().size();
+
+            host.beginTakeForTest (8.0);
+            host.recordNoteAt (60, 0.9f, true,  8.0);
+            host.recordNoteAt (60, 0.9f, false, 9.0);
+            host.recordNoteAt (64, 0.7f, true,  9.0);
+            host.recordNoteAt (64, 0.7f, false, 10.0);
+            host.recordNoteAt (67, 0.6f, true,  10.0);
+            host.recordNoteAt (67, 0.6f, false, 11.0);
+
+            // 同一只手在拧音量：从 -6 dB 一路推到 0 dB。最后一帧是"推到底"。
+            for (int i = 0; i <= 8; ++i)
+                host.recordControlAt (7, 60 + i * 8, 8.0 + i * 0.375);
+
+            host.recordControlAt (10, 20, 8.0);
+            host.recordControlAt (10, 110, 10.5);
+
+            // 一秒 48k 的音频，塞进录音带的位置。
+            juce::AudioBuffer<float> voice (2, 48000);
+
+            for (int i = 0; i < 48000; ++i)
+            {
+                const float value = std::sin ((float) i * 0.01f) * 0.5f;
+                voice.setSample (0, i, value);
+                voice.setSample (1, i, value);
+            }
+
+            host.takeAudioForTest (voice, 48000.0);
+
+            const int groupId = host.endTakeForTest (11.0);
+            auto* group81 = layer81->findGroup (groupId);
+
+            check (utf8 ("录完一次：三个音符进了一个自动编组，块和文件一起落下"),
+                   groupId > 0
+                     && group81 != nullptr
+                     && (int) layer81->getNotes().size() == notesBefore + 3
+                     && (int) layer81->getSamples().size() == clipsBefore + 1
+                     && (int) layer81->getGroups().size() == groupsBefore + 1,
+                   juce::String (groupId) + utf8 (" / 音符 ")
+                     + juce::String (layer81->getNotes().size() - notesBefore)
+                     + utf8 (" / 块 ") + juce::String (layer81->getSamples().size() - clipsBefore));
+
+            int members = 0;
+
+            if (group81 != nullptr)
+                for (const auto& note : layer81->getNotes())
+                    if (note.groupId == groupId)
+                        ++members;
+
+            check (utf8 ("组里正好是刚录的三个音符（不是整层）"),
+                   members == 3 && group81->getName() == juce::String (utf8 ("录音 ")) + "1",
+                   juce::String (members) + utf8 (" 个 / ")
+                     + (group81 == nullptr ? juce::String ("无组") : group81->getName()));
+
+            check (utf8 ("拧过的音量进了组的 level 曲线：约 8 个点，首尾对得上"),
+                   group81 != nullptr
+                     && group81->getLevelAutomation().isEnabled()
+                     && group81->getLevelAutomation().getPoints().size() >= 2
+                     && std::abs (group81->getLevelAutomation().valueAtBeat (8.0) - 60.0f / 127.0f) < 1.0e-4f
+                     && std::abs (group81->getLevelAutomation().valueAtBeat (11.0) - 124.0f / 127.0f) < 1.0e-4f,
+                   group81 == nullptr ? juce::String ("无组")
+                                      : juce::String ((int) group81->getLevelAutomation().getPoints().size())
+                                          + utf8 (" 个点 / 起点 ")
+                                          + juce::String (group81->getLevelAutomation().valueAtBeat (8.0), 3));
+
+            check (utf8 ("CC 10 进了组的 pan 曲线（20 -> 110 就是一左一右）"),
+                   group81 != nullptr
+                     && group81->getPanAutomation().isEnabled()
+                     && std::abs (group81->getPanAutomation().valueAtBeat (8.0) - 20.0f / 127.0f) < 1.0e-4f
+                     && std::abs (group81->getPanAutomation().valueAtBeat (10.5) - 110.0f / 127.0f) < 1.0e-4f,
+                   group81 == nullptr ? juce::String ("无组")
+                                      : juce::String (group81->getPanAutomation().valueAtBeat (10.5), 3));
+
+            // 块宽：一秒的音频在 120 BPM 下正好 2 拍。
+            const auto& clip81 = layer81->getSamples().back();
+
+            check (utf8 ("录下来的音频块：起点 = 录音起点，宽 = 这段音频的拍长"),
+                   std::abs (clip81.startBeat - 8.0) < 1.0e-9
+                     && std::abs (clip81.lengthBeats - 2.0) < 1.0e-6
+                     && clip81.outputSlotId > 0
+                     && clip81.path.isNotEmpty(),
+                   juce::String (clip81.startBeat, 2) + utf8 (" + ")
+                     + juce::String (clip81.lengthBeats, 4) + utf8 (" 拍"));
+
+            // 文件真的写出来了，而且能按同一套解码读回来（帧数对得上）。
+            const juce::File wav (clip81.path);
+            const auto reloaded = loadSampleFile (wav);
+
+            check (utf8 ("WAV 落到磁盘并能读回（48000 帧 / 48 kHz）"),
+                   wav.existsAsFile()
+                     && reloaded.ok()
+                     && reloaded.buffer->numFrames() == 48000
+                     && std::abs (reloaded.buffer->sampleRate - 48000.0) < 1e-6,
+                   reloaded.ok() ? juce::String (reloaded.buffer->numFrames()) + utf8 (" 帧")
+                                 : reloaded.error);
+
+            folder.deleteRecursively();
+        }
+
+
+        //-- E. 空按一下不该留下任何东西 -------------------------------------
+        {
+            MainComponent host;
+            auto& stack82 = host.getLayerStack();
+            auto* layer82 = stack82.getActiveLayer();
+
+            const int groupsBefore = (int) layer82->getGroups().size();
+            const int clipsBefore  = (int) layer82->getSamples().size();
+
+            host.beginTakeForTest (0.0);
+            const int result = host.endTakeForTest (4.0);      // 什么都没弹
+
+            check (utf8 ("空按一次录制：不建空组、不留空块"),
+                   result == -1
+                     && (int) layer82->getGroups().size() == groupsBefore
+                     && (int) layer82->getSamples().size() == clipsBefore,
+                   juce::String (result));
+        }
+
+
+        //-- F. 走带联动：停止就是收工 ---------------------------------------
+        {
+            MainComponent host;
+
+            // 走带必须真的在跑：停在原地按停止键是一次空操作（P32：停止不能
+            // 撤销一次"把播放头放这儿"的点击），空操作当然也不会结束录音。
+            host.playTransport (false);
+            host.beginTakeForTest (0.0);
+            host.recordNoteAt (60, 0.8f, true, 0.0);
+
+            const bool wasRecording = host.isRecording();
+            host.stopTransport();
+
+            check (utf8 ("按下停止键时这次录音一起收尾（不会一直录下去）"),
+                   wasRecording && ! host.isRecording(),
+                   juce::String (wasRecording ? "在录" : "没录") + " / "
+                     + juce::String (host.isRecording() ? "还在录" : "已停"));
+        }
     }
 
     // The summary MUST come after the last check. It used to sit mid-function

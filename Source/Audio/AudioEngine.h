@@ -5,6 +5,7 @@
 #include <atomic>
 
 #include "Audio/PlaybackEngine.h"
+#include "Audio/Recorder.h"
 #include "Model/HardwareRack.h"
 #include "Model/TempoModel.h"
 #include "Model/LayerModel.h"
@@ -116,6 +117,33 @@ public:
         the mixer: without it nothing can host a plugin. */
     void setPluginHost (PluginHost* host);
 
+    //-- Phase 81: recording --------------------------------------------------
+    /** The input side of the sound card. Phase 81 is the first thing here that
+        needed one: until now the device was opened with `initialise (0, 2, ...)`
+        — output only — so "record audio" had no wire to stand on.
+
+        False when the device has no usable inputs or the device is offline; the
+        caller then records MIDI only rather than pretending a take exists. */
+    bool hasAudioInput() const;
+
+    /** Message thread. Clears the tape and arms the callback.
+
+        `maxSeconds` is preallocated up front because the audio thread must not
+        allocate: a five-minute ceiling at the device's own sample rate. */
+    bool beginRecording (double maxSeconds = 300.0);
+
+    /** Message thread. Disarms and hands back what was captured. An empty
+        buffer means the device had no inputs (or nothing was armed). */
+    juce::AudioBuffer<float> endRecording();
+
+    bool isRecording() const noexcept { return recordBuffer.isRecording(); }
+    double getRecordSampleRate() const noexcept { return recordBuffer.getSampleRate(); }
+
+    /** Test only: pushes a buffer through the same door the device callback
+        uses. The self-test has no microphone, and mocking the device would test
+        the mock. */
+    void appendRecordedForTest (const juce::AudioBuffer<float>& audio);
+
     //-- Model listeners ------------------------------------------------------
     void layersChanged() override;
     void notesChanged() override;
@@ -153,6 +181,8 @@ private:
     /** Where the tail is rendered from after Play is released. In beats, so a
         tempo change during the 8 ms of tail is still consistent. */
     std::atomic<double> fadeOutBeats { 0.0 };
+
+    RecordBuffer recordBuffer;
 
     bool        deviceOpen = false;
     double      bpm        = PlaybackEngine::defaultBpm;
