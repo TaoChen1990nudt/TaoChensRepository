@@ -899,6 +899,35 @@ public:
         which is exactly where a user grabs to move the group as one object. */
     int getGroupFrameAt (juce::Point<float> position, int* occurrence = nullptr) const;
 
+    /** P92: which appearance a group-list row dropped at this point would
+        REPLACE, or -1 for "the drop means what it meant in Phase 58".
+
+        Members first, the bracket second — the same order a press uses, so the
+        answer is the thing the pointer is standing on rather than the group
+        drawn behind it. Two things are never a target: a loose note (it has no
+        group to replace), and the dragged group itself.
+
+        Only the sheet the dragged row lives on can answer. Groups belong to a
+        sheet, so taking one over from another sheet is a different gesture —
+        bringing the definition across — and folding it in here would make one
+        drop mean two things depending on state the user cannot see. */
+    int getGroupReplaceTargetAt (juce::Point<float> position,
+                                 int sourceLayer, int sourceGroupId,
+                                 int* occurrence = nullptr) const;
+
+    /** P92: the appearance the drop in flight would replace — the very number
+        the preview paints from and the drop acts on. Read back by the
+        self-test, because a preview that promises one group and a drop that
+        takes another is exactly the bug that survives every test that only
+        performs the drop. */
+    int getDropReplaceTargetForTest (int* occurrence = nullptr) const
+    {
+        if (occurrence != nullptr)
+            *occurrence = dropReplaceOccurrence;
+
+        return dropReplaceGroupId;
+    }
+
     /** Fired when a group disappears, so the host can drop its automation
         track. The model cannot do that itself: it does not own the window. */
     std::function<void (int groupId)> onGroupRemoved;
@@ -1123,6 +1152,31 @@ public:
         Returns false when the layer or group is gone, or the group has no
         members — a drag that resolved to nothing must not invent a group. */
     bool placeGroupAppearance (int layerIndex, int groupId, double atBeat);
+
+    /** P92: "that group, in THAT one's place" — a group-list row dropped onto
+        an appearance that is already on the sheet.
+
+        Phase 58 gave a row dropped on empty grid a meaning ("one more copy,
+        starting here") and left the other half unanswered: a row dropped on a
+        group produced the same copy stacked on top of the thing the user was
+        aiming at. This is the verb that was missing. The appearance under the
+        pointer is removed and the dragged group's members take its place.
+
+        Anchored at the TARGET appearance's own origin, not at the pointer:
+        "drop on it" means "be it", and the appearance being replaced already
+        has a position — reading the pointer's beat would nudge the group to
+        wherever the hand happened to stop.
+
+        Not a swap of definitions. The target group may have three other
+        appearances on the sheet, and this replaces the one under the pointer;
+        its definition leaves the list only when this was its last member
+        (pruneEmptyGroups runs at the end).
+
+        Returns false when either group is gone, when they are the same group
+        (a group cannot replace itself — that would delete the very members it
+        is about to place), or when what was dragged has no members. */
+    bool replaceGroupAppearance (int layerIndex, int groupId, int targetGroupId,
+                                 int targetOccurrence);
 
     /** Phase 56: the group menu's items, built by a function the self-test can
         call. `showMenuAsync` is a modal popup — a headless run can never see
@@ -2349,6 +2403,12 @@ private:
     int          dropTargetSample = -1;   // sampler card over this block
     int          dropGroupLayer   = -1;   // group row: which sheet it lives on
     int          dropGroupId      = -1;   // group row: which group
+
+    /** P92: the appearance this drop would replace, or -1 for "place a new
+        one". Resolved in updateCardDrop — the same call the drop runs — so the
+        preview and the result cannot name different groups. */
+    int          dropReplaceGroupId    = -1;
+    int          dropReplaceOccurrence = -1;
 
     //-- Phase 49: the clip's own automation box ------------------------------
     /** Mirrors the note box (Phase 8) and the group box (Phase 21): one

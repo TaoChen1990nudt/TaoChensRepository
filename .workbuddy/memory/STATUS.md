@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-30 · **Phase 91**（拍号是工程属性）
+> 最后更新：2026-10-30 · **Phase 92**（拖组到组上＝替换）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**，约 6 千字。
 > 规则 `MEMORY.md` · 制度 `REFERENCE.md` · 坑 `PITFALLS.md` · 逐阶段实现记录 `memory/<日期>.md`
 > · 被压掉的历史叙述（阶段全文 / 咬测流水 / 逐版沿革 / P62–P82 经验）在 **`STATUS-archive.md`**。
@@ -8,7 +8,7 @@
 ## 新会话读文档的顺序
 
 1. **本文件**（1 分钟）
-2. **`MEMORY.md`** — 二十四条跨主题硬规则 + 目录/构建/工程文件约定（必须全文读）
+2. **`MEMORY.md`** — 二十五条跨主题硬规则 + 目录/构建/工程文件约定（必须全文读）
 3. **`REFERENCE.md`** — 按主题查制度（构建/路由/音频/工程文件/混音台/编辑手势/编组/采样/走带/波形/伸缩…）
 4. **`PITFALLS.md`** — 卡住了再查对应阶段
 5. **`memory/<日期>.md`** — 想知道「为什么这么写」才翻
@@ -19,13 +19,13 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 91** — 拍号是工程属性。P86 把工程文件里的 `path` 从绝对改成**相对工程目录**（解不回来才退回绝对），模型里仍是绝对；找不到时能按用户挑的目录按文件名重定位。P87 让走带能循环任意一段：`Model/LoopRegion` 是唯一的区间规则，标尺底部一条 7px 窄带画它、拖它，关掉不忘记位置。P88 加了点击轨与数拍：`Audio/Metronome` 只混进走带的块（导出结构性拿不到），录音前可数一小节。P89 给自检的退出码装了个听众：GitHub Actions 跑 configure → build → `--snapshot`，四条门禁全判在 ASCII 上。P90 让已弹的东西回到网格：`Model/Quantize.h` 一个纯函数（就近 + 0..1 强度），右键菜单五档网格 × 四档强度，音符与采样块都动，编组先重锚定出现原点再同步形状。P91 把写了八十八个阶段的 `constexpr double beatsPerBar = 4.0` 变成值：`Model/Meter.h` 是唯一的拍号规则，写进 `<Transport beatsPerBar>`，四个读者（标尺/复制到后一小节/节拍器重音/量化菜单）读同一份 |
-| 自检 | **850 ALL PASSED / 0 FAIL**，失败退出码 1 |
+| 已完成阶段 | **Phase 92** — 拖组到组上＝替换。P92 补上「从编组栏拖一行出来」的另一半：落在空网格上仍是「再放一处」，落在**已经在那儿的组**上则是**替换那一处**——目标那一处的成员（音符与采样块）被拿掉，拖来的组按**目标的出现原点**站过去，目标没有别的出现就整行离开列表；只认同图层，命中顺序照按下的顺序（成员优先，框在后）。P91 把拍号变成工程属性。P86 把工程文件里的 `path` 从绝对改成**相对工程目录**（解不回来才退回绝对），模型里仍是绝对；找不到时能按用户挑的目录按文件名重定位。P87 让走带能循环任意一段：`Model/LoopRegion` 是唯一的区间规则，标尺底部一条 7px 窄带画它、拖它，关掉不忘记位置。P88 加了点击轨与数拍：`Audio/Metronome` 只混进走带的块（导出结构性拿不到），录音前可数一小节。P89 给自检的退出码装了个听众：GitHub Actions 跑 configure → build → `--snapshot`，四条门禁全判在 ASCII 上。P90 让已弹的东西回到网格：`Model/Quantize.h` 一个纯函数（就近 + 0..1 强度），右键菜单五档网格 × 四档强度，音符与采样块都动，编组先重锚定出现原点再同步形状。P91 把写了八十八个阶段的 `constexpr double beatsPerBar = 4.0` 变成值：`Model/Meter.h` 是唯一的拍号规则，写进 `<Transport beatsPerBar>`，四个读者（标尺/复制到后一小节/节拍器重音/量化菜单）读同一份 |
+| 自检 | **865 ALL PASSED / 0 FAIL**，失败退出码 1 |
 | 编译 | 零 error 零 warning |
 | `formatVersion` | **29**（P86 = 27 只改值不改标签；P87 = 28 加 `<Transport loop loopStart loopEnd>`；**P88 不升**——节拍器开关/音量/预备拍长度还没进工程文件；**P91 = 29** 加 `<Transport beatsPerBar>`，且 `<Transport>` 改成**永远写**——否则「4/4 无循环」和「3/4 无循环」是同一份文档）— 新增 `<Curve id name target pluginparam enabled>` + `<CurveState active/>`；**v28 及更老的文件照常打开**（没有 `beatsPerBar` 就读 4/4），只有重新保存才写新形状 |
 | 可执行 | `build/AtomicDAW_artefacts/Release/AtomicDAW.exe` |
 | 技术栈 | JUCE 8.0.4（FetchContent）+ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + C++17 |
-| 源码规模 | `Source/` 下 **109 个** .cpp/.h，共 **80,894 行**，分 Model / Audio / UI / Util / Media。最大的三个是 `SelfTest.cpp` 17,155 / `MainComponent.cpp` 8,687 / `PlaybackEngine.cpp` 3,748 |
+| 源码规模 | `Source/` 下 **109 个** .cpp/.h，共 **81,502 行**，分 Model / Audio / UI / Util / Media。最大的三个是 `SelfTest.cpp` 17,458 / `MainComponent.cpp` 8,696 / `PlaybackEngine.cpp` 3,748 |
 
 ## 下一步
 
@@ -42,7 +42,14 @@
   它要先有"那个脉"，才有"一小节几个"。真做变拍号（一首歌里换拍号）是另一层：
   拍号要跟着位置走，标尺、节拍器、复制到后一小节全要改成"问这一拍属于哪个拍号段"。
 
-## 最近十轮（新会话最需要的前情）
+## 最近十一轮（新会话最需要的前情）
+
+- **P92 拖组替换** — 「从编组栏拖一行」现在有两个答案，**是哪个由指针底下是什么决定**：
+  空网格 = 再放一处（P58），压在某个组上 = 替换那一处。三件事值得记住：**锚点是目标的
+  出现原点，不是指针的拍**（「落在它上面」就是「成为它」，被替换的那一处本来就有位置）；
+  **命中顺序照按下的顺序**（成员优先，框在后；自己组的成员一律不算目标，否则会先删掉
+  马上要插回来的东西）；**只认同图层**，跨图层要搬定义，是另一个手势。替换的不是整个组，
+  是**那一处**——它没有别的出现时 `pruneEmptyGroups` 才把整行送走。
 
 - **P91 拍号** — `beatsPerBar` 从一个 `constexpr` 变成一个值（`Model/Meter.h`），
   `formatVersion` 29。三件事值得记住：**`<Transport>` 改成永远写**（"4/4 无循环"和
@@ -96,6 +103,9 @@
 
 ## 已知边界（用户提过、还没做）
 
+- **替换只认同图层**（P92 的边界）：拖一行到**别的图层**的组上，走的还是 P58 的「再放一处」
+  （落在源组自己的图层上）。跨图层的替换要先把组的定义搬过去——那是「把组搬到这个图层」，
+  另一个手势、另一个菜单项。另外替换**不改音高**：拖来的组带自己的音高，与 P58 一致。
 - **量化只动起点**（P90 的边界）：长度不量化（"把长短也归位"是另一件事，也是另一个命令），
   网格只有 1/32 / 1/16 / 1/8 / 1/4 / 小节五档，**没有三连音**；自动化 lane 不受量化影响。
   量化不进工程文件（网格与强度是工具设置），`formatVersion` 的 29 是 P91 的拍号用的。
@@ -103,7 +113,7 @@
   **6/8 不是 `beatsPerBar = 3`**——那是三个点击，音乐里是两下；要支持得先有"附点四分"
   这个脉。变拍号（歌里换拍号）也没做：拍号现在是**一个**工程值，不是一张表。
 
-- **CI 不跑视觉回归**（P89）：30 张图只当 artifact 上传，不逐字节比。8 张本来就会抖
+- **CI 不跑视觉回归**（P89）：32 张图只当 artifact 上传，不逐字节比。8 张本来就会抖
   （电平表 / 播放头 / 恢复时间戳），其余依赖 runner 的字体与 DPI。要让这条进闸门，
   得先做一件事：给每张图定"允许抖多少像素 / 只比哪块区域"，而不是简单的 md5。
 - **CI 只在 Windows 上跑**（P89）：macOS / Linux 能编译的那部分从来没验过（`mp3` 在非
@@ -176,6 +186,7 @@
 | P89 | CI：GitHub Actions 跑 configure → build → `--snapshot`，四条 ASCII 门禁 | `.github/workflows/selftest.yml` |
 | P90 | 量化选区：`Model/Quantize.h` 纯函数 + 右键菜单五档网格 × 四档强度 + 编组重锚定 | `memory/2026-10-30.md` |
 | P91 | 拍号是工程属性：`Model/Meter.h` + `<Transport beatsPerBar>`（v29）+ 标尺角落与节拍器菜单两个门 | `memory/2026-10-30.md` |
+| P92 | 拖组到组上＝替换那一处：`getGroupReplaceTargetAt` + `replaceGroupAppearance` + 预览换形状 | `memory/2026-10-30.md` |
 | 踩坑索引 | 各阶段的不变量与咬测 | `PITFALLS.md` |
 
 ## 构建
@@ -203,21 +214,21 @@ build/AtomicDAW_artefacts/Release/AtomicDAW.exe --snapshot docs/phaseNN.png > do
 tail -3 docs/phaseNN.log   # 要看到 "ALL CHECKS PASSED"
 ```
 
-断言总数只增不减。**新增功能要加断言并报出新的总数**（当前基准 **850**），退回去说明有东西坏了。
+断言总数只增不减。**新增功能要加断言并报出新的总数**（当前基准 **865**），退回去说明有东西坏了。
 
-视觉回归：每轮入库 31 张 `docs/pNN-*.png`（`--snapshot p91.png` 会顺带写出 30 张后缀图 + 主图）。
-与上一轮逐字节比，**P91 是 13/31 相同**；差异必须落在三类里：**11 张**是标尺角落那格
-`1 小节` → `4/4` 的 24×9 像素文字框（`blank`/`clip`/`clipauto`/`clippan`/`dropnote`/
-`dropsample`/`groups`/`loop`/`spotlight`/`stretch`/主图），**7 张**是抖动集
-`mixer` / `mixer-narrow` / `recovery` / `sampler` / `groupauto` / `selectmark*`（电平表、播放头、
-恢复时间戳）。判"是不是有意的改动"用 bbox，不用 md5：面积、位置、形状不对就是出了别的事。
+视觉回归：每轮入库 32 张 `docs/pNN-*.png`（`--snapshot p92.png` 会顺带写出 31 张后缀图 + 主图；
+`-dropgroup` 是 P92 新加的）。与上一轮逐字节比，**P92 是 26/31 相同**，5 张差异全在抖动集
+`groupauto` / `recovery` / `selectmark*`（电平表、恢复时间戳），每张只有 81–322 个像素、
+bbox 是 13–16 px 宽的窄竖条。**抖动是逐次运行的，不是逐版本的**：同一份二进制跑两次，
+主图的电平表也会差三十几个像素——所以"比上一次多出几张不一样"不能当回归信号，
+要看 bbox 的形状与位置。判"是不是有意的改动"用 bbox，不用 md5。
 **会改状态的快照函数（`-loop` / `-metronome`）必须排在序列最后。**
 
 其他 dev 参数：`--cursor-preview <png>`（光标 8x 放大核对）、`--pluginscan`、`--audiotest`、`--transporttest`、`--load` / `--save` / `--export`。
 
 **CI（P89）**：推上去就跑 `.github/workflows/selftest.yml`（也可以手动 dispatch）。
 门禁只有四条，全判在 ASCII 上：退出码 0 / `[FAIL]` 数为 0 / 日志含 `ALL CHECKS PASSED` /
-PASS 数 ≥ `env.MIN_CHECKS`（850）。**加断言的那一轮要在同一个提交里把 `MIN_CHECKS` 调大**，
+PASS 数 ≥ `env.MIN_CHECKS`（865）。**加断言的那一轮要在同一个提交里把 `MIN_CHECKS` 调大**，
 它是"只增不减"唯一执法的地方。CI 跑在**仓库根**（cwd ≠ exe 目录），本地一样能这么跑，
 出图与 `demo.atomic` 会落在根上——`.gitignore` 里已忽略。
 

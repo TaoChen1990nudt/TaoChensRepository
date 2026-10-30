@@ -396,7 +396,11 @@ public:
         `instrumentCard` picks which gesture: a synth hovering a note (挂载) or a
         sampler hovering a block (替换采样). The preview is cleared before
         returning; the session is not changed by either frame. */
-    juce::Image createCardDropSnapshot (bool instrumentCard,
+    /** P92: which drag is in flight. A bool used to be enough — instrument or
+        sampler — and the group row was the third gesture with no frame. */
+    enum class DropSnapshotKind { instrumentCard, samplerCard, groupRow };
+
+    juce::Image createCardDropSnapshot (DropSnapshotKind kind,
                                         int width = ui::px (900),
                                         int height = ui::px (420));
 

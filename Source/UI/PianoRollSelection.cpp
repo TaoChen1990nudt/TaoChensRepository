@@ -956,6 +956,64 @@ int PianoRollComponent::getGroupFrameAt (juce::Point<float> position, int* occur
 }
 
 
+int PianoRollComponent::getGroupReplaceTargetAt (juce::Point<float> position,
+                                                 int sourceLayer, int sourceGroupId,
+                                                 int* occurrence) const
+{
+    if (occurrence != nullptr)
+        *occurrence = -1;
+
+    if (sourceGroupId < 0)
+        return -1;
+
+    // Same sheet only: a group id is unique session-wide, but a group LIVES on
+    // one sheet, and "replace that one with this one" between sheets would have
+    // to move a definition — a different act, with a different answer for the
+    // group list. The drop keeps its Phase-58 meaning there instead.
+    if (sourceLayer != stack.getActiveLayerIndex())
+        return -1;
+
+    // Members first, in the order the press uses: the topmost thing answers.
+    // A note that is NOT a replace target still ends the search — falling
+    // through to the bracket would answer with the group BEHIND the note,
+    // which is not what the pointer is on.
+    if (const auto* note = hitTestActiveLayer (position))
+    {
+        if (note->groupId < 0 || note->groupId == sourceGroupId)
+            return -1;
+
+        if (occurrence != nullptr)
+            *occurrence = note->groupOccurrence;
+
+        return note->groupId;
+    }
+
+    if (const auto* clip = hitTestSample (position))
+    {
+        if (clip->groupId < 0 || clip->groupId == sourceGroupId)
+            return -1;
+
+        if (occurrence != nullptr)
+            *occurrence = clip->groupOccurrence;
+
+        return clip->groupId;
+    }
+
+    int which = -1;
+    const int framed = getGroupFrameAt (position, &which);
+
+    if (framed >= 0 && framed != sourceGroupId)
+    {
+        if (occurrence != nullptr)
+            *occurrence = which;
+
+        return framed;
+    }
+
+    return -1;
+}
+
+
 bool PianoRollComponent::isGroupFocused (int layerIndex, int groupId, int occurrence) const
 {
     if (focusSlotId < 0)

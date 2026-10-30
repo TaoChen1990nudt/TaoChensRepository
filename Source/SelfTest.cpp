@@ -17141,6 +17141,309 @@ juce::String MainComponent::runSelfTest()
         }
     }
 
+    //==========================================================================
+    // P92: a group row dropped ON a group replaces that appearance
+    //==========================================================================
+    // Phase 58 answered the first half of "drag a row out of the group list" —
+    // empty grid means one more appearance, starting here. Aimed at a group
+    // already on the sheet it produced that same copy stacked on top of the
+    // thing being pointed at, because there was no second answer. These checks
+    // pin the second answer down: what the pointer is ON decides which verb
+    // runs, and a replacement takes the target's PLACE rather than the
+    // pointer's beat.
+    [&]
+    {
+        LayerStack stack;
+        RackModel  rack;
+
+        stack.addLayer (utf8 ("一层"), palette::layer1);
+        stack.addLayer (utf8 ("二层"), palette::layer2);
+
+        // A fresh stack has no active sheet, and every hit test here answers for
+        // "the sheet being edited" — without this the first four checks would
+        // read (-1, -1) and pass or fail for the wrong reason. The first drop
+        // below would set it as a side effect; a test that relied on that would
+        // be testing the side effect.
+        stack.setActiveLayerIndex (0);
+
+        auto* layer = stack.getLayer (0);
+
+        PianoRollComponent roll (stack, rack);
+        roll.setSize (1400, 620);
+        roll.setScrollBeats (0.0);
+
+        const auto addNote = [layer] (int pitch, double beat, double length)
+        {
+            NoteEvent note;
+            note.pitch       = pitch;
+            note.startBeat   = beat;
+            note.lengthBeats = length;
+            return layer->addNote (note);
+        };
+
+        const auto addGroup = [layer] (const juce::String& name, std::vector<int> notes,
+                                       int occurrence = 0)
+        {
+            const int id = layer->addGroup (name, groupPalette::group2);
+            layer->assignNotesToGroup (notes, id, occurrence);
+            return id;
+        };
+
+        // A: the row being dragged. Two notes one beat apart, so "the shape came
+        //    across intact" is a number rather than a guess.
+        const int gidA = addGroup (utf8 ("源"),
+                                   { addNote (72, 1.0, 1.0), addNote (76, 2.0, 1.0) });
+
+        // B: one note. Its frame IS its note, which makes "on a member" and
+        //    "inside the bracket" two separable cases instead of one.
+        const int noteB = addNote (68, 8.0, 1.0);
+        const int gidB  = addGroup (utf8 ("目标"), { noteB });
+
+        // C: a wide bracket, two notes far apart — the gap between them is
+        //    inside the frame and on no member.
+        const int gidC = addGroup (utf8 ("宽框"),
+                                   { addNote (80, 20.0, 1.0), addNote (64, 22.0, 1.0) });
+
+        // D: one note that sits INSIDE C's bracket. Dragging D's own row and
+        //    pointing at this note is the case where "member first" and
+        //    "bracket second" disagree — the press rule applies to the drop too.
+        const int gidD = addGroup (utf8 ("窄框"), { addNote (72, 21.0, 1.0) });
+
+        const auto frameB = roll.getGroupFrameBoundsForTest (0, gidB, 0);
+        const auto frameC = roll.getGroupFrameBoundsForTest (0, gidC, 0);
+        const auto frameD = roll.getGroupFrameBoundsForTest (0, gidD, 0);
+
+        const auto pointB = frameB.getCentre();          // on B's only note
+
+        // Inside C's bracket, on no member: horizontal at 20.5 (C's first note
+        // runs 20..21, but on the pitch-80 row), vertical at the frame's middle.
+        // Every pitch here stays inside the visible 84..57 window — a group whose
+        // members are scrolled out has an EMPTY frame (getGroupContentBounds only
+        // unions what intersects the grid), and every check below would then pass
+        // on (-1, -1) for the wrong reason.
+        const juce::Point<float> pointGap { roll.screenXForBeatForTest (20.5),
+                                            frameC.getCentreY() };
+
+        const auto pointD = frameD.getCentre();          // on D's only note
+
+        int occB = -1, occGap = -1, occD = -1, occSheet = -1;
+
+        const int hitB     = roll.getGroupReplaceTargetAt (pointB, 0, gidA, &occB);
+        const int hitGap   = roll.getGroupReplaceTargetAt (pointGap, 0, gidA, &occGap);
+        const int frameGap = roll.getGroupFrameAt (pointGap);
+
+        //-- 1/2. the pointer answers with what it is on ----------------------
+        check (utf8 ("拖到某个组的成员上：要被替换的就是它"),
+               hitB == gidB && occB == 0,
+               juce::String (hitB) + " / " + juce::String (occB));
+
+        check (utf8 ("拖进组框里的空白：也是那个组，不必正好压在音符上"),
+               hitGap == gidC && frameGap == gidC && occGap == 0,
+               juce::String (hitGap) + " / " + juce::String (frameGap));
+
+        //-- 3. members win over the bracket -------------------------------
+        // pointD is inside C's bracket AND on D's own note. The bracket would
+        // say C; the pointer is really on D. A group cannot replace itself, so
+        // the answer has to be "no target" — not "C".
+        const int hitD = roll.getGroupReplaceTargetAt (pointD, 0, gidD, &occD);
+
+        check (utf8 ("框会把这一点说成 C，可指针其实在 D 自己的音符上：不替换"),
+               roll.getGroupFrameAt (pointD) == gidC && hitD < 0,
+               juce::String (roll.getGroupFrameAt (pointD)) + " / " + juce::String (hitD));
+
+        //-- 4. only the sheet the row lives on answers ---------------------
+        const int hitOtherSheet = roll.getGroupReplaceTargetAt (pointB, 1, gidA, &occSheet);
+
+        check (utf8 ("别的图层的组不是目标（组是挂在图层上的）"),
+               hitOtherSheet < 0,
+               juce::String (hitOtherSheet));
+
+        //-- 5. empty grid still means Phase 58 ------------------------------
+        const int groupsBefore = (int) layer->getGroups().size();
+
+        const auto occurrencesOf = [&] (int groupId)
+        {
+            return layer->getGroupOccurrences (groupId);
+        };
+
+        roll.simulateCardDrop (groupDragDescription (0, gidA),
+                               { roll.screenXForBeatForTest (5.0),
+                                 roll.getGridBounds().getCentreY() });
+
+        const auto occAAfterPlace = occurrencesOf (gidA);
+
+        check (utf8 ("松手在空网格上：还是「再放一处」，谁也不删"),
+               (int) occAAfterPlace.size() == 2
+                 && (int) layer->getGroups().size() == groupsBefore
+                 && layer->findNote (noteB) != nullptr,
+               juce::String ((int) occAAfterPlace.size()) + utf8 (" 处 / ")
+                 + juce::String ((int) layer->getGroups().size()) + utf8 (" 组"));
+
+        const auto startOf = [&] (int groupId, int occurrence)
+        {
+            double at = -1.0;
+
+            for (int id : layer->getOccurrenceNoteIds (groupId, occurrence))
+                if (const auto* n = layer->findNote (id))
+                    at = at < 0.0 ? n->startBeat : juce::jmin (at, n->startBeat);
+
+            return at;
+        };
+
+        //-- 6. the preview and the drop read one number --------------------
+        roll.simulateDropPreview (groupDragDescription (0, gidA), pointB);
+
+        int previewOcc = -1;
+        const int previewGroup = roll.getDropReplaceTargetForTest (&previewOcc);
+
+        check (utf8 ("预览说会替换谁，松手就得替换谁"),
+               previewGroup == gidB && previewOcc == 0,
+               juce::String (previewGroup) + " / " + juce::String (previewOcc));
+
+        //-- 7. the actual drop ---------------------------------------------
+        // pointB is the middle of B's note, i.e. beat 8.5; B's origin is 8.0.
+        // The two numbers are different on purpose: an implementation that used
+        // the pointer would land at 8.5 and pass every check that only asked
+        // "did B disappear".
+        const double victimOrigin = layer->occurrenceStart (gidB, 0);
+
+        roll.simulateCardDrop (groupDragDescription (0, gidA), pointB);
+
+        const auto occAAfterReplace = occurrencesOf (gidA);
+        const int  newOcc           = occAAfterReplace.empty() ? -1 : occAAfterReplace.back();
+
+        double newFirst = -1.0;
+        double newLast  = -1.0;
+
+        for (int id : layer->getOccurrenceNoteIds (gidA, newOcc))
+            if (const auto* n = layer->findNote (id))
+            {
+                newFirst = newFirst < 0.0 ? n->startBeat : juce::jmin (newFirst, n->startBeat);
+                newLast  = juce::jmax (newLast, n->startBeat);
+            }
+
+        check (utf8 ("拖到目标组上：它的成员被拿掉，源组站到它的位置（不是指针的位置）"),
+               layer->findNote (noteB) == nullptr
+                 && std::abs (victimOrigin - 8.0) < 1.0e-9
+                 && std::abs (newFirst - 8.0) < 1.0e-9
+                 && std::abs (pointB.x - roll.screenXForBeatForTest (8.0)) > 1.0f,
+               juce::String (newFirst, 3) + utf8 ("（应 8.000；指针在 8.5）"));
+
+        check (utf8 ("只有一个出现的组被替换掉：整行从编组栏离开（不留空壳）"),
+               layer->findGroup (gidB) == nullptr
+                 && (int) layer->getGroups().size() == groupsBefore - 1,
+               juce::String ((int) layer->getGroups().size()) + utf8 (" 组，应 ")
+                 + juce::String (groupsBefore - 1));
+
+        check (utf8 ("形状原样搬过去：两个成员仍然相差一拍"),
+               std::abs ((newLast - newFirst) - 1.0) < 1.0e-9,
+               juce::String (newLast - newFirst, 3));
+
+        //-- 8. the thing you just dropped is the thing that is selected -----
+        const auto selected = roll.getSelection();
+        bool allNewMembers = ! selected.empty();
+
+        for (int id : selected)
+        {
+            const auto* n = layer->findNote (id);
+            allNewMembers = allNewMembers && n != nullptr
+                              && n->groupId == gidA && n->groupOccurrence == newOcc;
+        }
+
+        check (utf8 ("替换完选中的是刚放下的那些成员，不是原来选的东西"),
+               (int) selected.size() == 2 && allNewMembers,
+               juce::String ((int) selected.size()) + utf8 (" 个"));
+
+        check (utf8 ("源组自己原来那两处一动不动（1.0 与 5.0）"),
+               std::abs (startOf (gidA, 0) - 1.0) < 1.0e-9
+                 && std::abs (startOf (gidA, 1) - 5.0) < 1.0e-9,
+               juce::String (startOf (gidA, 0), 3) + " / " + juce::String (startOf (gidA, 1), 3));
+
+        //-- 9. one appearance, not the whole group --------------------------
+        // F has two appearances. Replacing one must leave the other and leave
+        // the definition in the list — that is the difference between replacing
+        // an APPEARANCE and deleting a group.
+        const int fOne = addNote (76, 12.0, 1.0);
+        const int fTwo = addNote (80, 16.0, 1.0);
+
+        const int gidF = layer->addGroup (utf8 ("两处"), groupPalette::group3);
+        layer->assignNotesToGroup ({ fOne }, gidF, 0);
+        layer->assignNotesToGroup ({ fTwo }, gidF, 1);
+
+        const auto frameF1 = roll.getGroupFrameBoundsForTest (0, gidF, 1);
+
+        roll.simulateCardDrop (groupDragDescription (0, gidA), frameF1.getCentre());
+
+        const auto occF = occurrencesOf (gidF);
+        const auto occAZ = occurrencesOf (gidA);
+        const int  newOccZ = occAZ.empty() ? -1 : occAZ.back();
+
+        check (utf8 ("替换的是「那一处」：另一处还在，组也还在列表里"),
+               layer->findGroup (gidF) != nullptr
+                 && (int) occF.size() == 1 && occF.front() == 0
+                 && layer->findNote (fTwo) == nullptr
+                 && layer->findNote (fOne) != nullptr
+                 && std::abs (startOf (gidA, newOccZ) - 16.0) < 1.0e-9,
+               juce::String ((int) occF.size()) + utf8 (" 处 / 新起点 ")
+                 + juce::String (startOf (gidA, newOccZ), 3));
+
+        //-- 11. a block is a member too -------------------------------------
+        // Phase 27 made sample blocks members of a group. A replace that swept
+        // only the notes would leave the block sitting inside a frame with no
+        // group left to belong to — and the row would stay in the list on the
+        // strength of it.
+        SampleEvent block;
+        block.name        = utf8 ("鼓块");
+        block.startBeat   = 4.0;
+        block.lengthBeats = 1.0;
+        block.pitch       = 70;
+        block.laneSpan    = 1;
+
+        const int blockId = layer->addSample (block);
+        const int gidG    = layer->addGroup (utf8 ("块组"), groupPalette::group4);
+        layer->assignSamplesToGroup ({ blockId }, gidG, 0);
+
+        const auto frameG = roll.getGroupFrameBoundsForTest (0, gidG, 0);
+
+        roll.simulateCardDrop (groupDragDescription (0, gidA), frameG.getCentre());
+
+        check (utf8 ("目标组里的采样块也算成员：一起被拿掉，组跟着离开列表"),
+               layer->findSample (blockId) == nullptr
+                 && layer->findGroup (gidG) == nullptr,
+               juce::String ((int) layer->getSamples().size()) + utf8 (" 个采样块"));
+
+        //-- 10. aimed at a group, but the pointer is on your own note -------
+        // The same drop, on D's note inside C's bracket: nothing is replaced
+        // and the gesture falls back to "one more copy". C must keep both of
+        // its notes — the bracket was never the target.
+        const int cBefore = layer->countNotesInGroup (gidC);
+        const int dBefore = (int) occurrencesOf (gidD).size();
+
+        roll.simulateCardDrop (groupDragDescription (0, gidD), pointD);
+
+        check (utf8 ("拖自己的组落到自己的音符上：再放一处，旁边的 C 一个音符都没少"),
+               (int) occurrencesOf (gidD).size() == dBefore + 1
+                 && layer->countNotesInGroup (gidC) == cBefore
+                 && layer->findGroup (gidD) != nullptr,
+               juce::String ((int) occurrencesOf (gidD).size()) + " / "
+                 + juce::String (layer->countNotesInGroup (gidC)));
+
+        //-- 12. a group still cannot replace itself -------------------------
+        // The drop never offers it — the hit test refuses every member of the
+        // group being dragged — but the function is public and the invariant is
+        // about the MODEL: "replace A with A" would delete the members it is
+        // about to insert, and A would come back with a different shape and one
+        // more occurrence. A rule enforced only by the caller is a rule one
+        // caller can forget.
+        const int  selfBefore   = layer->countNotesInGroup (gidA);
+        const bool selfReplaced = roll.replaceGroupAppearance (0, gidA, gidA, 0);
+
+        check (utf8 ("直接调用也不许「用 A 替换 A」：拒绝，而且一个成员都没少"),
+               ! selfReplaced && layer->countNotesInGroup (gidA) == selfBefore,
+               juce::String (selfReplaced ? 1 : 0) + " / "
+                 + juce::String (layer->countNotesInGroup (gidA)));
+    } ();
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

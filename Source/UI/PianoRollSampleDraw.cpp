@@ -376,6 +376,30 @@ void PianoRollComponent::drawDropPreview (juce::Graphics& g)
         if (group == nullptr)
             return;     // deleted mid-drag: do not promise anything
 
+        //-- P92: a target under the pointer means "replace", not "add" ------
+        // The preview changes SHAPE, not just wording: a card over a block
+        // does the same thing, for the same reason — the gesture is a
+        // different verb, and this is the only place the user finds out
+        // before letting go.
+        if (const auto* victim = layer->findGroup (dropReplaceGroupId))
+        {
+            const auto box = groupFrameOf (stack.getActiveLayerIndex(), dropReplaceGroupId,
+                                           dropReplaceOccurrence);
+
+            if (! box.isEmpty())
+            {
+                g.setColour (theme::warn.withAlpha (0.18f));
+                g.fillRoundedRectangle (box, ui::pf (4));
+
+                g.setColour (theme::warn.withAlpha (0.95f));
+                g.drawRoundedRectangle (box.reduced (ui::pf (0.7f)), ui::pf (4), ui::pf (2.0f));
+            }
+
+            drawTag (utf8 ("替换 ") + victim->getName() + utf8 (" → ") + group->getName(),
+                     theme::warn);
+            return;
+        }
+
         const auto occurrences = layer->getGroupOccurrences (dropGroupId);
 
         double first = std::numeric_limits<double>::max();
@@ -836,6 +860,12 @@ void PianoRollComponent::updateCardDrop (juce::Point<float> point,
         dropKind       = CardDropKind::groupRow;
         dropGroupLayer = groupLayer;
         dropGroupId    = groupId;
+
+        // P92: a group already on the sheet turns "place a copy" into "take
+        // that one's place". Resolved here, in the one function both the
+        // preview and the drop run.
+        dropReplaceGroupId = getGroupReplaceTargetAt (point, groupLayer, groupId,
+                                                      &dropReplaceOccurrence);
         return;
     }
 
@@ -872,6 +902,8 @@ void PianoRollComponent::clearCardDrop()
     dropTargetSample = -1;
     dropGroupLayer   = -1;
     dropGroupId      = -1;
+    dropReplaceGroupId    = -1;      // P92
+    dropReplaceOccurrence = -1;
 }
 
 
@@ -913,6 +945,11 @@ void PianoRollComponent::itemDropped (const SourceDetails& details)
     const int groupLayer   = dropGroupLayer;
     const int groupId      = dropGroupId;
 
+    // P92: read before the clear — a drop over a group replaces that
+    // appearance, and `groupLayer`/`groupId` name the row that was dragged.
+    const int replaceGroup      = dropReplaceGroupId;
+    const int replaceOccurrence = dropReplaceOccurrence;
+
     clearCardDrop();
 
     if (! getGridArea().contains (point))
@@ -926,7 +963,13 @@ void PianoRollComponent::itemDropped (const SourceDetails& details)
     // pitch lane it is over does not matter (the members bring their own).
     if (groupLayer >= 0 && groupId >= 0)
     {
-        placeGroupAppearance (groupLayer, groupId, beatAtScreenX (point.x));
+        // P92: over a group's own bracket, this row takes that appearance's
+        // place; anywhere else it is still "one more copy, starting here".
+        if (replaceGroup >= 0 && replaceOccurrence >= 0)
+            replaceGroupAppearance (groupLayer, groupId, replaceGroup, replaceOccurrence);
+        else
+            placeGroupAppearance (groupLayer, groupId, beatAtScreenX (point.x));
+
         repaint();
         return;
     }

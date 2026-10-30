@@ -208,8 +208,14 @@ namespace
         // exists while a real drag is in flight — no live screenshot can catch
         // it — so the frame that documents "a synth lands on a note / a sampler
         // lands on a block" has to stage the preview.
-        writePng ("-dropnote", component.createCardDropSnapshot (true));
-        writePng ("-dropsample", component.createCardDropSnapshot (false));
+        writePng ("-dropnote", component.createCardDropSnapshot (atomic::MainComponent::DropSnapshotKind::instrumentCard));
+        writePng ("-dropsample", component.createCardDropSnapshot (atomic::MainComponent::DropSnapshotKind::samplerCard));
+
+        // P92: the same drag over a group that is already there, where it means
+        // "replace this appearance" instead of "add one". The frame has to be
+        // staged for the same reason the two above it do — and it is the only
+        // picture of the second verb the interface has.
+        writePng ("-dropgroup", component.createCardDropSnapshot (atomic::MainComponent::DropSnapshotKind::groupRow));
 
         // Phase 54: the selection mark, next to the spotlight's absence. The
         // grid is at full brightness and the cards still carry a ring, which is

@@ -898,6 +898,141 @@ bool PianoRollComponent::placeGroupAppearance (int layerIndex, int groupId, doub
 }
 
 
+bool PianoRollComponent::replaceGroupAppearance (int layerIndex, int groupId,
+                                                 int targetGroupId, int targetOccurrence)
+{
+    if (groupId == targetGroupId || groupId < 0 || targetGroupId < 0)
+        return false;
+
+    if (stack.getActiveLayerIndex() != layerIndex)
+        stack.setActiveLayerIndex (layerIndex);
+
+    auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr)
+        return false;
+
+    const auto* dragged = layer->findGroup (groupId);
+    const auto* victim  = layer->findGroup (targetGroupId);
+
+    if (dragged == nullptr || victim == nullptr)
+        return false;
+
+    // Both names read up front, before anything reallocates the group vector —
+    // the message is about the state the user just changed.
+    const juce::String draggedName = dragged->getName();
+    const juce::String victimName  = victim->getName();
+
+    //-- Template: the dragged group's FIRST appearance (Phase 58's rule) -----
+    const auto occurrences = layer->getGroupOccurrences (groupId);
+
+    if (occurrences.empty())
+        return false;
+
+    const int source = occurrences.front();
+
+    std::vector<NoteEvent>   notes;
+    std::vector<SampleEvent> clips;
+    double first = std::numeric_limits<double>::max();
+    double last  = 0.0;
+
+    for (const auto& note : layer->getNotes())
+        if (note.groupId == groupId && note.groupOccurrence == source)
+        {
+            notes.push_back (note);
+            first = juce::jmin (first, note.startBeat);
+            last  = juce::jmax (last, note.endBeat());
+        }
+
+    for (const auto& clip : layer->getSamples())
+        if (clip.groupId == groupId && clip.groupOccurrence == source)
+        {
+            clips.push_back (clip);
+            first = juce::jmin (first, clip.startBeat);
+            last  = juce::jmax (last, clip.endBeat());
+        }
+
+    if (notes.empty() && clips.empty())
+        return false;       // nothing to put there; do not clear the target
+
+    if (first == std::numeric_limits<double>::max())
+        first = 0.0;
+
+    //-- Where it lands: the target's OWN origin ------------------------------
+    // Not the pointer's beat. The appearance being replaced already has a
+    // position, and "be it" has to include standing where it stood — otherwise
+    // dropping on the middle of a four-bar group would shift the group by
+    // whatever the hand did.
+    const double target = juce::jmax (0.0, layer->occurrenceStart (targetGroupId, targetOccurrence));
+    const double delta  = target - first;
+
+    //-- What goes: the target appearance, collected by id first --------------
+    // removeNote / removeSample rewrite the vectors this reads, so the ids are
+    // gathered before the first one goes.
+    std::vector<int> doomedNotes;
+    std::vector<int> doomedClips;
+
+    for (const auto& note : layer->getNotes())
+        if (note.groupId == targetGroupId && note.groupOccurrence == targetOccurrence)
+            doomedNotes.push_back (note.id);
+
+    for (const auto& clip : layer->getSamples())
+        if (clip.groupId == targetGroupId && clip.groupOccurrence == targetOccurrence)
+            doomedClips.push_back (clip.id);
+
+    if (doomedNotes.empty() && doomedClips.empty())
+        return false;       // the appearance went away between the preview and the drop
+
+    for (int id : doomedNotes)
+        layer->removeNote (id);
+
+    for (int id : doomedClips)
+        layer->removeSample (id);
+
+    //-- What arrives: a NEW appearance of the dragged group ------------------
+    const int newOccurrence = layer->nextGroupOccurrence (groupId);
+
+    std::vector<int> newNotes;
+    std::vector<int> newClips;
+
+    insertGroupMembers (*layer, groupId, newOccurrence, delta, notes, clips, newNotes, newClips);
+
+    // An appearance that just lost its last member must not leave its origin
+    // behind: the next appearance to take that number would inherit a position
+    // that was never its own.
+    layer->pruneOccurrenceStarts();
+
+    if (newNotes.empty() && newClips.empty())
+    {
+        // Half a swap is worse than none: the target is already gone, so the
+        // only honest end is "both disappeared" — and pruneEmptyGroups is what
+        // turns that into two rows leaving the list instead of a group that
+        // silently stopped existing.
+        pruneEmptyGroups();
+        stack.notifyNotesChanged();
+        repaint();
+        return false;
+    }
+
+    ensureTimelineExtendsTo (last + delta + (double) beatsPerBar);
+    setMixedSelection (newNotes, newClips);
+
+    // The definition outlives its last appearance otherwise: a row with no
+    // notes on the sheet is a row you cannot find, cannot open and cannot
+    // play. With other appearances left it stays — replacing ONE of them is
+    // the whole point.
+    pruneEmptyGroups();
+
+    stack.notifyNotesChanged();
+
+    flashStatus (draggedName + utf8 (" 替换了 ") + victimName
+                   + membersDescription ((int) newNotes.size(), (int) newClips.size()));
+
+    repaint();
+    return true;
+}
+
+
 std::vector<int> PianoRollComponent::duplicateSelectedSamples (double offsetBeats)
 {
     auto* active = stack.getActiveLayer();

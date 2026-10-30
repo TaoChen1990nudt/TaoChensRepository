@@ -1650,7 +1650,7 @@ juce::Image MainComponent::createStretchSnapshot (int width, int height)
     return image;
 }
 
-juce::Image MainComponent::createCardDropSnapshot (bool instrumentCard, int width, int height)
+juce::Image MainComponent::createCardDropSnapshot (DropSnapshotKind kind, int width, int height)
 {
     auto* layer = stack.getActiveLayer();
 
@@ -1667,7 +1667,51 @@ juce::Image MainComponent::createCardDropSnapshot (bool instrumentCard, int widt
     const auto grid = pianoRoll.getGridBounds();
     const int  index = stack.getActiveLayerIndex();
 
-    if (instrumentCard)
+    if (kind == DropSnapshotKind::groupRow)
+    {
+        //-- P92: a group-list row hovering a group already on the sheet -----
+        // The second verb of the same drag: the frame under the pointer turns
+        // warm and the tag says "替换 这 → 那". Both groups have to be picked
+        // from what is actually on screen, for the reason the note walk below
+        // exists: a frame that is scrolled out photographs as an empty grid.
+        int targetGroup = -1;
+        int targetOcc   = -1;
+
+        for (const auto& group : layer->getGroups())
+        {
+            for (int which : layer->getGroupOccurrences (group.getId()))
+            {
+                const auto frame = pianoRoll.getGroupFrameBoundsForTest (index, group.getId(), which);
+
+                if (! frame.isEmpty() && grid.contains (frame.getCentre()))
+                {
+                    targetGroup = group.getId();
+                    targetOcc   = which;
+                    break;
+                }
+            }
+
+            if (targetGroup >= 0)
+                break;
+        }
+
+        int sourceGroup = -1;
+
+        for (const auto& group : layer->getGroups())
+            if (group.getId() != targetGroup && ! layer->getGroupOccurrences (group.getId()).empty())
+            {
+                sourceGroup = group.getId();
+                break;
+            }
+
+        if (targetGroup < 0 || sourceGroup < 0)
+            return {};
+
+        pianoRoll.simulateDropPreview (groupDragDescription (index, sourceGroup),
+                                       pianoRoll.getGroupFrameBoundsForTest (index, targetGroup, targetOcc)
+                                           .getCentre());
+    }
+    else if (kind == DropSnapshotKind::instrumentCard)
     {
         const int slotId = rack.getFirstInstrumentSlotId();
 
