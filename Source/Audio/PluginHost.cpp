@@ -487,6 +487,20 @@ int PluginHost::getBlockSizeOf (int instanceId) const
     return getRenderBlockSize();
 }
 
+int PluginHost::getLatencySamples (int instanceId) const
+{
+    if (instanceId <= 0)
+        return 0;
+
+    const juce::ScopedLock sl (lock);
+
+    for (const auto& instance : instances)
+        if (instance.id == instanceId && instance.plugin != nullptr)
+            return juce::jmax (0, instance.plugin->getLatencySamples());
+
+    return 0;
+}
+
 std::vector<int> PluginHost::getInstanceIds() const
 {
     std::vector<int> ids;

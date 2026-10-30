@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-30 · **Phase 82**（自动化曲线的路由下拉）
+> 最后更新：2026-10-30 · **Phase 83**（插件延迟补偿）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**，约 6 千字。
 > 规则 `MEMORY.md` · 制度 `REFERENCE.md` · 坑 `PITFALLS.md` · 逐阶段实现记录 `memory/<日期>.md`
 > · 被压掉的历史叙述（阶段全文 / 咬测流水 / 逐版沿革 / P62–P82 经验）在 **`STATUS-archive.md`**。
@@ -19,10 +19,10 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 82** — 三个自动化框底部改成两个下拉：左边选「哪条曲线」（含新建），右边选「路由到哪」（含**空**）。核心是 `Model/CurveBank<CurveType>`：`CurveSlot{id, name, target, pluginParam, curve}`，**`target = -1` 是一个合法答案**（画着、存着、不驱动谁），于是「哪条曲线」和「驱动哪个参数」第一次成了两件事 |
-| 自检 | **714 ALL PASSED / 0 FAIL**，失败退出码 1 |
+| 已完成阶段 | **Phase 83** — 插件延迟补偿。控制台只有一种汇合：子通道加进父通道的总线，而一个带前瞻的 VST3 插入会让某条路径变晚，别的路径**不会自己变快**。新增 `Audio/PdcDelay.h`：`pdc::solve` 一张纯函数延迟表（`entry[c]` = 该通道入口应有的事件时刻，`own[c]` = 自己的插入延迟），补偿只发生在**汇合点**，绝不延迟源头。`PluginHost::getLatencySamples` 是唯一问延迟的地方，发布期折算进 `ChannelMix::insertLatency/entryLatency`，音频线程一次插件调用都不做。**没有插件报延迟 ⟹ 每张表都是 0 ⟹ 渲染逐位等同于 P82** |
+| 自检 | **723 ALL PASSED / 0 FAIL**，失败退出码 1 |
 | 编译 | 零 error 零 warning |
-| `formatVersion` | **26** — 新增 `<Curve id name target pluginparam enabled>` + `<CurveState active/>`；**v25 及更老的文件照常打开**，只有重新保存才写新形状 |
+| `formatVersion` | **26**（P83 不升：延迟是运行时的，不进文件）— 新增 `<Curve id name target pluginparam enabled>` + `<CurveState active/>`；**v25 及更老的文件照常打开**，只有重新保存才写新形状 |
 | 可执行 | `build/AtomicDAW_artefacts/Release/AtomicDAW.exe` |
 | 技术栈 | JUCE 8.0.4（FetchContent）+ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + C++17 |
 | 源码规模 | `Source/` 下 88 个 .cpp/.h，分 Model / Audio / UI / Util / Media |
@@ -31,8 +31,9 @@
 
 **未定**，等你给功能排期。P58–P82 的逐条主题不在这里重复，见下面的表和 `STATUS-archive.md`。
 
-## 最近六轮（新会话最需要的前情）
+## 最近七轮（新会话最需要的前情）
 
+- **P83 插件延迟补偿** — `pdc::solve` 解「每条路径多晚」，补偿落在汇合点而不是源头；零延迟时整条路径退化回原样。自检加了一条端到端断言：给一条静默通道强加 32 采样延迟，整个混音逐样本后移 32 采样。
 - **P82 曲线路由** — `CurveBank` 把音符/采样/编组三个对象的曲线集合统一成一张有序表；旧访问器
   （`envelope` / `volumeCurve` / `automationFor` / `laneDriving`）全做成薄壳，引擎与三个编辑窗一行没动。
   磁盘上「空」= **没有 `target` 属性**（写成词会被读回 level）。删掉了 `expandedGroupTarget` 缓存字段。
@@ -96,6 +97,7 @@
 | P44–P55 | 自检退出码门禁 / const 设计债还清 / 混音链三件套 / 效果器多参数化 / 视觉规范 / 采样音量曲线 / 声相与整层渲染成采样 / 停止回起点 / 机架卡拉伸 / 刻刀 / 卡片高亮统一成一个环 | `memory/2026-10-27.md` |
 | P56–P76 | 多选拉伸 / 组框贴成员 / 组 = 定义 + 出现 / 编组栏镜像 / 缩放视口 / 同源编组 / 剪贴板 / 播放跟随 / 图层栏眼睛 / 网格退档与吸附 / 1/64 拍 / 全量审查 16 条 / 撤销按动作 / 块高可拖 / 编组双击才可改 / 选中即整组 / 组内空白 / 打开≠选择 | `memory/2026-10-28.md` |
 | P77–P82 | ghost 换层 / 采样包络窗 / 三个名字 / 速度自动化 / 录音 / 曲线路由下拉 | `memory/2026-10-29.md` |
+| P83 | 插件延迟补偿（`PdcDelay.h` / 汇合点补偿 / 端到端断言） | `memory/2026-10-30.md` |
 | 踩坑索引 | 各阶段的不变量与咬测 | `PITFALLS.md` |
 
 ## 构建

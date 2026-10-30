@@ -16,6 +16,7 @@
 
 #include "Effects.h"
 #include "ClipStretch.h"
+#include "PdcDelay.h"
 
 namespace juce { class AudioProcessor; }
 
@@ -188,6 +189,21 @@ struct ChannelMix
         sum, so the effect chain still works on the stereo signal it was set up
         for — this is a listen control, not a mix control. */
     bool mono = false;
+
+    /** Phase 83: what this strip's inserts cost, in samples.
+
+        A hosted VST3 insert may report latency; the built-ins never do (none of
+        them looks ahead). Folded at publish time, because the audio thread must
+        not ask a plugin anything — it would be a lock, a virtual call, and an
+        answer that can change under it. */
+    int insertLatency = 0;
+
+    /** Phase 83: the latency of everything that arrives at this strip's INPUT.
+
+        Zero when nothing feeds it. Otherwise the slowest child's end — which is
+        also the instant this strip's own voices have to be held back to, since
+        a direct voice arrives at 0. */
+    int entryLatency = 0;
 };
 
 //==============================================================================
@@ -480,6 +496,17 @@ struct PublishedSchedule
         order is legal" is a question about the model, not about a block. */
     std::vector<int>           channelOrder;
 
+    /** Phase 83: the console's total latency, in samples.
+
+        Zero unless some insert reports latency. Every path is held back to this
+        figure at the joins it passes through, so the mix as a whole is late by
+        exactly this many samples — uniform, inaudible for playback, and the
+        number a future "align the playhead / the recording" step would need.
+        Nothing compensates for it today; correcting it would shift the sound
+        against the playhead, which is a separate decision from aligning two
+        strips against each other. */
+    int maxPdcLatency = 0;
+
     /** Project length in beats: what the transport loops over. */
     double lengthBeats = 0.0;
 
@@ -688,6 +715,21 @@ public:
     double beatAtSeconds (double seconds) const;
     double getLengthBeats() const noexcept   { return lengthBeats.load (std::memory_order_relaxed); }
     double getLengthSeconds() const noexcept { return lengthSeconds.load (std::memory_order_relaxed); }
+
+    /** Phase 83: how late the currently published console makes the mix.
+
+        Zero for every session without a latency-reporting VST3 insert, which is
+        the assertion that keeps the compensation path from silently changing
+        the sound of projects that never needed it. */
+    int getMaxPdcLatency() const;
+
+    /** Phase 83, self-test only: pretend this strip's inserts cost `samples`.
+
+        The headless harness cannot load a VST3 — it never runs a plugin scan —
+        so without this the compensation path would exist without ever being
+        rendered, which is precisely the situation this project keeps paying for.
+        One array, read at publish, never touched by the audio thread. */
+    void setInsertLatencyForTest (int channel, int samples);
 
     //-- Block timing, for the UI's sub-block interpolation -------------------
     double getBlockStartBeats() const noexcept   { return blockStartBeats.load (std::memory_order_relaxed); }
@@ -1025,6 +1067,30 @@ private:
     mutable std::array<fx::ChainState, MixerModel::numChannels + 1> channelChains;
     std::atomic<int>  chainsReady      { 0 };
     std::atomic<bool> masterChainReady { false };
+
+    /** Phase 83: the delay memory a strip needs when a slower sibling exists.
+
+        Two lines per strip, and the reason is worth keeping: `entry` holds the
+        strip's INPUT (so its own voices can wait for a late child before the
+        inserts see them), `exit` holds its finished output (so it can be held
+        back again when it is summed into a parent that already started
+        earlier). One line cannot serve both, because they are written at two
+        different moments of the same block.
+
+        Prepared lazily for the strips in use, like the insert chains: two
+        channels of 8192 floats apiece is 64 kB, and the console can address
+        128 strips. */
+    mutable std::array<pdc::Line, MixerModel::numChannels + 1> pdcEntry;
+    mutable std::array<pdc::Line, MixerModel::numChannels + 1> pdcExit;
+
+    /** Phase 83: what the self-test asks a strip to cost. Message thread only,
+        and folded into the published figures at publish time — the renderer
+        never reads it. */
+    std::array<int, MixerModel::numChannels> testInsertLatency {};
+
+    /** Message thread. Buys the delay memory for strips 0..count-1 (and the
+        bypass bus). Idempotent; a strip that already has memory keeps it. */
+    void preparePdcLines (int count);
 
     /** Message thread. Guarantees chains 0..count-1 plus the master chain exist.
         Called from publish (a growing console must have memory before it

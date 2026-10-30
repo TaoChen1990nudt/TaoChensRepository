@@ -124,6 +124,15 @@ public:
     bool         isInstrument (int instanceId) const;
     int          getBlockSizeOf (int instanceId) const;
 
+    /** Phase 83: what this plugin costs in time, in samples.
+
+        An insert that reports latency is why the console needs delay
+        compensation at all — everything else in the signal path is 0. Message
+        thread only (it takes the host lock, which the audio thread holds for
+        the length of a plugin call), and 0 for an unknown id: "nothing" reads
+        better than "assume the worst" when a plugin is mid-unload. */
+    int getLatencySamples (int instanceId) const;
+
     /** Every loaded instance id, in creation order. Used to work out which
         plugins nothing points at any more. */
     std::vector<int> getInstanceIds() const;

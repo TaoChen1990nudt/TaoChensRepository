@@ -9313,6 +9313,213 @@ juce::String MainComponent::runSelfTest()
                  : error);
     } ();
 
+    //-- Phase 83: plugin delay compensation ---------------------------------
+    // A console has exactly one kind of join, and it is not the master: a strip
+    // that feeds another strip is summed into its destination's bus. That is
+    // the only place two signals with different latencies can meet, so it is
+    // the only place that needs an answer.
+    {
+        const int master = MixerModel::masterChannel;
+
+        // A flat console: one strip is late, so every other path waits for it.
+        {
+            const int order[4]  = { 0, 1, 2, 3 };
+            const int output[4] = { master, master, master, master };
+            const int own[4]    = { 96, 0, 0, 0 };
+            int entry[4] = {};
+            int slide[4] = {};
+
+            const int total = pdc::solve (4, order, output, own, entry, slide);
+
+            check ("A late strip makes the whole console late",
+                   total == 96, "total " + juce::String (total));
+            check ("Every other path waits exactly as long as it must",
+                   slide[0] == 0 && slide[1] == 96 && slide[2] == 96 && slide[3] == 96,
+                   "slides " + juce::String (slide[0]) + "/" + juce::String (slide[1])
+                     + "/" + juce::String (slide[2]) + "/" + juce::String (slide[3]));
+        }
+
+        // A strip that feeds a parent: the parent starts when its slowest child
+        // ends, and the faster child waits at the join — not at its own source,
+        // where its inserts have not run yet.
+        {
+            const int order[3]  = { 0, 1, 2 };
+            const int output[3] = { 2, 2, master };
+            const int own[3]    = { 50, 0, 30 };
+            int entry[3] = {};
+            int slide[3] = {};
+
+            const int total = pdc::solve (3, order, output, own, entry, slide);
+
+            const int waitForChild0 = entry[2] - (entry[0] + own[0]);
+            const int waitForChild1 = entry[2] - (entry[1] + own[1]);
+
+            check ("A parent starts when its slowest child ends",
+                   entry[2] == 50 && total == 80,
+                   "entry 2 = " + juce::String (entry[2]) + ", total " + juce::String (total));
+            check ("Only the faster child waits at the join",
+                   waitForChild0 == 0 && waitForChild1 == 50,
+                   "waits " + juce::String (waitForChild0) + "/" + juce::String (waitForChild1));
+        }
+
+        // No insert reports latency => nothing moves. This is the property that
+        // lets the change ship at all: a session that never used a latency
+        // reporting plugin takes the pre-83 code path, sample for sample.
+        {
+            const int order[2]  = { 0, 1 };
+            const int output[2] = { master, master };
+            const int own[2]    = { 0, 0 };
+            int entry[2] = { 7, 7 };
+            int slide[2] = { 7, 7 };
+
+            const int total = pdc::solve (2, order, output, own, entry, slide);
+
+            check ("A console with no late insert compensates for nothing",
+                   total == 0 && entry[0] == 0 && entry[1] == 0
+                     && slide[0] == 0 && slide[1] == 0,
+                   "total " + juce::String (total) + ", slide " + juce::String (slide[0]));
+        }
+
+        // The delay line itself: a block pushed now must come back exactly four
+        // samples late, across a block boundary — the only interesting case,
+        // since within one block it is a copy.
+        {
+            pdc::Line line;
+            line.prepare();
+
+            juce::AudioBuffer<float> first (2, 4);
+            first.setSample (0, 0, 1.0f);
+            first.setSample (0, 1, 2.0f);
+            first.setSample (0, 2, 3.0f);
+            first.setSample (0, 3, 4.0f);
+            first.setSample (1, 0, 10.0f);
+            first.setSample (1, 3, 40.0f);
+
+            line.push (first, 4);
+
+            juce::AudioBuffer<float> empty (2, 4);
+            empty.clear();
+            line.readInto (empty, 4, 4, false);
+
+            const bool nothingYet = empty.getMagnitude (0, 0, 4) < 1.0e-9f;
+
+            juce::AudioBuffer<float> second (2, 4);
+            second.setSample (0, 0, 5.0f);
+            second.setSample (0, 1, 6.0f);
+            second.setSample (0, 2, 7.0f);
+            second.setSample (0, 3, 8.0f);
+            second.setSample (1, 1, 60.0f);
+
+            line.push (second, 4);
+
+            juce::AudioBuffer<float> back (2, 4);
+            back.clear();
+            line.readInto (back, 4, 4, false);
+
+            check ("A delay line returns the block it was handed, and no sooner",
+                   nothingYet
+                     && back.getSample (0, 0) == 1.0f
+                     && back.getSample (0, 3) == 4.0f
+                     && back.getSample (1, 0) == 10.0f
+                     && back.getSample (1, 3) == 40.0f,
+                   "first " + juce::String (back.getSample (0, 0), 2)
+                     + ", last " + juce::String (back.getSample (0, 3), 2));
+        }
+
+        // And the engine: a console with no late insert must report no latency,
+        // which is what keeps the renderer out of the compensation path.
+        {
+            LayerStack   flatStack;
+            RackModel    flatRack;
+            const int    flatLayer = flatStack.addLayer ("P83", palette::layer1);
+
+            flatStack.setLayerOutputSlot (flatLayer, flatRack.getSlotIdAt (0));
+
+            PlaybackEngine engine;
+            engine.setSampleRate (48000.0);
+            engine.publishSchedule (flatStack, flatRack, 120.0);
+
+            check ("A session with no VST3 insert reports no compensation latency",
+                   engine.getMaxPdcLatency() == 0,
+                   juce::String (engine.getMaxPdcLatency()) + " samples");
+        }
+
+        // The path, not the arithmetic: force a strip to be late and the audio
+        // that does not go through it must come out that many samples later —
+        // the same samples, later. This is the assertion the headless harness
+        // could not make before the seam existed, and it is the one that would
+        // catch a delay line wired in at the wrong point of the block.
+        {
+            LayerStack   lateStack;
+            RackModel    lateRack;
+            const int    lateLayer = lateStack.addLayer ("P83b", palette::layer1);
+            const int    lateSlot  = lateRack.getSlotIdAt (0);
+
+            lateStack.setLayerOutputSlot (lateLayer, lateSlot);
+
+            if (const int noteId = lateStack.getLayer (lateLayer)->addNote ({ 0, 60, 0.0, 4.0, 0.9f });
+                noteId >= 0)
+            {
+                if (auto* note = lateStack.getLayer (lateLayer)->findNote (noteId))
+                    note->envelope() = NoteEnvelope::makeFlat();
+            }
+
+            PlaybackEngine engine;
+            engine.setSampleRate (48000.0);
+
+            const int windowSize = 4096;
+
+            const auto render = [&] (int forced)
+            {
+                engine.setInsertLatencyForTest (1, forced);   // a silent strip
+                engine.publishSchedule (lateStack, lateRack, 120.0);
+                engine.resetMixState();
+
+                juce::AudioBuffer<float> buffer (2, windowSize);
+                buffer.clear();
+                engine.renderWindow (0.0, windowSize, buffer, nullptr);
+                return buffer;
+            };
+
+            const auto plain = render (0);
+            const auto late  = render (32);
+
+            bool shifted = std::abs (engine.getMaxPdcLatency() - 32) == 0;
+
+            for (int i = 0; i + 32 < windowSize && shifted; ++i)
+                if (std::abs (late.getSample (0, i + 32) - plain.getSample (0, i)) > 1.0e-7f)
+                    shifted = false;
+
+            const bool leadIsSilent = late.getMagnitude (0, 0, 32) < 1.0e-7f;
+
+            check ("A late strip delays everything that bypasses the console",
+                   shifted && leadIsSilent,
+                   "latency " + juce::String (engine.getMaxPdcLatency())
+                     + ", lead " + juce::String (late.getMagnitude (0, 0, 32), 8));
+
+            // The same property through a real strip. This one is a different
+            // branch of the renderer: the signal leaves a channel and is summed
+            // into the master, so it waits at that join — not at its own entry,
+            // and not at the source.
+            if (auto* slot = lateRack.getSlot (0))
+                slot->mixerChannel = 0;
+
+            const auto plainStrip = render (0);
+            const auto lateStrip  = render (32);
+
+            bool stripShifted = engine.getMaxPdcLatency() == 32;
+
+            for (int i = 0; i + 32 < windowSize && stripShifted; ++i)
+                if (std::abs (lateStrip.getSample (0, i + 32) - plainStrip.getSample (0, i)) > 1.0e-7f)
+                    stripShifted = false;
+
+            check ("A late strip delays the strips that join the master as well",
+                   stripShifted && lateStrip.getMagnitude (0, 0, 32) < 1.0e-7f,
+                   "latency " + juce::String (engine.getMaxPdcLatency())
+                     + ", lead " + juce::String (lateStrip.getMagnitude (0, 0, 32), 8));
+        }
+    }
+
     //-- Phase 50: the "render to a block" menu items ------------------------
     // Two verbs, one list: the canvas menu builds them through this function,
     // so reading the function is the same as reading the menu. The interesting

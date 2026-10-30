@@ -249,6 +249,7 @@ PlaybackEngine::PlaybackEngine()
     // Phase 25: only the strips a schedule actually references get memory —
     // publish() tops this up as the console grows.
     prepareChannelChains (MixerModel::defaultChannels);
+    preparePdcLines (MixerModel::defaultChannels);
 }
 
 void PlaybackEngine::prepareChannelChains (int count)
@@ -266,6 +267,24 @@ void PlaybackEngine::prepareChannelChains (int count)
         channelChains[(size_t) MixerModel::masterChannel].prepare (sampleRate);
         masterChainReady.store (true, std::memory_order_release);
     }
+}
+
+void PlaybackEngine::preparePdcLines (int count)
+{
+    // Phase 83: same shape as prepareChannelChains, for the same reason — the
+    // 127-strip ceiling must not cost 16 MB of delay memory in a session that
+    // opens eight strips. The bypass bus gets one too: it is a path to the
+    // master with latency 0, and it has to be held back like any other.
+    const int wanted = juce::jlimit (0, (int) MixerModel::numChannels, count);
+
+    for (int i = 0; i < wanted; ++i)
+    {
+        pdcEntry[(size_t) i].prepare();
+        pdcExit[(size_t) i].prepare();
+    }
+
+    pdcEntry[(size_t) MixerModel::numChannels].prepare();
+    pdcExit[(size_t) MixerModel::numChannels].prepare();
 }
 
 void PlaybackEngine::setSampleRate (double newSampleRate)
@@ -353,6 +372,20 @@ double PlaybackEngine::beatAtSeconds (double seconds) const
         return current->tempo.beatAtSeconds (seconds);
 
     return seconds / (60.0 / defaultBpm);
+}
+
+int PlaybackEngine::getMaxPdcLatency() const
+{
+    if (auto current = getSchedule())
+        return current->maxPdcLatency;
+
+    return 0;
+}
+
+void PlaybackEngine::setInsertLatencyForTest (int channel, int samples)
+{
+    if (juce::isPositiveAndBelow (channel, MixerModel::numChannels))
+        testInsertLatency[(size_t) channel] = juce::jmax (0, samples);
 }
 
 double PlaybackEngine::getPosition() const
@@ -517,6 +550,64 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             placed[(size_t) pick] = true;
             fresh->channelOrder.push_back (pick);
         }
+    }
+
+    //-- Phase 83: how late each path is, and how far to hold it back ---------
+    // The console has exactly one kind of join, and it is not the master: a
+    // strip that feeds another strip is summed into its destination's bus. Each
+    // of those joins is a place where two signals with different latencies meet,
+    // and the slower one cannot be made faster — so the fast one waits.
+    //
+    // Solved here, once per edit, for the same reason the summing order is: the
+    // audio thread must not walk a routing graph, and "which path is slowest"
+    // is a question about the model.
+    {
+        const int count = (int) fresh->channels.size();
+
+        std::vector<int> order ((size_t) count);
+        std::vector<int> output ((size_t) count, MixerModel::masterChannel);
+        std::vector<int> own ((size_t) count, 0);
+        std::vector<int> entry ((size_t) count, 0);
+        std::vector<int> slide ((size_t) count, 0);
+
+        for (int i = 0; i < count; ++i)
+        {
+            const auto& mix = fresh->channels[(size_t) i];
+
+            order[(size_t) i]  = fresh->channelOrder.empty() ? i
+                                                            : fresh->channelOrder[(size_t) i];
+            output[(size_t) i] = mix.output;
+
+            // Only a hosted VST3 can be late. Every built-in is zero-latency by
+            // construction (a delay line that reports latency, a filter with no
+            // lookahead), so asking the host about them would be a lock for an
+            // answer of 0.
+            int sum = 0;
+
+            for (const auto& insert : mix.inserts)
+                if (insert.active() && insert.type == fx::Type::vst)
+                    sum += pluginHost != nullptr ? pluginHost->getLatencySamples (insert.pluginId) : 0;
+
+            own[(size_t) i] = juce::jmin (pdc::maxSamples,
+                                          sum + testInsertLatency[(size_t) juce::jlimit (0, (int) MixerModel::numChannels - 1, i)]);
+        }
+
+        const int total = pdc::solve (count, order.data(), output.data(), own.data(),
+                                      entry.data(), slide.data());
+
+        for (int i = 0; i < count; ++i)
+        {
+            fresh->channels[(size_t) i].insertLatency = own[(size_t) i];
+            fresh->channels[(size_t) i].entryLatency  = entry[(size_t) i];
+        }
+
+        fresh->maxPdcLatency = total;
+
+        // Nothing to compensate for: free the delay lines' work for this block
+        // and keep the pre-83 code path exactly. This is the case for every
+        // session that has no VST3 insert, i.e. almost all of them.
+        if (total > 0)
+            preparePdcLines (count);
     }
 
     //-- Synth slots ----------------------------------------------------------
@@ -1031,7 +1122,18 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
     const bool pluginsLive = pluginGuard.isHeld();
 
     if (pluginsLive && pluginPanicRequested.exchange (false))
+    {
         pluginHost->resetAllInstancesWhileLocked();
+
+        // Phase 83: the compensation lines are memory too. After a locate they
+        // hold up to 42 ms of the position we just left — that is not a tail,
+        // it is the wrong music.
+        for (auto& line : pdcEntry)
+            line.reset();
+
+        for (auto& line : pdcExit)
+            line.reset();
+    }
 
     //-- Layer ramps for this block ------------------------------------------
     // Evaluated twice (in and out) instead of per sample: automation moves
@@ -1555,6 +1657,42 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
         if (layerVoicePeak[(size_t) i] > 0.0f && stats != nullptr)
             stats->addLayerPeak (i, layerVoicePeak[(size_t) i]);
 
+    //-- Stage 1b: hold back what arrives at a strip with a late child --------
+    // Phase 83. The voices above landed in their bus at time 0 — that is what
+    // they cost. A child strip summed later in this block arrives late. Both
+    // have to meet, so the voices wait — and they wait HERE, in front of the
+    // inserts, because past the inserts the whole bus has already moved on by
+    // the strip's own latency and the entry is no longer addressable.
+    if (current.maxPdcLatency > 0)
+    {
+        const int count = juce::jmin ((int) current.channels.size(), MixerModel::numChannels);
+
+        for (int step = 0; step < count; ++step)
+        {
+            const int channel = current.channelOrder.empty()
+                                  ? step
+                                  : current.channelOrder[(size_t) step];
+
+            if (! juce::isPositiveAndBelow (channel, count) || ! busUsed[(size_t) channel])
+                continue;
+
+            auto& line = pdcEntry[(size_t) channel];
+
+            if (! line.isReady())
+                continue;
+
+            // Pushed even when this strip needs no delay today: a strip whose
+            // child only appears later in the session must find history, not
+            // 42 ms of silence followed by a click.
+            line.push (channelBuses[(size_t) channel], numSamples);
+
+            const int delay = current.channels[(size_t) channel].entryLatency;
+
+            if (delay > 0)
+                line.readInto (channelBuses[(size_t) channel], delay, numSamples, false);
+        }
+    }
+
     //-- Stage 2: console channels, then the sum ------------------------------
     // Insert processing happens on a bus, never per voice: a delay or a filter
     // has memory that must see the whole channel, not one note at a time. A
@@ -1613,21 +1751,54 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
                                   ? current.channels[(size_t) channel].output
                                   : MixerModel::masterChannel;
 
+        //-- Phase 83: the strip is finished, decide when it may join ---------
+        // A strip that feeds another strip has to land on THAT strip's entry;
+        // one that goes straight out has to land on the console's slowest path.
+        // The difference is taken at the join, never at the source: a signal
+        // held back before its own inserts would be waiting in front of work it
+        // has not done yet.
+        int joinDelay = 0;
+
+        if (current.maxPdcLatency > 0 && juce::isPositiveAndBelow (channel, (int) current.channels.size()))
+        {
+            auto& line = pdcExit[(size_t) channel];
+
+            if (line.isReady())
+            {
+                const auto& mix = current.channels[(size_t) channel];
+
+                line.push (bus, numSamples);
+
+                const int end = juce::jmin (pdc::maxSamples, mix.entryLatency + mix.insertLatency);
+                const int target = juce::isPositiveAndBelow (destination, MixerModel::numChannels)
+                                     ? current.channels[(size_t) destination].entryLatency
+                                     : current.maxPdcLatency;
+
+                joinDelay = juce::jmax (0, target - end);
+            }
+        }
+
         if (juce::isPositiveAndBelow (destination, MixerModel::numChannels))
         {
             // Feeds another strip: sum into its bus and mark it as fed, so a
             // destination whose only source is a child still runs its inserts.
             auto& target = channelBuses[(size_t) destination];
 
-            for (int ch = 0; ch < 2; ++ch)
-                target.addFrom (ch, 0, bus, ch, 0, numSamples);
+            if (joinDelay > 0)
+                pdcExit[(size_t) channel].readInto (target, joinDelay, numSamples, true);
+            else
+                for (int ch = 0; ch < 2; ++ch)
+                    target.addFrom (ch, 0, bus, ch, 0, numSamples);
 
             busUsed[(size_t) destination] = true;
         }
         else
         {
-            for (int ch = 0; ch < numChannels; ++ch)
-                output.addFrom (ch, 0, bus, juce::jmin (ch, 1), 0, numSamples);
+            if (joinDelay > 0)
+                pdcExit[(size_t) channel].readInto (output, joinDelay, numSamples, true);
+            else
+                for (int ch = 0; ch < numChannels; ++ch)
+                    output.addFrom (ch, 0, bus, juce::jmin (ch, 1), 0, numSamples);
         }
 
         if (stats != nullptr)
@@ -1641,6 +1812,16 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
     if (busUsed[(size_t) MixerModel::numChannels])
     {
         auto& direct = channelBuses[(size_t) MixerModel::numChannels];
+
+        // Phase 83: this path has no inserts, so it is the fastest one there is
+        // and always waits the whole way. In place: it is the last reader of
+        // this bus, and nothing downstream looks at it again.
+        if (current.maxPdcLatency > 0 && pdcExit[(size_t) MixerModel::numChannels].isReady())
+        {
+            auto& line = pdcExit[(size_t) MixerModel::numChannels];
+            line.push (direct, numSamples);
+            line.readInto (direct, current.maxPdcLatency, numSamples, false);
+        }
 
         for (int ch = 0; ch < numChannels; ++ch)
             output.addFrom (ch, 0, direct, juce::jmin (ch, 1), 0, numSamples);
@@ -3379,6 +3560,15 @@ void PlaybackEngine::resetMixState()
     // A bounce must not inherit a delay tail from whatever was playing live.
     for (auto& chain : channelChains)
         chain.reset();
+
+    // Phase 83: nor a compensation delay's worth of the old material — an
+    // export that started with the first 32 ms of the previous pass would be
+    // wrong in a way that is very hard to hear and very easy to dismiss.
+    for (auto& line : pdcEntry)
+        line.reset();
+
+    for (auto& line : pdcExit)
+        line.reset();
 }
 
 //==============================================================================
