@@ -9,5 +9,14 @@ tmp/
 docs/bite*.png
 docs/bite.log
 
+# P89 自检产物。CI 在仓库根跑 `--snapshot selftest.png`，出图、日志、退出码、
+# 以及自检顺手保存的 demo.atomic 全落在根上；本地手动跑时它们在 build/ 里，
+# 本来就被忽略。这两组都不要入库。
+/selftest*.png
+/selftest.log
+/selftest.exit
+/demo.atomic
+/build.log
+
 # 代码片段草稿（下划线开头的 .txt）
 Source/UI/_*.txt

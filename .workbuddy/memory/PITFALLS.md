@@ -2620,3 +2620,50 @@ for p in glob.glob('build/AtomicDAW_artefacts/Release/p8[78]*bite*.png'): os.rem
 ```
 
 规则：**清理动作不要和验证动作串在同一条 `&&` 链里**。清理失败会伪装成验证失败。
+
+## P89 — CI：一条管道就能让闸门永远开
+
+### P89-A `| Tee` 之后 `$?` 是 tee 的，坏构建会绿着过去
+
+想要"留日志 + 不吞输出"的人都会这么写：
+
+```powershell
+cmake --build build --config Release 2>&1 | Tee-Object -FilePath build.log
+```
+
+管道本身成功（tee 写成了文件），于是这一步的状态是成功的，**即使 cmake 失败了**。
+GitHub 的 pwsh 包装层会 `exit $LASTEXITCODE`——`$LASTEXITCODE` 恰好还留着 cmake 的码，
+所以这条**碰巧**能用；但同一条纪律在 bash 里就是 `pipefail` 没开的经典坑，
+而且把 `run:` 写成多行脚本、末尾还有别的命令时，那个 `exit` 就不再是最后一个。
+唯一稳的写法是当场判：
+
+```powershell
+if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
+```
+
+后果比"没闸门"更隐蔽：一个编译器错误会被下游报成"self-test: not built: …exe",
+而下一个人会去查构建产物路径。
+
+### P89-B CI 跑在仓库根，本地一律跑在 exe 目录里
+
+四个月来每一次 `--snapshot` 都是 `cd build/AtomicDAW_artefacts/Release && ./AtomicDAW.exe`。
+CI 从仓库根跑，cwd ≠ exe 目录——**这一条从来没被验证过**，而它正好压在两类断言上：
+`addDevPluginPaths()` 找那两枚测试 VST3，以及自检顺手 `saveProjectToFile("demo.atomic")`。
+
+好在 `addDevPluginPaths` 是拿 `File::currentExecutableFile` 往上走四层，与 cwd 无关；
+出图落在**参数 png 的同级目录**。本地实测仓库根运行仍是 810/0（VST3 发现 1+1）。
+
+规律：**凡是 CI 与本地"启动形态"不同的地方，都要在本地真跑一遍那种形态**。
+不跑就会在 CI 上第一次知道，而 CI 的第一条红信息通常指向错误的地方。
+
+### P89-C 一条会喊狼的闸门，最后一定被人关掉
+
+视觉回归在 CI 上做逐字节比较很诱人（数据都有），但 8 张图**本来就会抖**：
+电平表读数、播放头位置、恢复时间戳。红的理由永远不是缺陷。
+第一次红了查十分钟、第二次红了查五分钟、第三次就有人加 `continue-on-error`。
+
+所以 CI 里只判那四件**确定是缺陷**的事（退出码 / FAIL 数 / 标记 / 断言下限），
+30 张图当 artifact 传上去给人看。P87-E 那份"已知抖动集"清单不是给 CI 豁免用的，
+是给 CI **不碰**用的。
+
+同一条也适用于 `/WX`：工具链更新会在 JUCE 头文件里加一个新警告，那不是本仓库的缺陷。

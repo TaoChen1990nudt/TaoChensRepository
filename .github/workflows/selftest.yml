@@ -1,0 +1,139 @@
+# Phase 89: the gate.
+#
+# The self-test has been able to fail the process since P44 — `--snapshot`
+# returns 1 when a check fails — but nothing was listening: the exit code only
+# ever reached whoever happened to run it by hand. This workflow is that
+# listener.
+#
+# Three things it deliberately does NOT do:
+#
+#   * **No visual regression.** 30 snapshots are generated and uploaded, but
+#     none are compared. Eight of them are known to jitter (level meters, the
+#     playhead, the recovery timestamp) and the rest depend on the runner's
+#     fonts and DPI. A byte comparison here would be red for reasons that are
+#     not defects, and a gate that cries wolf gets switched off.
+#
+#   * **No plugin scan of the machine.** `--snapshot` already sets
+#     "extra search paths only", so it looks at the two throwaway VST3s in the
+#     build tree and nothing else. A runner with no plugins installed is the
+#     normal case, not a broken one.
+#
+#   * **No `/WX`.** Warnings are counted and printed (the project keeps them at
+#     zero) but do not fail the build: a toolchain update that adds a warning
+#     inside a JUCE header is not a defect in this repository.
+
+name: selftest
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Assertions are only ever added (STATUS.md: 只增不减). A phase that adds
+  # checks raises this number in the same commit — the floor is the whole point
+  # of the check, so it has to be a number somebody chose rather than "whatever
+  # this run happens to print".
+  MIN_CHECKS: 810
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # JUCE 8.0.4 arrives through FetchContent, which means a shallow git clone
+      # of a couple of hundred megabytes on every cold run. Caching the deps
+      # tree is the difference between a 3-minute and a 15-minute job.
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-${{ runner.os }}-8.0.4
+          restore-keys: juce-${{ runner.os }}-
+
+      - name: Configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64
+
+      # `2>&1 | Tee-Object` makes the step's own exit status the tee's, so the
+      # code is checked explicitly. Without that a broken build would go green
+      # and the self-test would fail instead — with a message about a missing
+      # exe rather than about the compiler.
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build build --config Release 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
+
+      # The generator is multi-config, so the exe sits under
+      # build/AtomicDAW_artefacts/Release. `--snapshot` finds the test VST3s by
+      # walking up from the executable itself, so the working directory does not
+      # matter — but the file it writes should land outside the build tree.
+      #
+      # `cmd` rather than PowerShell for the run itself: it gives a real console
+      # and a real ERRORLEVEL, and the redirect is unambiguous.
+      - name: Self-test
+        shell: pwsh
+        run: |
+          $exe = "build/AtomicDAW_artefacts/Release/AtomicDAW.exe"
+          if (-not (Test-Path $exe)) { throw "not built: $exe" }
+
+          cmd /c "`"$exe`" --snapshot selftest.png > selftest.log 2>&1"
+          "exitcode=$LASTEXITCODE" | Set-Content selftest.exit
+          exit 0
+
+      - name: Gate
+        shell: pwsh
+        run: |
+          if (-not (Test-Path selftest.log)) { throw "no selftest.log - the run did not start" }
+
+          $log  = Get-Content selftest.log -Raw
+          $pass = ([regex]::Matches($log, '(?m)^\s*\[PASS\]')).Count
+          $fail = ([regex]::Matches($log, '(?m)^\s*\[FAIL\]')).Count
+          $code = ((Get-Content selftest.exit) -replace 'exitcode=', '').Trim()
+
+          $warnMatch = [regex]::Match((Get-Content build.log -Raw), '(?m)^\s*(\d+) Warning\(s\)')
+          $warnings  = if ($warnMatch.Success) { [int]$warnMatch.Groups[1].Value } else { -1 }
+
+          $lines = @(
+            "checks: **$pass passed / $fail failed** (floor $env:MIN_CHECKS), exit ``$code``",
+            "compiler warnings: $warnings"
+          )
+
+          # Read the failures out before anything else: a red run whose message
+          # is only "exit code 1" costs a second round trip through the log.
+          if ($fail -gt 0) {
+            $lines += ''
+            $lines += ($log -split "`n" | Where-Object { $_ -match '^\s*\[FAIL\]' })
+          }
+
+          $lines | Add-Content $env:GITHUB_STEP_SUMMARY
+
+          if ($code -ne '0')        { throw "self-test exited with $code" }
+          if ($fail -ne 0)          { throw "$fail check(s) failed" }
+          if (-not $log.Contains('ALL CHECKS PASSED')) { throw "no 'ALL CHECKS PASSED' in the log" }
+          if ($pass -lt [int]$env:MIN_CHECKS) {
+            throw "only $pass checks ran, below the $env:MIN_CHECKS floor - did a block get deleted?"
+          }
+
+      # Always, because the interesting runs are the red ones.
+      - name: Upload logs and snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-${{ github.sha }}
+          path: |
+            selftest.log
+            selftest.exit
+            build.log
+            selftest*.png
+            demo.atomic
+          if-no-files-found: warn
+          retention-days: 14

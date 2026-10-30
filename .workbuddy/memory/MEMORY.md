@@ -197,6 +197,13 @@ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + JUCE 8.0.4（FetchContent）。PATH �
 用 VS 自带那份。**构建前 `unset https_proxy http_proxy all_proxy no_proxy`**（大小写两份），
 否则 MSB6001 谎报找不到编译器。
 
+**CI = `.github/workflows/selftest.yml`**（P89）：`windows-2022` 上 configure → build →
+`--snapshot`，门禁只有四条、全判在 **ASCII** 上（退出码 / `[FAIL]` 数 / `ALL CHECKS PASSED` /
+PASS 数 ≥ `env.MIN_CHECKS`）。`MIN_CHECKS` 是"断言只增不减"唯一执法的地方，**加断言的那一轮
+要把它一起调大**。**故意不跑视觉回归**：8 张图本来会抖、其余看 runner 的字体与 DPI，
+会喊狼的闸门最后一定被人关掉；30 张图只当 artifact 传。留日志走管道时（`| Tee`）必须显式查
+`$LASTEXITCODE`——管道之后 `$?` 是 tee 的，坏构建会绿着过去。
+
 ## 工程文件
 `.atomic`，`formatVersion = 28`（逐版字段见 `REFERENCE.md`）。老版本必须仍能开。
 **"选中哪条自动化 lane"这类状态必须显式写属性**，不能靠元素顺序或别的属性推断。

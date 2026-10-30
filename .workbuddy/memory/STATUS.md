@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-30 · **Phase 88**（节拍器与预备拍）
+> 最后更新：2026-10-30 · **Phase 89**（CI）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**，约 6 千字。
 > 规则 `MEMORY.md` · 制度 `REFERENCE.md` · 坑 `PITFALLS.md` · 逐阶段实现记录 `memory/<日期>.md`
 > · 被压掉的历史叙述（阶段全文 / 咬测流水 / 逐版沿革 / P62–P82 经验）在 **`STATUS-archive.md`**。
@@ -19,7 +19,7 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 88** — 节拍器与预备拍。P86 把工程文件里的 `path` 从绝对改成**相对工程目录**（解不回来才退回绝对），模型里仍是绝对；找不到时能按用户挑的目录按文件名重定位。P87 让走带能循环任意一段：`Model/LoopRegion` 是唯一的区间规则，标尺底部一条 7px 窄带画它、拖它，关掉不忘记位置。P88 加了点击轨与数拍：`Audio/Metronome` 只混进走带的块（导出结构性拿不到），录音前可数一小节 |
+| 已完成阶段 | **Phase 89** — CI。P86 把工程文件里的 `path` 从绝对改成**相对工程目录**（解不回来才退回绝对），模型里仍是绝对；找不到时能按用户挑的目录按文件名重定位。P87 让走带能循环任意一段：`Model/LoopRegion` 是唯一的区间规则，标尺底部一条 7px 窄带画它、拖它，关掉不忘记位置。P88 加了点击轨与数拍：`Audio/Metronome` 只混进走带的块（导出结构性拿不到），录音前可数一小节。P89 给自检的退出码装了个听众：GitHub Actions 跑 configure → build → `--snapshot`，四条门禁全判在 ASCII 上 |
 | 自检 | **810 ALL PASSED / 0 FAIL**，失败退出码 1 |
 | 编译 | 零 error 零 warning |
 | `formatVersion` | **28**（P86 = 27 只改值不改标签；P87 = 28 加 `<Transport loop loopStart loopEnd>`；**P88 不升**——节拍器开关/音量/预备拍长度还没进工程文件）— 新增 `<Curve id name target pluginparam enabled>` + `<CurveState active/>`；**v25 及更老的文件照常打开**，只有重新保存才写新形状 |
@@ -29,12 +29,9 @@
 
 ## 下一步
 
-**未定**，等你给功能排期。P58–P88 的逐条主题不在这里重复，见下面的表和 `STATUS-archive.md`。
+**未定**，等你给功能排期。P58–P89 的逐条主题不在这里重复，见下面的表和 `STATUS-archive.md`。
 
 还没做、但已经想清楚的几件事：
-- **CI**（原计划 P89）：GitHub Actions 跑 `--snapshot`，红/绿由退出码决定（自检本身已经
-  以 1 退出）。卡在两件事：JUCE 的 FetchContent 在 CI 上要缓存，以及视觉回归那 4 张抖动图
-  （`mixer` / `mixer-narrow` / `recovery` / `slotparam`）需要先决定"允许抖动"还是"逐字节"。
 - **节拍器状态不进工程文件**（P88 的边界）：开/关、音量、预备拍长度现在是 `MainComponent`
   的成员，重启回默认。要存就得加属性，`formatVersion` 升 29。
 - **混音台插入槽的双击**：目前只有右键菜单能开效果器界面。机架卡片这条路 P85 已经打通，
@@ -44,6 +41,12 @@
 
 ## 最近八轮（新会话最需要的前情）
 
+- **P89 CI** — 自检从 P44 起就能让进程以 1 退出，但一直没人在听。`.github/workflows/selftest.yml`
+  上 `windows-2022`，门禁四条**全判在 ASCII 上**（退出码 / `[FAIL]` 数 / `ALL CHECKS PASSED` /
+  PASS 数 ≥ `MIN_CHECKS`），因为日志里的中文会随控制台代码页变样。`MIN_CHECKS` 是
+  "断言只增不减"唯一的执法点，加断言的那一轮必须顺手调大。**故意不跑视觉回归**：
+  8 张本来会抖、其余依赖 runner 字体与 DPI，会喊狼的闸门最后一定被关掉；
+  30 张图当 artifact 传。`| Tee` 之后 `$?` 是 tee 的，构建那步必须显式查 `$LASTEXITCODE`。
 - **P88 节拍器与预备拍** — **点击是监听，不是声音，也不是定时器**。它混进
   `renderNextBlock` 的每个 segment、`renderInto` 里没有，所以"导出拿不到点击"是结构性的；
   每一下落在它该在的那个**采样**上（`at = (beat - fromBeat) / beatsPerSample`），
@@ -74,11 +77,14 @@
 - **P82 曲线路由** — `CurveBank` 把音符/采样/编组三个对象的曲线集合统一成一张有序表；旧访问器
   （`envelope` / `volumeCurve` / `automationFor` / `laneDriving`）全做成薄壳，引擎与三个编辑窗一行没动。
   磁盘上「空」= **没有 `target` 属性**（写成词会被读回 level）。删掉了 `expandedGroupTarget` 缓存字段。
-- **P81 录音** — `initialise(2, 2, …)` 才是「能录音」的前置条件；拍号在 MIDI 线程随事件过桥；
-  一次按键落两样东西：音频→采样块、音符→**新编组**、手拧的旋钮→那个组的 lane（先稀疏化到 32 点）。
 
 ## 已知边界（用户提过、还没做）
 
+- **CI 不跑视觉回归**（P89）：30 张图只当 artifact 上传，不逐字节比。8 张本来就会抖
+  （电平表 / 播放头 / 恢复时间戳），其余依赖 runner 的字体与 DPI。要让这条进闸门，
+  得先做一件事：给每张图定"允许抖多少像素 / 只比哪块区域"，而不是简单的 md5。
+- **CI 只在 Windows 上跑**（P89）：macOS / Linux 能编译的那部分从来没验过（`mp3` 在非
+  Windows 上本来就不可用，导出框会灰掉）。
 - **节拍器与预备拍的设置不存盘**（P88）：开/关、音量、预备拍长度是 `MainComponent` 的成员，
   重启回默认（关 / 50% / 一小节）。要存就得加属性并升 `formatVersion = 29`。
 - **预备拍只数不放**：数拍期间听不到歌，只有点击。想听前一小节（过门）做不到。
@@ -144,6 +150,7 @@
 | P83–P84 | 插件延迟补偿（`PdcDelay.h` / 汇合点补偿）/ 崩溃恢复（`Util/Recovery` / 启动 offer / 原子写） | `memory/2026-10-30.md` |
 | P85 | 钢琴窗拆成十一个 TU / 机架卡片双击开音源界面 | `memory/2026-10-30.md` |
 | P86–P88 | 采样路径相对化与重定位（`Model/SamplePath`）/ 循环区间（`Model/LoopRegion` / 标尺手势）/ 节拍器与预备拍（`Audio/Metronome` / `renderPreRoll` / 录音 skip） | `memory/2026-10-30.md` |
+| P89 | CI：GitHub Actions 跑 configure → build → `--snapshot`，四条 ASCII 门禁 | `.github/workflows/selftest.yml` |
 | 踩坑索引 | 各阶段的不变量与咬测 | `PITFALLS.md` |
 
 ## 构建
@@ -179,6 +186,12 @@ tail -3 docs/phaseNN.log   # 要看到 "ALL CHECKS PASSED"
 恢复时间戳）。**会改状态的快照函数（`-loop` / `-metronome`）必须排在序列最后。**
 
 其他 dev 参数：`--cursor-preview <png>`（光标 8x 放大核对）、`--pluginscan`、`--audiotest`、`--transporttest`、`--load` / `--save` / `--export`。
+
+**CI（P89）**：推上去就跑 `.github/workflows/selftest.yml`（也可以手动 dispatch）。
+门禁只有四条，全判在 ASCII 上：退出码 0 / `[FAIL]` 数为 0 / 日志含 `ALL CHECKS PASSED` /
+PASS 数 ≥ `env.MIN_CHECKS`（810）。**加断言的那一轮要在同一个提交里把 `MIN_CHECKS` 调大**，
+它是"只增不减"唯一执法的地方。CI 跑在**仓库根**（cwd ≠ exe 目录），本地一样能这么跑，
+出图与 `demo.atomic` 会落在根上——`.gitignore` 里已忽略。
 
 ## 未建成的东西
 

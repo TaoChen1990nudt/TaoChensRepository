@@ -17,6 +17,34 @@
 - 自检新建音符用中音区 pitch（78/80）：pitch 60 在 520 高画布上已出屏。写死的像素断言是
   **真实像素**、与 scale 无关；数字变了说明有常量没走 px()。
 
+## CI（P89：给退出码装个听的人）
+唯一工作流 `.github/workflows/selftest.yml`。`windows-2022` 上三步：configure
+（`-G "Visual Studio 17 2022" -A x64`，和本地 CMakeCache 里那份生成器/平台完全一致）→
+build Release → `--snapshot selftest.png`。
+
+**门禁四条，全在 ASCII 上判**（日志里的中文会因控制台代码页变样，`[PASS]` 不会）：
+1. 退出码 0；
+2. `[FAIL]` 行数为 0；
+3. 日志里有 `ALL CHECKS PASSED`；
+4. PASS 行数 ≥ `env.MIN_CHECKS`（当前 **810**）。**加断言的那一轮顺手把它调大**——
+   它必须是一个有人选的数，不能是"这次跑出来多少"。这是"断言只增不减"唯一的执法点。
+
+**故意不做三件事**：
+- **不跑视觉回归**。8 张本来就会抖（电平表 / 播放头 / 恢复时间戳），其余依赖 runner 的
+  字体与 DPI。这里做逐字节比较，红了也不是缺陷；会喊狼的闸门最后一定被人关掉。
+  30 张图照样当 artifact 传上去，给人看。
+- **不扫机器上的插件**。`--snapshot` 已经 `setScanExtraPathsOnly(true)`，只看构建树里那两个
+  一次性 VST3。"runner 上一个插件都没装"是正常情况，不是坏了。
+- **不开 `/WX`**。警告计数并打进 summary（工程要求零 warning），但不因此判红：
+  JUCE 头文件里的一个新警告不是本仓库的缺陷。
+
+**跑在仓库根**（cwd ≠ exe 目录），这一形态本地实测过（810/0）：`addDevPluginPaths` 从
+**可执行文件**往上找 `*_artefacts/Release/VST3`，不看 cwd；出图落在参数 png 的**同级目录**。
+所以根上会多出 `selftest*.png` / `demo.atomic` / `build.log`，`.gitignore` 里有对应五条。
+
+**缓存 `build/_deps`**（key 带 JUCE 版本）。JUCE FetchContent 是两百多兆的浅克隆，
+不缓存 15 分钟、缓存后 3 分钟。
+
 ## 数据规则
 - **挂在音符上的东西都是值成员**（`NoteEnvelope` / `outputSlotOverride` / `groupId` /
   `modTarget` / `modPluginParam`）：复制、拖动时物理上不可能脱钩。采样块同理。
