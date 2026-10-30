@@ -358,6 +358,32 @@ void PianoRollComponent::drawGridLines (juce::Graphics& g)
 {
     const auto area = getGridArea();
 
+    // Phase 87: the loop, seen from the lanes.
+    //
+    // The strip in the ruler is where the loop is EDITED; this is where it is
+    // READ. Without it, "which bars am I repeating" is a question you answer by
+    // looking at a nine-pixel bar and counting. Drawn under the lines and under
+    // everything else, at an alpha that tints the lanes without lying about the
+    // colour of a clip.
+    if (loopRegion.isUsable())
+    {
+        const auto left  = juce::jmax (area.getX(), screenXForBeat (loopRegion.startBeat));
+        const auto right = juce::jmin (area.getRight(), screenXForBeat (loopRegion.endBeat));
+
+        if (right > left)
+        {
+            g.setColour (theme::accent.withAlpha (0.08f));
+            g.fillRect (juce::Rectangle<float> (left, area.getY(), right - left, area.getHeight()));
+
+            // Two edges, because a tint alone is ambiguous next to a group
+            // bracket: "does the loop start here or does the group?". The lines
+            // are the same answer the strip above gives, drawn down the lanes.
+            g.setColour (theme::accent.withAlpha (0.22f));
+            g.drawVerticalLine ((int) std::floor (left), area.getY(), area.getBottom());
+            g.drawVerticalLine ((int) std::floor (right), area.getY(), area.getBottom());
+        }
+    }
+
     // Phase 68: the list already reflects the current step, so "skip the thin
     // lines when they are too close together" is a property of the geometry
     // rather than a check the painter has to remember.
@@ -1141,6 +1167,51 @@ void PianoRollComponent::drawRuler (juce::Graphics& g)
                                               ui::px (64), ui::px (15)),
                         juce::Justification::centredLeft, false);
             g.setFont (boldFont (10.5f));
+        }
+    }
+
+    //-- Phase 87: the loop -------------------------------------------------
+    // Over the ticks and under the playhead: the loop is part of the time axis,
+    // and the playhead must still read as being on top of it. Only the ends are
+    // clamped to the strip — a region that runs past the edge of the screen is
+    // drawn to the edge rather than dropped, because "the loop ends somewhere
+    // over there" is information.
+    {
+        const auto bar = getLoopBarArea();
+
+        // Nothing at all while the loop is off.
+        //
+        // A hollow bracket was the first version, and it put a ghost of bars
+        // 0-4 on every empty project — a region nobody had made, drawn on every
+        // still, saying "something is arranged here". Off means off: the strip
+        // still answers a double click (that is how it comes back), and a drag
+        // still draws a new one.
+        if (! bar.isEmpty() && loopRegion.isUsable())
+        {
+            const auto left  = juce::jlimit ((float) bar.getX(), (float) bar.getRight(),
+                                             screenXForBeat (loopRegion.startBeat));
+            const auto right = juce::jlimit ((float) bar.getX(), (float) bar.getRight(),
+                                             screenXForBeat (loopRegion.endBeat));
+
+            if (right > left)
+            {
+                const juce::Rectangle<float> span (left, (float) bar.getY(),
+                                                   right - left, (float) bar.getHeight());
+
+                g.setColour (theme::accent.withAlpha (0.22f));
+                g.fillRoundedRectangle (span, ui::pf (2.0f));
+
+                g.setColour (theme::accent.withAlpha (0.85f));
+                g.drawRoundedRectangle (span.reduced (0.5f), ui::pf (2.0f), ui::pf (1.0f));
+
+                // Two grips, so "this end" is something you can see before you
+                // have to hit it.
+                g.fillRect (juce::Rectangle<float> (left, span.getY(),
+                                                    ui::pf (2.0f), span.getHeight()));
+                g.fillRect (juce::Rectangle<float> (right - ui::pf (2.0f), span.getY(),
+                                                    ui::pf (2.0f), span.getHeight()));
+
+            }
         }
     }
 

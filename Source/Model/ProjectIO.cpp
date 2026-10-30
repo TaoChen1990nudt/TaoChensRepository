@@ -529,7 +529,8 @@ namespace
 //==============================================================================
 juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double bpm,
                         const MixerModel* mixer, const AutomationModel* automation,
-                        const TempoModel* tempo, const juce::File* projectFile)
+                        const TempoModel* tempo, const juce::File* projectFile,
+                        const LoopRegion* loop)
 {
     juce::XmlElement root ("AtomicDAW");
     root.setAttribute ("version", formatVersion);
@@ -549,6 +550,19 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
         return projectFile != nullptr ? samplepath::toStored (absolute, *projectFile)
                                       : absolute;
     };
+
+    //-- Phase 87: the transport ---------------------------------------------
+    // Written whenever a region has ever been set — including while it is
+    // switched off, because "where the loop was" is state the user expects to
+    // survive a toggle, and a file that dropped it would move it back to the
+    // default four beats on the next launch.
+    if (loop != nullptr)
+    {
+        auto* transportXml = root.createNewChildElement ("Transport");
+        transportXml->setAttribute ("loop", loop->enabled ? 1 : 0);
+        transportXml->setAttribute ("loopStart", number (loop->startBeat, 8));
+        transportXml->setAttribute ("loopEnd", number (loop->endBeat, 8));
+    }
 
     //-- Rack ----------------------------------------------------------------
     {
@@ -951,7 +965,7 @@ bool fromXmlText (const juce::String& xmlText,
                   LayerStack& stack, RackModel& rack,
                   double& bpm, juce::String& error,
                   MixerModel* mixer, AutomationModel* automation, PluginHost* plugins,
-                  TempoModel* tempo, const juce::File* projectFile)
+                  TempoModel* tempo, const juce::File* projectFile, LoopRegion* loop)
 {
     error.clear();
 
@@ -970,6 +984,23 @@ bool fromXmlText (const juce::String& xmlText,
         error = juce::String::fromUTF8 (u8"工程由更新版本的 AtomicDAW 创建（格式 ")
                   + juce::String (version) + juce::String::fromUTF8 (u8"），无法读取");
         return false;
+    }
+
+    //-- Phase 87: the loop, before anything else ----------------------------
+    // A v27 file has no <Transport> and therefore keeps the region it was
+    // written with: "off", which is what every earlier build did (the transport
+    // repeated the whole project and there was nothing to switch).
+    if (loop != nullptr)
+    {
+        *loop = LoopRegion();
+
+        if (auto* transportXml = root->getChildByName ("Transport"))
+        {
+            loop->enabled   = transportXml->getIntAttribute ("loop", 0) != 0;
+            loop->startBeat = juce::jmax (0.0, transportXml->getDoubleAttribute ("loopStart", 0.0));
+            loop->endBeat   = juce::jmax (loop->startBeat + LoopRegion::minLengthBeats,
+                                          transportXml->getDoubleAttribute ("loopEnd", 4.0));
+        }
     }
 
     //-- Parse everything into temporaries ------------------------------------
@@ -1611,7 +1642,7 @@ bool fromXmlText (const juce::String& xmlText,
 bool save (const juce::File& file,
            const LayerStack& stack, const RackModel& rack, double bpm,
            juce::String& error, const MixerModel* mixer, const AutomationModel* automation,
-           const TempoModel* tempo)
+           const TempoModel* tempo, const LoopRegion* loop)
 {
     error.clear();
 
@@ -1623,7 +1654,8 @@ bool save (const juce::File& file,
     // Phase 86: the file about to be written IS the base every relative sample
     // path in it is relative to. Passing it here is what makes "save into
     // another folder" re-anchor the paths instead of copying the old ones.
-    if (! file.replaceWithText (toXmlText (stack, rack, bpm, mixer, automation, tempo, &file)))
+    if (! file.replaceWithText (toXmlText (stack, rack, bpm, mixer, automation, tempo, &file,
+                                           loop)))
     {
         error = juce::String::fromUTF8 (u8"无法写入 ") + file.getFullPathName();
         return false;
@@ -1636,7 +1668,7 @@ bool load (const juce::File& file,
            LayerStack& stack, RackModel& rack,
            double& bpm, juce::String& error,
            MixerModel* mixer, AutomationModel* automation, PluginHost* plugins,
-           TempoModel* tempo)
+           TempoModel* tempo, LoopRegion* loop)
 {
     error.clear();
 
@@ -1647,7 +1679,7 @@ bool load (const juce::File& file,
     }
 
     return fromXmlText (file.loadFileAsString(), stack, rack, bpm, error,
-                        mixer, automation, plugins, tempo, &file);
+                        mixer, automation, plugins, tempo, &file, loop);
 }
 
 } // namespace project

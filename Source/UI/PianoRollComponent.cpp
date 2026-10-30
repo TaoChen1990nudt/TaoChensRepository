@@ -489,6 +489,38 @@ juce::Rectangle<int> PianoRollComponent::getRulerArea() const
                            .withHeight (rulerHeight);
 }
 
+//==============================================================================
+//  Phase 87: the loop strip
+//==============================================================================
+juce::Rectangle<int> PianoRollComponent::getLoopBarArea() const
+{
+    // The bottom of the ruler, one pixel in from each edge.
+    //
+    // Bottom and not top: the bar numbers and their seconds live in the upper
+    // two thirds, and a band across them would make the ruler unreadable at
+    // exactly the zoom levels where you are trying to decide where the loop
+    // goes. The beat ticks it covers are drawn first and show through — the
+    // band is a tint, not an opaque bar.
+    const auto ruler = getRulerArea();
+
+    // Seven pixels, and no label: the band sits under the seconds row, where
+    // the only thing it covers is the minor beat ticks. It used to be twelve
+    // and carry the word 循环 — which landed on top of "0:06.0" and made both
+    // unreadable. The grid tint (drawGridLines) is what says what the loop IS.
+    return ruler.withTrimmedTop (ruler.getHeight() - ui::px (7))
+                .withTrimmedBottom (ui::px (1))
+                .reduced (1, 0);
+}
+
+void PianoRollComponent::setLoopRegion (const LoopRegion& region)
+{
+    if (loopRegion == region)
+        return;
+
+    loopRegion = region;
+    repaint (getRulerArea());
+}
+
 
 juce::Rectangle<int> PianoRollComponent::getKeyboardArea() const
 {

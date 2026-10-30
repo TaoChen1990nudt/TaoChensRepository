@@ -184,6 +184,34 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
     // "the thing that is scaled" is the scale itself, not the transport.
     if (getRulerArea().contains (ipos))
     {
+        // Phase 87: the loop strip answers before the transport does. A press
+        // here is about where the loop goes, never about where the playhead
+        // goes — the two live on the same 32 pixels, and a gesture that could
+        // mean either would be a gesture that means neither.
+        if (getLoopBarArea().contains (ipos) && ! mods.isPopupMenu())
+        {
+            const double beat = beatAtScreenX (pos.x);
+
+            loopDragAnchorBeat   = beat;
+            loopDragAnchorLength = loopRegion.lengthBeats();
+            loopDragOriginal     = loopRegion;
+
+            const float startX = screenXForBeat (loopRegion.startBeat);
+            const float endX   = screenXForBeat (loopRegion.endBeat);
+
+            if (loopRegion.isUsable() && std::abs (pos.x - startX) <= ui::px (5))
+                dragMode = DragMode::loopStart;
+            else if (loopRegion.isUsable() && std::abs (pos.x - endX) <= ui::px (5))
+                dragMode = DragMode::loopEnd;
+            else if (loopRegion.isUsable() && loopRegion.contains (beat))
+                dragMode = DragMode::loopMove;
+            else
+                dragMode = DragMode::loopNew;    // the region is built by the DRAG
+
+            setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
+            return;
+        }
+
         if (mods.isPopupMenu())
         {
             // Right button: zoom. Anchored on the value the drag started with,
@@ -765,6 +793,27 @@ void PianoRollComponent::mouseDoubleClick (const juce::MouseEvent& e)
 
 void PianoRollComponent::handleDoubleClick (juce::Point<float> pos)
 {
+    // Phase 87: the loop strip, before the grid test below. A double click on
+    // the region is the only way to switch it off — and switching it OFF has to
+    // keep the two numbers, so this is a flag change plus a report, not a
+    // rebuild of the region.
+    if (getLoopBarArea().toFloat().contains (pos))
+    {
+        const auto before = loopRegion;
+
+        loopRegion.enabled = ! loopRegion.enabled;
+
+        if (loopRegion.enabled && ! loopRegion.isUsable())
+            loopRegion = LoopRegion::around (snapBeat (beatAtScreenX (pos.x)));
+
+        repaint (getRulerArea());
+
+        if (loopRegion != before && onLoopRegionChanged != nullptr)
+            onLoopRegionChanged (loopRegion);
+
+        return;
+    }
+
     if (! getGridArea().contains (pos))
         return;
 
@@ -986,6 +1035,14 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
         return;
     }
 
+    //-- Phase 87: the loop strip ---------------------------------------------
+    if (dragMode == DragMode::loopStart || dragMode == DragMode::loopEnd
+          || dragMode == DragMode::loopMove || dragMode == DragMode::loopNew)
+    {
+        applyLoopDragToScreenX (e.position.x);
+        return;
+    }
+
     if (dragMode == DragMode::rulerZoom)
     {
         // Right-drag. Up widens the beat, i.e. zooms in. Exponential so the same
@@ -1179,6 +1236,11 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent&)
     const bool wasRulerDrag = dragMode == DragMode::rulerScrub
                                 || dragMode == DragMode::rulerZoom;
 
+    // Phase 87: a loop gesture reports itself ONCE, on release, for the same
+    // reason a note drag does — the host turns one report into one undo step,
+    // and a report per mouse move would turn a drag into sixty undos.
+    const bool wasLoopDrag = finishLoopGesture();     // reports, if anything moved
+
     // Phase 21: one undo step per gesture, not per mouse-move — the point drag
     // itself only republishes (see dragGroupCurvePoint).
     const bool wasGroupCurveDrag = dragMode == DragMode::groupAutomationPoint;
@@ -1237,12 +1299,72 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent&)
 
     // The ruler borrows the vertical-resize pointer while it is being dragged;
     // letting the tool take it back is the only way out of that state.
-    if (wasRulerDrag)
+    if (wasRulerDrag || wasLoopDrag)
         updateCursor();
 
     repaint();
 }
 
+
+//==============================================================================
+//  Phase 87: the loop gestures, as functions
+//==============================================================================
+void PianoRollComponent::applyLoopDragToScreenX (float screenX)
+{
+    // Snapped like everything else on this grid, and always rebuilt from the
+    // ORIGINAL region rather than nudged: a move that accumulated deltas would
+    // drift by the rounding error of every mouse move.
+    if (dragMode == DragMode::loopStart)
+    {
+        loopRegion.setStart (snapBeat (beatAtScreenX (screenX)));
+    }
+    else if (dragMode == DragMode::loopEnd)
+    {
+        loopRegion.setEnd (snapBeat (beatAtScreenX (screenX)));
+    }
+    else if (dragMode == DragMode::loopMove)
+    {
+        loopRegion = loopDragOriginal;
+        loopRegion.moveBy (snapBeat (beatAtScreenX (screenX)) - snapBeat (loopDragAnchorBeat));
+    }
+    else if (dragMode == DragMode::loopNew)
+    {
+        loopRegion.setRange (loopDragAnchorBeat, snapBeat (beatAtScreenX (screenX)));
+
+        // Dragging a region out is the request itself. Requiring a second click
+        // to switch on the thing you just drew would be a rule nobody could
+        // guess from the picture.
+        loopRegion.enabled = true;
+    }
+
+    repaint (getRulerArea());
+}
+
+bool PianoRollComponent::finishLoopGesture()
+{
+    if (dragMode != DragMode::loopStart && dragMode != DragMode::loopEnd
+          && dragMode != DragMode::loopMove && dragMode != DragMode::loopNew)
+        return false;
+
+    // Reported only when something actually changed. A press that never dragged
+    // is a click, and a click in the strip means "start here next time", not
+    // "I have edited the project".
+    if (loopRegion != loopDragOriginal && onLoopRegionChanged != nullptr)
+        onLoopRegionChanged (loopRegion);
+
+    return true;
+}
+
+void PianoRollComponent::simulateLoopGestureForTest (float downX, float dragX)
+{
+    const auto bar = getLoopBarArea();
+
+    handlePress ({ downX, (float) bar.getCentreY() }, {}, 1);
+    applyLoopDragToScreenX (dragX);
+    finishLoopGesture();
+
+    dragMode = DragMode::none;
+}
 
 void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
 {

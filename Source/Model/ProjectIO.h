@@ -6,6 +6,7 @@
 #include "AutomationModel.h"
 #include "HardwareRack.h"
 #include "LayerModel.h"
+#include "LoopRegion.h"
 #include "MixerModel.h"
 #include "TempoModel.h"
 
@@ -227,6 +228,18 @@ namespace project
         where its single curve points. A v25 project therefore opens sounding
         exactly as it did; it is only re-WRITTEN in the new shape.
 
+    v28 (Phase 87): the transport remembers a loop region.
+
+      * `<Transport loop="1" loopStart="8" loopEnd="16"/>` — a child of the
+        root, written only when the loop has been turned on at least once.
+        Absent means "loop the whole project", which is exactly what every
+        earlier version did, so an old file opens with the same behaviour it
+        saved with.
+
+        The two beats are written even when `loop="0"`: switching the loop off
+        must not forget where it was, or the next click puts it back at the
+        default four beats and the user has to find their eight bars again.
+
     v27 (Phase 86): a path may be relative to the project file.
 
       * `<Sample path="…">` and `<Synth sample="…">` are now written RELATIVE
@@ -243,7 +256,7 @@ namespace project
         v26 reader meeting a v27 file opens it with the samples it cannot
         resolve drawn as "missing" — degraded, but never mis-pointed, which is
         the reason this is a version bump at all. */
-inline constexpr int formatVersion = 27;
+inline constexpr int formatVersion = 28;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";
@@ -255,7 +268,8 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                         const MixerModel* mixer = nullptr,
                         const AutomationModel* automation = nullptr,
                         const TempoModel* tempo = nullptr,
-                        const juce::File* projectFile = nullptr);
+                        const juce::File* projectFile = nullptr,
+                        const LoopRegion* loop = nullptr);
 
 /** Parses a document produced by toXmlText(). Returns false with `error` set
     when the document is not a usable project; the targets are then untouched.
@@ -273,14 +287,16 @@ bool fromXmlText (const juce::String& xmlText,
                   AutomationModel* automation = nullptr,
                   PluginHost* plugins = nullptr,
                   TempoModel* tempo = nullptr,
-                  const juce::File* projectFile = nullptr);
+                  const juce::File* projectFile = nullptr,
+                  LoopRegion* loop = nullptr);
 
 bool save (const juce::File& file,
            const LayerStack& stack, const RackModel& rack, double bpm,
            juce::String& error,
            const MixerModel* mixer = nullptr,
            const AutomationModel* automation = nullptr,
-           const TempoModel* tempo = nullptr);
+           const TempoModel* tempo = nullptr,
+           const LoopRegion* loop = nullptr);
 
 bool load (const juce::File& file,
            LayerStack& stack, RackModel& rack,
@@ -288,7 +304,8 @@ bool load (const juce::File& file,
            MixerModel* mixer = nullptr,
            AutomationModel* automation = nullptr,
            PluginHost* plugins = nullptr,
-           TempoModel* tempo = nullptr);
+           TempoModel* tempo = nullptr,
+           LoopRegion* loop = nullptr);
 
 } // namespace project
 

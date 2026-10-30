@@ -155,6 +155,7 @@ namespace
         // prompt above, a modal dialog has no other way into a still.
         writePng ("-recovery", component.createRecoveryPromptSnapshot());
 
+
         // Phase 52: the export dialog, in both formats — WAV with the bitrate
         // row greyed and MP3 with the depth row greyed is the whole control,
         // and a modal window cannot be photographed by a headless run.
@@ -272,6 +273,13 @@ namespace
 
             writePng ("-blank", blank.createComponentSnapshot (blank.getLocalBounds(), true));
         }
+
+        // Phase 87: the loop strip, LAST because it changes the session — a
+        // region left on would tint every still taken after it, and "every
+        // picture has a loop on it" is not what these images document.
+        // Twelve pixels of ruler do not read in a whole-window shot, so the
+        // roll is photographed on its own with a region already set.
+        writePng ("-loop", component.createLoopSnapshot (8.0, 16.0));
 
         pngFile.withFileExtension (".log").replaceWithText (report);
         std::cout << report << std::endl;

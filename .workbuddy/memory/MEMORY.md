@@ -7,7 +7,7 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
 编组、采样、走带、文件树、波形、伸缩、缩放、电平表）；平台陷阱与自检夹具在 `PITFALLS.md`。
 动代码前按主题查这两份，本文件只留跨主题硬规则。
 
-## 十九条硬规则
+## 二十一条硬规则
 1. **中文一律 `atomic::utf8("...")`**，自检的失败信息也算。裸中文 = 乱码。
 2. **几何走 `ui::px()/pf()`、字号 `ui::sp()`**，唯一密度旋钮 `ui::scale = 1.3f`，禁止裸像素。
    `numPitches` / gutter / 内联自动化框最小宽度不缩放。
@@ -136,8 +136,34 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
     验收标准不是"能编译 + 断言全过"，是**逐行比对**：原文按非空行做多重集，和新文件做减法，
     允许的差异只有 `inline ` 前缀和 namespace 包裹这两处。
 
+20. **模型只存绝对路径，相对是文档的形式**（P86）：`Model/SamplePath` 是唯一的路径规则层，
+    `toStored` / `resolve` / `resolveExisting` 全走它，`ProjectIO` 只负责在两端调用。
+    三条规矩：**模型里永远是绝对路径**（一个 `File("media\\kick.wav")` 会被下一个拿到它的人按
+    进程当前目录解释，那就是 bug 的种子）；**相对路径必须解得回原文件才写**（`toStored` 算出
+    候选，用读盘时同一个 `resolve` 跑一遍，答案等于原文件才采用，跨盘/符号链接/解析后落到别处
+    的 `..` 链一律退回绝对——永远正确，只是不那么好搬）；**读盘时把修好的位置写回模型，找不到
+    也写绝对**，否则下一次 Ctrl+S 又把那条死路径存一遍，修好只维持一个会话。
+    **重定位不许自动发生**：`relinkSamplesTo(folder)` 只认用户挑的目录，弹窗默认关闭
+    （理由同 P84：无头运行会动用户数据）。`FolderIndex` 用**文件名**配对，同名多个取先找到的，
+    深度上限 6 层；把整个磁盘扫成索引不是"更好的体验"。
+    **恢复副本的相对路径以 `recoveryOf` 指向的工程为基准**，不是副本自己所在的 Rescue 目录
+    ——`restoreState` 因此多一个 `projectFile` 参数（`nullptr` = 用 `currentProject`）。
+
+21. **时间是积分，循环是一个区间，不是一个标志**（P87）：`Model/LoopRegion` 是唯一的区间规则，
+    `PlaybackEngine` 与钢琴窗都读它。区间的不变量全是关于**顺序与最短**的，不是关于那两个数：
+    起点永远在终点之前（谁从哪个方向拖都一样）、**不短于 `minLengthBeats`**（0.25 拍，
+    一次误点不该做出一个两采样之间反复抽搐的循环）、永不小于 0。
+    **开关与数字分开**：关掉循环**不许忘记位置**——关掉听一遍再打开要的还是那八小节，所以磁盘上
+    `loop="0"` 时两个拍子照样写。渲染侧关闭时 `wrapStart/wrapEnd` 退化成 `[0, length)`，
+    即 P87 之前的整首循环，**老行为逐位不变**，这是它能上线的理由。
+    **`isUsable()` 是唯一的判据**（`enabled && 长度够`），渲染、绘制、磁盘、手势全问它；
+    别在别处再写一遍 `enabled`——关掉的区间画在标尺上就是"凭空多个括号"。
+    拖出新区间**顺手打开**（画它就是在要它）；`loopMove` 每次都从 `loopDragOriginal` 重建
+    而不是累加 delta，否则每像素的取整误差会攒成漂移。标尺手势只占底部 `ui::px(7)`
+    （曾做成 12px + "循环"字样，把 `0:06.0` 压掉了）。
+
 ## 目录
-- `Source/Model/` 数据与路由（LayerModel / **CurveBank** / RackModel / MixerModel / TempoMap / TempoModel / Routing / ProjectIO / Gain）
+- `Source/Model/` 数据与路由（LayerModel / **CurveBank** / RackModel / MixerModel / TempoMap / TempoModel / Routing / **SamplePath** / **LoopRegion** / ProjectIO / Gain）
 - `Source/Audio/` 引擎与纯函数 DSP（PlaybackEngine / Recorder / ClipStretch / PdcDelay / 导出）
 - `Source/UI/` 时间线、机架、混音台、文件树、自动化、分栏（**钢琴窗 = `PianoRoll*.cpp` 十一个 TU +
   `PianoRollInternals.h`**，见 `REFERENCE.md` 的「钢琴窗的文件布局」）
@@ -150,6 +176,6 @@ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + JUCE 8.0.4（FetchContent）。PATH �
 否则 MSB6001 谎报找不到编译器。
 
 ## 工程文件
-`.atomic`，`formatVersion = 26`（逐版字段见 `REFERENCE.md`）。老版本必须仍能开。
+`.atomic`，`formatVersion = 28`（逐版字段见 `REFERENCE.md`）。老版本必须仍能开。
 **"选中哪条自动化 lane"这类状态必须显式写属性**，不能靠元素顺序或别的属性推断。
 先解析到临时对象、末尾一次性提交，坏文件绝不破坏当前会话。

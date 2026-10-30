@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-30 · **Phase 85**（钢琴窗拆分 / 双击打开音源界面）
+> 最后更新：2026-10-30 · **Phase 87**（采样路径相对化 + 循环区间）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**，约 6 千字。
 > 规则 `MEMORY.md` · 制度 `REFERENCE.md` · 坑 `PITFALLS.md` · 逐阶段实现记录 `memory/<日期>.md`
 > · 被压掉的历史叙述（阶段全文 / 咬测流水 / 逐版沿革 / P62–P82 经验）在 **`STATUS-archive.md`**。
@@ -8,7 +8,7 @@
 ## 新会话读文档的顺序
 
 1. **本文件**（1 分钟）
-2. **`MEMORY.md`** — 十八条跨主题硬规则 + 目录/构建/工程文件约定（必须全文读）
+2. **`MEMORY.md`** — 二十一条跨主题硬规则 + 目录/构建/工程文件约定（必须全文读）
 3. **`REFERENCE.md`** — 按主题查制度（构建/路由/音频/工程文件/混音台/编辑手势/编组/采样/走带/波形/伸缩…）
 4. **`PITFALLS.md`** — 卡住了再查对应阶段
 5. **`memory/<日期>.md`** — 想知道「为什么这么写」才翻
@@ -19,24 +19,39 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 85** — 钢琴窗拆成十一个翻译单元 + 机架卡片双击打开音源界面。13,125 行的那一件东西按主题分成 `Source/UI/PianoRoll*.cpp` 十个新文件，共享的 13 个 inline 辅助与 9 个调色板别名进 `PianoRollInternals.h`；**拆的是文件边界，不是逻辑**，10,493 个非空行逐行比对过，除 inline 前缀与 namespace 包裹外全部原样。机架卡片上名字以外的部分是「打开这个音源」（名字仍是改名，P79），宿主侧 `MainComponent::openSlotEditor()` 统一回答，右键菜单第 41 项与双击共用它 |
-| 自检 | **753 ALL PASSED / 0 FAIL**，失败退出码 1 |
+| 已完成阶段 | **Phase 87** — 采样路径相对化 + 循环区间。P86 把工程文件里的 `path` 从绝对改成**相对工程目录**（解不回来才退回绝对），模型里仍是绝对；找不到时能按用户挑的目录按文件名重定位。P87 让走带能循环任意一段：`Model/LoopRegion` 是唯一的区间规则，标尺底部一条 7px 窄带画它、拖它，关掉不忘记位置 |
+| 自检 | **782 ALL PASSED / 0 FAIL**，失败退出码 1 |
 | 编译 | 零 error 零 warning |
-| `formatVersion` | **26**（P85 不升：纯结构重构，不动一个字节的存档。P83/P84 也没升）— 新增 `<Curve id name target pluginparam enabled>` + `<CurveState active/>`；**v25 及更老的文件照常打开**，只有重新保存才写新形状 |
+| `formatVersion` | **28**（P86 = 27 只改值不改标签；P87 = 28 加 `<Transport loop loopStart loopEnd>`）— 新增 `<Curve id name target pluginparam enabled>` + `<CurveState active/>`；**v25 及更老的文件照常打开**，只有重新保存才写新形状 |
 | 可执行 | `build/AtomicDAW_artefacts/Release/AtomicDAW.exe` |
 | 技术栈 | JUCE 8.0.4（FetchContent）+ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + C++17 |
-| 源码规模 | `Source/` 下 **102 个** .cpp/.h，分 Model / Audio / UI / Util / Media。最大的单文件从 13,125 行降到 **1,718 行**（`PianoRollInput.cpp`）——现在最大的三个是 `SelfTest.cpp` 15,709 / `MainComponent.cpp` 8,143 / `PlaybackEngine.cpp` 3,607 |
+| 源码规模 | `Source/` 下 **105 个** .cpp/.h，共 **78,421 行**，分 Model / Audio / UI / Util / Media。最大的三个是 `SelfTest.cpp` 16,143 / `MainComponent.cpp` 8,360 / `PlaybackEngine.cpp` 3,628 |
 
 ## 下一步
 
-**未定**，等你给功能排期。P58–P85 的逐条主题不在这里重复，见下面的表和 `STATUS-archive.md`。
+**未定**，等你给功能排期。P58–P87 的逐条主题不在这里重复，见下面的表和 `STATUS-archive.md`。
 
-仍值得排期的两件事（都不是 bug）：
-- **混音台插入槽的双击**：目前只有右键菜单能开效果器界面。机架卡片这条路刚打通，混音台的 `InsertEditorWindow` 是同一个窗口类，形状几乎一样——但它是 `fx::Type` 而不是插件实例，得先决定"双击要不要区分内置效果和 VST3"。
-- **`MainComponent.cpp` 还有 8,143 行**：拆分收益已经证明过了（P85），下一个候选是它。
+还没做、但已经想清楚的三件事：
+- **节拍器与预备拍**（原计划 P88）：走带里有一个能听的 4/4 点击，录音前给一小节。
+  难点不在发声，在"点击不能进渲染、不能进导出、不能进采样"——它是监听侧的东西。
+- **CI**（原计划 P89）：GitHub Actions 跑 `--snapshot`，红/绿由退出码决定（自检本身已经
+  以 1 退出）。卡在两件事：JUCE 的 FetchContent 在 CI 上要缓存，以及视觉回归那 9 张抖动图
+  需要先决定"允许抖动"还是"逐字节"。
+- **混音台插入槽的双击**：目前只有右键菜单能开效果器界面。机架卡片这条路 P85 已经打通，
+  混音台的 `InsertEditorWindow` 是同一个窗口类，形状几乎一样——但它是 `fx::Type` 而不是
+  插件实例，得先决定"双击要不要区分内置效果和 VST3"。
+- **`MainComponent.cpp` 还有 8,360 行**：拆分收益已经证明过了（P85），下一个候选是它。
 
 ## 最近八轮（新会话最需要的前情）
 
+- **P87 循环区间** — 区间的不变量全是关于**顺序与最短**的（0.25 拍），不是关于那两个数；
+  **开关与数字分开**，`loop="0"` 时位置照样写进磁盘。关闭时渲染退化成 `[0, length)` =
+  P87 之前的整首循环，老行为逐位不变，这是它能上线的理由。`isUsable()` 是唯一判据，
+  少判它一次，29 张视觉快照里 18 张就凭空多一个虚框。
+- **P86 采样相对路径** — **模型只存绝对，相对只是文档的形式**。`toStored` 的验收标准是
+  "用读盘时同一个 `resolve` 解得回原文件"，不是"字符串更短"；跨盘与符号链接自动退回绝对。
+  读盘找不到**也要写绝对**，否则下一次 Ctrl+S 又把死路径存一遍。重定位只认用户挑的目录，
+  弹窗默认关闭（同 P84：无头运行会动用户数据）。
 - **P85 拆分与双击** — 结构重构的验收标准**不是**"能编译 + 断言全过"，是逐行比对：
   原文按非空行做多重集、和新文件做减法，允许的差异只有 `inline ` 前缀和 namespace 包裹两处。
   守卫断言保的是行为，行为可以完全正确而注释、空行、`//====` 分隔线已经错位。
@@ -54,14 +69,16 @@
   一次按键落两样东西：音频→采样块、音符→**新编组**、手拧的旋钮→那个组的 lane（先稀疏化到 32 点）。
 - **P80 速度曲线** — `secondsPerBeat` 从全工程消失，换成 `Model/TempoMap`（段内 BPM 线性 ⟹ 求秒取对数）。
   `renderNextBlock` **每段**重算 `beatsPerSample`。
-- **P79 三个名字** — `Layer::name` / `NoteGroup::name` / `SynthSlot::name` 各只有一处字段，双击那行就地改；
-  唯一例外是采样块的 `SampleEvent::name`（导入时抄来的副本，所以只有它要跟随规则）。
-- **P78 采样包络窗** — 双击开**窗口**不是内联窄条；采样那一问必须排在 `hitTestActiveLayer` 之后
-  （块画在音符下面，压在块上的音符才是指针看着的东西）。
-- **P77 ghost** — 挡单击、不挡双击：「点穿」是"抓不到"，「双击」是"让我过去"。
 
 ## 已知边界（用户提过、还没做）
 
+- **循环与录音互斥，但代码没拦**（P87 的边界）：录音期间播放头回绕，后面那些音符的拍号会
+  比 `recordStartBeat` **小**，而 `finishRecording()` 取 `endBeat = max(recordStartBeat, position)`，
+  于是这次 take 的长度塌成 0，弹出的组是空的——**看得见，不是静默损坏**。
+  一行修法是 `startRecording()` 里临时关掉循环、`finishRecording()` 再恢复；
+  之所以没顺手加：`setLoopRegion` 会走 `modelChanged()`，会在录音前后各多一个"改动"。
+- **导出不受循环影响**：`renderOffline` / `renderWindow` 走的是 `renderInto`，不读循环原子
+  ——这是对的（导出该导整首或选区，不是那八小节），但要知道它和播放听到的不一样。
 - **停止只记住"最后一次播放从哪开始"**：播放中途拖标尺换位置，停止仍回到本次播放的起点，不是新的落点。
 - **刻刀一次只切点中的那一个**：不切整个选区（旧菜单行为是切选区，工具语义是切点中的对象）。
 - **MP3 只在 Windows 上可用**：走 Media Foundation（系统自带）；其它平台 `mp3::isAvailable()==false`，
@@ -111,6 +128,8 @@
 | P56–P76 | 多选拉伸 / 组框贴成员 / 组 = 定义 + 出现 / 编组栏镜像 / 缩放视口 / 同源编组 / 剪贴板 / 播放跟随 / 图层栏眼睛 / 网格退档与吸附 / 1/64 拍 / 全量审查 16 条 / 撤销按动作 / 块高可拖 / 编组双击才可改 / 选中即整组 / 组内空白 / 打开≠选择 | `memory/2026-10-28.md` |
 | P77–P82 | ghost 换层 / 采样包络窗 / 三个名字 / 速度自动化 / 录音 / 曲线路由下拉 | `memory/2026-10-29.md` |
 | P83–P84 | 插件延迟补偿（`PdcDelay.h` / 汇合点补偿）/ 崩溃恢复（`Util/Recovery` / 启动 offer / 原子写） | `memory/2026-10-30.md` |
+| P85 | 钢琴窗拆成十一个 TU / 机架卡片双击开音源界面 | `memory/2026-10-30.md` |
+| P86–P87 | 采样路径相对化与重定位（`Model/SamplePath`）/ 循环区间（`Model/LoopRegion` / 标尺手势） | `memory/2026-10-30.md` |
 | 踩坑索引 | 各阶段的不变量与咬测 | `PITFALLS.md` |
 
 ## 构建
@@ -138,7 +157,7 @@ build/AtomicDAW_artefacts/Release/AtomicDAW.exe --snapshot docs/phaseNN.png > do
 tail -3 docs/phaseNN.log   # 要看到 "ALL CHECKS PASSED"
 ```
 
-断言总数只增不减。**新增功能要加断言并报出新的总数**（当前基准 **742**），退回去说明有东西坏了。
+断言总数只增不减。**新增功能要加断言并报出新的总数**（当前基准 **782**），退回去说明有东西坏了。
 
 其他 dev 参数：`--cursor-preview <png>`（光标 8x 放大核对）、`--pluginscan`、`--audiotest`、`--transporttest`、`--load` / `--save` / `--export`。
 

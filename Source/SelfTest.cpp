@@ -15883,6 +15883,252 @@ juce::String MainComponent::runSelfTest()
         root86.getParentDirectory().getChildFile ("atomic-p86-moved").deleteRecursively();
     }
 
+    //-- P87: 循环区间 --------------------------------------------------------
+    // 三件事分开验：区间的规矩（顺序、最短、不出界）、走带真的照着它转、
+    // 存盘读回之后还是同一段。
+    {
+        //-- A. 区间的规矩 ---------------------------------------------------
+        {
+            LoopRegion r87;
+            r87.setRange (12.0, 8.0);
+
+            check (utf8 ("从右往左拖，得到的是同一段（起点仍然小于终点）"),
+                   r87.startBeat == 8.0 && r87.endBeat == 12.0,
+                   juce::String (r87.startBeat) + " -> " + juce::String (r87.endBeat));
+
+            r87.setRange (8.0, 8.0);
+
+            check (utf8 ("拖成一个点，至少留下一个最短长度"),
+                   r87.lengthBeats() >= LoopRegion::minLengthBeats - 1.0e-9,
+                   juce::String (r87.lengthBeats(), 4) + utf8 (" 拍"));
+
+            r87.setRange (-4.0, 2.0);
+
+            check (utf8 ("往前拖出时间线：起点夹到 0"),
+                   r87.startBeat == 0.0 && r87.endBeat == 2.0,
+                   juce::String (r87.startBeat) + " -> " + juce::String (r87.endBeat));
+
+            // 起点越过终点：终点被推着走，而不是区间被压成负数
+            r87.setRange (0.0, 8.0);
+            r87.setStart (9.0);
+
+            check (utf8 ("把起点拖过终点，终点跟着被推走"),
+                   r87.startBeat == 9.0 && r87.endBeat >= 9.0 + LoopRegion::minLengthBeats - 1.0e-9,
+                   juce::String (r87.startBeat) + " -> " + juce::String (r87.endBeat));
+
+            r87.setRange (4.0, 8.0);
+            r87.moveBy (-10.0);
+
+            check (utf8 ("整段左移撞到 0 就停在 0，不会跑到时间线外面"),
+                   r87.startBeat == 0.0 && std::abs (r87.lengthBeats() - 4.0) < 1.0e-9,
+                   juce::String (r87.startBeat) + " / " + juce::String (r87.lengthBeats()));
+
+            LoopRegion off87;
+            off87.setRange (4.0, 8.0);
+
+            check (utf8 ("关掉之后，播放头不再被它拉回去"),
+                   ! off87.isUsable() && off87.wrapped (9.0) == 9.0,
+                   juce::String (off87.wrapped (9.0)));
+        }
+
+        //-- B. 走带照着它转 ------------------------------------------------
+        {
+            LayerStack t87;
+            RackModel  r87;
+            MixerModel m87;
+            PlaybackEngine e87;
+
+            t87.addLayer (utf8 ("循环"), palette::layer1);
+
+            // 48000 采样就是一块，所以采样率必须说清楚：默认是 44100，一块
+            // 折出来是 2.177 拍，位点会一点点漂，断言看着像差一点点其实差
+            // 在单位上。
+            e87.prepareToPlay (48000.0, 48000);
+            e87.publishSchedule (t87, r87, 120.0, 0.0, &m87);
+
+            LoopRegion loop87;
+            loop87.enabled   = true;
+            loop87.startBeat = 8.0;
+            loop87.endBeat   = 12.0;
+            e87.setLoopRegion (loop87);
+
+            // 120 BPM：一拍 0.5 秒，所以一次 48000 采样的回调正好是两拍。
+            juce::AudioBuffer<float> b87 (2, 48000);
+            e87.setPositionBeats (8.0);
+
+            e87.renderNextBlock (b87, 48000);
+            const double afterOne = e87.getPositionBeats();
+
+            e87.renderNextBlock (b87, 48000);
+            const double afterTwo = e87.getPositionBeats();
+
+            e87.renderNextBlock (b87, 48000);
+            const double afterThree = e87.getPositionBeats();
+
+            check (utf8 ("循环开着：播到区间末尾就回到起点"),
+                   std::abs (afterOne - 10.0) < 1.0e-6
+                     && std::abs (afterTwo - 8.0) < 1.0e-6
+                     && std::abs (afterThree - 10.0) < 1.0e-6,
+                   juce::String (afterOne, 3) + " / " + juce::String (afterTwo, 3)
+                     + " / " + juce::String (afterThree, 3));
+
+            // 关掉：整首循环，也就是这一段之前的全部行为。
+            e87.setLoopRegion (LoopRegion());
+            e87.setPositionBeats (63.0);
+            e87.renderNextBlock (b87, 48000);
+
+            check (utf8 ("循环关着：回到 0（整首循环，和 P87 之前一模一样）"),
+                   std::abs (e87.getPositionBeats() - 1.0) < 1.0e-6,
+                   juce::String (e87.getPositionBeats(), 3));
+
+            // 区间尾巴伸出工程长度：被夹到长度上，不是照着 70 转。
+            LoopRegion past87;
+            past87.enabled   = true;
+            past87.startBeat = 60.0;
+            past87.endBeat   = 70.0;
+            // 从 62 起播两拍：夹住了就在 64 回绕到 60，没夹住会走到 64。
+            e87.setLoopRegion (past87);
+            e87.setPositionBeats (62.0);
+            e87.renderNextBlock (b87, 48000);
+
+            check (utf8 ("区间越过工程末尾：回绕点被夹在工程长度上"),
+                   std::abs (e87.getPositionBeats() - 60.0) < 1.0e-6,
+                   juce::String (e87.getPositionBeats(), 3)
+                     + utf8 (" （没夹住会是 64）"));
+        }
+
+        //-- C. 存盘 ---------------------------------------------------------
+        {
+            auto root87 = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                            .getChildFile ("atomic-p87");
+            root87.deleteRecursively();
+            root87.createDirectory();
+
+            const auto song87 = root87.getChildFile ("loop.atomic");
+
+            LayerStack t87;
+            RackModel  r87;
+            t87.addLayer (utf8 ("循环"), palette::layer1);
+
+            LoopRegion saved87;
+            saved87.enabled   = false;      // 关着也要记住位置
+            saved87.startBeat = 8.0;
+            saved87.endBeat   = 16.0;
+
+            juce::String error87;
+            const bool savedOk = project::save (song87, t87, r87, 120.0, error87,
+                                                nullptr, nullptr, nullptr, &saved87);
+
+            check (utf8 ("工程存得下来（带循环区间）"), savedOk, error87);
+
+            LoopRegion read87;
+            {
+                LayerStack t2;
+                RackModel  r2;
+                double     bpm2 = 0.0;
+                juce::String e2;
+
+                const bool ok = project::load (song87, t2, r2, bpm2, e2,
+                                               nullptr, nullptr, nullptr, nullptr, &read87);
+
+                check (utf8 ("读回来是同一段：关着的状态和两个拍子都还在"),
+                       ok && ! read87.enabled
+                         && std::abs (read87.startBeat - 8.0) < 1.0e-9
+                         && std::abs (read87.endBeat - 16.0) < 1.0e-9,
+                       ok ? (read87.enabled ? juce::String (utf8 ("开着?"))
+                                            : juce::String (read87.startBeat, 3) + " - "
+                                                + juce::String (read87.endBeat, 3))
+                          : e2);
+            }
+
+            // 老文档（没有 <Transport>）读出来必须是"关"，也就是整首循环。
+            {
+                auto document = juce::parseXML (song87.loadFileAsString());
+
+                if (document != nullptr)
+                    document->removeChildElement (document->getChildByName ("Transport"), true);
+
+                LayerStack t3;
+                RackModel  r3;
+                double     bpm3 = 0.0;
+                juce::String e3;
+                LoopRegion legacy;
+
+                // 先塞一个"开着"的进去，确认读盘会把它清掉而不是留着。
+                legacy.enabled = true;
+
+                const bool ok = project::fromXmlText (document != nullptr ? document->toString()
+                                                                          : juce::String(),
+                                                      t3, r3, bpm3, e3,
+                                                      nullptr, nullptr, nullptr, nullptr,
+                                                      nullptr, &legacy);
+
+                check (utf8 ("没有 <Transport> 的老工程读成\"关\"，不是留着上一次的值"),
+                       ok && ! legacy.enabled,
+                       ok ? (legacy.enabled ? juce::String (utf8 ("还开着"))
+                                            : juce::String (utf8 ("关")))
+                          : e3);
+            }
+
+            root87.deleteRecursively();
+        }
+
+        //-- D. 标尺上的手势 -------------------------------------------------
+        {
+            MainComponent host87;
+
+            // 面板自己什么都不知道，直到宿主告诉它。
+            auto& roll87 = host87.pianoRollForTest();
+            const auto bar87 = roll87.getLoopBarAreaForTest();
+
+            check (utf8 ("标尺上留出了一条循环带（不在带上的点击仍然是走带）"),
+                   bar87.getHeight() >= ui::px (5) && bar87.getWidth() > 100,
+                   juce::String (bar87.getWidth()) + "x" + juce::String (bar87.getHeight()));
+
+            // 从第 8 拍拖到第 16 拍：起点在带子上按下，往右拖。
+            const float x8  = roll87.screenXForBeatForTest (8.0);
+            const float x16 = roll87.screenXForBeatForTest (16.0);
+
+            roll87.simulateLoopGestureForTest (x8, x16);
+
+            const auto afterDraw = roll87.getLoopRegion();
+
+            check (utf8 ("在循环带上拖一段：区间画出来了，而且是开着的"),
+                   afterDraw.enabled
+                     && std::abs (afterDraw.startBeat - 8.0) < 1.0e-6
+                     && std::abs (afterDraw.endBeat - 16.0) < 1.0e-6,
+                   juce::String (afterDraw.startBeat, 3) + " - "
+                     + juce::String (afterDraw.endBeat, 3)
+                     + (afterDraw.enabled ? utf8 (" 开") : utf8 (" 关")));
+
+            check (utf8 ("手势上报之后，宿主手上的区间和面板的完全一致"),
+                   host87.getLoopRegion() == afterDraw,
+                   juce::String (host87.getLoopRegion().startBeat, 3) + " - "
+                     + juce::String (host87.getLoopRegion().endBeat, 3));
+
+            // 抓右边缘往右拖：只动终点。
+            roll87.simulateLoopGestureForTest (x16, roll87.screenXForBeatForTest (20.0));
+
+            check (utf8 ("抓住右边缘往右拖：只动终点，起点不动"),
+                   std::abs (roll87.getLoopRegion().startBeat - 8.0) < 1.0e-6
+                     && std::abs (roll87.getLoopRegion().endBeat - 20.0) < 1.0e-6,
+                   juce::String (roll87.getLoopRegion().startBeat, 3) + " - "
+                     + juce::String (roll87.getLoopRegion().endBeat, 3));
+
+            // 在中间按下往右拖：整段搬家，长度不变。
+            const float mid = roll87.screenXForBeatForTest (14.0);
+            roll87.simulateLoopGestureForTest (mid, mid + ui::px (40));
+
+            const auto moved87 = roll87.getLoopRegion();
+
+            check (utf8 ("在区间中间拖：整段搬家，长度不变"),
+                   std::abs (moved87.lengthBeats() - 12.0) < 1.0e-6
+                     && moved87.startBeat > 8.0,
+                   juce::String (moved87.startBeat, 3) + " - "
+                     + juce::String (moved87.endBeat, 3));
+        }
+    }
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

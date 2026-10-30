@@ -2317,10 +2317,28 @@ void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numS
     const TempoMap& map = current->tempo;
     const double length = juce::jmax (1.0, current->lengthBeats);
 
+    //-- Phase 87: where this block is allowed to run out of timeline --------
+    // Read once, here, and never again inside the segment loop: a region that
+    // changed between two segments of one callback would make the beat count
+    // during a single buffer depend on how many segments it happened to split
+    // into. With the loop off the pair degenerates to [0, length), which is
+    // exactly the whole-project wrap every earlier phase shipped.
+    const LoopRegion loop = getLoopRegion();
+    const bool   looping  = loop.isUsable();
+
+    const double wrapStart = looping ? juce::jlimit (0.0, length, loop.startBeat) : 0.0;
+    const double wrapEnd   = looping ? juce::jmax (wrapStart + LoopRegion::minLengthBeats,
+                                                   juce::jmin (length, loop.endBeat))
+                                     : length;
+
     double posBeats = positionBeats.load (std::memory_order_relaxed);
 
-    if (posBeats >= length)
-        posBeats = 0.0;
+    // Past the end: the transport had been stopped somewhere that no longer
+    // exists (a shorter project, a loop that moved behind the playhead). It
+    // rewinds to the TOP of whatever is being repeated, not to zero — landing
+    // outside an active loop means the next lap starts wrong every time.
+    if (posBeats >= wrapEnd)
+        posBeats = wrapStart;
 
     // Published before rendering: the UI extrapolates from this pair, so it
     // must not point at a block that has not been produced yet.
@@ -2351,7 +2369,7 @@ void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numS
         // How many of the remaining samples fall before the loop point. A block
         // that straddles the end of the timeline is split rather than truncated:
         // otherwise every lap would swallow up to one buffer of audio.
-        const double samplesLeft = (length - posBeats) / beatsPerSample;
+        const double samplesLeft = (wrapEnd - posBeats) / beatsPerSample;
         int segment = remaining;
 
         if (samplesLeft < (double) remaining)
@@ -2368,8 +2386,11 @@ void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numS
         remaining -= segment;
         posBeats  += (double) segment * beatsPerSample;
 
-        if (posBeats >= length)
-            posBeats = 0.0;
+        // Phase 87: back to the region's head, not to zero. A block that began
+        // before the loop (playing into it, which is what a DAW does) keeps its
+        // own start: only reaching the END wraps.
+        if (posBeats >= wrapEnd)
+            posBeats = wrapStart;
     }
 
     positionBeats.store (posBeats, std::memory_order_relaxed);

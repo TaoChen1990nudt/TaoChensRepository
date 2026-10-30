@@ -407,6 +407,13 @@ public:
         prompt: a modal question has no other way to appear in a still. */
     juce::Image createRecoveryPromptSnapshot();
 
+    /** Phase 87: the row and the loop strip with a region on it.
+
+        A still of the whole window would not show the feature — the strip is
+        twelve pixels of ruler — so the roll is photographed on its own, cropped
+        to the ruler and the first lanes, with a region already set. */
+    juce::Image createLoopSnapshot (double startBeat, double endBeat);
+
     //-- Phase 6: project files and offline bounce ----------------------------
     /** Writes the whole session to a .atomic file. Also the path the self-test
         and the command line use — the Save button only adds a file chooser in
@@ -454,6 +461,22 @@ public:
         loads projects, and a modal box on the `--snapshot` path is not a prompt,
         it is a hang. Only the real startup path turns this on. */
     void setSampleRelinkPromptEnabled (bool shouldPrompt) { sampleRelinkPrompt = shouldPrompt; }
+
+    //-- Phase 87: the loop region --------------------------------------------
+    /** Where the transport repeats. Owned here because three parties need the
+        same answer: the renderer (what to wrap), the project file (what to
+        save) and the ruler (what to draw). */
+    const LoopRegion& getLoopRegion() const noexcept { return loopRegion; }
+
+    /** Every edit lands through here — a ruler drag, a double click, an undo,
+        a project load — so "the engine and the picture agree" is a property of
+        one function instead of a rule four call sites have to remember. */
+    void setLoopRegion (const LoopRegion& region);
+
+    /** Pushes the session's region at the two things that consume it. Called by
+        every path that CHANGES the region without being an edit: opening a
+        project and undoing into an older one. */
+    void applyLoopToViews();
 
     /** Replaces the session with the contents of a recovery copy, keeping the
         project identity the copy declares.
@@ -1420,6 +1443,12 @@ private:
     /** cached `captureState() != savedStateText`, refreshed at every point that
         can change either side. paint() must not run a full XML dump. */
     bool       dirtyCache = false;
+
+    //-- Phase 87: the loop ---------------------------------------------------
+    /** The transport's repeat region. Part of the SESSION, not of the engine:
+        it is written to the project file, it is undone with everything else,
+        and the engine is told about it through `setLoopRegion`. */
+    LoopRegion loopRegion;
 
     //-- Phase 84: crash recovery ---------------------------------------------
     /** Off until the real startup path says otherwise; see setRecoveryEnabled. */

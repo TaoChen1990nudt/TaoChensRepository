@@ -8,6 +8,7 @@
 
 #include "Model/HardwareRack.h"
 #include "Model/LayerModel.h"
+#include "Model/LoopRegion.h"
 #include "Model/PluginParam.h"
 #include "Model/Routing.h"
 
@@ -1272,6 +1273,31 @@ public:
     /** Phase 68: the snap, asked from outside. The point of the phase is that
         the answer lands on a line `collectGridLines` actually produces, so a
         fixture has to be able to call this and compare the two. */
+    //-- Phase 87: the loop region -------------------------------------------
+    /** The strip of the ruler the transport repeats.
+
+        Owned by the host, not by this component: playing, exporting and saving
+        all need it, and a component that owned a transport property would make
+        every one of them reach through the UI to find out where the loop is.
+        The component draws it, edits it, and reports every edit through
+        `onLoopRegionChanged` — including the ones a drag makes, which the host
+        coalesces into one undo step exactly like a note drag. */
+    void setLoopRegion (const LoopRegion& region);
+    const LoopRegion& getLoopRegion() const noexcept { return loopRegion; }
+    juce::Rectangle<int> getLoopBarAreaForTest() const { return getLoopBarArea(); }
+
+    /** Phase 87: where a beat lands on screen. The loop gestures are driven by
+        x, so a fixture has to be able to name one. */
+    float screenXForBeatForTest (double beat) const noexcept { return screenXForBeat (beat); }
+
+    /** Phase 87: the whole gesture, from press to report, without a MouseEvent.
+        The three parts are the three the real handler runs — press decides which
+        of the four gestures it is, the drag applies it, the release reports —
+        so a test cannot pass here and fail under the mouse. */
+    void simulateLoopGestureForTest (float downX, float dragX);
+
+    std::function<void (const LoopRegion&)> onLoopRegionChanged;
+
     double snapBeatForTest (double beats) const { return snapBeat (beats); }
 
     /** Phase 68: one line's weight, asked from outside. Deciding "bar or beat"
@@ -1487,7 +1513,8 @@ private:
     enum class DragMode { none, moveNote, resizeNote, resizeNoteLeft, marquee, panView,
                           scrollThumb, automationPoint, resizeSample, resizeSampleLeft,
                           resizeSampleTop, resizeSampleBottom,
-                          rulerScrub, rulerZoom, groupAutomationPoint, sampleCurvePoint };
+                          rulerScrub, rulerZoom, groupAutomationPoint, sampleCurvePoint,
+                          loopStart, loopEnd, loopMove, loopNew };
 
     /** Phase 72: which edge of a block the pointer is on. Two of them trim the
         LENGTH (head / tail) and two change how many pitch lanes the block
@@ -1507,6 +1534,18 @@ private:
     //-- Geometry helpers -----------------------------------------------------
     juce::Rectangle<float> getGridArea() const;
     juce::Rectangle<int>   getRulerArea() const;
+
+    /** Phase 87: the band inside the ruler where the loop lives. A strip of its
+        own rather than the whole ruler, because the rest of the ruler already
+        answers two questions (scrub on the left button, zoom on the right) and
+        a third answer over the whole surface would make all three unreliable. */
+    juce::Rectangle<int>   getLoopBarArea() const;
+
+    /** Phase 87: where a loop drag lands, and what it reports. Split out of
+        mouseDrag/mouseUp for the same reason scrubRulerTo was: the self-test has
+        to drive the real code, not a description of it. */
+    void applyLoopDragToScreenX (float screenX);
+    bool finishLoopGesture();
     juce::Rectangle<int>   getKeyboardArea() const;
     juce::Rectangle<int>   getScrollBarArea() const;
     juce::Rectangle<float> getScrollThumb() const;
@@ -2125,6 +2164,24 @@ private:
         screen. */
     float  rulerZoomAnchorX    = 0.0f;
     double rulerZoomAnchorBeat = 0.0;
+
+    //-- Phase 87: the loop region --------------------------------------------
+    /** What this component draws. The host owns the truth (see setLoopRegion);
+        this is the copy every paint reads, so a repaint never has to ask. */
+    LoopRegion loopRegion;
+
+    /** Where the press landed and how long the region was, for the two gestures
+        that need an anchor. `loopDragAnchorBeat` is the beat under the pointer
+        at press time; `loopDragAnchorLength` is the region's length then, which
+        is what a move must preserve no matter how far the pointer travels. */
+    double loopDragAnchorBeat   = 0.0;
+    double loopDragAnchorLength = 4.0;
+
+    /** The region as it was when the button went down. A move is always
+        recomputed from this, never from the previous mouse position, and the
+        gesture reports only if the answer differs from it — "did anything
+        happen" is a comparison, not a flag somebody has to remember to set. */
+    LoopRegion loopDragOriginal;
 
     //-- Phase 19 -------------------------------------------------------------
     /** The pitch the current drag has already sounded. Dragging sideways with

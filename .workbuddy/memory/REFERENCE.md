@@ -97,7 +97,7 @@
 - 窗口门写作 `if (audio.isPlaying() || audio.getPlayback().hasMeters())`，**放在
   `if (! audio.isPlaying()) return;` 之前**——放后面就漏掉"停止后还在落"那一段，而那正是用户会看的。
 
-## 工程文件（`.atomic`，`formatVersion` = 26）
+## 工程文件（`.atomic`，`formatVersion` = 28）
 - **先解析到临时对象、末尾一次性提交**，坏文件绝不破坏当前会话。载入后重置
   `nextNoteId`/`nextSlotId`/组 id（max+1）。
 - 老文件必须仍能开：v3 `mod=`、v4 插件（标签 **"PLUGIN"** 全大写）、v5 `mixer=`、
@@ -121,6 +121,13 @@
   v26（P82）把每个对象的一组曲线写成 **`<Curve id="1" name="音量" target="level" pluginparam="3" enabled="1">` + `<Point …>` 子元素，末尾一条 `<CurveState active="2"/>`**；三处（`<Sample>` / `<Group>` / `<Note>`）同一套词汇。
   **`target` 缺失 = 「空」**（曲线留着，不驱动任何东西）——绝不能写成一个词，未知词会被 `routeFromText` 读回 level，"空"就悄悄变成"音量"。v25 及更老的 `<Envelope>` / `<PanEnvelope>` / `<Automation target>` / `mod` / `pluginparam` / `autotarget` **读取分支全部保留**：
   `childHasCurveBank(parent)` 为真才走 bank 读取，否则按老形状迁移进 bank。只有重新保存才写 v26。
+  v27（P86）**不改标签，只改值的形状**：`<Sample path>` / `<Slot>` 的采样路径可以写成
+  **相对工程文件所在目录的路径**（`media\kick.wav`），写不了才退回绝对。读侧对两种都接受
+  （`File::isAbsolutePath` 判），所以 v27 文件 v26 的读法也能读，只是老版本会把相对路径当
+  进程当前目录解释——这也是模型里必须存绝对的原因。
+  v28（P87）在 root 下追加 **`<Transport loop="0|1" loopStart="8" loopEnd="16"/>`**：
+  **`loop="0"` 时两个拍子照样写**（关掉循环不该忘记位置）。缺失 = 关闭 + 默认 0..4。
+  它同样是 root 的兄弟节点，不进 `<Mixer>`。
 - **选中哪条 lane 显式写 `autotarget`，不靠元素顺序推断**：三条 lane 都写出来之后，
   "最后读到的那条算选中"恒把 target 变成 `plugin`。回退规则只在 `autotarget` **缺失**时启用。
 - **P70：`<Layer autotarget>` 同理**。图层只有 volume/pan 两条 lane，所以后果不是
@@ -140,6 +147,73 @@
   `restoreNotes` 一致；多短能画是编辑器的 `minimumNoteLength()`。写死 0.25 会让 1/64 的块
   在存盘往返、粘贴、组内补齐时统统变宽 16 倍。
 - 导出：发布快照 → 后台按块渲染，长度用 `contentBeats`，不归一化（峰值 >0.999 才拉回）。
+
+## 采样路径与重定位（P86：模型只存绝对，相对是文档的形式）
+唯一实现 `Model/SamplePath.h`，纯函数，不碰 `SampleEvent` / `SynthSlot`。`ProjectIO` 只在
+写盘与读盘两端各调一次。
+
+**三条规矩**
+- **模型里永远是绝对路径**。`SampleEvent::path` 一个字节没变；相对只是文档形式。
+  `juce::File("media\\kick.wav")` 会被下一个拿到它的人按**进程当前目录**解释——那就是 bug。
+- **相对路径必须解得回原文件才写**。`toStored()` 算出候选 → 用读盘时**同一个** `resolve()`
+  跑一遍 → 答案等于原文件才采用，否则退回绝对。跨盘、符号链接、解析后落到别处的 `..` 链
+  全部过不了这一关。结果：**永远正确，只是不那么好搬**。
+- **读盘时把修好的位置写回模型**，找不到**也写绝对**。否则下一次 Ctrl+S 又把那条死路径存
+  一遍，"修好"只维持一个会话。这条是咬测三抓出来的真 bug——第一版把 `media\kick86.wav`
+  留在了模型里。
+
+**解析顺序**（`resolveExisting`）：工程目录 → `media/` → `Media/` → `audio/`。子目录只有这
+四个"约定俗成"的名字，不做模糊搜索。
+
+**重定位**（`relinkSamplesTo(folder)`）
+- **只认用户挑的目录**，不自动猜。`offerSampleRelink()` 在 `loadProjectFromFile` 末尾问一次，
+  **默认关闭**（`setSampleRelinkPromptEnabled`，理由同 P84：无头运行会动用户数据，
+  而 `renderHeadlessReport` 开工第一件事就是存盘）。
+- `FolderIndex` 用**文件名**配对（`byName`），同名多个取先找到的；深度上限 6 层。
+  把整块磁盘扫成索引不是"更好的体验"，是一次几十分钟的卡死。
+- 修好之后**立刻写回模型**（`SampleEvent*` 与 `SynthSlot*` 两条路都改，`path()` 返回引用
+  就是为了这个），再 `layersChanged()`。
+
+**恢复副本里的相对路径**以 `recoveryOf` 指向的工程为基准，**不是**副本自己所在的
+`Recovery/` 目录——所以 `restoreState(xml, projectFile)` 多了一个参数，传 `nullptr` 时用
+`currentProject`。
+
+**陷阱**
+- `juce::File::isAbsolute` **不存在**，只有静态的 `juce::File::isAbsolutePath (StringRef)`；
+  默认构造的 `File` 调它要小心，`PianoRollInternals` 之外的地方一律走 `SamplePath`。
+- 采样器槽与采样块**共用同一个路径字段语义**，清扫（`pruneOrphanSamplerSlots`）按路径比对，
+  改路径等于换文件，别在清扫之后才 relink。
+
+## 循环区间（P87：一个区间，不是一个标志）
+唯一实现 `Model/LoopRegion.h`（header-only）。`PlaybackEngine` 与钢琴窗读同一份。
+
+**不变量**
+- 起点永远在终点之前——谁从哪个方向拖都一样（`setRange` 排序）。
+- 不短于 `minLengthBeats = 0.25` 拍。一次误点不该做出一个在两采样之间反复抽搐的循环。
+- 永不小于 0（`setStart` / `moveBy` 撞 0 停住；`moveBy` 可以越过末尾——在静音上循环是
+  合法的数拍方式）。
+- **`isUsable()` 是唯一判据**（`enabled && 长度够`）。渲染、绘制、磁盘、手势全问它。
+
+**开关与数字分开**
+- 关掉**不许忘记位置**，所以磁盘上 `loop="0"` 时两个拍子照样写。
+- 关闭时 `renderNextBlock` 里 `wrapStart/wrapEnd` 退化成 `[0, length)` = P87 之前的整首循环，
+  **老行为逐位不变**，这是它能上线的理由。
+- 绘制：`drawRuler` 里 `if (! bar.isEmpty() && loopRegion.isUsable())` 才画。少了前面那半句，
+  29 张视觉快照里 18 张会凭空多一个 0–4 拍的虚框。
+- 引擎每块**一次性**读出 `LoopRegion`（三个 relaxed 原子），循环内不再问。
+
+**手势**（`PianoRollInput.cpp`，标尺底部 `ui::px(7)`）
+- 5px 内判 `loopStart` / `loopEnd`；`contains` 判 `loopMove`；其余 `loopNew`。只认左键。
+- 双击循环带翻 `enabled`，不动数字。
+- `loopNew` 拖完**顺手 `enabled = true`**——画它就是在要它，再点一次才生效是没人猜得到的规则。
+- `loopMove` 每次从 `loopDragOriginal` **重建**再 `moveBy(总位移)`，不是累加 delta：
+  每像素的取整误差会攒成漂移。
+- 三个函数分开是为了可测：`applyLoopDragToScreenX` / `finishLoopGesture` /
+  `simulateLoopGestureForTest`。测试驱动的是真代码，不是对它的描述。
+- `finishLoopGesture()` 只在**真的变了**才 `onLoopRegionChanged`（`==` 早退）——按一下没拖
+  是"下次从这儿开始"，不是"我改了工程"。
+- 曾经做成 12px + "循环"两个字，把标尺上的 `0:06.0` 压掉了（截图确认过），所以只剩
+  `ui::px(7)` 一条窄带 + 车道底色 + 两条竖线。
 
 ## 会话与撤销
 - **会话重置唯一入口 `buildSession(withEmptyLayer)`**：清 automation/mixer → restoreLayers →

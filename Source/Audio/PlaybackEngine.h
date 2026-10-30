@@ -12,6 +12,7 @@
 #include "Model/TempoModel.h"
 #include "Model/HardwareRack.h"
 #include "Model/LayerModel.h"
+#include "Model/LoopRegion.h"
 #include "Model/MixerModel.h"
 
 #include "Effects.h"
@@ -716,6 +717,30 @@ public:
     double getLengthBeats() const noexcept   { return lengthBeats.load (std::memory_order_relaxed); }
     double getLengthSeconds() const noexcept { return lengthSeconds.load (std::memory_order_relaxed); }
 
+    //-- Phase 87: the loop region -------------------------------------------
+    /** Message thread -> audio thread. Three atomics rather than a field on the
+        published schedule, because the region changes while the user drags its
+        edge and a drag is sixty publishes a second; the schedule is a document
+        of what the SONG is, and the loop is what the TRANSPORT is doing.
+
+        Read once per block by the renderer, which is why "the loop moved" takes
+        effect on the next callback and never mid-block. */
+    void setLoopRegion (const LoopRegion& region) noexcept
+    {
+        loopStartBeat.store (region.startBeat, std::memory_order_relaxed);
+        loopEndBeat.store   (region.endBeat,   std::memory_order_relaxed);
+        loopEnabled.store   (region.enabled,   std::memory_order_relaxed);
+    }
+
+    LoopRegion getLoopRegion() const noexcept
+    {
+        LoopRegion region;
+        region.enabled   = loopEnabled.load (std::memory_order_relaxed);
+        region.startBeat = loopStartBeat.load (std::memory_order_relaxed);
+        region.endBeat   = loopEndBeat.load   (std::memory_order_relaxed);
+        return region;
+    }
+
     /** Phase 83: how late the currently published console makes the mix.
 
         Zero for every session without a latency-reporting VST3 insert, which is
@@ -1026,6 +1051,14 @@ private:
     std::atomic<double> positionBeats { 0.0 };
     std::atomic<double> lengthBeats   { timelineBeats };
     std::atomic<double> lengthSeconds { timelineBeats * 0.5 };
+
+    // Phase 87: the loop, written whole by the message thread (three relaxed
+    // stores) and read once per block. A half-updated triple — new start, old
+    // end — lasts only until the next store, and the worst it can do is play a
+    // slightly wrong region for one buffer, so it does not need a seqlock.
+    std::atomic<bool>   loopEnabled   { false };
+    std::atomic<double> loopStartBeat { 0.0 };
+    std::atomic<double> loopEndBeat   { 0.0 };
 
     std::atomic<double> blockStartBeats  { 0.0 };
     std::atomic<double> blockBeats       { 0.0 };

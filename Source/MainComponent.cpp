@@ -508,6 +508,14 @@ MainComponent::MainComponent()
                                       (double) pianoRoll.getBeatWidth());
     };
 
+    // Phase 87: the ruler edits the loop; the session is what owns it. The
+    // roll never writes its own copy on the strength of a gesture — it reports,
+    // and the host decides (undo step, dirty flag, engine).
+    pianoRoll.onLoopRegionChanged = [this] (const LoopRegion& region)
+    {
+        setLoopRegion (region);
+    };
+
     automationWindow.setTimeline (pianoRoll.getTimelineBeats(),
                                   (double) pianoRoll.getBeatWidth());
     automationWindow.setScrollBeats (pianoRoll.getScrollBeats());
@@ -1079,7 +1087,8 @@ MainComponent::~MainComponent()
 //==============================================================================
 juce::String MainComponent::captureState() const
 {
-    return project::toXmlText (stack, rack, audio.getBpm(), &mixer, &automation, &tempo, &currentProject);
+    return project::toXmlText (stack, rack, audio.getBpm(), &mixer, &automation, &tempo,
+                               &currentProject, &loopRegion);
 }
 
 void MainComponent::modelChanged()
@@ -1255,8 +1264,13 @@ bool MainComponent::restoreState (const juce::String& xml, const juce::File* pro
 
     const juce::File* base = projectFile != nullptr ? projectFile : &currentProject;
 
-    if (! project::fromXmlText (xml, stack, rack, bpmValue, error, &mixer, &automation, &plugins, &tempo, base))
+    if (! project::fromXmlText (xml, stack, rack, bpmValue, error,
+                                &mixer, &automation, &plugins, &tempo, base, &loopRegion))
         return false;
+
+    // Phase 87: an undo can move the loop (or remove it), and the region the
+    // renderer holds is not part of the document — it has to be pushed.
+    applyLoopToViews();
 
     setBpm (bpmValue);
     bpmField.setBpm (bpmValue, false);
@@ -6932,7 +6946,8 @@ juce::File MainComponent::getProjectDirectory()
 
 bool MainComponent::saveProjectToFile (const juce::File& file, juce::String& error)
 {
-    if (! project::save (file, stack, rack, audio.getBpm(), error, &mixer, &automation, &tempo))
+    if (! project::save (file, stack, rack, audio.getBpm(), error, &mixer, &automation, &tempo,
+                         &loopRegion))
         return false;
 
     currentProject = file;
@@ -6969,7 +6984,8 @@ bool MainComponent::loadProjectFromFile (const juce::File& file, juce::String& e
 
     {
         const juce::ScopedValueSetter<bool> noSweep (suspendSamplerPrune, true);
-        loaded = project::load (file, stack, rack, newBpm, error, &mixer, &automation, &plugins, &tempo);
+        loaded = project::load (file, stack, rack, newBpm, error,
+                                &mixer, &automation, &plugins, &tempo, &loopRegion);
     }
 
     if (! loaded)
@@ -6980,6 +6996,10 @@ bool MainComponent::loadProjectFromFile (const juce::File& file, juce::String& e
     // demo note ids below would point at notes that no longer exist).
     audio.stopTransport();
     audio.setBpm (newBpm);
+
+    // Phase 87: the loaded song carries its own loop; until now the renderer
+    // was repeating the previous project's region.
+    applyLoopToViews();
 
     bpmField.setBpm (audio.getBpm(), false);
     pianoRoll.setBpm (audio.getBpm());
@@ -7034,6 +7054,47 @@ bool MainComponent::loadProjectFromFile (const juce::File& file, juce::String& e
 
     repaint();
     return true;
+}
+
+//==============================================================================
+//  Phase 87: the loop region
+//==============================================================================
+juce::Image MainComponent::createLoopSnapshot (double startBeat, double endBeat)
+{
+    LoopRegion region;
+    region.enabled   = true;
+    region.startBeat = juce::jmax (0.0, startBeat);
+    region.endBeat   = juce::jmax (region.startBeat + LoopRegion::minLengthBeats, endBeat);
+
+    setLoopRegion (region);
+
+    pianoRoll.repaint();
+    const auto full = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
+
+    return full.getClippedImage (juce::Rectangle<int> (0, 0, full.getWidth(),
+                                                       juce::jmin (full.getHeight(), ui::px (300))));
+}
+
+void MainComponent::setLoopRegion (const LoopRegion& region)
+{
+    if (region == loopRegion)
+        return;
+
+    loopRegion = region;
+    applyLoopToViews();
+
+    // An edit like any other: the region is in the project file, so moving it
+    // makes the session unsaved and closing without asking after one would be a
+    // lie about what the file will contain.
+    modelChanged();
+}
+
+void MainComponent::applyLoopToViews()
+{
+    // Two consumers, one order. The renderer first: a picture that shows a loop
+    // the transport is not repeating is worse than one that is a frame behind.
+    audio.getPlayback().setLoopRegion (loopRegion);
+    pianoRoll.setLoopRegion (loopRegion);
 }
 
 //==============================================================================
