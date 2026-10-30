@@ -2331,3 +2331,35 @@ saveProjectToFile (recoveryFile, error);   // ← 灾难
 
 **教训**：两个东西内容相同，不代表它们是同一个东西。写之前先问一句"这一行会不会改掉
 别人对'我是谁'的认知"。
+
+## P84-D：`dirtyCache` 是"上一次问的时候的答案"，不是"现在的答案"
+
+P84-A 说的是"别咬缓存"，这一条是同一件事的另一面：**别在设计里依赖缓存的时点**。
+
+`autosaveTick` 的第一版写的是：
+
+```cpp
+if (! dirtyCache) { dropRecovery(); return; }   // ← 省一次序列化
+recovery::write (... captureState () ...);
+```
+
+看着很合理：`dirtyCache` 已经是"与磁盘不同"的预算结果，不必为了发现"没变"而序列化整个工程。
+问题是它由 `commitHistory()` 写出来，而 `commitHistory` 挂在 `AsyncUpdater` 上，**下一个消息轮**才跑。
+于是最典型的场景正好撞上：
+
+1. 用户停手五分钟（这期间每次 tick 都 `recoveryDirty == false`，早退，什么都没发生）；
+2. 用户改了一个音符 → `modelChanged` 把 `recoveryDirty` 置 true；
+3. 3 秒后 tick 到来 → 读到的 `dirtyCache` 还是**五分钟前**那个 `false`（新一轮的 commitHistory 还没跑）；
+4. 于是 `dropRecovery()`，并且把 `recoveryDirty` 清成 false —— 那一笔编辑没有被保存，
+   而且直到下一次编辑才会重试。
+
+修法不是"提前刷 dirtyCache"，是**别用它**：一次 `captureState()` 同时回答两个问题
+（是不是仍未保存、跟已写的是否不同）。代价是编辑后每 5 秒一次序列化——只在有编辑时才发生，
+和"漏掉最该保存的那一笔"比，这个代价可以忽略。
+
+顺带挖出第二处同类的洞：`undo` / `redo` 走 `applyHistoryPosition`，那里 `restoringHistory` 是抬起的，
+`modelChanged` 在第一行就早退，所以 `recoveryDirty` 得在那儿手动置位。不置位的后果是
+"编辑后又撤销回保存点"这一路不删副本——下次启动拿一个用户已经撤销掉的版本去诱惑他。
+
+**教训**：缓存是为了省一次计算，不是为了让别人依赖它的新鲜度。凡是在**定时器**里读缓存，
+先问一句"它是不是在另一个时机被写的"。定时器不排队、不等你。
