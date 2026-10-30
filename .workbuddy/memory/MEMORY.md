@@ -3,208 +3,108 @@
 JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观包络。分阶段交付，
 每阶段只做一件事，必须能编译并跑通视觉或数据逻辑。
 
-**当前阶段、自检基准数、构建命令看 `STATUS.md`**。**详细规则在 `REFERENCE.md`**（按主题分节：构建、路由、音频、工程文件、混音台、编辑手势、
-编组、采样、走带、文件树、波形、伸缩、缩放、电平表）；平台陷阱与自检夹具在 `PITFALLS.md`。
-动代码前按主题查这两份，本文件只留跨主题硬规则。
+**当前阶段、自检基准数、构建命令看 `STATUS.md`**。**详细规则在 `REFERENCE.md`**（按主题分节）；
+平台陷阱与自检夹具在 `PITFALLS.md`。本文件只留跨主题硬规则 —— 每条只写"不能违反的那一句"，
+写法和理由去 REFERENCE 查。
 
-## 二十二条硬规则
+## 硬规则
+
 1. **中文一律 `atomic::utf8("...")`**，自检的失败信息也算。裸中文 = 乱码。
-2. **几何走 `ui::px()/pf()`、字号 `ui::sp()`**，唯一密度旋钮 `ui::scale = 1.3f`，禁止裸像素。
+2. **几何走 `ui::px()/pf()`、字号 `ui::sp()`**，唯一密度旋钮 `ui::scale`，禁止裸像素。
    `numPitches` / gutter / 内联自动化框最小宽度不缩放。
-3. **路由只有 `Model/Routing.h`**：`resolve()`（音符优先级链）、`resolveSample()`（采样，不看组）、
-   `layerSlotId()`（兜底跳过 sampler）。UI 高亮与引擎必须调同一份，否则显示和听到是两套话。
+3. **路由只有 `Model/Routing.h`**：`resolve()`（音符）、`resolveSample()`（采样，不看组）、
+   `layerSlotId()`（兜底跳过 sampler）。UI 高亮与引擎必须调同一份。
 4. **音频线程不读 Layer / NoteEvent / RackModel**：消息线程 `publishSchedule()` 产出不可变
-   `PublishedSchedule`，锁只覆盖 shared_ptr 赋值；发布期把拍换成秒，音频线程只做乘加。
-5. **改模型后必发 `layersChanged()` / `notesChanged()`**：采样槽清扫
-   `pruneOrphanSamplerSlots()` 挂在这两个通知上，不是回调——"谁记得调回调"不是规则。
-6. **唯一入口**：会话重置 = `buildSession(withEmptyLayer)`；删槽 = `removeSlotAndItsClips()`
-   （先删块再删槽）；撤销 = 整工程 XML 快照，**粒度是一次鼠标手势**（`beginUndoGesture()` /
-   `endUndoGesture()` 包住按下与释放，手势期间 `commitHistory()` 直接返回）；试听分岔 =
-   `MainComponent::auditionPreview()`（插件槽发真 MIDI，内置合成器才发正弦）。
-7. **组的形状只按「起点 + 名字」配对**（`clipShapeLess`）：配对键不能是形状编辑自己会改的
-   字段——pitch 曾经是，拖采样块下边缘把 pitch 一改，序号配对就错位、两个副本互换名字和音频。
-   宽度、窗口、曲线、`laneSpan` 全是形状，改完一律走 `syncShapeOfClip()`。
-8. **编组默认是对象，不是容器**（P73）：没双击进去之前，组内成员的按下只回答「整个出现」
-   （选中 + 整组起拖），缩放/删除/切割都不生效；双击成员、组框或组名进入 `enterGroupEdit()`，
-   双击空白或点到组外成员退出。状态只有一个 `editingGroupId`；失效判据在 `layersChanged()`
-   里**无条件**清——撤销/加载会把同一个组 id 带回来，存在性检查会答 yes。
-9. **按下的话事权归"你以为自己在按的东西"**（P75）：命中测试回答的是"这一像素上画着
-   谁"，不是"用户选中的是谁"。两块叠在同一拍同一行时，按在已选中块的中间必须是那块
-   （`clipEdgeAt` 答 `(id, none)`：抓住了块、没抓住边），否则选择被换成上面那块，
-   多选就只剩一个动——"有时候只有一个块跟着变"就是这么来的。同理，组编辑态下组框内
-   的空白不是把手，是空白。
-10. **选中一个成员 = 选中它所在的编组**（P74）：选择是「就是这些东西」这句话说的话，不是
-   「我点到的那一个」。凡是把成员放进选择的手势（点击走 `armGroupMove`、框选走
-   `expandToWholeOccurrences`、Shift/Ctrl 加选走 `addOccurrenceToSelection`）都要先扩成整次
-   出现，否则下一次 Delete 就从队形里撕掉一个成员。**扩散只写在手势层，不写进
-   `setMixedSelection`**——底层写入还是精确集合，P62 的「改一部分才同步形状」全靠它；打开编辑
-   的组也不扩散，那里成员就是对象。
-11. **打开不是选择**（P76）：双击进组只改 `editingGroupId`，**不重写选区**。双击前那一击在闭组
-   状态下已经把「整次出现」选好了，再收窄成一个成员，用户手上就只剩一块——拖高度/长度自然只
-   动一块，看起来像"要动两次其他才联动一次"。收窄只发生在「双击的那个还不在选区里」的时候。
-   同理：**按在已选中的成员上不能替换选区**（`handlePress` 的 `else if (! isSelected)`），那是
-   多选后还能整体拖的前提，也是 P65 给组名 pill 定的同一条。要"只留这一个"就点空白再点它。
-   测这类行为别拿"会动的东西有几个"（`dragOriginals.size()`）当判据——多选时它当然有几个；
-   要问「谁会被缩放」（`dragResizeNoteId`）。
-
-12. **双击 = 打开，顺序照绘制顺序**（P78）：音符双击开包络窗，采样块双击开采样包络窗
-    （`onNoteDoubleClicked` / `onSampleDoubleClicked` → `NoteEnvelopePanel` / `SampleEnvelopePanel`）。
-    采样那块的两档要分清：chevron 开内联窄条（P49），双击开窗，开窗前先关内联框。
-    `handleDoubleClick()` 里采样那一问必须排在 `hitTestActiveLayer` **之后**——`drawSamples` 先画、
-    块在音符**下面**，压在块上的音符才是指针看着的东西。闭组里的块那一击仍旧是「让我进去」（P73），
-    进组后再双击才开窗。
-    机架卡片同理（P85），而且**名字和卡片是两个语义**：名字那块是改名（P79），其余部分才是
-    「打开这个音源」。S / M / 推子 / 折叠 caret 一律排除——那两次点击已经各有各的活儿
-    （双击静音键是两次切换，不是一次开窗）。只有插件槽有窗可开；内置合成器答 false 且
-    **不弹窗**，「双击了正弦波」不值得一个模态框。
-
-13. **名字是一份数据，不是一个副本**（P79）：图层 / 编组 / 音源三个名字只有一处字段
-    （`Layer::name` / `NoteGroup::name` / `SynthSlot::name`），三处入口（图层栏、编组栏、机架卡）
-    都是**双击那行名字**就地改（`NameEditor`，位置 = 那行画名字的矩形，`getNameBounds()` 一处
-    说了算）。所以"改完钢琴窗跟着变"不需要同步代码；**唯一例外是采样块的 `SampleEvent::name`**
-    ——它是导入时从槽名抄来的副本，所以 `MainComponent::renameSynthSlot()` 只改「还穿着旧名字」
-    的块（`name == 旧槽名`），自己起过名的不动。改名按 **id** 记住改谁（层 id / 槽 id / 层 id + 组 id），
-    行索引在框开着时会因为删层、重排指向别人。
-    **通知分两种**：`Listener::namesChanged()` 默认转发 `layersChanged()`（漏通知比多清场更糟），
-    只有钢琴窗 override 成纯 `repaint()`——`layersChanged()` 会无条件关掉编辑中的组（P73），
-    而"站在组里给组改名"是最常见的用法。**`SynthSlot::userName`**（可选属性，不升版本）让
-    用户起的名字压过 `pluginName`，替换乐器时清掉。
-14. **速度一旦会变，时间就是积分，不是一个数**（P80）：`secondsPerBeat` 已经从全工程消失，
-    唯一的时间换算是 `Model/TempoMap`（`secondsAtBeat` / `beatAtSeconds` / `secondsBetween`）。
-    段内 BPM 线性 ⟹ 求秒 `(60/q)·ln(bpm/bpm0)`、反解拍 `bpm(t)=bpm0·exp(q·dt/60)`；
-    **平坦分支走线性形式，两条分支互换了照样编译得过**（第一版咬测还原时就撞上过）。
-    `renderNextBlock` **每段重算** `beatsPerSample`，每块一次会在渐快时一路落后。
-    曲线值到 BPM 是 `60·4^v`（半个高度 = 半个速度），不是线性。速度图不放进 `MixerModel`：
-    `resetToDefault()` 是"重置混音台"，不该顺手抹掉它。
-
-15. **录制的拍号在事件发生的地方取**（P81）：`MidiInputHub::onNote/onControl` 在 **MIDI 线程**，
-    而 `TakeCollector` 持有 vector、只能在消息线程动。唯一正确的顺序是在回调里读
-    `playback.getPositionBeats()`（原子 relaxed），**把 beat 随事件一起** `callAsync` 过桥；
-    在消息线程里问位置，等于把队列延迟算成走音（每个音符错 5 ms）。`recording` 因此是
-    `std::atomic<bool>`。**音频线程只往预分配的 buffer 里 `copyFrom`**（`RecordBuffer` 只有
-    `writePos`/`armed` 两个原子），满了**自己停**不回绕；`finish()` **先读 `writePos` 再 disarm**。
-    一次录制落两样东西：音频 → 采样块（当前图层）+ 采样器槽，音符 → **新编组**，手拧的旋钮 →
-    **那个组**的 lane（CC 7/11→level、CC 10→pan，其余丢弃不猜）。写 lane 前必须
-    `decimateRecordedCurve`（lane 上限 32 点，一次推子两百个 CC），**少于两点不写**。
-
-16. **一条曲线 = 一个形状 + 一个去处，两件事分开说**（P82）：`Model/CurveBank<CurveType>` 是
-    音符 / 采样 / 编组共用的有序表（`CurveSlot{id, name, target, pluginParam, curve}`），
-    `target = -1` 就是**空**——画着、存着、不驱动任何东西。三条不变量：**目标至多归一条曲线**
-    （`route()` 从别人手里夺走；插件目标按 `pluginParam` 区分，参数 3 和 17 是两个去处）、
-    **列表永不为空**（`remove()` 拒绝最后一条）、**用 id 不用下标**（框开着时增删不该把编辑器
-    指到别人的形状上）。**const 读永不创建**：缺了返回 `idleCurve` / `idleLane`，不能返回默认
-    构造的 `NoteEnvelope`（那是启用的 ADSR），也不能在 painter 里 `ensure…`。
-    **「空」在磁盘上是「没有 `target` 属性」**，不是一个词——未知词会被读回成 level，
-    「空」就悄悄变成「音量」。新建曲线默认不路由、且是扁平的：点「新建」是在要白纸。
-    旧访问器（`envelope()` / `volumeCurve()` / `automationFor()` / `getLevelAutomation()`）
-    必须保住原语义，否则引擎、三个编辑窗、撤销、剪贴板全要跟着改。
-
-17. **两条路径汇到一处，慢的那条不能被拉快，只能让别人等**（P83）：`Audio/PdcDelay.h` 里的
-    `pdc::solve` 是唯一的延迟表。控制台只有一种汇合：子通道加进父通道的总线
-    （`MixerModel::masterChannel` 是"直接去主输出"的哨兵）。`entry[c]` = 该通道**入口**应有的事件
-    时刻（= 最慢孩子结束的时刻），`own[c]` = 它自己插入链的延迟。补偿只在**汇合点**做：子通道 →
-    父通道用 `entry[父] - 自己的结束`，通道 → 主输出用 `max - 自己的结束`。**绝不延迟源头**——
-    在自己插入链之前按住它，等于让它等着还没干的活。**唯一问延迟的地方是
-    `PluginHost::getLatencySamples`**，发布期折算，音频线程不做插件调用。
-    **没有插件报延迟 ⟹ 每张表都是 0 ⟹ 渲染逐位等于 P83 之前**，这是它能上线的唯一理由：
-    别给 `maxPdcLatency` 加"至少 1"这类兜底。延迟线是记忆体不是常数：locate、停止、
-    `resetMixState` 都必须清，否则导出会带上上一遍的开头。
-
-18. **恢复副本是「一份副本」，不是「那个工程」**（P84）：`Util/Recovery` 把整篇会话写进
-    `Documents/AtomicDAW/Recovery/`，文件名带工程路径的 hash（同名不同目录不会撞）。
-    **写它的那条路绝不能改 `currentProject`**——把它当成工程，下一次 Ctrl+S 就把歌存进了恢复目录。
-    唯一的不变量：**副本存在 ⟺ 有未保存的编辑且进程没能正常收尾**。保存 → 删；用户选「不保存」→
-    删；正常关闭且无改动 → 本来就没有。所以它唯一能活下来的方式是崩溃，这条链子断一环，
-    恢复就变成制造重复或制造丢件。启动时只 offer **严格比工程文件更新**的那一份（打平算
-    stale：不打扰比赌一条改动便宜）。写入靠 `File::replaceWithText`，它走 JUCE 的
-    `TemporaryFile`，写一半崩也只丢这一次更新，**不要自己 appendOpen**。
-    恢复出来的会话**必须仍算未保存**，`savedStateText` 保持指向磁盘上的旧内容——顺手标成干净，
-    下一次关闭会一声不响把刚救回来的东西扔掉。文档里**没有任何"当前是哪个工程"的记忆**：
-    身份只能来自副本自己的 `recoveryOf` 属性。
-    这个功能**默认关闭**，只有 `Main.cpp` 的窗口路径打开：无头运行构造同一个类，而
-    `renderHeadlessReport` 开工第一件事就是 `saveProjectToFile`，默认开启会删掉用户的副本。
-
-19. **一个类可以住在多个 TU 里，但共享的辅助必须是 inline 的**（P85）：`PianoRollComponent` 的
-    316 个成员函数分开住在 `Source/UI/PianoRoll*.cpp` 十一个文件里，一个文件一个主题
-    （布局见 `REFERENCE.md`）。**拆的是文件边界，不是逻辑**——结构改动只动 include 和函数归属，
-    一行实现都不碰；两万行交互代码加 753 条断言，"顺手改一点"的代价是无从归因的失败。
-    共享层是 `UI/PianoRollInternals.h`：`namespace atomic::roll` + **每个定义都 `inline`** +
-    每个 TU 顶部 `using namespace roll;`。**不要退回把匿名 namespace 写进头文件**：那是每个 TU
-    一份副本，还给未使用的静态函数留警告位（MSVC 的 C4505）。
-    **判断一个辅助该不该进 internals 的标准是"几个 TU 用"**，不是"它看起来像工具函数"——
-    改 internals 要重编十一个 TU（约单文件的三倍），宁可让它留在主题文件里。
-    验收标准不是"能编译 + 断言全过"，是**逐行比对**：原文按非空行做多重集，和新文件做减法，
-    允许的差异只有 `inline ` 前缀和 namespace 包裹这两处。
-
-20. **模型只存绝对路径，相对是文档的形式**（P86）：`Model/SamplePath` 是唯一的路径规则层，
-    `toStored` / `resolve` / `resolveExisting` 全走它，`ProjectIO` 只负责在两端调用。
-    三条规矩：**模型里永远是绝对路径**（一个 `File("media\\kick.wav")` 会被下一个拿到它的人按
-    进程当前目录解释，那就是 bug 的种子）；**相对路径必须解得回原文件才写**（`toStored` 算出
-    候选，用读盘时同一个 `resolve` 跑一遍，答案等于原文件才采用，跨盘/符号链接/解析后落到别处
-    的 `..` 链一律退回绝对——永远正确，只是不那么好搬）；**读盘时把修好的位置写回模型，找不到
-    也写绝对**，否则下一次 Ctrl+S 又把那条死路径存一遍，修好只维持一个会话。
-    **重定位不许自动发生**：`relinkSamplesTo(folder)` 只认用户挑的目录，弹窗默认关闭
-    （理由同 P84：无头运行会动用户数据）。`FolderIndex` 用**文件名**配对，同名多个取先找到的，
-    深度上限 6 层；把整个磁盘扫成索引不是"更好的体验"。
-    **恢复副本的相对路径以 `recoveryOf` 指向的工程为基准**，不是副本自己所在的 Rescue 目录
-    ——`restoreState` 因此多一个 `projectFile` 参数（`nullptr` = 用 `currentProject`）。
-
-21. **时间是积分，循环是一个区间，不是一个标志**（P87）：`Model/LoopRegion` 是唯一的区间规则，
-    `PlaybackEngine` 与钢琴窗都读它。区间的不变量全是关于**顺序与最短**的，不是关于那两个数：
-    起点永远在终点之前（谁从哪个方向拖都一样）、**不短于 `minLengthBeats`**（0.25 拍，
-    一次误点不该做出一个两采样之间反复抽搐的循环）、永不小于 0。
-    **开关与数字分开**：关掉循环**不许忘记位置**——关掉听一遍再打开要的还是那八小节，所以磁盘上
-    `loop="0"` 时两个拍子照样写。渲染侧关闭时 `wrapStart/wrapEnd` 退化成 `[0, length)`，
-    即 P87 之前的整首循环，**老行为逐位不变**，这是它能上线的理由。
-    **`isUsable()` 是唯一的判据**（`enabled && 长度够`），渲染、绘制、磁盘、手势全问它；
-    别在别处再写一遍 `enabled`——关掉的区间画在标尺上就是"凭空多个括号"。
-    拖出新区间**顺手打开**（画它就是在要它）；`loopMove` 每次都从 `loopDragOriginal` 重建
-    而不是累加 delta，否则每像素的取整误差会攒成漂移。标尺手势只占底部 `ui::px(7)`
-    （曾做成 12px + "循环"字样，把 `0:06.0` 压掉了）。
-
-22. **点击是监听，不是声音，也不是定时器**（P88）：`Audio/Metronome` 混进
-    `PlaybackEngine::renderNextBlock` 的**每个 segment**，而 `renderInto`（导出 / 分轨 /
-    离线分析 / 渲染成采样）里没有——所以"导出拿不到点击"是**结构性的**，不是记得关；
-    同理它也不进 `RecordBuffer`，录音要的是干的。
-    **它是按拍和每块 `beatsPerSample` 驱动的**，每一下落在它该在的那个**采样**上
-    （`at = (beat - fromBeat) / beatsPerSample`），块首对齐听起来就是"拖了半块"。
-    分句用 `ceil (fromBeat - 1e-9)`：那个 `-1e-9` 是让正好落在块边界上的那一拍**只算一次**，
-    否则它既是上一块的最后一拍又是下一块的第一拍，重音响两遍。
-    **一击 12 ms、一块可以 46 ms**，所以四个声部：一个声部会把上一击从衰减中途切断，听起来是踉跄。
-    **音量是它自己的**（`setVolume`），不骑主推子——骑主推子意味着动一下混音台就改掉了
-    演奏者的时间参考；音量 0 时先 `silence()` 再返回，否则尾巴冻住、拧回来接着响。
-    重音跟着**工程拍号**走（3/4 就数三下），"每四拍重一下的 3/4 点击"比没有点击更糟。
-    **预备拍不改 `positionBeats`**：数的是下拍**之前**那几拍，所以"数拍期间歌曲没动"是构造性的；
-    做成"先播放再数四拍"，`recordStartBeat` 就是个谎。数完在**同一个块里**交接给
-    `renderNextBlock(rest, …)`——块边界交接会往最后一击和第一个音之间塞一个 buffer 的静音。
-    数拍期间 `blockBeats.store(0.0)`，否则播放头会从一块"正在被数进去"的块往前外推。
-    **`force=true` 让关着也响**：要求被数的人不能因为没开节拍器而听不到数。
-    录音 skip 在 `RecordBuffer::begin`（`skipRemaining`）里生效，不是"数完再 arm"——后者晚一个
-    timer tick，take 会从自己的 downbeat 之后开始。`startRecording()` 的顺序是
-    先 `playTransport()`（它会 rewind）→ `startPreRoll` → 读 `recordStartBeat` → arm。
-    `setPositionBeats` / `pause` / `finishRecording` 一律 `cancelPreRoll()`。
+   `PublishedSchedule`，发布期把拍换成秒；锁只覆盖 shared_ptr 赋值。
+5. **改模型后必发 `layersChanged()` / `notesChanged()`**：`pruneOrphanSamplerSlots()` 挂在这两个
+   通知上，不是回调——"谁记得调"不是规则。通知合并成一次撤销步靠 AsyncUpdater，一趟一次。
+6. **唯一入口**：会话重置 = `buildSession(withEmptyLayer)`；删槽 = `removeSlotAndItsClips()`；
+   撤销 = 整工程 XML 快照、**粒度是一次鼠标手势**（`beginUndoGesture()`/`endUndoGesture()`
+   包住按下与释放）；试听分岔 = `MainComponent::auditionPreview()`。
+7. **组的形状只按「起点 + 名字」配对**（`clipShapeLess`）：配对键不能是形状编辑自己会改的字段
+   ——pitch 曾经是，拖一下下边缘两个副本就互换名字和音频。宽度/窗口/曲线/`laneSpan` 都是形状，
+   改完一律 `syncShapeOfClip()` / `syncGroupShape()`。
+8. **编组默认是对象，不是容器**（P73）：没双击进去之前，组内成员的按下只回答「整个出现」；
+   `enterGroupEdit()` 之后成员才是对象。状态只有一个 `editingGroupId`，失效判据在
+   `layersChanged()` 里**无条件**清——撤销/加载会把同一个 id 带回来，存在性检查会答 yes。
+9. **按下的话事权归"你以为自己在按的东西"**（P75）：命中测试回答的是"这一像素上画着谁"。
+   两块叠在同一拍同一行时，按在已选中块的中间必须是那块（`clipEdgeAt` 答 `(id, none)`），
+   否则选择被换掉、多选只剩一个动。组编辑态下组框内的空白不是把手。
+10. **选中一个成员 = 选中它所在的编组**（P74）：凡是把成员放进选择的手势都要先扩成整次出现
+    （`armGroupMove` / `expandToWholeOccurrences` / `addOccurrenceToSelection`）。**扩散只写在
+    手势层**，不写进 `setMixedSelection`——"改一部分才同步形状"全靠底层是精确集合。
+11. **打开不是选择**（P76）：双击进组只改 `editingGroupId`，**不重写选区**；**按在已选中的成员
+    上不能替换选区**（`else if (! isSelected)`），那是多选后还能整体拖的前提。测这类行为别拿
+    "会动的东西有几个"当判据，要问「谁会被缩放」（`dragResizeNoteId`）。
+12. **双击 = 打开，顺序照绘制顺序**（P78）：音符/采样块/机架卡片双击各开各的窗；采样那一问必须
+    排在 `hitTestActiveLayer` **之后**（块在音符下面）。机架卡上**名字是改名、其余是打开**，
+    S/M/推子/caret 一律排除。只有插件槽有窗可开，内置合成器答 false 且不弹窗。
+13. **名字是一份数据，不是一个副本**（P79）：图层/编组/音源三个名字各只有一处字段，三处入口都是
+    **双击那行名字**就地改（`NameEditor`，位置 = `getNameBounds()`）。唯一例外是
+    `SampleEvent::name`（导入时抄来的副本）。改名按 **id** 记住改谁，不用行索引。
+    `namesChanged()` 默认转发 `layersChanged()`，只有钢琴窗 override 成纯 `repaint()`
+    ——`layersChanged()` 会无条件关掉编辑中的组。
+14. **速度一旦会变，时间就是积分**（P80）：`secondsPerBeat` 已从全工程消失，唯一换算是
+    `Model/TempoMap`。段内 BPM 线性 ⟹ 求秒取对数、反解取指数；**平坦分支走线性形式**，
+    两条分支互换了照样编译得过。`renderNextBlock` **每段**重算 `beatsPerSample`。
+    曲线值到 BPM 是 `60·4^v`。速度图不放进 `MixerModel`（`resetToDefault()` 不该抹掉它）。
+15. **录制的拍号在事件发生的地方取**（P81）：回调里读 `getPositionBeats()`，**把 beat 随事件一起**
+    `callAsync` 过桥；在消息线程里问位置等于把队列延迟算成走音。音频线程只往预分配 buffer
+    `copyFrom`，满了自己停不回绕；`finish()` **先读 `writePos` 再 disarm**。写 lane 前必须
+    `decimateRecordedCurve`（上限 32 点），**少于两点不写**。
+16. **一条曲线 = 一个形状 + 一个去处**（P82）：`Model/CurveBank` 三条不变量——**目标至多归一条
+    曲线**、**列表永不为空**、**用 id 不用下标**。**const 读永不创建**（返回 `idleCurve`/`idleLane`）。
+    **「空」在磁盘上是「没有 `target` 属性」**，不是一个词。旧访问器必须保住原语义。
+17. **两条路径汇到一处，慢的那条不能被拉快**（P83）：`Audio/PdcDelay.h` 的 `pdc::solve` 是唯一
+    延迟表，补偿只在**汇合点**做，绝不延迟源头。唯一问延迟的地方是 `PluginHost::getLatencySamples`。
+    **没有插件报延迟 ⟹ 每张表都是 0 ⟹ 渲染逐位等于 P83 之前**——别加"至少 1"这类兜底。
+    延迟线是记忆体不是常数：locate / 停止 / `resetMixState` 都必须清。
+18. **恢复副本是「一份副本」，不是「那个工程」**（P84）：**写它的路绝不能改 `currentProject`**。
+    唯一不变量：**副本存在 ⟺ 有未保存编辑且进程没能正常收尾**。启动只 offer **严格更新**的那份。
+    写入靠 `File::replaceWithText`（走 TemporaryFile），**不要 appendOpen**。恢复出来的会话
+    **必须仍算未保存**。身份只来自副本自己的 `recoveryOf`。功能**默认关闭**，只有窗口路径打开。
+19. **一个类可以住在多个 TU 里，但共享的辅助必须 inline**（P85）：`PianoRoll*.cpp` 十一个文件一个
+    主题，**拆的是文件边界不是逻辑**。共享层 `UI/PianoRollInternals.h`（`namespace atomic::roll`，
+    每个定义 `inline`）。**进不进 internals 的标准是"几个 TU 用"**。验收不是"能编译"，是**逐行
+    比对**：按非空行做多重集减法，只允许 `inline ` 前缀与 namespace 包裹两处差异。
+20. **模型只存绝对路径，相对是文档的形式**（P86）：`Model/SamplePath` 是唯一路径规则层。
+    **相对路径必须解得回原文件才写**；**读盘时把修好的位置写回模型，找不到也写绝对**。
+    **重定位不许自动发生**（`relinkSamplesTo` 只认用户挑的目录）。恢复副本的相对路径以
+    `recoveryOf` 指向的工程为基准。
+21. **循环是一个区间，不是一个标志**（P87）：`Model/LoopRegion`，不变量全是关于**顺序与最短**
+    （0.25 拍）。**开关与数字分开**：关掉不许忘记位置。关闭时渲染退化成 `[0, length)`，
+    老行为逐位不变。**`isUsable()` 是唯一判据**；`loopMove` 每次从 `loopDragOriginal` 重建。
+22. **点击是监听，不是声音，也不是定时器**（P88）：`Audio/Metronome` 混进 `renderNextBlock` 的
+    **每个 segment**，`renderInto`（导出/分轨/渲染成采样）里没有——"导出拿不到点击"是**结构性的**；
+    也不进 `RecordBuffer`。**按拍与每块 `beatsPerSample` 驱动**，落在该在的那个采样上。
+    分句 `ceil(fromBeat - 1e-9)` 让块边界那一拍**只算一次**。一击 12 ms、一块 46 ms ⟹ 四个声部。
+    音量是它自己的。重音跟工程拍号。**预备拍不改 `positionBeats`**，数完在同一个块里交接。
+23. **量化是形状的改动，不是位置的搬家**（P90）：`Model/Quantize.h` 的 `quantize::apply` 是唯一规则
+    ——`round` 不是 `floor`、`>= 1.0` 早退即夹紧、0 与网格 0 都逐位退回。**只改起点**，音符与采样块
+    都动；`moved == 0` 不重绘也不产生撤销步，判"动没动"用 `1e-9`。
+    **编组要做两件事**：先把出现原点重锚定成该出现的最小成员，再**无条件** `syncGroupShape`
+    （拖动整次出现不改形状，量化改）。出现原点是**存下来的数**，任何不走拖动路径的位移都要自己挪它。
 
 ## 目录
-- `Source/Model/` 数据与路由（LayerModel / **CurveBank** / RackModel / MixerModel / TempoMap / TempoModel / Routing / **SamplePath** / **LoopRegion** / ProjectIO / Gain）
-- `Source/Audio/` 引擎与纯函数 DSP（PlaybackEngine / Recorder / ClipStretch / PdcDelay / **Metronome** / 导出）
-- `Source/UI/` 时间线、机架、混音台、文件树、自动化、分栏（**钢琴窗 = `PianoRoll*.cpp` 十一个 TU +
-  `PianoRollInternals.h`**，见 `REFERENCE.md` 的「钢琴窗的文件布局」）
-- `Source/Util/` 度量与主题 / 文本 / 菜单 / **Recovery**（崩溃恢复）
+- `Source/Model/` 数据与路由（LayerModel / CurveBank / RackModel / MixerModel / TempoMap / TempoModel /
+  Routing / SamplePath / LoopRegion / **Meter** / ProjectIO / Gain）
+- `Source/Audio/` 引擎与纯函数 DSP（PlaybackEngine / Recorder / ClipStretch / PdcDelay / Metronome / 导出）
+- `Source/UI/` 时间线、机架、混音台、文件树、自动化、分栏（钢琴窗 = `PianoRoll*.cpp` 十一个 TU +
+  `PianoRollInternals.h`，见 `REFERENCE.md` 的「钢琴窗的文件布局」）
+- `Source/Util/` 度量与主题 / 文本 / 菜单 / Recovery
 - `Source/MainComponent.*` 装配、走带、撤销、快照与自检
 
 ## 构建
-VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + JUCE 8.0.4（FetchContent）。PATH 无 cmake，
-用 VS 自带那份。**构建前 `unset https_proxy http_proxy all_proxy no_proxy`**（大小写两份），
-否则 MSB6001 谎报找不到编译器。
+VS2022 + MSVC + JUCE 8.0.4（FetchContent）。PATH 无 cmake，用 VS 自带那份。
+**构建前 `unset https_proxy http_proxy all_proxy no_proxy`**（大小写两份），否则 MSB6001
+谎报找不到编译器。
 
-**CI = `.github/workflows/selftest.yml`**（P89）：`windows-2022` 上 configure → build →
-`--snapshot`，门禁只有四条、全判在 **ASCII** 上（退出码 / `[FAIL]` 数 / `ALL CHECKS PASSED` /
-PASS 数 ≥ `env.MIN_CHECKS`）。`MIN_CHECKS` 是"断言只增不减"唯一执法的地方，**加断言的那一轮
-要把它一起调大**。**故意不跑视觉回归**：8 张图本来会抖、其余看 runner 的字体与 DPI，
-会喊狼的闸门最后一定被人关掉；30 张图只当 artifact 传。留日志走管道时（`| Tee`）必须显式查
-`$LASTEXITCODE`——管道之后 `$?` 是 tee 的，坏构建会绿着过去。
+**CI = `.github/workflows/selftest.yml`**（P89）：门禁四条、全判在 **ASCII** 上（退出码 /
+`[FAIL]` 数 / `ALL CHECKS PASSED` / PASS 数 ≥ `env.MIN_CHECKS`）。`MIN_CHECKS` 是"断言只增不减"
+唯一执法的地方，**加断言的那一轮要把它一起调大**。**故意不跑视觉回归**。管道之后
+`$?` 是 tee 的，必须显式查 `$LASTEXITCODE`，否则坏构建会绿着过去。
 
 ## 工程文件
-`.atomic`，`formatVersion = 28`（逐版字段见 `REFERENCE.md`）。老版本必须仍能开。
-**"选中哪条自动化 lane"这类状态必须显式写属性**，不能靠元素顺序或别的属性推断。
-先解析到临时对象、末尾一次性提交，坏文件绝不破坏当前会话。
+`.atomic`，`formatVersion` 见 `STATUS.md`（逐版字段见 `REFERENCE.md`）。老版本必须仍能开。
+**"选中哪条自动化 lane"这类状态必须显式写属性**，不能靠元素顺序推断。先解析到临时对象、
+末尾一次性提交，坏文件绝不破坏当前会话。

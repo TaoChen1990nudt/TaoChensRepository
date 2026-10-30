@@ -304,6 +304,33 @@ build Release → `--snapshot selftest.png`。
 - 状态还没进工程文件：`metronomeEnabled` / `metronomeVolume` / `countInBeats` 是 `MainComponent`
   的成员，重启回默认（关 / 50% / 4 拍）。`formatVersion` 仍是 28。
 
+## 量化（P90：形状会跟过去，位置不会）
+
+**一个纯函数**：`Model/Quantize.h` 的 `quantize::apply (beat, grid, strength)`。
+`nearestGridPoint` 用 `round` 不用 `floor`——一个早 6 ms 的音，向下取整会把它推到下一格。
+强度是"走过去多少"，0 = 原样（逐位相同），≥1 走满；**`>= 1.0` 早退就是"夹紧"**，
+不需要 `std::min`（写过一次，删了：它咬不住，因为早退先接住了）。
+
+**入口**：`PianoRollComponent::quantizeSelection (gridBeats, strength)`，右键画布菜单的
+`量化`（`addQuantizeItems` 单独建菜单，自检读菜单不读截图）。五档网格 + 四档强度
+（100/75/50/25，勾在当前）。网格与强度是**工具**的设置，存在组件上，不进工程文件。
+
+**改的是起点**：音高与长度原样。音符与**采样块都动**（都是"人把它放在时间里的某个位置"）。
+`moved == 0` 就直接返回——不重绘、不产生撤销步；判"算不算动"用 `abs(diff) < 1e-9`，
+因为 `round(x/g)*g` 对 `0.1` 这种网格不是逐位相等（差 5e-17），用 `==` 会把"已经在格上"
+报成一次移动。
+
+**编组是这一轮唯一与拖动不同的地方，两件事都要做**：
+
+1. **重锚定** `setOccurrenceStart(groupId, occurrence, 该出现里最早的成员)`。出现原点是
+   **存下来的数**（P62），拖动的 `applyOccurrenceOriginsForMove` 会跟着挪它，量化不会；
+   而 `syncGroupShape` 是按 `副本自己的原点 + 源码的相对形状` 落位的。原点留在旧位置，
+   副本就会整体平移"源码第一个成员的那一份误差"——实测 8.00/8.57 → 7.89/8.64 而不是
+   8.00/8.75，形状看着是对的，位置错了一拍误差。
+2. **同步形状**，且**无条件**做，包括"整次出现都选中"。`collectTwinsForEdit` 在整次出现
+   时跳过同步，因为拖动整次出现**不改形状**；量化改（每个成员按自己的误差归位），
+   跳过的结果是一个组两份形状，下一次编辑任何一处都悄悄挑一个。
+
 ## 会话与撤销
 - **会话重置唯一入口 `buildSession(withEmptyLayer)`**：清 automation/mixer → restoreLayers →
   restoreSlots → BPM 120 → 清 currentProject → reconcilePlugins。空白 = 1 空图层 + 1 原装音源。

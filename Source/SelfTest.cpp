@@ -9,6 +9,7 @@
 //==============================================================================
 
 #include "MainComponent.h"
+#include "Model/Quantize.h"
 #include "Model/SamplePath.h"
 #include "Util/SharedRules.h"
 #include "Util/Theme.h"
@@ -16518,6 +16519,324 @@ juce::String MainComponent::runSelfTest()
             check (utf8 ("重音落在工程的拍号上（4/4 就是每 4 拍一个重音）"),
                    host88.getPlaybackForTest().getMetronome().getBeatsPerBar() == 4,
                    juce::String (host88.getPlaybackForTest().getMetronome().getBeatsPerBar()));
+        }
+    }
+
+    //-- P90: 量化选区 --------------------------------------------------------
+    // 四件事分开验：纯函数（就近、强度、强度夹紧、网格为零）、选区（只动选中的、
+    // 音高长度不变、已经在网格上不产生第二次撤销步）、编组（整次出现也同步形状）、
+    // 以及菜单（每一项都能读出来，而不是靠一张弹窗截图）。
+    {
+        //-- A. 纯函数 -------------------------------------------------------
+        {
+            check (utf8 ("100%：0.11 拍到 0（就近，不是向下取整）"),
+                   std::abs (quantize::apply (0.11, 0.25, 1.0) - 0.0) < 1.0e-12
+                     && std::abs (quantize::apply (0.14, 0.25, 1.0) - 0.25) < 1.0e-12,
+                   juce::String (quantize::apply (0.11, 0.25, 1.0), 4) + " / "
+                     + juce::String (quantize::apply (0.14, 0.25, 1.0), 4));
+
+            check (utf8 ("50%：走一半，落在 0.055 而不是 0"),
+                   std::abs (quantize::apply (0.11, 0.25, 0.5) - 0.055) < 1.0e-12,
+                   juce::String (quantize::apply (0.11, 0.25, 0.5), 4));
+
+            // 强度 0 与网格 0 都必须是"原样退回"，而且是逐位相同：调用方忘了设
+            // 网格时，音符不该被堆到 0 上去。
+            {
+                const double messy = 0.1234567890123;
+
+                check (utf8 ("强度 0 与网格 0 都是原样退回（逐位相同）"),
+                       quantize::apply (messy, 0.25, 0.0) == messy
+                         && quantize::apply (messy, 0.0, 1.0) == messy,
+                       juce::String (quantize::apply (messy, 0.25, 0.0), 13));
+            }
+
+            // 强度 > 1 夹紧，不外推：外推会让一个音符越过网格点跑到下一个
+            // 网格点上，看起来像量化在倒着干活。
+            check (utf8 ("强度 2 夹成 1：不越过网格点"),
+                   std::abs (quantize::apply (0.14, 0.25, 2.0) - 0.25) < 1.0e-12,
+                   juce::String (quantize::apply (0.14, 0.25, 2.0), 4));
+
+            check (utf8 ("已经在网格上的音，量化后逐位不动"),
+                   quantize::apply (0.5, 0.25, 1.0) == 0.5,
+                   juce::String (quantize::apply (0.5, 0.25, 1.0), 6));
+        }
+
+        //-- B. 选区 --------------------------------------------------------
+        {
+            LayerStack t90;
+            RackModel  r90;
+            PianoRollComponent roll90 (t90, r90);
+            roll90.setSize (1200, 520);
+
+            t90.addLayer (utf8 ("量化"), palette::layer1);
+
+            auto* layer90 = t90.getLayer (0);
+
+            const int n1 = layer90->addNote ({ 0, 60, 0.11, 1.0, 0.9f });
+            const int n2 = layer90->addNote ({ 0, 64, 0.68, 0.5, 0.9f });
+            const int n3 = layer90->addNote ({ 0, 67, 1.13, 1.0, 0.9f });
+            const int untouched = layer90->addNote ({ 0, 72, 4.13, 1.0, 0.9f });
+
+            roll90.setSelection ({ n1, n2, n3 });
+
+            const int moved = roll90.quantizeSelection (0.25, 1.0);
+
+            const auto at = [layer90] (int id)
+            {
+                const auto* n = layer90->findNote (id);
+                return n != nullptr ? n->startBeat : -1.0;
+            };
+
+            check (utf8 ("三个音符各自就近落格：0.11→0 / 0.68→0.75 / 1.13→1.25"),
+                   moved == 3
+                     && std::abs (at (n1) - 0.0)  < 1.0e-12
+                     && std::abs (at (n2) - 0.75) < 1.0e-12
+                     && std::abs (at (n3) - 1.25) < 1.0e-12,
+                   juce::String (moved) + ": " + juce::String (at (n1), 3) + " "
+                     + juce::String (at (n2), 3) + " " + juce::String (at (n3), 3));
+
+            check (utf8 ("没选中的那个一动不动（量化是选区命令，不是全图层命令）"),
+                   std::abs (at (untouched) - 4.13) < 1.0e-12,
+                   juce::String (at (untouched), 3));
+
+            {
+                const auto* n2ptr = layer90->findNote (n2);
+
+                check (utf8 ("量化只改起点：音高与长度原样"),
+                       n2ptr != nullptr && n2ptr->pitch == 64
+                         && std::abs (n2ptr->lengthBeats - 0.5) < 1.0e-12,
+                       n2ptr != nullptr ? juce::String (n2ptr->pitch) + " / "
+                                            + juce::String (n2ptr->lengthBeats, 3)
+                                        : juce::String ("no note"));
+            }
+
+            // 第二次必须是 0：量化过的音符不该每按一次就多一个撤销步。
+            const int again = roll90.quantizeSelection (0.25, 1.0);
+
+            check (utf8 ("再量化一次：0 个移动（不产生空的撤销步）"),
+                   again == 0, juce::String (again));
+
+            // 那个 1e-9 的理由：网格不是二进制能表示的整数时，`round(x/g)*g`
+            // 与 x 差 5e-17，用 == 判会把"已经在网格上"报成一次移动。
+            {
+                const int awkward = layer90->addNote ({ 0, 65, 0.3, 1.0, 0.9f });
+                roll90.setSelection ({ awkward });
+
+                const int movedAwkward = roll90.quantizeSelection (0.1, 1.0);
+
+                check (utf8 ("网格 0.1 上 0.3 已经在格上：0 个移动（差在 1e-17 量级）"),
+                       movedAwkward == 0, juce::String (movedAwkward) + ": "
+                                            + juce::String (at (awkward), 18));
+            }
+
+            // 50% 强度：4.13 的就近格点是 4.25（不是 4.0），走一半落在 4.19。
+            roll90.setSelection ({ untouched });
+            const int half = roll90.quantizeSelection (0.25, 0.5);
+
+            check (utf8 ("50% 强度：4.13 走向 4.25 的一半 = 4.19"),
+                   half == 1 && std::abs (at (untouched) - 4.19) < 1.0e-9,
+                   juce::String (half) + ": " + juce::String (at (untouched), 4));
+
+            // 0.03 用一拍的网格：就近是 0，不是负数。
+            const int nearZero = layer90->addNote ({ 0, 60, 0.03, 1.0, 0.9f });
+            roll90.setSelection ({ nearZero });
+            roll90.quantizeSelection (1.0, 1.0);
+
+            check (utf8 ("贴近 0 的音符夹在 0，不跑到 -1"),
+                   std::abs (at (nearZero)) < 1.0e-12, juce::String (at (nearZero), 4));
+        }
+
+        //-- C. 采样块也跟着走 ------------------------------------------------
+        {
+            LayerStack t90c;
+            RackModel  r90c;
+            PianoRollComponent roll90c (t90c, r90c);
+            roll90c.setSize (1200, 520);
+
+            t90c.addLayer (utf8 ("块"), palette::layer1);
+
+            SampleEvent clip;
+            clip.name        = utf8 ("kick");
+            clip.startBeat   = 0.68;
+            clip.lengthBeats = 1.0;
+            clip.pitch       = 60;
+
+            const int clipId = t90c.getLayer (0)->addSample (clip);
+
+            roll90c.setSampleSelection ({ clipId });
+
+            const int movedClips = roll90c.quantizeSelection (0.25, 1.0);
+            const auto* after = t90c.getLayer (0)->findSample (clipId);
+
+            check (utf8 ("采样块的起点也量化（混合选区不是只动一半）"),
+                   movedClips == 1 && after != nullptr
+                     && std::abs (after->startBeat - 0.75) < 1.0e-12
+                     && std::abs (after->lengthBeats - 1.0) < 1.0e-12,
+                   juce::String (movedClips) + ": "
+                     + (after != nullptr ? juce::String (after->startBeat, 3) : juce::String ("gone")));
+        }
+
+        //-- D. 编组：整次出现也同步 ------------------------------------------
+        // 这里是量化与拖动的分界。拖整次出现不改形状，量化改（每个成员按自己的
+        // 误差归位），所以同步必须无条件做；不做的话，同一个组会有两种形状，
+        // 下一次编辑任何一处都会悄悄挑一个。
+        {
+            LayerStack t90d;
+            RackModel  r90d;
+            PianoRollComponent roll90d (t90d, r90d);
+            roll90d.setSize (1200, 520);
+
+            t90d.addLayer (utf8 ("组"), palette::layer1);
+
+            auto* layer90d = t90d.getLayer (0);
+
+            // 两个成员偏的量不一样（-0.11 与 +0.07），所以量化真的会改形状。
+            const int g1 = layer90d->addNote ({ 0, 60, 0.11, 1.0, 0.9f });
+            const int g2 = layer90d->addNote ({ 0, 64, 0.68, 1.0, 0.9f });
+
+            roll90d.setSelection ({ g1, g2 });
+
+            const int groupId = roll90d.groupSelection();
+            const bool placed = roll90d.placeGroupAppearance (0, groupId, 8.0);
+
+            // 副本的位置是它自己的（occurrenceStart 是存下来的），所以这里
+            // 断言的是两件事分开：相对形状必须换成源码的，锚点必须原地不动。
+            // 只看绝对位置会把"形状跟过去"和"整段搬家"混成一个数。
+            struct CopyShape { double anchor = 1.0e9; double second = -1.0; };
+
+            const auto shapeOfCopy = [layer90d] ()
+            {
+                CopyShape s;
+
+                for (const auto& n : layer90d->getNotes())
+                    if (n.groupOccurrence != 0)
+                    {
+                        s.anchor = juce::jmin (s.anchor, n.startBeat);
+
+                        if (n.pitch == 64)
+                            s.second = n.startBeat;
+                    }
+
+                return s;
+            };
+
+            const auto copyBefore = shapeOfCopy();
+
+            roll90d.setSelection ({ g1, g2 });      // 整次出现都选中
+
+            const int movedGroup = roll90d.quantizeSelection (0.25, 1.0);
+
+            const auto copyAfter = shapeOfCopy();
+
+            check (utf8 ("量化整次出现：副本的相对形状跟着走（0.57 → 0.75），锚点不动"),
+                   placed && movedGroup == 2
+                     && std::abs ((copyBefore.second - copyBefore.anchor) - 0.57) < 1.0e-9
+                     && std::abs ((copyAfter.second - copyAfter.anchor) - 0.75) < 1.0e-9
+                     && std::abs (copyAfter.anchor - copyBefore.anchor) < 1.0e-9,
+                   juce::String (copyBefore.second - copyBefore.anchor, 3) + utf8 (" -> ")
+                     + juce::String (copyAfter.second - copyAfter.anchor, 3) + utf8 (" @ ")
+                     + juce::String (copyAfter.anchor, 3));
+        }
+
+        //-- E. 菜单 ---------------------------------------------------------
+        {
+            LayerStack t90e;
+            RackModel  r90e;
+            PianoRollComponent roll90e (t90e, r90e);
+
+            roll90e.setQuantizeGrid (0.5);
+            roll90e.setQuantizeStrength (0.75);
+
+            juce::PopupMenu top;
+            roll90e.addQuantizeItems (top, true);
+
+            juce::PopupMenu* sub = nullptr;
+            juce::String topText;
+
+            for (juce::PopupMenu::MenuItemIterator it (top); it.next();)
+                if (it.getItem().subMenu != nullptr)
+                {
+                    sub = it.getItem().subMenu.get();
+                    topText = it.getItem().text;
+                }
+
+            int grids = 0, ticked = 0;
+            juce::String tickedText;
+            bool allEnabled = true;
+            juce::PopupMenu* strengths = nullptr;
+
+            if (sub != nullptr)
+                for (juce::PopupMenu::MenuItemIterator it (*sub); it.next();)
+                {
+                    const auto& item = it.getItem();
+
+                    if (item.isSeparator)
+                        continue;
+
+                    if (item.subMenu != nullptr)
+                    {
+                        strengths = item.subMenu.get();
+                        continue;
+                    }
+
+                    ++grids;
+                    allEnabled = allEnabled && item.isEnabled;
+
+                    if (item.isTicked)
+                    {
+                        ++ticked;
+                        tickedText = item.text;
+                    }
+                }
+
+            check (utf8 ("菜单里有「量化」，五个网格，勾在当前那个上"),
+                   sub != nullptr && topText.startsWith (utf8 ("量化"))
+                     && grids == PianoRollComponent::numQuantizeGrids && ticked == 1
+                     && tickedText == PianoRollComponent::quantizeGridName (2),
+                   topText + " · " + juce::String (grids) + utf8 (" 项 / 勾 ") + tickedText);
+
+            check (utf8 ("网格那一层是可点的（有选区时不是灰的）"),
+                   allEnabled, juce::String (allEnabled ? utf8 ("可点") : utf8 ("灰的")));
+
+            int amountItems = 0;
+            juce::String amountTicked;
+
+            if (strengths != nullptr)
+                for (juce::PopupMenu::MenuItemIterator it (*strengths); it.next();)
+                {
+                    const auto& item = it.getItem();
+
+                    if (item.isSeparator)
+                        continue;
+
+                    ++amountItems;
+
+                    if (item.isTicked)
+                        amountTicked = item.text;
+                }
+
+            check (utf8 ("强度是四档，勾在 75%"),
+                   amountItems == PianoRollComponent::numQuantizeStrengths && amountTicked == "75%",
+                   juce::String (amountItems) + " / " + amountTicked);
+
+            // 空选区：每一项都得是灰的，菜单不该提供"量化没有的东西"。
+            juce::PopupMenu emptyMenu;
+            roll90e.addQuantizeItems (emptyMenu, false);
+
+            bool emptyTopEnabled = true;
+
+            for (juce::PopupMenu::MenuItemIterator it (emptyMenu); it.next();)
+                emptyTopEnabled = emptyTopEnabled && it.getItem().isEnabled;
+
+            check (utf8 ("空选区时「量化」是灰的"),
+                   ! emptyTopEnabled, juce::String (emptyTopEnabled ? utf8 ("可点") : utf8 ("灰的")));
+
+            // 小节那一档跟着拍号走，不是写死的 4。这是 P91 的接口，先在这儿咬住。
+            check (utf8 ("「1 小节」那一档用的是传进来的小节长度，不是写死的 4"),
+                   std::abs (PianoRollComponent::quantizeGridAt (4, 3.0) - 3.0) < 1.0e-12
+                     && std::abs (PianoRollComponent::quantizeGridAt (4, 7.0) - 7.0) < 1.0e-12
+                     && std::abs (PianoRollComponent::quantizeGridAt (3, 7.0) - 1.0) < 1.0e-12,
+                   juce::String (PianoRollComponent::quantizeGridAt (4, 3.0), 2));
         }
     }
 

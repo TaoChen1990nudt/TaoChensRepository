@@ -39,7 +39,7 @@ env:
   # checks raises this number in the same commit — the floor is the whole point
   # of the check, so it has to be a number somebody chose rather than "whatever
   # this run happens to print".
-  MIN_CHECKS: 810
+  MIN_CHECKS: 829
 
 jobs:
   windows:

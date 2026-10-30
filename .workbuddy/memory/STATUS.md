@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-30 · **Phase 89**（CI）
+> 最后更新：2026-10-30 · **Phase 90**（量化选区）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**，约 6 千字。
 > 规则 `MEMORY.md` · 制度 `REFERENCE.md` · 坑 `PITFALLS.md` · 逐阶段实现记录 `memory/<日期>.md`
 > · 被压掉的历史叙述（阶段全文 / 咬测流水 / 逐版沿革 / P62–P82 经验）在 **`STATUS-archive.md`**。
@@ -19,17 +19,17 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 89** — CI。P86 把工程文件里的 `path` 从绝对改成**相对工程目录**（解不回来才退回绝对），模型里仍是绝对；找不到时能按用户挑的目录按文件名重定位。P87 让走带能循环任意一段：`Model/LoopRegion` 是唯一的区间规则，标尺底部一条 7px 窄带画它、拖它，关掉不忘记位置。P88 加了点击轨与数拍：`Audio/Metronome` 只混进走带的块（导出结构性拿不到），录音前可数一小节。P89 给自检的退出码装了个听众：GitHub Actions 跑 configure → build → `--snapshot`，四条门禁全判在 ASCII 上 |
-| 自检 | **810 ALL PASSED / 0 FAIL**，失败退出码 1 |
+| 已完成阶段 | **Phase 90** — 量化选区。P86 把工程文件里的 `path` 从绝对改成**相对工程目录**（解不回来才退回绝对），模型里仍是绝对；找不到时能按用户挑的目录按文件名重定位。P87 让走带能循环任意一段：`Model/LoopRegion` 是唯一的区间规则，标尺底部一条 7px 窄带画它、拖它，关掉不忘记位置。P88 加了点击轨与数拍：`Audio/Metronome` 只混进走带的块（导出结构性拿不到），录音前可数一小节。P89 给自检的退出码装了个听众：GitHub Actions 跑 configure → build → `--snapshot`，四条门禁全判在 ASCII 上。P90 让已弹的东西回到网格：`Model/Quantize.h` 一个纯函数（就近 + 0..1 强度），右键菜单五档网格 × 四档强度，音符与采样块都动，编组先重锚定出现原点再同步形状 |
+| 自检 | **829 ALL PASSED / 0 FAIL**，失败退出码 1 |
 | 编译 | 零 error 零 warning |
 | `formatVersion` | **28**（P86 = 27 只改值不改标签；P87 = 28 加 `<Transport loop loopStart loopEnd>`；**P88 不升**——节拍器开关/音量/预备拍长度还没进工程文件）— 新增 `<Curve id name target pluginparam enabled>` + `<CurveState active/>`；**v25 及更老的文件照常打开**，只有重新保存才写新形状 |
 | 可执行 | `build/AtomicDAW_artefacts/Release/AtomicDAW.exe` |
 | 技术栈 | JUCE 8.0.4（FetchContent）+ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + C++17 |
-| 源码规模 | `Source/` 下 **107 个** .cpp/.h，共 **79,643 行**，分 Model / Audio / UI / Util / Media。最大的三个是 `SelfTest.cpp` 16,535 / `MainComponent.cpp` 8,587 / `PlaybackEngine.cpp` 3,748 |
+| 源码规模 | `Source/` 下 **108 个** .cpp/.h，共 **80,305 行**，分 Model / Audio / UI / Util / Media。最大的三个是 `SelfTest.cpp` 16,854 / `MainComponent.cpp` 8,587 / `PlaybackEngine.cpp` 3,748 |
 
 ## 下一步
 
-**未定**，等你给功能排期。P58–P89 的逐条主题不在这里重复，见下面的表和 `STATUS-archive.md`。
+**未定**，等你给功能排期。P58–P90 的逐条主题不在这里重复，见下面的表和 `STATUS-archive.md`。
 
 还没做、但已经想清楚的几件事：
 - **节拍器状态不进工程文件**（P88 的边界）：开/关、音量、预备拍长度现在是 `MainComponent`
@@ -41,6 +41,12 @@
 
 ## 最近八轮（新会话最需要的前情）
 
+- **P90 量化** — 一个纯函数 `quantize::apply(beat, grid, strength)`：`round` 不是 `floor`，
+  `>= 1.0` 早退就是夹紧（多余的 `std::min` 咬不住，删了）。改起点，不改音高与长度；
+  `moved == 0` 不产生撤销步，判"动没动"用 `1e-9`（`0.1` 这种网格差 5e-17）。
+  **编组两件事都要做**：先 `setOccurrenceStart(该出现最小起点)` 重锚定，再**无条件**
+  `syncGroupShape`——拖动整次出现不改形状，量化改（每个成员按自己的误差归位）。
+  出现原点是**存下来的数**，不走拖动路径的位移都要自己挪它，否则副本整体平移一份误差。
 - **P89 CI** — 自检从 P44 起就能让进程以 1 退出，但一直没人在听。`.github/workflows/selftest.yml`
   上 `windows-2022`，门禁四条**全判在 ASCII 上**（退出码 / `[FAIL]` 数 / `ALL CHECKS PASSED` /
   PASS 数 ≥ `MIN_CHECKS`），因为日志里的中文会随控制台代码页变样。`MIN_CHECKS` 是
@@ -79,6 +85,10 @@
   磁盘上「空」= **没有 `target` 属性**（写成词会被读回 level）。删掉了 `expandedGroupTarget` 缓存字段。
 
 ## 已知边界（用户提过、还没做）
+
+- **量化只动起点**（P90 的边界）：长度不量化（"把长短也归位"是另一件事，也是另一个命令），
+  网格只有 1/32 / 1/16 / 1/8 / 1/4 / 小节五档，**没有三连音**；自动化 lane 不受量化影响。
+  量化不进工程文件（网格与强度是工具设置），`formatVersion` 仍是 28。
 
 - **CI 不跑视觉回归**（P89）：30 张图只当 artifact 上传，不逐字节比。8 张本来就会抖
   （电平表 / 播放头 / 恢复时间戳），其余依赖 runner 的字体与 DPI。要让这条进闸门，
@@ -151,6 +161,7 @@
 | P85 | 钢琴窗拆成十一个 TU / 机架卡片双击开音源界面 | `memory/2026-10-30.md` |
 | P86–P88 | 采样路径相对化与重定位（`Model/SamplePath`）/ 循环区间（`Model/LoopRegion` / 标尺手势）/ 节拍器与预备拍（`Audio/Metronome` / `renderPreRoll` / 录音 skip） | `memory/2026-10-30.md` |
 | P89 | CI：GitHub Actions 跑 configure → build → `--snapshot`，四条 ASCII 门禁 | `.github/workflows/selftest.yml` |
+| P90 | 量化选区：`Model/Quantize.h` 纯函数 + 右键菜单五档网格 × 四档强度 + 编组重锚定 | `memory/2026-10-30.md` |
 | 踩坑索引 | 各阶段的不变量与咬测 | `PITFALLS.md` |
 
 ## 构建
@@ -178,7 +189,7 @@ build/AtomicDAW_artefacts/Release/AtomicDAW.exe --snapshot docs/phaseNN.png > do
 tail -3 docs/phaseNN.log   # 要看到 "ALL CHECKS PASSED"
 ```
 
-断言总数只增不减。**新增功能要加断言并报出新的总数**（当前基准 **810**），退回去说明有东西坏了。
+断言总数只增不减。**新增功能要加断言并报出新的总数**（当前基准 **829**），退回去说明有东西坏了。
 
 视觉回归：每轮入库 30 张 `docs/pNN-*.png`（`--snapshot p88.png` 会顺带写出 30 张后缀图）。
 与上一轮逐字节比，**P88 是 21/29 相同**；剩下 8 张只允许落在这两个集合里：顶栏改动造成的

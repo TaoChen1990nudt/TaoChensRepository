@@ -670,6 +670,56 @@ public:
         Returns true when something was re-routed. */
     bool mountSelectionTo (int slotId);
 
+    //-- Phase 90: quantise ---------------------------------------------------
+    /** Puts every selected START on `gridBeats`, moved `strength` of the way.
+
+        Starts only, deliberately: a note's length is how long the player chose
+        to hold it, and the word "quantise" is about the attack. Notes and sample
+        blocks both move, because both are things somebody put somewhere in time
+        — a mixed selection that obeyed only half way would be worse than either
+        answer alone.
+
+        The one place this departs from a drag is the group rule. A start IS the
+        group's shape (`syncGroupShape` pairs members by start), so every touched
+        appearance is re-synced afterwards — even when the selection covers the
+        appearance whole, which is exactly the case `collectTwinsForEdit` skips.
+        It has to be that way: a drag of a whole appearance keeps its shape, a
+        quantise does not (each note moves by its own error), and leaving the
+        twins alone would give the project two shapes for one group. Whichever
+        appearance comes first in the selection wins, and after the first sync the
+        rest are no-ops because they are already identical.
+
+        Returns how many objects actually moved. A selection already on the grid
+        moves nothing, which means no repaint and no undo step. */
+    int quantizeSelection (double gridBeats, double strength);
+
+    /** The grid and the strength the menu will use next.
+
+        Kept on the COMPONENT, not in the project: reopening a song must not
+        change the grid somebody quantises with. (The metronome's settings are on
+        the other side of that line for the same reason, in reverse.) */
+    void   setQuantizeGrid (double gridBeats) noexcept;
+    double getQuantizeGrid() const noexcept { return quantizeGridBeats; }
+    void   setQuantizeStrength (double amount) noexcept;
+    double getQuantizeStrength() const noexcept { return quantizeStrength; }
+
+    /** The 量化 menu's entries. `true` = the bar, whose length is the project's
+        meter rather than a constant, so the index alone is not enough. */
+    static constexpr int quantizeGridBase     = 7001;   // + 0 … numQuantizeGrids - 1
+    static constexpr int quantizeStrengthBase = 7101;   // + 0 … numQuantizeStrengths - 1
+    static constexpr int numQuantizeGrids     = 5;
+    static constexpr int numQuantizeStrengths = 4;
+
+    /** Index → beats. One switch, so the menu that SHOWS the grid and the
+        handler that USES it cannot disagree about what "1/8 音符" is. */
+    static double quantizeGridAt (int index, double barBeats) noexcept;
+    static juce::String quantizeGridName (int index);
+    static double quantizeStrengthAt (int index) noexcept;
+
+    /** Builds the submenu. Split out of showCanvasMenu so the self-test can READ
+        the menu instead of trusting a screenshot of a popup (P43's rule). */
+    void addQuantizeItems (juce::PopupMenu& menu, bool hasSelection) const;
+
     //-- Phase 16: note groups ------------------------------------------------
     /** Turns the selection into a group. Nothing moves: a group is a new way to
         address notes that already exist, not a container they move into.
@@ -2199,6 +2249,12 @@ private:
     int    hoveredAutomationMenu = 0;
     bool   snapEnabled          = true;
     float  ghostAlphaValue      = ghostAlpha;
+
+    //-- Phase 90 -------------------------------------------------------------
+    // The tool's own settings (see quantizeSelection). 1/16 and full strength
+    // are the first answer the word means; the menu remembers the second.
+    double quantizeGridBeats    = gridDivision;
+    double quantizeStrength     = 1.0;
 
     //-- Phase 21 -------------------------------------------------------------
     int    expandedGroupLayerIndex = -1;

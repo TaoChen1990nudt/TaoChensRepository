@@ -1,6 +1,7 @@
 #include "PianoRollComponent.h"
 #include "PianoRollInternals.h"
 
+#include "Model/Quantize.h"
 #include "Util/Metrics.h"
 #include "Util/SharedRules.h"
 
@@ -1346,6 +1347,189 @@ void PianoRollComponent::showGroupMenu (int layerIndex, int groupId, int occurre
 }
 
 
+//==============================================================================
+//  Phase 90: quantise
+//==============================================================================
+double PianoRollComponent::quantizeGridAt (int index, double barBeats) noexcept
+{
+    switch (index)
+    {
+        case 0:  return 1.0 / 8.0 * 0.5;    // 1/32 note: an eighth of a beat
+        case 1:  return gridDivision;       // 1/16 note: a quarter of a beat
+        case 2:  return 0.5;                // 1/8 note
+        case 3:  return 1.0;                // 1/4 note = one beat
+        case 4:  return barBeats;           // a bar, whatever the meter says
+        default: return 0.0;
+    }
+}
+
+
+juce::String PianoRollComponent::quantizeGridName (int index)
+{
+    switch (index)
+    {
+        case 0:  return utf8 ("1/32 音符");
+        case 1:  return utf8 ("1/16 音符");
+        case 2:  return utf8 ("1/8 音符");
+        case 3:  return utf8 ("1/4 音符");
+        case 4:  return utf8 ("1 小节");
+        default: return {};
+    }
+}
+
+
+double PianoRollComponent::quantizeStrengthAt (int index) noexcept
+{
+    switch (index)
+    {
+        case 0:  return 1.0;
+        case 1:  return 0.75;
+        case 2:  return 0.5;
+        case 3:  return 0.25;
+        default: return 1.0;
+    }
+}
+
+
+void PianoRollComponent::setQuantizeGrid (double gridBeats) noexcept
+{
+    if (gridBeats > 0.0)
+        quantizeGridBeats = gridBeats;
+}
+
+
+void PianoRollComponent::setQuantizeStrength (double amount) noexcept
+{
+    quantizeStrength = juce::jlimit (0.0, 1.0, amount);
+}
+
+
+int PianoRollComponent::quantizeSelection (double gridBeats, double strength)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr || ! (gridBeats > 0.0))
+        return 0;
+
+    const double amount = juce::jlimit (0.0, 1.0, strength);
+
+    // "0%" is "leave it exactly where it is". Letting it through would rewrite
+    // every start with itself, which is a move of zero that still costs an undo
+    // step and a repaint — the two things the early return below is about.
+    if (amount <= 0.0)
+        return 0;
+
+    int moved = 0;
+    double reach = 0.0;
+
+    // The comparison is against a billionth of a beat, not against zero.
+    // `round (x / g) * g` is NOT bit-exact even for a start already on the grid
+    // (0.3 / 0.1 is 2.9999999999999996), so comparing exactly would report a
+    // move on every press and turn "quantise twice" into two undo steps that
+    // change nothing anybody can hear.
+    const auto land = [&] (double& startBeat, double lengthBeats)
+    {
+        const double target = juce::jmax (0.0, quantize::apply (startBeat, gridBeats, amount));
+
+        if (std::abs (target - startBeat) < 1.0e-9)
+            return;
+
+        startBeat = target;
+        reach = juce::jmax (reach, target + lengthBeats);
+        ++moved;
+    };
+
+    for (int id : selection)
+        if (auto* note = layer->findNote (id))
+            land (note->startBeat, note->lengthBeats);
+
+    for (int id : sampleSelection)
+        if (auto* clip = layer->findSample (id))
+            land (clip->startBeat, clip->lengthBeats);
+
+    if (moved == 0)
+        return 0;
+
+    // Same rule as a drag that runs off the end: the timeline grows, nothing is
+    // dragged back to fit. Quantise is a nudge of at most half a grid step, so
+    // this only ever fires on a note already sitting against the end.
+    if (reach > timelineBeats)
+        ensureTimelineExtendsTo (reach + gridBeats);
+
+    //-- Re-anchor, then propagate the shape ----------------------------------
+    // Two steps, and the first one is not optional. `syncGroupShape` places a
+    // sibling at `its own origin + the source's relative shape`, and the origin
+    // is a STORED number (P62) that a drag keeps in step through
+    // applyOccurrenceOriginsForMove. Quantise does not drag: it moves each
+    // member by its own error, so the origin no longer names the earliest
+    // member — and a stale origin shifts every copy by exactly the source's
+    // first error while the shape looks right. Measured: a copy at 8.00/8.57
+    // became 7.89/8.64 instead of 8.00/8.75 before this loop existed.
+    //
+    // "The origin is the earliest member" is not a new rule: it is exactly what
+    // occurrenceStart() materialises when nothing is stored, and what every
+    // reader of getOccurrenceStarts() already assumes.
+    const auto touched = groupOccurrencesOf (selection, sampleSelection);
+
+    for (const auto& entry : touched)
+    {
+        double origin = std::numeric_limits<double>::max();
+
+        for (const auto& n : layer->getNotes())
+            if (n.groupId == entry.first && n.groupOccurrence == entry.second)
+                origin = juce::jmin (origin, n.startBeat);
+
+        for (const auto& clip : layer->getSamples())
+            if (clip.groupId == entry.first && clip.groupOccurrence == entry.second)
+                origin = juce::jmin (origin, clip.startBeat);
+
+        if (origin < std::numeric_limits<double>::max())
+            layer->setOccurrenceStart (entry.first, entry.second, origin);
+    }
+
+    // Unconditionally, and this is the one place this differs from a drag: see
+    // the declaration. A start IS the group's shape, and quantise changes each
+    // start by its own error, so the appearance that was touched is a new shape
+    // for every copy of it.
+    syncGroupShapesAfterEdit (touched);
+
+    stack.notifyNotesChanged();
+    repaint();
+
+    return moved;
+}
+
+
+void PianoRollComponent::addQuantizeItems (juce::PopupMenu& menu, bool hasSelection) const
+{
+    juce::PopupMenu sub;
+
+    for (int i = 0; i < numQuantizeGrids; ++i)
+        sub.addItem (quantizeGridBase + i, quantizeGridName (i), hasSelection,
+                     std::abs (quantizeGridAt (i, (double) beatsPerBar) - quantizeGridBeats) < 1.0e-9);
+
+    sub.addSeparator();
+
+    // Strength lives one level in, because it is a modifier of the verb above it
+    // rather than a sixth grid: twelve flat entries would bury "1/16", which is
+    // the one people press.
+    juce::PopupMenu amounts;
+
+    for (int i = 0; i < numQuantizeStrengths; ++i)
+    {
+        const double amount = quantizeStrengthAt (i);
+
+        amounts.addItem (quantizeStrengthBase + i,
+                         juce::String ((int) std::lround (amount * 100.0)) + "%",
+                         hasSelection, std::abs (amount - quantizeStrength) < 1.0e-9);
+    }
+
+    sub.addSubMenu (utf8 ("强度"), amounts, hasSelection);
+
+    menu.addSubMenu (utf8 ("量化"), sub, hasSelection);
+}
+
+
 void PianoRollComponent::addRenderScopeItems (juce::PopupMenu& menu, bool hasSelection)
 {
     menu.addItem (7, utf8 ("渲染选中内容为采样…"), hasSelection);
@@ -1379,6 +1563,13 @@ void PianoRollComponent::showCanvasMenu (juce::Point<int> screenPos)
         autoMenu.addItem (6, utf8 ("组声相"), groupId >= 0);
         menu.addSubMenu (utf8 ("创建自动化"), autoMenu, groupId >= 0);
     }
+
+    //-- Phase 90: quantise --------------------------------------------------
+    // Above the bounce entries, below the group ones: it edits what is already
+    // selected, and everything that CREATES something (a group, a render) stays
+    // below it.
+    menu.addSeparator();
+    addQuantizeItems (menu, count > 0 || clips > 0);
 
     //-- Phase 50: bounce to a sample block ----------------------------------
     // The selection and the whole layer are here; a group has its own menu
@@ -1439,7 +1630,37 @@ void PianoRollComponent::showCanvasMenu (juce::Point<int> screenPos)
                                     }
                                     break;
 
-                                default: break;
+                                default:
+                                    if (result >= quantizeGridBase
+                                          && result < quantizeGridBase + numQuantizeGrids)
+                                    {
+                                        const double grid = quantizeGridAt (result - quantizeGridBase,
+                                                                            (double) beatsPerBar);
+
+                                        const int moved = safe->quantizeSelection (grid,
+                                                                                   safe->getQuantizeStrength());
+
+                                        // Ticked even when nothing moved: the
+                                        // user made a choice, and the next
+                                        // press should show what it was.
+                                        safe->setQuantizeGrid (grid);
+
+                                        if (moved > 0)
+                                            safe->flashStatus (utf8 ("已量化 ") + juce::String (moved)
+                                                                 + utf8 (" 个 · ")
+                                                                 + quantizeGridName (result - quantizeGridBase)
+                                                                 + " · "
+                                                                 + juce::String ((int) std::lround (safe->getQuantizeStrength() * 100.0))
+                                                                 + "%");
+                                        else
+                                            safe->flashStatus (utf8 ("已经在网格上，没有东西动"));
+                                    }
+                                    else if (result >= quantizeStrengthBase
+                                               && result < quantizeStrengthBase + numQuantizeStrengths)
+                                    {
+                                        safe->setQuantizeStrength (quantizeStrengthAt (result - quantizeStrengthBase));
+                                    }
+                                    break;
                             }
                         });
 }
