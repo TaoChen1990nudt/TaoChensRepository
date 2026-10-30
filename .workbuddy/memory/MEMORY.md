@@ -7,7 +7,7 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
 编组、采样、走带、文件树、波形、伸缩、缩放、电平表）；平台陷阱与自检夹具在 `PITFALLS.md`。
 动代码前按主题查这两份，本文件只留跨主题硬规则。
 
-## 十七条硬规则
+## 十八条硬规则
 1. **中文一律 `atomic::utf8("...")`**，自检的失败信息也算。裸中文 = 乱码。
 2. **几何走 `ui::px()/pf()`、字号 `ui::sp()`**，唯一密度旋钮 `ui::scale = 1.3f`，禁止裸像素。
    `numPitches` / gutter / 内联自动化框最小宽度不缩放。
@@ -106,10 +106,25 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
     别给 `maxPdcLatency` 加"至少 1"这类兜底。延迟线是记忆体不是常数：locate、停止、
     `resetMixState` 都必须清，否则导出会带上上一遍的开头。
 
+18. **恢复副本是「一份副本」，不是「那个工程」**（P84）：`Util/Recovery` 把整篇会话写进
+    `Documents/AtomicDAW/Recovery/`，文件名带工程路径的 hash（同名不同目录不会撞）。
+    **写它的那条路绝不能改 `currentProject`**——把它当成工程，下一次 Ctrl+S 就把歌存进了恢复目录。
+    唯一的不变量：**副本存在 ⟺ 有未保存的编辑且进程没能正常收尾**。保存 → 删；用户选「不保存」→
+    删；正常关闭且无改动 → 本来就没有。所以它唯一能活下来的方式是崩溃，这条链子断一环，
+    恢复就变成制造重复或制造丢件。启动时只 offer **严格比工程文件更新**的那一份（打平算
+    stale：不打扰比赌一条改动便宜）。写入靠 `File::replaceWithText`，它走 JUCE 的
+    `TemporaryFile`，写一半崩也只丢这一次更新，**不要自己 appendOpen**。
+    恢复出来的会话**必须仍算未保存**，`savedStateText` 保持指向磁盘上的旧内容——顺手标成干净，
+    下一次关闭会一声不响把刚救回来的东西扔掉。文档里**没有任何"当前是哪个工程"的记忆**：
+    身份只能来自副本自己的 `recoveryOf` 属性。
+    这个功能**默认关闭**，只有 `Main.cpp` 的窗口路径打开：无头运行构造同一个类，而
+    `renderHeadlessReport` 开工第一件事就是 `saveProjectToFile`，默认开启会删掉用户的副本。
+
 ## 目录
 - `Source/Model/` 数据与路由（LayerModel / **CurveBank** / RackModel / MixerModel / TempoMap / TempoModel / Routing / ProjectIO / Gain）
 - `Source/Audio/` 引擎与纯函数 DSP（PlaybackEngine / Recorder / ClipStretch / 导出）
 - `Source/UI/` 时间线、机架、混音台、文件树、自动化、分栏
+- `Source/Util/` 度量与主题 / 文本 / 菜单 / **Recovery**（崩溃恢复）
 - `Source/MainComponent.*` 装配、走带、撤销、快照与自检
 
 ## 构建

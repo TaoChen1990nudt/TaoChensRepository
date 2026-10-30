@@ -151,6 +151,10 @@ namespace
         // can never contain — it lives in its own window.
         writePng ("-prompt", component.createSamplerPromptSnapshot());
 
+        // Phase 84: the question a crashed-out session comes back to. Like the
+        // prompt above, a modal dialog has no other way into a still.
+        writePng ("-recovery", component.createRecoveryPromptSnapshot());
+
         // Phase 52: the export dialog, in both formats — WAV with the bitrate
         // row greyed and MP3 with the depth row greyed is the whole control,
         // and a modal window cannot be photographed by a headless run.
@@ -658,6 +662,13 @@ public:
             {
                 addDevPluginPaths (*content);
                 content->startAudio();
+
+                // Phase 84: recovery is enabled HERE and nowhere else. Every
+                // other MainComponent in this file belongs to a headless run,
+                // and those save a project before doing anything else — with the
+                // feature on by default, a snapshot pass would delete the rescue
+                // copy of whatever the human had open.
+                content->setRecoveryEnabled (true);
             }
             setResizable (true, false);
 
@@ -680,6 +691,20 @@ public:
 
             setVisible (true);
             setFullScreen (true);
+
+            // Phase 84: after the window exists, not during construction. The
+            // offer is a modal child of the shell, and a modal child of a window
+            // that is not on screen yet has nowhere to appear.
+            juce::Component::SafePointer<MainWindow> safe (this);
+
+            juce::MessageManager::callAsync ([safe]
+            {
+                if (safe == nullptr)
+                    return;
+
+                if (auto* content = dynamic_cast<atomic::MainComponent*> (safe->getContentComponent()))
+                    content->offerRecoveryIfAny();
+            });
         }
 
         void closeButtonPressed() override

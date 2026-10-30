@@ -156,6 +156,37 @@
   唯一一个例外是异步提交的"非鼠标编辑"（键盘删除等）：它们在下一个消息循环里照常落一步。
 - 混音台在 `MixerWindow`，面板归 MainComponent：关窗不销毁状态。
 
+## 崩溃恢复（P84：副本不是工程）
+- **一句话不变量**：**副本存在 ⟺ 有未保存的编辑且进程没能正常收尾**。保存工程 → 删；
+  `confirmDiscardChanges` 里用户选「不保存」→ 删；载入别的工程 → 删（那些改动被放弃了）；
+  正常关闭且无改动 → 本来就没有。所以它唯一能活下来的方式是崩溃。这条链子断一环，
+  恢复就变成制造重复（该删没删）或制造丢件（不该删删了）。
+- **`Util/Recovery.h` 是纯函数层，把判断和对话框分开**：`getFileFor` / `inspect` / `write` /
+  `readProjectPath` / `listIn` / `discard`。UI 只有 `MainComponent::offerRecoveryIfAny` 一层胶水。
+  自检直接测下面那层——会错的从来是判据，不是弹窗。
+- **文件名带路径 hash**（FNV-1a，取整个 full path）：两个都叫 `song.atomic` 的工程不能共用一个
+  副本，否则第二个会覆盖第一个正要救的东西。唯一接受的冲突是两个**从未保存**的窗口——它们都是
+  `untitled`。文件名无法区分两个无名会话，而每次启动随机后缀会让"这是哪个"在崩溃后从"含糊"
+  变成"不可回答"。
+- **副本是一个能被直接打开的工程**：根元素只多加 `recoveryOf` / `recoveredAt` 两个属性，
+  解析器读它认识的、忽略其余。用户最后的逃生手段就是拿文件浏览器打开它。
+- **`inspect()` 的四个答案**：`none`（没有）／`unusable`（空、或不是会话文档）／
+  `stale`（不比工程新）／`offer`。工程不存在（从未保存）→ **一定 offer**，那是唯一没有任何
+  其他地方存着的场景。**打平算 stale**：同一秒说不清谁新，不打扰比赌一条改动便宜。
+- **原子写**：`File::replaceWithText` → JUCE 的 `TemporaryFile`（同目录隐藏临时文件 + 改名）。
+  写一半崩只会丢这一次更新，绝不留下半截。**别自己 `createOutputStream` 然后追加**——
+  那既不是原子的，也没人会记得 `deleteFile`（P82-A 就是这个）。
+- **自动保存的节拍**：`timerCallback` **最前面**（在 `! audio.isPlaying()` 早退之上，因为停着走带
+  正是人在编辑的时候），每 5 秒看一次。`recoveryDirty` 由 `modelChanged()` 置位，所以不编辑时
+  零成本——否则每 5 秒序列化一次整工程，只为发现"没变"。手势中／导出中／恢复中／对话框开着都不写。
+- **绝不改 `currentProject`**。这是最容易犯的错：复用 `saveProjectToFile` 会把 `currentProject`
+  指向恢复目录，下一次 Ctrl+S 就把歌存进了 Rescue 文件夹。
+- **恢复后仍然是脏的**：`savedStateText` 不更新。顺手标干净 = 下一次关闭一声不响扔掉它。
+- **默认关闭**：`setRecoveryEnabled(true)` 只在 `Main.cpp` 的窗口路径调用。`renderHeadlessReport`
+  开工第一件事就是 `saveProjectToFile`，默认开启会让一次快照删掉用户真实的副本。
+- **没被断言覆盖的一层**：真窗口里的那个模态框（无头跑不起消息循环）。它下面的判据全在纯函数里，
+  所以漏的是"弹没弹"，不是"该不该弹"。
+
 ## 插件延迟补偿（P83：慢的那条不能被拉快）
 - **控制台只有一种汇合**：子通道加进父通道的总线。`MixerModel::masterChannel`（=127）是"直接去
   主输出"的哨兵，同时也就是 bypass 总线的下标。别的地方没有并行路径。

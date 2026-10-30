@@ -64,7 +64,8 @@ target_sources(AtomicDAW PRIVATE
     Source/UI/RackPanel.cpp
     Source/UI/SampleEnvelopePanel.cpp
     Source/UI/NameEditor.cpp
-    Source/UI/SettingsWindow.cpp)
+    Source/UI/SettingsWindow.cpp
+    Source/Util/Recovery.cpp)
 
 target_include_directories(AtomicDAW PRIVATE Source)
 

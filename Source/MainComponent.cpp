@@ -1032,6 +1032,10 @@ MainComponent::MainComponent()
     savedStateText = history.front();        // nothing to save yet
     dirtyCache     = false;
 
+    // Phase 84: a brand-new session is `untitled` until it is saved, and that
+    // name is where its unsaved work goes if the process never gets to close.
+    recoveryFile = recovery::getFileFor (currentProject);
+
     // 60 Hz: the playhead is the one thing on screen that has to look like it
     // is moving, and 30 Hz reads as a stutter on a thin bright line.
     startTimerHz (60);
@@ -1067,6 +1071,12 @@ void MainComponent::modelChanged()
 {
     if (restoringHistory)
         return;
+
+    // Phase 84: something was edited, so the next autosave pass has a reason to
+    // serialise the session. Deliberately above the undo coalescing below: that
+    // guard is about how many SNAPSHOTS one gesture produces, and this is not a
+    // snapshot.
+    recoveryDirty = true;
 
     // One snapshot per turn, not per notification: dragging a note fires a
     // notesChanged every mouse move, and each of those is NOT an undo step.
@@ -1212,7 +1222,7 @@ void MainComponent::applyHistoryPosition()
     repaint();
 }
 
-void MainComponent::restoreState (const juce::String& xml)
+bool MainComponent::restoreState (const juce::String& xml)
 {
     // Phase 71: the session — and with it every slot id — is about to be
     // replaced. A note still held on a plugin preview would be held on a slot
@@ -1223,7 +1233,7 @@ void MainComponent::restoreState (const juce::String& xml)
     juce::String error;
 
     if (! project::fromXmlText (xml, stack, rack, bpmValue, error, &mixer, &automation, &plugins, &tempo))
-        return;
+        return false;
 
     setBpm (bpmValue);
     bpmField.setBpm (bpmValue, false);
@@ -1238,6 +1248,7 @@ void MainComponent::restoreState (const juce::String& xml)
     automationWindow.repaint();
     mixerPanel.repaint();
     pianoRoll.repaint();
+    return true;
 }
 
 //==============================================================================
@@ -2039,6 +2050,62 @@ namespace
     }
 }
 
+namespace
+{
+    /** Phase 84: the question the startup offer asks, in words.
+
+        One builder for the dialog and for the picture that documents it — the
+        same rule the cascade prompt follows, for the same reason: a fixture
+        typed a second time is a picture of a dialog nobody is shown. */
+    /** A timestamp in the shape the rest of the interface is written in.
+
+        `Time::toString` spells the month in English ("30 Oct 2026 9:35:02am"),
+        which is the one thing in this dialog that would look pasted in from
+        another program — and it changes shape with the system locale, so the
+        same copy could read differently on two machines. */
+    juce::String chineseTime (juce::Time time)
+    {
+        return juce::String (time.getYear()) + "-"
+                 + juce::String (time.getMonth() + 1).paddedLeft ('0', 2) + "-"
+                 + juce::String (time.getDayOfMonth()).paddedLeft ('0', 2) + " "
+                 + juce::String (time.getHours()).paddedLeft ('0', 2) + ":"
+                 + juce::String (time.getMinutes()).paddedLeft ('0', 2);
+    }
+
+    juce::String recoveryOfferMessage (const juce::String& projectName,
+                                       juce::Time savedAt,
+                                       juce::int64 bytes,
+                                       int olderCopies,
+                                       const juce::File& folder)
+    {
+        juce::String extra;
+
+        if (olderCopies > 0)
+            extra = juce::String (olderCopies) + utf8 (" 份更早的副本也还在：\n")
+                      + folder.getFullPathName() + utf8 ("\n\n");
+
+        // Whole kilobytes only: the exact byte count of a rescue file is not a
+        // number anybody makes a decision with.
+        const auto kilobytes = juce::jmax ((juce::int64) 1, bytes / 1024);
+
+        return projectName + utf8 (" 在上次退出时还有未保存的改动。\n\n")
+                 + utf8 ("保存于 ") + chineseTime (savedAt)
+                 + utf8 ("，约 ") + juce::String (kilobytes) + utf8 (" KB\n\n")
+                 + extra
+                 + utf8 ("要恢复它吗？");
+    }
+
+    /** Three answers, in one place. "稍后" is not a no: it leaves the copy
+        alone, so the next launch asks again — the only choice here that cannot
+        destroy something because of a mis-click. */
+    void addRecoveryButtons (juce::AlertWindow& alert)
+    {
+        alert.addButton (utf8 ("恢复"), 1, juce::KeyPress ((int) 'r'));
+        alert.addButton (utf8 ("丢弃"), 0, juce::KeyPress ((int) 'd'));
+        alert.addButton (utf8 ("稍后"), -1, juce::KeyPress (juce::KeyPress::escapeKey));
+    }
+}
+
 juce::Image MainComponent::createSamplerLinkSnapshot()
 {
     // Phase 32: the clip is the subject, so the notes are let go — a mixed
@@ -2099,6 +2166,26 @@ juce::Image MainComponent::createSamplerPromptSnapshot()
                              nullptr);
 
     addSamplerCascadeButtons (alert);
+
+    return alert.createComponentSnapshot (alert.getLocalBounds(), true);
+}
+
+juce::Image MainComponent::createRecoveryPromptSnapshot()
+{
+    // Phase 84: built, never shown — same as the cascade prompt above. The
+    // numbers are a plausible copy three minutes old: what the picture has to
+    // prove is the shape of the question (a project, a time, three answers),
+    // not the size of one particular file.
+    juce::AlertWindow alert (utf8 ("有未保存的工作"),
+                             recoveryOfferMessage (utf8 ("未命名工程"),
+                                                   juce::Time::getCurrentTime()
+                                                     - juce::RelativeTime::minutes (3),
+                                                   46 * 1024, 1,
+                                                   recovery::getFolder()),
+                             juce::MessageBoxIconType::QuestionIcon,
+                             nullptr);
+
+    addRecoveryButtons (alert);
 
     return alert.createComponentSnapshot (alert.getLocalBounds(), true);
 }
@@ -4205,6 +4292,12 @@ void MainComponent::showTempoAutomation()
 
 void MainComponent::timerCallback()
 {
+    // Phase 84: above every early-out below on purpose. The `! audio.isPlaying()`
+    // return further down is the state the transport is in while somebody sits
+    // and edits, and protecting only during playback would protect the wrong
+    // half of the session.
+    autosaveTick();
+
     // Phase 71: a plugin preview is a held key, not a fire-and-forget voice —
     // the engine will keep it down until it is told otherwise. This is what
     // lets go: a little after the last mouse move, like the oscillator preview
@@ -6437,6 +6530,220 @@ void MainComponent::showMenuBarMenu (int index)
                         });
 }
 
+//==============================================================================
+//  Phase 84: crash recovery
+//==============================================================================
+void MainComponent::autosaveTick()
+{
+    if (! recoveryEnabled || exporting || undoGestureActive || restoringHistory || recoveryPromptOpen)
+        return;
+
+    const auto now = juce::Time::getMillisecondCounter();
+
+    // Signed difference: the millisecond counter wraps after 49 days, and the
+    // obvious `<` would then stop saving for the rest of that session.
+    if ((juce::int32) (now - nextRecoveryAt) < 0)
+        return;
+
+    nextRecoveryAt = now + recoveryIntervalMs;
+
+    if (! recoveryDirty)
+        return;                       // nothing has been edited since the last pass
+
+    recoveryDirty = false;
+
+    if (! dirtyCache)
+    {
+        // Saved, or undone back to the saved state. Either way nothing here is
+        // waiting to be lost, and a copy that stayed would offer the user their
+        // own current document back as if it were news.
+        dropRecovery();
+        return;
+    }
+
+    writeRecoveryNow();
+}
+
+void MainComponent::writeRecoveryNow()
+{
+    if (! recoveryEnabled)
+        return;
+
+    const auto xml = captureState();
+
+    if (xml == lastRecoveryText)
+        return;
+
+    juce::String error;
+
+    // This is NOT a save. Handing the string to saveProjectToFile would move
+    // `currentProject` into the recovery folder, and the next Ctrl+S would put
+    // the user's song among the rescue files.
+    if (recovery::write (recoveryFile, xml, currentProject, error))
+        lastRecoveryText = xml;
+
+    // A failure is not reported: the next pass tries again, and a dialog about
+    // a rescue copy the user did not ask for is worse than silently retrying.
+}
+
+void MainComponent::dropRecovery()
+{
+    if (lastRecoveryText.isEmpty() && ! recoveryFile.existsAsFile())
+        return;                       // never written and nothing there
+
+    recovery::discard (recoveryFile);
+    lastRecoveryText.clear();
+}
+
+void MainComponent::resetRecoveryFor (const juce::File& projectFile)
+{
+    // The old name is the one that has to be removed; `dropRecovery` reads the
+    // member, so it has to run before the member changes.
+    dropRecovery();
+
+    recoveryFile  = recovery::getFileFor (projectFile);
+    recoveryDirty = false;
+}
+
+void MainComponent::offerRecoveryIfAny()
+{
+    if (! recoveryEnabled || recoveryPromptOpen)
+        return;
+
+    std::vector<recovery::Entry> offers;
+
+    for (const auto& entry : recovery::list())
+    {
+        switch (recovery::inspect (entry.file, entry.projectFile))
+        {
+            case recovery::Decision::offer:
+                offers.push_back (entry);
+                break;
+
+            case recovery::Decision::stale:
+            case recovery::Decision::unusable:
+                // Belongs to a project that has been saved since, or is not a
+                // session at all. Neither will ever be offered, and startup is
+                // the last moment anything remembers they exist.
+                recovery::discard (entry.file);
+                break;
+
+            case recovery::Decision::none:
+                break;
+        }
+    }
+
+    if (offers.empty())
+        return;
+
+    const auto newest = offers.front();
+
+    const auto name = newest.projectFile.existsAsFile()
+                        ? newest.projectFile.getFileNameWithoutExtension()
+                        : juce::String (utf8 ("未命名工程"));
+
+    auto* alert = new juce::AlertWindow (utf8 ("有未保存的工作"),
+                                         recoveryOfferMessage (name, newest.savedAt,
+                                                               newest.bytes,
+                                                               (int) offers.size() - 1,
+                                                               recovery::getFolder()),
+                                         juce::MessageBoxIconType::QuestionIcon,
+                                         this);
+
+    addRecoveryButtons (*alert);
+
+    recoveryPromptOpen = true;
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+
+    alert->enterModalState (true,
+                            juce::ModalCallbackFunction::create (
+                                [safe, newest] (int result)
+                                {
+                                    if (safe == nullptr)
+                                        return;
+
+                                    safe->recoveryPromptOpen = false;
+
+                                    if (result == 1)
+                                    {
+                                        juce::String error;
+
+                                        if (! safe->recoverFromFile (newest.file, error))
+                                            safe->showMessage (utf8 ("恢复失败"), error, true);
+
+                                        return;
+                                    }
+
+                                    if (result == 0)
+                                        recovery::discard (newest.file);
+
+                                    // 稍后 asks again on the next launch. Silence
+                                    // is the only answer here that cannot destroy
+                                    // something because of a mis-click, and the
+                                    // copy costs a few kilobytes on disk.
+                                }),
+                            true);      // delete when dismissed
+}
+
+bool MainComponent::recoverFromFile (const juce::File& file, juce::String& error)
+{
+    if (! file.existsAsFile())
+    {
+        error = utf8 ("恢复文件已经不在了");
+        return false;
+    }
+
+    const auto xml = file.loadFileAsString();
+
+    if (xml.isEmpty())
+    {
+        error = utf8 ("恢复文件是空的");
+        return false;
+    }
+
+    // The identity comes from the copy itself: a session that was never saved
+    // has no other record of where it belongs.
+    const auto projectPath = recovery::readProjectPath (file);
+
+    bool restored = false;
+
+    {
+        const juce::ScopedValueSetter<bool> guard (restoringHistory, true);
+        restored = restoreState (xml);
+    }
+
+    if (! restored)
+    {
+        error = utf8 ("恢复文件已经不能解析成工程了");
+        return false;
+    }
+
+    currentProject = projectPath.isEmpty() ? juce::File() : juce::File (projectPath);
+    recoveryFile   = file;
+
+    // One undo step, exactly like opening a file: the history of a session that
+    // was crashed out of is not the history of this one. Taken from the restored
+    // model rather than from `xml`, because the copy carries two bookkeeping
+    // attributes that a fresh capture does not — otherwise every later undo
+    // would see a phantom difference at the bottom of the stack.
+    cancelPendingUpdate();
+    history.clear();
+    history.push_back (captureState());
+    historyPos = 0;
+
+    // Still unsaved, on purpose. `savedStateText` keeps pointing at whatever the
+    // disk holds (often nothing), which is what makes the very next close ask
+    // before this is thrown away a second time.
+    dirtyCache = (history.front() != savedStateText);
+
+    lastRecoveryText = history.front();
+    recoveryDirty    = false;
+
+    repaint();
+    return true;
+}
+
 void MainComponent::saveProject()
 {
     if (! currentProject.existsAsFile())
@@ -6591,6 +6898,11 @@ bool MainComponent::saveProjectToFile (const juce::File& file, juce::String& err
     savedStateText = captureState();
     dirtyCache     = false;
 
+    // Phase 84: the disk now holds this session, so there is nothing left for a
+    // recovery copy to be newer than. A save-as also has to move the copy: its
+    // name is derived from the project path.
+    resetRecoveryFor (file);
+
     repaint (topBarBounds);
     return true;
 }
@@ -6646,6 +6958,11 @@ bool MainComponent::loadProjectFromFile (const juce::File& file, juce::String& e
     pianoRoll.closeNoteAutomation();
 
     currentProject = file;
+
+    // Phase 84: the previous project's unsaved work was just thrown away by
+    // opening something else, so its copy must go with it — otherwise the next
+    // launch offers to restore a session the user already walked away from.
+    resetRecoveryFor (file);
 
     // Phase 32: a file written by an older build can carry samplers that no
     // clip names any more (deleting a clip used to leave them behind). Loading
@@ -6810,6 +7127,12 @@ void MainComponent::confirmDiscardChanges (const juce::String& action,
 
                                     if (result == 0)
                                     {
+                                        // Phase 84: "不保存" is an answer about
+                                        // this work, not just about this file.
+                                        // Keeping the copy would resurrect it on
+                                        // the next launch as if the user had
+                                        // never said no.
+                                        safe->dropRecovery();
                                         onProceed();
                                         return;
                                     }

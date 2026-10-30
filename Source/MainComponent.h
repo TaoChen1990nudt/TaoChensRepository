@@ -36,6 +36,7 @@
 #include "UI/RackPanel.h"
 #include "UI/SettingsWindow.h"
 #include "UI/TypingPiano.h"
+#include "Util/Recovery.h"
 
 namespace atomic
 {
@@ -402,6 +403,10 @@ public:
         the bitrate row greyed, MP3 with the depth row greyed). */
     juce::Image createExportDialogSnapshot (bool mp3);
 
+    /** Phase 84: the startup offer, rendered. Same reason as the cascade
+        prompt: a modal question has no other way to appear in a still. */
+    juce::Image createRecoveryPromptSnapshot();
+
     //-- Phase 6: project files and offline bounce ----------------------------
     /** Writes the whole session to a .atomic file. Also the path the self-test
         and the command line use — the Save button only adds a file chooser in
@@ -422,6 +427,33 @@ public:
     double getContentSeconds() const;
 
     juce::File getCurrentProjectFile() const { return currentProject; }
+
+    //-- Phase 84: crash recovery ---------------------------------------------
+    /** Turns the recovery copy on or off for this session.
+
+        Off by default, and that is not timidity — this is the only code in the
+        editor that writes to and deletes from a folder the user owns. Every
+        automated run constructs this class, and `renderHeadlessReport` saves a
+        project before it does anything else, so with recovery on by default a
+        snapshot pass would delete the recovery copy of whatever the human had
+        open. Only the real startup path turns this on. */
+    void setRecoveryEnabled (bool shouldRecover) { recoveryEnabled = shouldRecover; }
+    bool isRecoveryEnabled() const noexcept      { return recoveryEnabled; }
+
+    /** Where this session's unsaved work would currently be written. */
+    juce::File getRecoveryFile() const { return recoveryFile; }
+
+    /** Startup: if the last run left unsaved work behind, offer it. Never
+        called from a headless run — a modal dialog there is a hung test. */
+    void offerRecoveryIfAny();
+
+    /** Replaces the session with the contents of a recovery copy, keeping the
+        project identity the copy declares.
+
+        The result is deliberately still unsaved: the copy exists precisely
+        because the disk does not have this content, so marking it clean would
+        invite a close with nothing written. */
+    bool recoverFromFile (const juce::File& file, juce::String& error);
 
     juce::String getAudioStatus() const { return audio.getStatusText(); }
 
@@ -635,9 +667,34 @@ private:
     void modelChanged();
 
     juce::String captureState() const;
-    void         restoreState (const juce::String& xml);
+
+    /** Returns false when the document no longer parses; the session is then
+        untouched. Callers that are undoing ignore it, because a snapshot that
+        fails to parse could never have been put on the stack in the first
+        place — the recovery path is the one that has to look. */
+    bool         restoreState (const juce::String& xml);
     void         commitHistory();
     void         applyHistoryPosition();
+
+    //-- Phase 84: crash recovery ---------------------------------------------
+    /** Runs from `timerCallback` on a wall-clock interval, above every transport
+        early-out in it: work is saved while the transport rolls, which is when
+        most of it happens.
+
+        Does nothing during a gesture, during an export, or while the session is
+        being replaced — a half-dragged note is not a state, and a recovery copy
+        of one would be a copy of something that never existed. */
+    void autosaveTick();
+
+    void writeRecoveryNow();
+
+    /** Removes this session's copy. Called from exactly the three places where
+        it stops being true that the copy holds something the disk does not:
+        a successful save, a load, and the user explicitly discarding changes. */
+    void dropRecovery();
+
+    /** Points this session at a different project's copy, after a save-as. */
+    void resetRecoveryFor (const juce::File& projectFile);
 
     //-- Phase 8: settings popup ---------------------------------------------
     void showSettingsMenu (juce::Point<int> screenPosition);
@@ -1311,6 +1368,41 @@ private:
     /** cached `captureState() != savedStateText`, refreshed at every point that
         can change either side. paint() must not run a full XML dump. */
     bool       dirtyCache = false;
+
+    //-- Phase 84: crash recovery ---------------------------------------------
+    /** Off until the real startup path says otherwise; see setRecoveryEnabled. */
+    bool         recoveryEnabled = false;
+
+    /** This session's copy. Follows `currentProject`, including a save-as. */
+    juce::File   recoveryFile;
+
+    /** The text last written to it. The only reason to write again is a
+        different session; comparing whole documents is cheaper than pointing
+        at the disk every five seconds. */
+    juce::String lastRecoveryText;
+
+    /** Millisecond counter, not a Timer: the 60 Hz callback is already the
+        heartbeat, and a second Timer would be a second clock. */
+    juce::uint32 nextRecoveryAt = 0;
+
+    /** How much work a crash may cost. Short enough that the answer to "did I
+        lose anything" is usually no, long enough that the serialisation never
+        lands inside one keystroke of another. */
+    static constexpr int recoveryIntervalMs = 5000;
+
+    /** Set by `modelChanged`, cleared by the pass that acts on it.
+
+        Without this the tick would have to serialise the whole session every
+        five seconds merely to discover that nothing had changed since the last
+        one — a few milliseconds of UI stall, on a timer, forever. The flag says
+        "something was edited since we last looked", which is the only thing the
+        comparison would have told us. */
+    bool         recoveryDirty = false;
+
+    /** The recovery offer is a modal dialog; a second one while it is up would
+        stack. Also stops the autosave from writing the blank session the user
+        is about to replace. */
+    bool         recoveryPromptOpen = false;
 
     bool       exporting = false;
 

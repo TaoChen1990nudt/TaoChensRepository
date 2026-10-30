@@ -2265,3 +2265,69 @@ P83 的最大风险不是算错，是**默认情况下这段代码从来不跑**
 
 **教训**：一段"平常不跑"的代码，必须有一条**只属于它**的断言，而且要能说出"这条断言是因为它才绿"。
 用别人的测量去间接覆盖，等于把两条不变量绑在一根绳上：断了才知道，而且不知道断的是哪根。
+
+## P84-A：咬测咬在缓存上，比不咬更糟——它会给你一个"已覆盖"的假象
+
+给 P84 设计第四处咬测时，我想验证「恢复出来的会话必须仍算未保存」，于是把
+`recoverFromFile` 里的 `dirtyCache = (history.front() != savedStateText);` 改成
+`dirtyCache = false;`。跑出来 **742/0，一条都没挂**。
+
+第一反应是"断言写错了"。不是。`hasUnsavedChanges()` 的实现是：
+
+```cpp
+auto now = captureState();
+if (now == history[historyPos]) { dirtyCache = (now != savedStateText); return dirtyCache; }
+```
+
+`dirtyCache` 只是一个**预算好的答案**，被问的时候会当场重算。改它等于改一个马上会被覆盖的变量——
+所以那条断言正确地在说"真相没变"。
+
+真正的坏法是把**真相**改掉：`savedStateText = history.front();`，也就是"恢复完顺手当成已保存"。
+这才是会丢工作的 bug（用户恢复回来，关窗口，一声不响没了）。这么咬，一条精确命中，detail 是 `clean`。
+
+**教训**：咬测咬不中，先问"我改的是真相还是它的缓存"。项目里这类成对结构不少
+（`dirtyCache` / `savedStateText`、`editingGroupId` / 组的形状、`expandedGroupTarget` / `curveTarget`），
+凡是看到一对，咬那个**没有它也能算出来的**那个，才有意义。
+
+## P84-B：一个会删用户文件的默认值，在无头运行里就是定时炸弹
+
+崩溃恢复的第一版想的是"默认开启，窗口启动时不用特别做什么"。看起来无害——直到想起
+`renderHeadlessReport()` 的**第一件事**是：
+
+```cpp
+component.saveProjectToFile (pngFile.getSiblingFile ("demo.atomic"), saveError);
+```
+
+而"保存成功"在新设计里意味着"删掉恢复副本"。于是每跑一次 `--snapshot`，就会把用户当时真正
+未保存的工作删掉一次。而这条路径**每天跑几十次**，且删的时候非常安静。
+
+修法不是加判断，是把默认值反过来：`bool recoveryEnabled = false;`，只有 `Main.cpp` 的
+`MainWindow` 构造里 `setRecoveryEnabled (true)`。理由写进注释：这是整个编辑器里**唯一会写、
+会删用户目录**的代码，而每一个自动化运行都会构造同一个类。
+
+顺带一条同类的验证：改完之后专门看了一眼 `Documents/AtomicDAW/Recovery` 是否存在——
+无头跑完**没有创建**，说明早退真的生效了，而不是"创建了空目录但没写东西"。
+
+**教训**：给"有破坏性的副作用"的功能定默认值时，想的不是"正常用户会怎样"，而是
+"**这个类还会在哪些别的场景被构造**"。自检、快照、导出、命令行——它们都构造同一个 MainComponent。
+
+## P84-C：恢复副本不是工程，别让它沾上"当前工程"这个身份
+
+`saveProjectToFile(file)` 的最后一行是 `currentProject = file;`。而自动保存要写的那份东西
+和保存工程**看起来一模一样**（都是整篇会话的 XML），最省事的实现就是复用它：
+
+```cpp
+saveProjectToFile (recoveryFile, error);   // ← 灾难
+```
+
+后果不是"多存了一个文件"，是 `currentProject` 变成了恢复目录里的那个副本。这之后用户按 Ctrl+S，
+文件选择器不再出现（因为"已经有一个路径了"），**歌被存进 Rescue 文件夹**，而磁盘上那个真正的
+工程文件从此停在旧版本。用户不会立刻发现，因为标题栏还写着工程名（那是 `getFileNameWithoutExtension`，
+而副本名字的前缀恰好也是它）。
+
+所以 `recovery::write` 是一条**完全独立**的路径：它只写文件，不碰 `currentProject`，不更新
+`savedStateText`，不进撤销历史。恢复方向同理——`recoverFromFile` 把身份**从副本里读回来**
+（`recoveryOf`），因为文档里根本没有"上次打开的是哪个工程"这种记忆。
+
+**教训**：两个东西内容相同，不代表它们是同一个东西。写之前先问一句"这一行会不会改掉
+别人对'我是谁'的认知"。

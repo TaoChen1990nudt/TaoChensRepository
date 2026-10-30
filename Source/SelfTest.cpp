@@ -9520,6 +9520,205 @@ juce::String MainComponent::runSelfTest()
         }
     }
 
+    //-- Phase 84: crash recovery ---------------------------------------------
+    {
+        // Everything runs in a scratch folder. The feature's entire job is to
+        // touch a folder the user owns, so a self-test that touched the real
+        // one would be the exact bug it is meant to catch.
+        const auto root = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                            .getChildFile ("atomic-p84-recovery");
+
+        root.deleteRecursively();
+        root.createDirectory();
+
+        const auto folder = root.getChildFile ("Recovery");
+        folder.createDirectory();
+
+        //-- identity ----------------------------------------------------------
+        check ("A recovery copy uses the project extension",
+               juce::String (recovery::fileExtension) == juce::String (project::fileExtension),
+               juce::String (recovery::fileExtension) + " / " + project::fileExtension);
+
+        const auto songHere  = root.getChildFile ("song.atomic");
+        const auto songThere = root.getChildFile ("elsewhere").getChildFile ("song.atomic");
+
+        check ("Two projects with the same name never share a copy",
+               recovery::getFileFor (songHere).getFileName()
+                 != recovery::getFileFor (songThere).getFileName(),
+               recovery::getFileFor (songHere).getFileName() + " vs "
+                 + recovery::getFileFor (songThere).getFileName());
+
+        check ("A session that was never saved has one fixed copy name",
+               recovery::getFileFor (juce::File()).getFileName()
+                 == juce::String ("untitled") + project::fileExtension,
+               recovery::getFileFor (juce::File()).getFileName());
+
+        //-- a real session document, so inspect() looks at what it will see ---
+        LayerStack authorStack;
+        RackModel  authorRack;
+
+        if (auto* track = authorStack.getLayer (authorStack.addLayer ("P84", palette::layer1)))
+        {
+            track->addNote ({ 0, 60, 0.0, 2.0, 0.9f });
+            track->addNote ({ 0, 64, 2.0, 2.0, 0.8f });
+        }
+
+        const auto xml = project::toXmlText (authorStack, authorRack, 120.0);
+
+        const auto copy = folder.getChildFile ("copy.atomic");
+
+        check ("No copy on disk means nothing to say",
+               recovery::inspect (copy, songHere) == recovery::Decision::none,
+               "missing");
+
+        copy.replaceWithText ("not a session");
+        check ("A file that is not a session is not offered",
+               recovery::inspect (copy, songHere) == recovery::Decision::unusable,
+               "garbage");
+
+        copy.replaceWithText (juce::String());
+        check ("An empty file is not offered",
+               recovery::inspect (copy, songHere) == recovery::Decision::unusable,
+               "zero bytes");
+
+        juce::String writeError;
+        const bool   wrote = recovery::write (copy, xml, songHere, writeError);
+
+        check ("A recovery copy lands where it was asked for",
+               wrote && copy.existsAsFile() && copy.getSize() > 0,
+               wrote ? juce::String (copy.getSize()) + " bytes" : writeError);
+
+        check ("A project that was never saved is always worth offering",
+               recovery::inspect (copy, songHere) == recovery::Decision::offer,
+               "no project on disk yet");
+
+        //-- newer, older, or a tie --------------------------------------------
+        juce::String saveError;
+        project::save (songHere, authorStack, authorRack, 120.0, saveError);
+
+        copy.setLastModificationTime (songHere.getLastModificationTime());
+
+        check ("A copy from the same moment is not offered",
+               recovery::inspect (copy, songHere) == recovery::Decision::stale,
+               "tied");
+
+        copy.setLastModificationTime (songHere.getLastModificationTime()
+                                        - juce::RelativeTime::seconds (10.0));
+
+        check ("A copy older than its project is not offered",
+               recovery::inspect (copy, songHere) == recovery::Decision::stale,
+               "older");
+
+        copy.setLastModificationTime (songHere.getLastModificationTime()
+                                        + juce::RelativeTime::seconds (10.0));
+
+        check ("A copy newer than its project is offered",
+               recovery::inspect (copy, songHere) == recovery::Decision::offer,
+               "newer");
+
+        //-- the copy is still a project ---------------------------------------
+        {
+            auto document = juce::parseXML (copy.loadFileAsString());
+
+            check ("The copy remembers which project it belongs to",
+                   document != nullptr
+                     && document->getStringAttribute ("recoveryOf") == songHere.getFullPathName()
+                     && document->getStringAttribute ("recoveredAt").isNotEmpty(),
+                   document != nullptr
+                     ? document->getStringAttribute ("recoveryOf") + " @ "
+                         + document->getStringAttribute ("recoveredAt")
+                     : juce::String ("unparseable"));
+        }
+
+        {
+            LayerStack   readStack;
+            RackModel    readRack;
+            double       readBpm = 0.0;
+            juce::String readError;
+
+            const bool ok = project::fromXmlText (copy.loadFileAsString(),
+                                                  readStack, readRack, readBpm, readError);
+
+            int notes = 0;
+
+            for (int i = 0; i < readStack.getNumLayers(); ++i)
+                if (auto* layer = readStack.getLayer (i))
+                    notes += (int) layer->getNotes().size();
+
+            // The bookkeeping attributes must not cost readability: the last
+            // resort for a user is to open the copy by hand as a project.
+            check ("A recovery copy is still a project the reader accepts",
+                   ok && notes == 2 && std::abs (readBpm - 120.0) < 1.0e-6,
+                   ok ? juce::String (notes) + " notes at " + juce::String (readBpm)
+                      : readError);
+        }
+
+        //-- scanning the folder -----------------------------------------------
+        {
+            const auto entries = recovery::listIn (folder);
+
+            check ("The folder scan finds the copy and its project",
+                   entries.size() == 1
+                     && entries.front().file == copy
+                     && entries.front().projectPath == songHere.getFullPathName(),
+                   juce::String ((int) entries.size()) + " entries");
+        }
+
+        //-- a folder that does not exist yet -----------------------------------
+        {
+            const auto deep = folder.getChildFile ("a").getChildFile ("b")
+                                        .getChildFile ("deep.atomic");
+            juce::String deepError;
+
+            check ("Writing a copy creates the folder it needs",
+                   recovery::write (deep, xml, songHere, deepError) && deep.existsAsFile(),
+                   deepError.isEmpty() ? juce::String ("written") : deepError);
+        }
+
+        //-- discard -----------------------------------------------------------
+        recovery::discard (copy);
+
+        check ("Discarding a copy removes the file",
+               ! copy.existsAsFile(),
+               copy.existsAsFile() ? "still there" : "gone");
+
+        //-- end to end: the shell takes a copy back ---------------------------
+        {
+            const auto fresh = folder.getChildFile ("untitled.atomic");
+            recovery::write (fresh, xml, songHere, writeError);
+
+            MainComponent reopened;
+
+            juce::String recoverError;
+            const bool   recovered = reopened.recoverFromFile (fresh, recoverError);
+
+            int notes = 0;
+            auto& layers = reopened.getLayerStack();
+
+            for (int i = 0; i < layers.getNumLayers(); ++i)
+                if (auto* layer = layers.getLayer (i))
+                    notes += (int) layer->getNotes().size();
+
+            check ("The shell takes a recovery copy back as a session",
+                   recovered && notes == 2,
+                   recovered ? juce::String (notes) + " notes" : recoverError);
+
+            // The copy is the only thing that knows where this belonged; a
+            // session that was never saved has nothing else to say it.
+            check ("A recovered session knows which project it belongs to",
+                   reopened.getCurrentProjectFile() == songHere,
+                   reopened.getCurrentProjectFile().getFullPathName());
+
+            // Recovered work is by definition not on disk, so the next close has
+            // to ask. Marking it clean would let one click throw it away again.
+            check ("A recovered session counts as unsaved",
+                   reopened.hasUnsavedChanges(),
+                   reopened.hasUnsavedChanges() ? "dirty" : "clean");
+        }
+
+        root.deleteRecursively();
+    }
+
     //-- Phase 50: the "render to a block" menu items ------------------------
     // Two verbs, one list: the canvas menu builds them through this function,
     // so reading the function is the same as reading the menu. The interesting
