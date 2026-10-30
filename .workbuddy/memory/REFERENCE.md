@@ -593,6 +593,36 @@ build Release → `--snapshot selftest.png`。
   名字，下一次启动从 1 数起也不会错），`lastRecordGroupId / lastRecordClipId` 是给自检与
   定位用的缓存。凡是"新一轮产出刚好全是旧字段"的功能，都别顺手升版本。
 
+## 输入监听与录音补偿（P94：两条链，两个数）
+
+- **监听是直通，不是插件链**：`AudioEngine::setMonitoringEnabled`，采集通道按
+  `min(ch, numInputs - 1)` 求和进输出——**和 `RecordBuffer::append` 同一条规矩**，
+  所以听见的和写进磁带的永远是同一份信号、同一对声道。单声道话筒因此在两只耳朵里。
+- **混在走带淡变之后**，位置与 audition / live / preview 并列。理由一样：话筒不是走带音频，
+  那段 8 ms 淡出不能把它一起掐掉——而**走带停着查电平正是最常见的用法**。
+  这也是它必须参与早退判据的原因（`! monitoring` 是第五个"停下也要渲染"的理由）。
+- **默认关，由录音键开、录音键关**：`startRecording()` 里 `setMonitoringEnabled(audioArmed)`
+  （没开成录音就不开监听），`finishRecording()` 里关。不询问就活的输入是啸叫，
+  而录音键是唯一"我马上要对着它弹"的那一下。
+- **两条链两个数**，都在 `AudioEngine`：
+  - `getRecordOffsetSamples()` = 设备输出 + 设备输入 + 监听链 → 给**话筒**那一半。
+  - `getMidiRecordOffsetSamples()` = 设备输出 + 监听链 → 给**键盘**那一半。
+    键盘没走过采集缓冲，把输入项摊给它是让每个音符**提前**。
+  - 设备延迟在 `audioDeviceAboutToStart` 里读一次（驱动/缓冲区变了才变），测试用
+    `setDeviceLatencyForTest` 灌。
+  - **三项都不看监听开关**。`finishRecording()` 在 `commitTake` 之前就关了监听，
+    按开关取值正好把监听链那一项抹掉——而那正是"监听链上挂个线性相位插件"这个场景要补的。
+  - 监听链现在插不进插件，`setMonitorChainLatency` 恒为 0；门先开好，免得以后另起一条补偿路径。
+- **校正只在 `commitTake` 门口做一次**（局部 lambda `correctedBeat`）：音符起点与终点、
+  CC 曲线上的点、音频块的起点，各按自己那条链挪；下游（编组出现原点、lane 点、WAV 位置）
+  拿到的都已经是正确的数，不需要每个读者记得减一次。
+  - **走秒不走拍分数**：速度一变，固定的采样数就不是固定的拍数。
+  - **零点由 `TempoMap` 兜**（`beatAtSeconds` 对负数答第一段的起点）。落点上那个
+    `jmax(0.0, ...)` 是死代码，咬测咬不动，已删。
+  - **音符长度从新起点量**：两端一起挪在起点撞到 0 时会变长。
+- **一个 take 里两半必须落在同一处**：这正是"两个数"而不是"一个数"的原因。用音频那个数
+  去挪音符，会把同一只手的两半拆开一个输入延迟那么宽。
+
 ## 三层叠加（P36：`Model/AutomationStack.h`）
 **法则只有一份**，纯函数，引擎与界面都调它，禁止在别处再写一遍乘法链。
 - 三层：**宏**（图层 volume lane × 合成器 level lane，两个 fader 也在这里）、**组**（trim ×

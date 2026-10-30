@@ -562,6 +562,11 @@ public:
         that paints the plate. */
     PlaybackEngine& getPlaybackForTest() { return audio.getPlayback(); }
 
+    /** P94: the engine, so a test can set the two device latencies it has no
+        sound card to read them from, and then watch a take land early by
+        exactly that much. */
+    AudioEngine& getAudioEngineForTest() { return audio; }
+
     //-- Phase 9: VST3 --------------------------------------------------------
     /** The session's plugin host. Main.cpp adds extra search paths here before
         the window opens; the self-test drives it directly. */

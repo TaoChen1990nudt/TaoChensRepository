@@ -17688,6 +17688,314 @@ juce::String MainComponent::runSelfTest()
                    MainComponent::formatBarBeat (6.0, 3) + " / "
                      + MainComponent::formatBarBeat (6.5, 4));
         }
+
+        //-- E. monitoring and the recording offset (P94) ----------------------
+        // The two halves of "I can hear myself, and what I played lands where I
+        // played it". Both are checked through the real callback, because both
+        // are decisions made inside it — a helper that mixed the input would
+        // prove the helper works, not that the engine calls it.
+        {
+            LayerStack t94;
+            RackModel  r94;
+
+            AudioEngine engine (t94, r94);
+            engine.setDeviceRateForTest (48000.0);
+
+            const juce::AudioIODeviceCallbackContext ctx {};
+
+            std::vector<float> inL ((size_t) 512, 0.5f), inR ((size_t) 512, 0.5f);
+            const float* inputs[2] = { inL.data(), inR.data() };
+
+            std::vector<float> outL ((size_t) 512, 0.0f), outR ((size_t) 512, 0.0f);
+            float* outputs[2] = { outL.data(), outR.data() };
+
+            check (utf8 ("监听默认是关的——不加询问就活的输入是啸叫的前提"),
+                   ! engine.isMonitoringEnabled(),
+                   juce::String (engine.isMonitoringEnabled() ? "on" : "off"));
+
+            // Off: the input reaches the output block zero times. The transport
+            // is stopped and the fade has settled, so this block leaves through
+            // the early return — which is the point: with monitoring off there
+            // is nothing to do, and the input must not sneak in.
+            engine.audioDeviceIOCallbackWithContext (inputs, 2, outputs, 2, 512, ctx);
+
+            check (utf8 ("监听关着时输入一个采样都不进输出"),
+                   outL[0] == 0.0f && outL[256] == 0.0f && outR[511] == 0.0f,
+                   juce::String (outL[256]) + " / " + juce::String (outR[511]));
+
+            engine.setMonitoringEnabled (true);
+
+            // The transport is still stopped and the fade is still at zero.
+            // Monitoring alone has to be enough to get past the early return —
+            // checking levels with the song parked is the ordinary case.
+            engine.audioDeviceIOCallbackWithContext (inputs, 2, outputs, 2, 512, ctx);
+
+            check (utf8 ("走带停着、淡变归零，只开监听也能听见自己"),
+                   outL[0] == 0.5f && outL[255] == 0.5f && outR[511] == 0.5f,
+                   juce::String (outL[0]) + " / " + juce::String (outR[511]));
+
+            // One microphone, two ears. Same rule the tape uses, so what is
+            // heard and what is written are the same signal in the same
+            // channels rather than two rules that happen to agree today.
+            std::fill (outL.begin(), outL.end(), 0.0f);
+            std::fill (outR.begin(), outR.end(), 0.0f);
+
+            const float* mono[1] = { inL.data() };
+
+            engine.audioDeviceIOCallbackWithContext (mono, 1, outputs, 2, 512, ctx);
+
+            check (utf8 ("单声道话筒在两只耳朵里是同一份声音"),
+                   outL[100] == 0.5f && outR[100] == 0.5f,
+                   juce::String (outL[100]) + " / " + juce::String (outR[100]));
+
+            // Two inputs, two different signals: each output channel takes its
+            // own input, so the mono rule above is a clamp and not a constant.
+            // Without this, "always read input 0" passes every other check here.
+            std::vector<float> inR25 ((size_t) 512, 0.25f);
+            const float* stereo[2] = { inL.data(), inR25.data() };
+
+            std::fill (outL.begin(), outL.end(), 0.0f);
+            std::fill (outR.begin(), outR.end(), 0.0f);
+
+            engine.audioDeviceIOCallbackWithContext (stereo, 2, outputs, 2, 512, ctx);
+
+            check (utf8 ("双声道输入各走各的：左 0.5 / 右 0.25"),
+                   outL[200] == 0.5f && outR[200] == 0.25f,
+                   juce::String (outL[200]) + " / " + juce::String (outR[200]));
+
+            // A device with no capture channel hands over null; monitoring must
+            // not turn that into a dereference just because the switch is on.
+            std::fill (outL.begin(), outL.end(), 0.0f);
+
+            engine.audioDeviceIOCallbackWithContext (nullptr, 0, outputs, 2, 512, ctx);
+
+            check (utf8 ("没有输入通道时开着监听也不崩、不出声"),
+                   outL[0] == 0.0f && outR[0] == 0.0f,
+                   juce::String (outL[0]) + " / " + juce::String (outR[0]));
+
+            //-- the offset arithmetic ----------------------------------------
+            engine.setDeviceLatencyForTest (0, 0);
+            engine.setMonitorChainLatency (0);
+
+            check (utf8 ("没有设备延迟时录音偏移是 0（不补偿一个不存在的链）"),
+                   engine.getRecordOffsetSamples() == 0 && engine.getRecordOffsetSeconds() == 0.0,
+                   juce::String (engine.getRecordOffsetSamples()));
+
+            engine.setDeviceLatencyForTest (100, 200);
+            engine.setMonitorChainLatency (50);
+
+            check (utf8 ("偏移 = 输入 + 输出 + 监听链：100 + 200 + 50"),
+                   engine.getRecordOffsetSamples() == 350,
+                   juce::String (engine.getRecordOffsetSamples()));
+
+            check (utf8 ("偏移换算成秒用的是回调的采样率"),
+                   std::abs (engine.getRecordOffsetSeconds() - 350.0 / 48000.0) < 1.0e-9,
+                   juce::String (engine.getRecordOffsetSeconds(), 8));
+
+            // The switch does not change the answer, and that is the whole
+            // point: `finishRecording()` closes the monitor path BEFORE the take
+            // is committed, so an offset that read the switch would silently
+            // drop the monitor term at exactly the moment it was needed.
+            engine.setMonitoringEnabled (false);
+
+            check (utf8 ("关掉监听后偏移不变——记的是当时那条链，不是此刻的开关"),
+                   engine.getRecordOffsetSamples() == 350,
+                   juce::String (engine.getRecordOffsetSamples()));
+
+            engine.setMonitoringEnabled (true);
+
+            // Negative input is clamped rather than propagated: a driver that
+            // reports a nonsense latency must not make every take land after
+            // where it was played.
+            engine.setDeviceLatencyForTest (-40, -60);
+
+            check (utf8 ("设备报负数延迟时夹到 0，不让 take 往后跑"),
+                   engine.getRecordOffsetSamples() == 50,
+                   juce::String (engine.getRecordOffsetSamples()));
+
+            // The keyboard figure is a different chain, not a fraction of the
+            // microphone one: a keystroke never passed through the capture
+            // buffer, so an input term here would make every note early.
+            engine.setDeviceLatencyForTest (100, 200);
+            engine.setMonitorChainLatency (50);
+
+            check (utf8 ("键盘偏移不含输入：只有输出 200 + 监听链 50"),
+                   engine.getMidiRecordOffsetSamples() == 250,
+                   juce::String (engine.getMidiRecordOffsetSamples()));
+
+            engine.setMonitoringEnabled (false);
+
+            check (utf8 ("键盘偏移同样与监听开关无关"),
+                   engine.getMidiRecordOffsetSamples() == 250,
+                   juce::String (engine.getMidiRecordOffsetSamples()));
+
+            engine.setMonitoringEnabled (true);
+        }
+
+        //-- F. 端到端：一个 take 真的落在拍上（P94）-------------------------
+        // The arithmetic above is a formula; this is the thing the formula is
+        // for. Numbers picked so the answer is an equation rather than a
+        // tolerance: 120 BPM and 48 kHz make 48000 samples exactly one second,
+        // which is exactly two beats.
+        {
+            MainComponent host94;
+
+            const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                  .getChildFile ("atomic-p94-latency");
+            folder.deleteRecursively();
+            host94.setRecordingsFolder (folder);
+
+            auto& engine94 = host94.getAudioEngineForTest();
+            engine94.setDeviceRateForTest (48000.0);
+
+            // The state the take is committed in: monitor path already closed by
+            // `finishRecording()`. Set here on purpose — an offset that read that
+            // switch would come out zero, and this check is what catches it.
+            engine94.setMonitoringEnabled (false);
+            engine94.setMonitorChainLatency (0);
+
+            juce::AudioBuffer<float> voice94 (2, 48000);
+
+            for (int i = 0; i < 48000; ++i)
+            {
+                const float value = std::sin ((float) i * 0.01f) * 0.5f;
+                voice94.setSample (0, i, value);
+                voice94.setSample (1, i, value);
+            }
+
+            auto* layer94 = host94.getLayerStack().getActiveLayer();
+
+            auto startOfClip = [layer94] (int clipId) -> double
+            {
+                for (const auto& clip : layer94->getSamples())
+                    if (clip.id == clipId)
+                        return clip.startBeat;
+
+                return -1.0;
+            };
+
+            Take take94;
+            take94.startBeat = 8.0;
+            take94.endBeat   = 10.0;
+
+            // 24000 in + 24000 out, so the round trip is exactly one second =
+            // two beats while the click alone is half a second = one beat. The
+            // two chains get different answers from the same device, which is
+            // the point of them being two numbers.
+            engine94.setDeviceLatencyForTest (24000, 24000);
+
+            const int lateId = host94.commitTake (take94, voice94, 48000.0);
+            const double lateStart = startOfClip (lateId);
+
+            check (utf8 ("晚一秒的链：写在 8.0 拍的 take 落在 6.0 拍"),
+                   lateId > 0 && std::abs (lateStart - 6.0) < 1.0e-9,
+                   juce::String (lateStart, 9));
+
+            // Nothing reported: nothing moves. This is the branch that keeps
+            // every project recorded on a sane driver bit-identical to P93.
+            engine94.setDeviceLatencyForTest (0, 0);
+
+            const int exactId = host94.commitTake (take94, voice94, 48000.0);
+            const double exactStart = startOfClip (exactId);
+
+            check (utf8 ("设备不报延迟时 8.0 拍还是 8.0 拍（不补一个不存在的链）"),
+                   exactId > 0 && std::abs (exactStart - 8.0) < 1.0e-9,
+                   juce::String (exactStart, 9));
+
+            // A take holds both halves at once, and then they have to land
+            // together: audio at 6.0 (two beats back), the note at 7.0 (one
+            // beat back). A single shared number would slide them a beat apart.
+            engine94.setDeviceLatencyForTest (24000, 24000);
+
+            const size_t notesBefore94   = layer94->getNotes().size();
+            const size_t samplesBefore94 = layer94->getSamples().size();
+
+            Take both94;
+            both94.startBeat = 8.0;
+            both94.endBeat   = 8.5;
+
+            RecordedNote played;
+            played.pitch    = 60;
+            played.velocity = 0.8f;
+            played.startBeat = 8.0;
+            played.endBeat   = 8.5;
+            both94.notes.push_back (played);
+
+            const int bothId = host94.commitTake (both94, voice94, 48000.0);
+
+            // `commitTake` answers with the group when there are notes, so the
+            // block is read off the end of the list rather than by that id.
+            const auto& samples94 = layer94->getSamples();
+            const double bothClipStart = samples94.size() > samplesBefore94
+                                           ? samples94.back().startBeat : -1.0;
+
+            const auto& notes94 = layer94->getNotes();
+            const double noteStart94 = notes94.size() > notesBefore94
+                                         ? notes94.back().startBeat : -1.0;
+            const double noteLength94 = notes94.size() > notesBefore94
+                                          ? notes94.back().lengthBeats : -1.0;
+
+            check (utf8 ("同一个 take 的两半落在一起：音频 6.0 / 音符 7.0"),
+                   bothId > 0
+                     && std::abs (bothClipStart - 6.0) < 1.0e-9
+                     && std::abs (noteStart94 - 7.0) < 1.0e-9,
+                   juce::String (bothClipStart, 9) + " / " + juce::String (noteStart94, 9));
+
+            check (utf8 ("音符挪了位置，长度还是弹下去的那么长"),
+                   std::abs (noteLength94 - 0.5) < 1.0e-9,
+                   juce::String (noteLength94, 9));
+
+            // The knob the same hand turned came in late by the same amount, so
+            // the curve has to move with the notes. Written as its own check
+            // because the shift is its own loop: a version that moved the notes
+            // and left the controller where it was would pass everything above.
+            engine94.setDeviceLatencyForTest (24000, 24000);
+
+            Take knob94;
+            knob94.startBeat = 8.0;
+            knob94.endBeat   = 9.0;
+
+            knob94.notes.push_back (played);
+
+            RecordedControl swell;
+            swell.controller = 7;
+            swell.value      = 0.2f;
+            swell.beat       = 8.0;
+            knob94.controls.push_back (swell);
+
+            swell.value = 0.9f;
+            swell.beat  = 8.5;
+            knob94.controls.push_back (swell);
+
+            const int knobId = host94.commitTake (knob94, juce::AudioBuffer<float>(), 48000.0);
+            auto* knobGroup = layer94->findGroup (knobId);
+
+            std::vector<AutomationPoint> levelPoints;
+
+            if (knobGroup != nullptr)
+                levelPoints = knobGroup->getLevelAutomation().getPoints();
+
+            check (utf8 ("手拧的旋钮跟着一起挪：8.0/8.5 的两次变成 7.0/7.5"),
+                   levelPoints.size() == 2
+                     && std::abs (levelPoints[0].beat - 7.0) < 1.0e-9
+                     && std::abs (levelPoints[1].beat - 7.5) < 1.0e-9,
+                   juce::String ((int) levelPoints.size())
+                     + (levelPoints.empty() ? juce::String() : " / " + juce::String (levelPoints[0].beat, 9)));
+
+            // A take at the very top has nowhere to move back to. It lands on
+            // zero rather than at a negative beat the model cannot hold.
+            engine94.setDeviceLatencyForTest (24000, 24000);
+            take94.startBeat = 0.5;
+
+            const int topId = host94.commitTake (take94, voice94, 48000.0);
+            const double topStart = startOfClip (topId);
+
+            check (utf8 ("曲子最开头的 take 夹在 0，不会跑成负拍"),
+                   topId > 0 && topStart == 0.0,
+                   juce::String (topStart, 9));
+
+            folder.deleteRecursively();
+        }
     }
 
     // The summary MUST come after the last check. It used to sit mid-function

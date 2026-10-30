@@ -183,6 +183,54 @@ void AudioEngine::appendRecordedForTest (const juce::AudioBuffer<float>& audio)
 }
 
 //==============================================================================
+//  Phase 94: input monitoring and record-side compensation
+//==============================================================================
+void AudioEngine::setMonitoringEnabled (bool shouldMonitor) noexcept
+{
+    monitoringEnabled.store (shouldMonitor, std::memory_order_release);
+}
+
+void AudioEngine::setMonitorChainLatency (int samples) noexcept
+{
+    monitorChainLatency.store (juce::jmax (0, samples), std::memory_order_release);
+}
+
+int AudioEngine::getRecordOffsetSamples() const noexcept
+{
+    // Three terms, one sum — and the monitoring one is NOT conditioned on the
+    // monitoring switch. That condition looks right and is a trap: the switch
+    // describes the chain being listened through *now*, while the offset
+    // describes the chain the take was played through. `finishRecording()`
+    // turns monitoring off before the take is committed, so conditioning here
+    // would subtract exactly the term that a plugin on the monitor path added —
+    // the linear-phase case this whole calculation exists for.
+    return deviceInputLatency.load (std::memory_order_acquire)
+         + deviceOutputLatency.load (std::memory_order_acquire)
+         + monitorChainLatency.load (std::memory_order_acquire);
+}
+
+double AudioEngine::getRecordOffsetSeconds() const noexcept
+{
+    return currentSampleRate > 0.0 ? getRecordOffsetSamples() / currentSampleRate : 0.0;
+}
+
+int AudioEngine::getMidiRecordOffsetSamples() const noexcept
+{
+    // No input term, and that is the whole point of it being a second function
+    // rather than arithmetic at the call site: a keystroke never went through
+    // the capture buffer, so charging it for one would make every recorded
+    // note early by the input latency of a microphone it never used.
+    return deviceOutputLatency.load (std::memory_order_acquire)
+         + monitorChainLatency.load (std::memory_order_acquire);
+}
+
+void AudioEngine::setDeviceLatencyForTest (int inputSamples, int outputSamples) noexcept
+{
+    deviceInputLatency.store (juce::jmax (0, inputSamples), std::memory_order_release);
+    deviceOutputLatency.store (juce::jmax (0, outputSamples), std::memory_order_release);
+}
+
+//==============================================================================
 void AudioEngine::beginFadeOut()
 {
     // Remember where the tail has to come from *before* the position moves:
@@ -333,6 +381,15 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
         currentSampleRate = device->getCurrentSampleRate();
         loadMeter.reset();
 
+        // Phase 94: the two halves of the round trip, read once per device.
+        // They move when the driver or the buffer size changes, and the record
+        // offset is arithmetic on top of them, so it must not be cached
+        // anywhere else.
+        deviceInputLatency.store (juce::jmax (0, device->getInputLatencyInSamples()),
+                                  std::memory_order_release);
+        deviceOutputLatency.store (juce::jmax (0, device->getOutputLatencyInSamples()),
+                                   std::memory_order_release);
+
         // prepareToPlay sizes the mixer's scratch bus once, so the callback
         // never allocates, and clears the synth filters' memory.
         playback.prepareToPlay (device->getCurrentSampleRate(),
@@ -466,6 +523,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // point of it.
     const bool live = playback.hasLiveNotes();
 
+    // Phase 94: monitoring is the fifth reason to be in this callback with the
+    // transport stopped. It has to be read before the early return below, and
+    // it has to keep that return from firing — a singer checking their level
+    // with the transport parked is the ordinary case, not an edge one.
+    const bool monitoring = monitoringEnabled.load (std::memory_order_acquire)
+                              && numInputChannels > 0 && inputChannelData != nullptr;
+
     if (preRolling)
     {
         // A count-in has no music to fade in, and fading it would swallow the
@@ -481,6 +545,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     // Once the release ramp has reached zero there is nothing left to render.
     if (! running && ! preRolling && ! audition && ! preview && ! live
+          && ! monitoring
           && ! masterFade.isSmoothing() && masterFade.getCurrentValue() < 1.0e-4f)
         return;
 
@@ -524,6 +589,25 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     if (preview)
         playback.renderSamplePreview (output, numSamples);
+
+    // Phase 94: the monitor path, summed last for the same reason as the three
+    // above — a microphone is not transport audio, so the fade that silences a
+    // stopped transport must not silence it too. A mono source is duplicated
+    // by the rule `RecordBuffer::append` already uses, so what is heard and what
+    // is written to the tape are the same signal in the same channels.
+    if (monitoring)
+    {
+        for (int ch = 0; ch < numOutputChannels; ++ch)
+        {
+            if (outputChannelData[ch] == nullptr)
+                continue;
+
+            const float* source = inputChannelData[juce::jmin (ch, numInputChannels - 1)];
+
+            if (source != nullptr)
+                juce::FloatVectorOperations::add (outputChannelData[ch], source, numSamples);
+        }
+    }
 }
 
 } // namespace atomic

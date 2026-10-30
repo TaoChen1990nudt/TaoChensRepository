@@ -4255,7 +4255,13 @@ bool MainComponent::startRecording()
     // The audio side may refuse (no capture channel, or none free). That is not
     // a reason to refuse the MIDI side: a keyboard take is still a take, and the
     // button has to mean something on a machine with no microphone.
-    audio.beginRecording (300.0, skipSamples);
+    const bool audioArmed = audio.beginRecording (300.0, skipSamples);
+
+    // Phase 94: a singer who cannot hear themselves is recording blind. The
+    // monitor path follows the record button because that is the only moment
+    // the two are the same decision — "I am about to play into this" — and an
+    // input left live afterwards is a feedback loop nobody asked for.
+    audio.setMonitoringEnabled (audioArmed);
 
     repaint (topBarBounds);
     return true;
@@ -4459,6 +4465,11 @@ void MainComponent::finishRecording()
 
     recording.store (false);
 
+    // Phase 94: the monitor path closes with the take. It is opened by the
+    // record button and by nothing else, so leaving it open after the button
+    // goes dark would be a microphone one gesture away from the speakers.
+    audio.setMonitoringEnabled (false);
+
     const double endBeat = juce::jmax (recordStartBeat, audio.getPositionBeats());
     Take take = takeCollector.finish (endBeat);
 
@@ -4523,6 +4534,57 @@ int MainComponent::commitTake (Take take, const juce::AudioBuffer<float>& audioT
     // thing the user did, not two files that happen to be numbered alike.
     ++recordingCounter;
 
+    //-- 0. the take lands on the grid, not where the chain left it -----------
+    // Phase 94. Two chains, two numbers: the microphone take is late by the
+    // whole round trip (output + input + monitor), the keyboard take only by
+    // the click it was following (output + monitor) because it never passes
+    // through the capture buffer. One number for both would slide the two
+    // halves of the same performance apart — the one error a recording is
+    // never allowed to make.
+    //
+    // Corrected once, here, before anything reads the take. The notes and the
+    // recorded curves are shifted in place; the audio block gets the same
+    // treatment where its start is computed below. Everything downstream —
+    // group origin, lane points, the WAV's position — then works on positions
+    // that are already right, instead of each reader remembering to apply an
+    // offset.
+    auto& playback = audio.getPlayback();
+
+    const auto correctedBeat = [&playback] (double beat, int offsetSamples, double rate)
+    {
+        if (offsetSamples <= 0 || rate <= 0.0)
+            return beat;
+
+        // Through seconds, not by a beat fraction: under a tempo map a constant
+        // number of samples is not a constant number of beats, and the error is
+        // exactly where the tempo changes. The floor at zero is the tempo map's
+        // — `beatAtSeconds` answers the first segment's start for anything
+        // before it, so nothing below zero can come out of here.
+        const double offsetSeconds = (double) offsetSamples / rate;
+
+        return playback.beatAtSeconds (playback.secondsAtBeat (beat) - offsetSeconds);
+    };
+
+    const int midiOffset = audio.getMidiRecordOffsetSamples();
+
+    if (midiOffset > 0 && sampleRate > 0.0)
+    {
+        for (auto& note : take.notes)
+        {
+            // Length is measured wherever the note ends up. Shifting both ends
+            // would keep it too, but only until the start hits the floor — then
+            // a note played before the song began would come back longer than
+            // it was played.
+            const double length = note.endBeat - note.startBeat;
+
+            note.startBeat = correctedBeat (note.startBeat, midiOffset, sampleRate);
+            note.endBeat   = note.startBeat + length;
+        }
+
+        for (auto& control : take.controls)
+            control.beat = correctedBeat (control.beat, midiOffset, sampleRate);
+    }
+
     //-- 1. the audio: file -> sampler -> block -------------------------------
     if (hasAudio)
     {
@@ -4532,18 +4594,33 @@ int MainComponent::commitTake (Take take, const juce::AudioBuffer<float>& audioT
             const auto file = getRecordingsFolder().getChildFile (name + ".wav");
             const bool wrote = writeSampleFile (file, *buffer);
 
+            // Phase 94: the take is late by however long the signal spent
+            // getting from the player's hands to the tape — output latency (the
+            // click reached their ears late), input latency (the sound got back
+            // late), and the monitor chain they were listening through. Moving
+            // the block back by that much is the whole compensation; the
+            // samples themselves are not resampled or shifted, because the
+            // error is in *where the take starts*, not inside it.
+            //
+            // Clamped at zero by the tempo map, not here: a take at the very
+            // top of the song has nowhere to move back to, and `beatAtSeconds`
+            // already answers the first segment's start for anything before it.
+            // The assertion in the self-test is what keeps that true.
+            const double startBeat = correctedBeat (take.startBeat,
+                                                    audio.getRecordOffsetSamples(),
+                                                    sampleRate);
+
             SampleEvent clip;
             clip.name = file.getFileName();
             clip.path = wrote ? file.getFullPathName() : juce::String();
             clip.audio = buffer;
-            clip.startBeat = juce::jmax (0.0, take.startBeat);
+            clip.startBeat = startBeat;
             clip.pitch = 60;
             clip.laneSpan = 4;
 
             // The buffer is real seconds; the block is beats. Under a tempo map
             // those differ, so the width is measured on the map rather than
             // divided by a BPM — the same rule the exporter follows (P80).
-            auto& playback = audio.getPlayback();
             const double endOfTake = playback.beatAtSeconds (playback.secondsAtBeat (clip.startBeat)
                                                              + buffer->lengthSeconds());
             clip.lengthBeats = juce::jmax (1.0, endOfTake - clip.startBeat);

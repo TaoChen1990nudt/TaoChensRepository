@@ -203,6 +203,99 @@ public:
         the mock. */
     void appendRecordedForTest (const juce::AudioBuffer<float>& audio);
 
+    //-- Phase 94: input monitoring and record-side compensation --------------
+    /**
+        Straight-through monitoring: what arrives on the capture channels is
+        summed into the output block.
+
+        Three things are deliberate:
+
+          * **It is added after the transport fade**, exactly like audition,
+            live keys and the sample preview. A held microphone is not
+            transport audio, so the 8 ms fade that silences a stopped transport
+            must not swallow it — and monitoring has to work with the transport
+            stopped, which is when most people check their level.
+          * **A mono microphone is duplicated**, by the same rule
+            `RecordBuffer::append` uses (`min(channel, numInputs - 1)`): one
+            voice belongs in both ears, and picking input 0 twice would be a
+            different (and wrong) rule for two-channel interfaces.
+          * **It is off by default.** A monitoring path that is on without
+            being asked for is a feedback loop waiting for the user to point a
+            microphone at a speaker.
+    */
+    void setMonitoringEnabled (bool shouldMonitor) noexcept;
+    bool isMonitoringEnabled() const noexcept
+    {
+        return monitoringEnabled.load (std::memory_order_acquire);
+    }
+
+    /** How far the monitoring chain itself delays the signal, in samples.
+
+        Currently nothing can be inserted on that chain, so this is zero — the
+        door exists so that the day a plugin lands there, the recording offset
+        is already reading from the right place instead of needing a second
+        compensation path (@see PdcDelay, which is the same rule one level up:
+        one delay table, not two).
+    */
+    void setMonitorChainLatency (int samples) noexcept;
+
+    /**
+        How far a recorded take has to move towards zero to land on the beat the
+        player actually played.
+
+        The chain is: the click leaves the DAW, waits out the device's output
+        latency, reaches the player's ears, hands answer `output + monitoring`
+        later than they heard it, the sound comes back through the microphone and
+        the input buffer, and finally reaches the tape. Everything in that
+        sentence is latency the take inherits and the player never intended:
+
+            offset = inputLatency + outputLatency + monitorChainLatency
+
+        The monitoring term is not a rounding detail — it is why a linear-phase
+        plugin on the monitor path shows up as a late take. The player follows
+        what they hear, and what they hear went through that plugin.
+
+        All three terms are unconditional, including the monitoring one. That is
+        deliberate: the offset describes the chain the take was played through,
+        not the state of a switch at the moment the file lands. `finishRecording`
+        closes the monitor path before the take is committed, so making this
+        depend on `isMonitoringEnabled()` would zero out precisely the term a
+        monitor-path plugin contributed.
+
+        Zero when no device has ever opened, which is also the honest answer:
+        with no device there is no chain to compensate. The self-test sets the
+        numbers through `setDeviceLatencyForTest`.
+    */
+    int getRecordOffsetSamples() const noexcept;
+
+    /** The same number in seconds at the rate the callback is running. */
+    double getRecordOffsetSeconds() const noexcept;
+
+    /**
+        How far a recorded KEYBOARD take has to move towards zero, in samples.
+
+        A different chain, not a fraction of the one above. A microphone take
+        pays for the whole round trip: the click leaves late, the sound comes
+        back late, the capture buffer adds its own. A keyboard take pays only
+        for the click — the player's hand answers what it heard, and the note
+        arrives on a MIDI cable with no capture buffer behind it. Subtracting an
+        input latency the performance never passed through would put the notes
+        *early* by exactly that much.
+
+            offset = outputLatency + monitorChainLatency
+
+        Two numbers instead of one because a take can contain both halves at
+        once. Using the audio figure for the notes would slide the two halves of
+        one performance apart by the input latency — the one error a recording
+        is never allowed to make.
+    */
+    int getMidiRecordOffsetSamples() const noexcept;
+
+    /** Test only: the self-test has no sound card, so the device's own latency
+        numbers have to come from somewhere. Real devices fill these in
+        `audioDeviceAboutToStart`. */
+    void setDeviceLatencyForTest (int inputSamples, int outputSamples) noexcept;
+
     //-- Model listeners ------------------------------------------------------
     void layersChanged() override;
     void notesChanged() override;
@@ -242,6 +335,23 @@ private:
     std::atomic<double> fadeOutBeats { 0.0 };
 
     RecordBuffer recordBuffer;
+
+    //-- Phase 94: monitoring -------------------------------------------------
+    /** Off until asked for: an input path that is live without being asked for
+        turns a speaker into a microphone's best friend. */
+    std::atomic<bool> monitoringEnabled { false };
+
+    /** Samples the monitoring chain adds. Nothing can be inserted there yet
+        (P94 is the straight-through path), so this stays zero until a plugin
+        chain exists — but the recording offset already reads it, because a
+        compensation formula that has to be remembered later is a formula that
+        gets forgotten later. */
+    std::atomic<int> monitorChainLatency { 0 };
+
+    /** The device's own numbers, taken once in `audioDeviceAboutToStart`.
+        Zero until a device opens. */
+    std::atomic<int> deviceInputLatency  { 0 };
+    std::atomic<int> deviceOutputLatency { 0 };
 
     /** Phase 93. Fed once per callback by a scope guard, so a block that leaves
         through one of the early returns is still measured — those are the
