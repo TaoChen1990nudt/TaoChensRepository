@@ -686,8 +686,6 @@ private:
         of one would be a copy of something that never existed. */
     void autosaveTick();
 
-    void writeRecoveryNow();
-
     /** Removes this session's copy. Called from exactly the three places where
         it stops being true that the copy holds something the disk does not:
         a successful save, a load, and the user explicitly discarding changes. */

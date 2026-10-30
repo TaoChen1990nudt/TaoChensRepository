@@ -1213,6 +1213,12 @@ void MainComponent::applyHistoryPosition()
 {
     const juce::String xml = history[(size_t) historyPos];
 
+    // Phase 84: undo and redo are edits too, and this one can land exactly on
+    // the state the file on disk holds — which is the moment the recovery copy
+    // stops being true. `modelChanged` does not fire for it (restoringHistory is
+    // up), so the flag is raised here.
+    recoveryDirty = true;
+
     restoringHistory = true;
     restoreState (xml);
     restoringHistory = false;
@@ -6552,24 +6558,21 @@ void MainComponent::autosaveTick()
 
     recoveryDirty = false;
 
-    if (! dirtyCache)
+    // The document itself, not `dirtyCache`. That cache is refreshed by
+    // commitHistory, which runs a turn later, so trusting it here would drop the
+    // first edit after a pause — the one an autosave is most likely to meet.
+    // One capture answers both questions: is this still unsaved, and is it
+    // different from what is already written.
+    const auto xml = captureState();
+
+    if (xml == savedStateText)
     {
-        // Saved, or undone back to the saved state. Either way nothing here is
-        // waiting to be lost, and a copy that stayed would offer the user their
-        // own current document back as if it were news.
+        // Undone back to the file on disk. Nothing is waiting to be lost, and a
+        // copy that stayed would offer the user their own current document back
+        // as if it were news.
         dropRecovery();
         return;
     }
-
-    writeRecoveryNow();
-}
-
-void MainComponent::writeRecoveryNow()
-{
-    if (! recoveryEnabled)
-        return;
-
-    const auto xml = captureState();
 
     if (xml == lastRecoveryText)
         return;
