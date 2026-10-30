@@ -75,36 +75,23 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
     （0.25 拍）。**开关与数字分开**：关掉不许忘记位置。关闭时渲染退化成 `[0, length)`，
     老行为逐位不变。**`isUsable()` 是唯一判据**；`loopMove` 每次从 `loopDragOriginal` 重建。
 22. **点击是监听，不是声音，也不是定时器**（P88）：`Audio/Metronome` 混进 `renderNextBlock` 的
-    **每个 segment**，`renderInto`（导出/分轨/渲染成采样）里没有——"导出拿不到点击"是**结构性的**；
-    也不进 `RecordBuffer`。**按拍与每块 `beatsPerSample` 驱动**，落在该在的那个采样上。
-    分句 `ceil(fromBeat - 1e-9)` 让块边界那一拍**只算一次**。一击 12 ms、一块 46 ms ⟹ 四个声部。
-    音量是它自己的。重音跟工程拍号。**预备拍不改 `positionBeats`**，数完在同一个块里交接。
+    **每个 segment**，`renderInto`（导出/分轨/渲染成采样）里没有——"导出拿不到点击"是**结构性的**。
+    **按拍与每块 `beatsPerSample` 驱动**，落在该在的那个采样上。分句 `ceil(fromBeat - 1e-9)`
+    让块边界那一拍**只算一次**。音量是它自己的，**重音跟工程拍号**（→ 规则 24）。
+    **预备拍不改 `positionBeats`**，数完在同一个块里交接。
 23. **量化是形状的改动，不是位置的搬家**（P90）：`Model/Quantize.h` 的 `quantize::apply` 是唯一规则
     ——`round` 不是 `floor`、`>= 1.0` 早退即夹紧、0 与网格 0 都逐位退回。**只改起点**，音符与采样块
     都动；`moved == 0` 不重绘也不产生撤销步，判"动没动"用 `1e-9`。
     **编组要做两件事**：先把出现原点重锚定成该出现的最小成员，再**无条件** `syncGroupShape`
     （拖动整次出现不改形状，量化改）。出现原点是**存下来的数**，任何不走拖动路径的位移都要自己挪它。
 
-## 目录
-- `Source/Model/` 数据与路由（LayerModel / CurveBank / RackModel / MixerModel / TempoMap / TempoModel /
-  Routing / SamplePath / LoopRegion / **Meter** / ProjectIO / Gain）
-- `Source/Audio/` 引擎与纯函数 DSP（PlaybackEngine / Recorder / ClipStretch / PdcDelay / Metronome / 导出）
-- `Source/UI/` 时间线、机架、混音台、文件树、自动化、分栏（钢琴窗 = `PianoRoll*.cpp` 十一个 TU +
-  `PianoRollInternals.h`，见 `REFERENCE.md` 的「钢琴窗的文件布局」）
-- `Source/Util/` 度量与主题 / 文本 / 菜单 / Recovery
-- `Source/MainComponent.*` 装配、走带、撤销、快照与自检
+24. **拍号是一个值，不是一个 `constexpr`**（P91）：`Model/Meter.h` 是唯一规则，`MainComponent`
+    持有它，钢琴窗与节拍器是**被推**的视图（标尺 / 复制到后一小节 / 重音读同一份）。
+    **`<Transport>` 永远写**（否则「4/4 无循环」与「3/4 无循环」是同一份文档），
+    **读侧先无条件赋默认再查表**（老文件连元素都没有），`setBeatsPerBar` **不调 `modelChanged()`**。
 
-## 构建
-VS2022 + MSVC + JUCE 8.0.4（FetchContent）。PATH 无 cmake，用 VS 自带那份。
-**构建前 `unset https_proxy http_proxy all_proxy no_proxy`**（大小写两份），否则 MSB6001
-谎报找不到编译器。
-
-**CI = `.github/workflows/selftest.yml`**（P89）：门禁四条、全判在 **ASCII** 上（退出码 /
-`[FAIL]` 数 / `ALL CHECKS PASSED` / PASS 数 ≥ `env.MIN_CHECKS`）。`MIN_CHECKS` 是"断言只增不减"
-唯一执法的地方，**加断言的那一轮要把它一起调大**。**故意不跑视觉回归**。管道之后
-`$?` 是 tee 的，必须显式查 `$LASTEXITCODE`，否则坏构建会绿着过去。
-
-## 工程文件
-`.atomic`，`formatVersion` 见 `STATUS.md`（逐版字段见 `REFERENCE.md`）。老版本必须仍能开。
-**"选中哪条自动化 lane"这类状态必须显式写属性**，不能靠元素顺序推断。先解析到临时对象、
-末尾一次性提交，坏文件绝不破坏当前会话。
+## 索引
+- 目录结构、构建命令（含 `unset *proxy*`）、CI 四条门禁、`formatVersion` 逐版字段、自检夹具
+  —— 全在 `STATUS.md` 与 `REFERENCE.md`，本文件不重复。
+- 只留两条不能忘的：**加断言的那一轮必须同步调大 `MIN_CHECKS`**；**"选中哪条自动化 lane"
+  这类状态必须显式写属性**，不能靠元素顺序推断（先解析到临时对象、末尾一次性提交）。

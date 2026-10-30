@@ -394,7 +394,7 @@ void PianoRollComponent::drawGridLines (juce::Graphics& g)
     {
         const float x = std::floor (screenXForBeat (beat)) + 0.5f;
 
-        g.setColour (juce::Colours::white.withAlpha (gridLineAlpha (beat)));
+        g.setColour (juce::Colours::white.withAlpha (gridLineAlpha (beat, beatsPerBar)));
         g.drawVerticalLine ((int) x, area.getY(), area.getBottom());
     }
 }
@@ -1075,16 +1075,20 @@ void PianoRollComponent::drawRuler (juce::Graphics& g)
     {
         // The corner cell sits beside the ruler, not above it: drawing it at 0,0
         // painted over the tool strip and hid the first tool button.
-        const auto corner = juce::Rectangle<int> (0, ruler.getY(), keyboardWidth, rulerHeight);
+        const auto corner = getMeterCornerArea();
 
         g.setColour (kRulerBackground);
         g.fillRect (corner);
 
-        const double barSeconds = 4.0 * (60.0 / juce::jmax (1.0, bpm));
+        const double barSeconds = (double) beatsPerBar * (60.0 / juce::jmax (1.0, bpm));
 
         g.setColour (juce::Colours::white.withAlpha (0.32f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (7.5f))));
-        g.drawText (utf8 ("1 小节"), ui::px (8), corner.getY() + ui::px (3),
+
+        // Phase 91: the numerator IS the metre, so it is drawn instead of the
+        // word "1 小节" — and clicking it is how it changes. A control nobody
+        // can see is a control nobody has.
+        g.drawText (juce::String (beatsPerBar) + "/4", ui::px (8), corner.getY() + ui::px (3),
                     ui::px (60), ui::px (14), juce::Justification::centredLeft, false);
 
         g.setColour (theme::accent.withAlpha (0.90f));
@@ -1136,12 +1140,17 @@ void PianoRollComponent::drawRuler (juce::Graphics& g)
         //-- Bars, with their wall-clock position underneath -------------------
         g.setFont (boldFont (10.5f));
 
-        const int firstBar = (int) std::floor (scrollBeats / 4.0);
-        const int lastBar  = (int) std::ceil ((scrollBeats + (double) ruler.getWidth() / beatWidth) / 4.0);
+        // Phase 91: a bar is the PROJECT's bar, not four beats. Read once into a
+        // local so the three uses below cannot disagree with each other.
+        const double barLength = (double) juce::jmax (1, beatsPerBar);
+
+        const int firstBar = (int) std::floor (scrollBeats / barLength);
+        const int lastBar  = (int) std::ceil ((scrollBeats + (double) ruler.getWidth() / beatWidth)
+                                                 / barLength);
 
         for (int bar = firstBar; bar <= lastBar; ++bar)
         {
-            const double beat = (double) bar * 4.0;
+            const double beat = (double) bar * barLength;
 
             if (beat < 0.0 || beat > timelineBeats)
                 continue;

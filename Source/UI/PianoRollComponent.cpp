@@ -522,6 +522,33 @@ void PianoRollComponent::setLoopRegion (const LoopRegion& region)
 }
 
 
+juce::Rectangle<int> PianoRollComponent::getMeterCornerArea() const
+{
+    // The cell the ruler's corner readout is painted into: the keyboard's width,
+    // the ruler's height, above the grid. `drawRuler` draws "1 小节 = 2.00 s"
+    // here, and this is the same rectangle — the clickable one and the painted
+    // one have to be one expression, or the control is invisible in the wrong
+    // place.
+    return { 0, toolbarHeight, keyboardWidth, rulerHeight };
+}
+
+
+void PianoRollComponent::setBeatsPerBar (int beats)
+{
+    const int clamped = meter::clamp (beats);
+
+    if (clamped == beatsPerBar)
+        return;
+
+    beatsPerBar = clamped;
+
+    // The bar lines get heavier or lighter and the numbers move; the notes do
+    // not. Nothing else in the roll needs telling — `beatsPerBar` is read where
+    // it is used rather than cached into a shape.
+    repaint();
+}
+
+
 juce::Rectangle<int> PianoRollComponent::getKeyboardArea() const
 {
     return getLocalBounds().withTrimmedTop (toolbarHeight + rulerHeight)
@@ -991,7 +1018,7 @@ double PianoRollComponent::minimumNoteLength() const noexcept
 }
 
 
-float PianoRollComponent::gridLineAlpha (double beat) noexcept
+float PianoRollComponent::gridLineAlpha (double beat, int beatsPerBar) noexcept
 {
     // Asked of the BEAT, not of the loop index. While the step is 1/16 the two
     // happen to agree (`index % 4 == 0` is a beat); the moment it climbs to a

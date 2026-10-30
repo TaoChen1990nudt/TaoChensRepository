@@ -530,7 +530,7 @@ namespace
 juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double bpm,
                         const MixerModel* mixer, const AutomationModel* automation,
                         const TempoModel* tempo, const juce::File* projectFile,
-                        const LoopRegion* loop)
+                        const LoopRegion* loop, int beatsPerBar)
 {
     juce::XmlElement root ("AtomicDAW");
     root.setAttribute ("version", formatVersion);
@@ -551,17 +551,24 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                                       : absolute;
     };
 
-    //-- Phase 87: the transport ---------------------------------------------
-    // Written whenever a region has ever been set — including while it is
-    // switched off, because "where the loop was" is state the user expects to
-    // survive a toggle, and a file that dropped it would move it back to the
-    // default four beats on the next launch.
-    if (loop != nullptr)
+    //-- Phase 87 / 91: the transport ----------------------------------------
+    // Always written since v29: the metre is always there (a song is in SOME
+    // metre), so "no <Transport>" would have to mean two different things.
+    //
+    // The loop inside it is still written whenever a region has ever been set —
+    // including while it is switched off, because "where the loop was" is state
+    // the user expects to survive a toggle, and a file that dropped it would
+    // move it back to the default four beats on the next launch.
     {
         auto* transportXml = root.createNewChildElement ("Transport");
-        transportXml->setAttribute ("loop", loop->enabled ? 1 : 0);
-        transportXml->setAttribute ("loopStart", number (loop->startBeat, 8));
-        transportXml->setAttribute ("loopEnd", number (loop->endBeat, 8));
+        transportXml->setAttribute ("beatsPerBar", meter::clamp (beatsPerBar));
+
+        if (loop != nullptr)
+        {
+            transportXml->setAttribute ("loop", loop->enabled ? 1 : 0);
+            transportXml->setAttribute ("loopStart", number (loop->startBeat, 8));
+            transportXml->setAttribute ("loopEnd", number (loop->endBeat, 8));
+        }
     }
 
     //-- Rack ----------------------------------------------------------------
@@ -965,7 +972,8 @@ bool fromXmlText (const juce::String& xmlText,
                   LayerStack& stack, RackModel& rack,
                   double& bpm, juce::String& error,
                   MixerModel* mixer, AutomationModel* automation, PluginHost* plugins,
-                  TempoModel* tempo, const juce::File* projectFile, LoopRegion* loop)
+                  TempoModel* tempo, const juce::File* projectFile, LoopRegion* loop,
+                  int* beatsPerBar)
 {
     error.clear();
 
@@ -1001,6 +1009,20 @@ bool fromXmlText (const juce::String& xmlText,
             loop->endBeat   = juce::jmax (loop->startBeat + LoopRegion::minLengthBeats,
                                           transportXml->getDoubleAttribute ("loopEnd", 4.0));
         }
+    }
+
+    //-- Phase 91: the metre --------------------------------------------------
+    // A v28 file has no attribute, so it reads as 4/4 — the metre every earlier
+    // build drew. The answer is still assigned when the attribute is missing:
+    // leaving the caller's variable alone would make the "load a big file" case
+    // inherit the previous song's metre, which is the bug this phase is about.
+    if (beatsPerBar != nullptr)
+    {
+        *beatsPerBar = meter::defaultBeatsPerBar;
+
+        if (auto* transportXml = root->getChildByName ("Transport"))
+            *beatsPerBar = meter::clamp (transportXml->getIntAttribute ("beatsPerBar",
+                                                                        meter::defaultBeatsPerBar));
     }
 
     //-- Parse everything into temporaries ------------------------------------
@@ -1642,7 +1664,7 @@ bool fromXmlText (const juce::String& xmlText,
 bool save (const juce::File& file,
            const LayerStack& stack, const RackModel& rack, double bpm,
            juce::String& error, const MixerModel* mixer, const AutomationModel* automation,
-           const TempoModel* tempo, const LoopRegion* loop)
+           const TempoModel* tempo, const LoopRegion* loop, int beatsPerBar)
 {
     error.clear();
 
@@ -1655,7 +1677,7 @@ bool save (const juce::File& file,
     // path in it is relative to. Passing it here is what makes "save into
     // another folder" re-anchor the paths instead of copying the old ones.
     if (! file.replaceWithText (toXmlText (stack, rack, bpm, mixer, automation, tempo, &file,
-                                           loop)))
+                                           loop, beatsPerBar)))
     {
         error = juce::String::fromUTF8 (u8"无法写入 ") + file.getFullPathName();
         return false;
@@ -1668,7 +1690,7 @@ bool load (const juce::File& file,
            LayerStack& stack, RackModel& rack,
            double& bpm, juce::String& error,
            MixerModel* mixer, AutomationModel* automation, PluginHost* plugins,
-           TempoModel* tempo, LoopRegion* loop)
+           TempoModel* tempo, LoopRegion* loop, int* beatsPerBar)
 {
     error.clear();
 
@@ -1679,7 +1701,7 @@ bool load (const juce::File& file,
     }
 
     return fromXmlText (file.loadFileAsString(), stack, rack, bpm, error,
-                        mixer, automation, plugins, tempo, &file, loop);
+                        mixer, automation, plugins, tempo, &file, loop, beatsPerBar);
 }
 
 } // namespace project

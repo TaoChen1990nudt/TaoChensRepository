@@ -52,13 +52,37 @@ build Release → `--snapshot selftest.png`。
 - UI 寻址一律 `(layerIndex, noteId)` 或稳定 id，禁止缓存 `NoteEvent*` / `Layer*`。
 - 图层共用一套 content 空间（128 pitch × N beat）；只有激活图层的音符可命中。
 
-## 小节（P56：`beatsPerBar` 在 `Util/SharedRules.h`）
-- 4 拍一小节，**只有一处常量** `beatsPerBar`。标尺的小节编号、`nextBarLineAfter()`、
-  `barLineAtOrAfter()` 都读它。视图里原来写着字面量 4.0。
-- `nextBarLineAfter(beat, grid)`：先按网格吸一下再找**严格更晚**的小节线——
-  "下一小节"是标尺画的那条线，不是 beat + 4。
-- `barLineAtOrAfter(beat)`：不早于 `beat` 的第一条小节线。别看名字像，它和上面那个是
-  两个问题：一个"我要往后走"，一个"我从这儿开始放"。
+## 拍号（P91：一个值，四个读者）
+
+- **P56 到 P90 是一行常量**：`Util/SharedRules.h` 里的 `constexpr double beatsPerBar = 4.0`，
+  注释自己写着"有设置项那天，这一行就变成值"。P91 兑现了它：规则搬到 `Model/Meter.h`，
+  值归 `MainComponent`，视图是被推的。`SharedRules.h` 里那三个名字**全部删掉**，不留转发壳
+  ——`Util` 头文件看不见 `Model` 的值，转发会让"唯一实现"变成两个。
+- `Model/Meter.h` 四个纯函数：`clamp (1..16)`；`nextBarLineAfter (beat, grid, beatsPerBar)`
+  （先按网格吸一下，再找**严格更晚**的小节线——"下一小节"是标尺画的那条线，不是 beat + 4）；
+  `barLineAtOrAfter (beat, beatsPerBar)`（不早于它的第一条线，`- 1e-9` 让正好在线上的人
+  答这条线，不是下一条）；`barNumberAt`（1-based，人读的那个数，同样带 `+ 1e-9`）。
+  两个方向不能互换：一个"我要往后走"，一个"我从这儿开始放"。
+- **三个读者读同一份**：标尺的小节线与小节号（`PianoRollPaint`）、"复制到后一小节"的落点
+  与提示里的小节号（`PianoRollClipboard`）、节拍器的重音（`applyMetronomeSettings`）。
+  第四个读者是量化菜单的「1 小节」，P90 就已经把它收成参数（`quantizeGridAt (i, barBeats)`）。
+- **`<Transport>` 永远写**：拍号是**工程**的属性，不是循环的附件。有循环才写，会让
+  「4/4 无循环」和「3/4 无循环」序列化成同一份文档——保存一次就丢拍号。
+- **读侧先无条件赋默认、再查表**：`*beatsPerBar = 4` 必须在 `getChildByName ("Transport")`
+  **之前**。老文件（v28 及更早）有一半连 `<Transport>` 元素都没有，那时
+  `getIntAttribute (…, 4)` 根本不会被求值，调用方的变量就带着**上一首歌的拍号**回家了。
+  这是本轮唯一先写错、又被咬测纠正的一条：一开始只写了"元素在、属性不在"的一半。
+- **`setBeatsPerBar` 不调 `modelChanged()`**：加载与会话重置也走它，那两处不是编辑，
+  快照会平白给下一首歌一个撤销步。撤销步由菜单回调登记（`if (beatsPerBar != before)`）。
+- **两个门，一个值**：标尺左上角那格（`getMeterCornerArea()` = 键盘宽 × 标尺高 = 96×42，
+  画着 `4/4`）与节拍器菜单里的「每小节拍数」（2/4…12/4，`menu` 里 id 用 `300 + beats`）。
+  角落那一击在 `handlePress` 里排在最前并 `return`——少了这个 `return`，同一击还会继续
+  落到标尺上把播放头拖到 0（自检里"播放头没动"就是咬这个的）。
+- **一拍 = 一个四分音符**：2/4 … 12/4 是一族，**6/8 不是 `beatsPerBar = 3`**——那会数出三个
+  点击，音乐里是两下。要支持得先有"附点四分"这个脉。变拍号（歌里换拍号）没做：现在是
+  一个工程值，不是一张表。
+- 视觉上唯一变化：角落读数 `1 小节` → `4/4`，下一行 `2.00 s` 是小节秒数
+  （`beatsPerBar × 60 / bpm`，也跟着变）。11 张快照因此变化，全在 24×9 的文字框里。
 
 ## 路由（唯一实现 `Model/Routing.h`）
 - `routing::resolve()`：**note.outputSlotOverride > group.outputSlotId > layer.outputSlotId >
@@ -125,7 +149,7 @@ build Release → `--snapshot selftest.png`。
 - 窗口门写作 `if (audio.isPlaying() || audio.getPlayback().hasMeters())`，**放在
   `if (! audio.isPlaying()) return;` 之前**——放后面就漏掉"停止后还在落"那一段，而那正是用户会看的。
 
-## 工程文件（`.atomic`，`formatVersion` = 28）
+## 工程文件（`.atomic`，`formatVersion` = 29）
 - **先解析到临时对象、末尾一次性提交**，坏文件绝不破坏当前会话。载入后重置
   `nextNoteId`/`nextSlotId`/组 id（max+1）。
 - 老文件必须仍能开：v3 `mod=`、v4 插件（标签 **"PLUGIN"** 全大写）、v5 `mixer=`、
@@ -156,6 +180,9 @@ build Release → `--snapshot selftest.png`。
   v28（P87）在 root 下追加 **`<Transport loop="0|1" loopStart="8" loopEnd="16"/>`**：
   **`loop="0"` 时两个拍子照样写**（关掉循环不该忘记位置）。缺失 = 关闭 + 默认 0..4。
   它同样是 root 的兄弟节点，不进 `<Mixer>`。
+  v29（P91）在同一个 `<Transport>` 上加 **`beatsPerBar="3"`**，而且 `<Transport>` 从
+  "有循环才写"改成**永远写**（v29 起没有循环也有那个元素，只带 `beatsPerBar`）。
+  缺失 = 4/4，**所以 v28 及更老的文件零迁移**。读侧默认值要在查表之前赋值，理由见「拍号」一节。
 - **选中哪条 lane 显式写 `autotarget`，不靠元素顺序推断**：三条 lane 都写出来之后，
   "最后读到的那条算选中"恒把 target 变成 `plugin`。回退规则只在 `autotarget` **缺失**时启用。
 - **P70：`<Layer autotarget>` 同理**。图层只有 volume/pan 两条 lane，所以后果不是

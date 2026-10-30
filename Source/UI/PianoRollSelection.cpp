@@ -1635,7 +1635,7 @@ void PianoRollComponent::showCanvasMenu (juce::Point<int> screenPos)
                                           && result < quantizeGridBase + numQuantizeGrids)
                                     {
                                         const double grid = quantizeGridAt (result - quantizeGridBase,
-                                                                            (double) beatsPerBar);
+                                                                            (double) safe->getBeatsPerBar());
 
                                         const int moved = safe->quantizeSelection (grid,
                                                                                    safe->getQuantizeStrength());

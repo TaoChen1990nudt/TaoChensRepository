@@ -511,6 +511,12 @@ MainComponent::MainComponent()
     // Phase 87: the ruler edits the loop; the session is what owns it. The
     // roll never writes its own copy on the strength of a gesture — it reports,
     // and the host decides (undo step, dirty flag, engine).
+    // Phase 91: the metre is the project's, so the roll asks rather than sets.
+    pianoRoll.onMeterRequested = [this] (juce::Point<int> screenPos)
+    {
+        showMeterMenu (screenPos);
+    };
+
     pianoRoll.onLoopRegionChanged = [this] (const LoopRegion& region)
     {
         setLoopRegion (region);
@@ -1092,7 +1098,7 @@ MainComponent::~MainComponent()
 juce::String MainComponent::captureState() const
 {
     return project::toXmlText (stack, rack, audio.getBpm(), &mixer, &automation, &tempo,
-                               &currentProject, &loopRegion);
+                               &currentProject, &loopRegion, beatsPerBar);
 }
 
 void MainComponent::modelChanged()
@@ -2277,6 +2283,10 @@ void MainComponent::buildSession (bool withEmptyLayer)
 
     setBpm (120.0);
     bpmField.setBpm (120.0, false);
+
+    // Phase 91: a new session is 4/4 — the metre is part of the song, and the
+    // previous song's is not inherited any more than its tempo was.
+    setBeatsPerBar (meter::defaultBeatsPerBar);
 
     currentProject = juce::File();
     pianoRoll.resetTimeline();
@@ -4207,8 +4217,64 @@ void MainComponent::applyMetronomeSettings()
 
     // The accent follows the project's own bar length, so a 3/4 song clicks in
     // three. `ui::` has nothing to do with it — this is music, not geometry.
-    click.setBeatsPerBar (juce::jmax (1, (int) std::lround (beatsPerBar)));
+    click.setBeatsPerBar (meter::clamp (beatsPerBar));
 }
+
+void MainComponent::setBeatsPerBar (int beats)
+{
+    const int clamped = meter::clamp (beats);
+
+    if (clamped == beatsPerBar)
+        return;
+
+    beatsPerBar = clamped;
+
+    // Three readers, one push: the ruler's numbers and bar-line weight, where
+    // "复制到后一小节" lands, and the click's accent. Nothing else caches it.
+    pianoRoll.setBeatsPerBar (beatsPerBar);
+    applyMetronomeSettings();
+
+    // Deliberately NOT `modelChanged()` here. This also runs while a file is
+    // being loaded and while a session is being reset, and neither of those is
+    // an edit: a snapshot taken there would hand the NEXT song a phantom undo
+    // step. The menu registers the step, because that is the only caller where
+    // the user did something.
+    repaint();
+}
+
+
+void MainComponent::showMeterMenu (juce::Point<int> screenPos)
+{
+    juce::PopupMenu menu;
+
+    menu.addSectionHeader (utf8 ("每小节拍数"));
+
+    // 2..12 over 4. `meter::clamp` accepts 1..16 — this is the list of metres
+    // people write in, not the list of metres that exist, and a menu of sixteen
+    // entries buries the four that anyone presses.
+    for (int beats = 2; beats <= 12; ++beats)
+        menu.addItem (beats, juce::String (beats) + "/4", true, beats == beatsPerBar);
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (
+                            juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1)),
+                        [safe] (int result)
+                        {
+                            if (safe == nullptr || result <= 0)
+                                return;
+
+                            const int before = safe->beatsPerBar;
+
+                            safe->setBeatsPerBar (result);
+
+                            // One gesture, one step — and none at all when the
+                            // metre did not actually change.
+                            if (safe->beatsPerBar != before)
+                                safe->modelChanged();
+                        });
+}
+
 
 void MainComponent::showMetronomeMenu()
 {
@@ -4228,12 +4294,28 @@ void MainComponent::showMetronomeMenu()
 
     // "1 小节" rather than "4 拍": the count-in is a bar of the song's own
     // metre, and a 3/4 song counts in three.
-    const int barBeats = juce::jmax (1, (int) std::lround (beatsPerBar));
+    const int barBeats = meter::clamp (beatsPerBar);
     menu.addItem (200, utf8 ("关"), true, countInBeats == 0);
     menu.addItem (201, utf8 ("1 小节（") + juce::String (barBeats) + utf8 (" 拍）"),
                   true, countInBeats == barBeats);
     menu.addItem (202, utf8 ("2 小节（") + juce::String (barBeats * 2) + utf8 (" 拍）"),
                   true, countInBeats == barBeats * 2);
+
+    // The second door to the metre. The ruler's corner is the one that is
+    // always on screen, but it is a 96×42 cell that says "4/4" and nothing
+    // else — nobody clicks it looking for a setting. This menu is where the
+    // metronome already lives, and the count-in above already reads the metre,
+    // so the two sit next to each other here. Same value, two entries, and both
+    // go through `setBeatsPerBar` (P79: a name is one datum, not a copy).
+    menu.addSeparator();
+    menu.addSectionHeader (utf8 ("拍号"));
+
+    juce::PopupMenu metres;
+
+    for (int beats = 2; beats <= 12; ++beats)
+        metres.addItem (300 + beats, juce::String (beats) + "/4", true, beats == barBeats);
+
+    menu.addSubMenu (utf8 ("每小节拍数"), metres);
 
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this)
                                                   .withTargetScreenArea (getMetronomeButtonBounds()),
@@ -4249,9 +4331,20 @@ void MainComponent::showMetronomeMenu()
                             else if (result == 200)
                                 setCountInBeats (0);
                             else if (result == 201)
-                                setCountInBeats (juce::jmax (1, (int) std::lround (beatsPerBar)));
+                                setCountInBeats (meter::clamp (beatsPerBar));
                             else if (result == 202)
-                                setCountInBeats (juce::jmax (1, (int) std::lround (beatsPerBar)) * 2);
+                                setCountInBeats (meter::clamp (beatsPerBar) * 2);
+                            else if (result > 300)
+                            {
+                                // One gesture, one step — and none at all when
+                                // the metre did not actually change.
+                                const int previous = beatsPerBar;
+
+                                setBeatsPerBar (result - 300);
+
+                                if (beatsPerBar != previous)
+                                    modelChanged();
+                            }
                         });
 }
 
@@ -7182,6 +7275,7 @@ bool MainComponent::saveProjectToFile (const juce::File& file, juce::String& err
 bool MainComponent::loadProjectFromFile (const juce::File& file, juce::String& error)
 {
     double newBpm = audio.getBpm();
+    int    newBeatsPerBar = beatsPerBar;
 
     // project::load parses into temporaries and only commits at the end, so a
     // corrupt file leaves the open session exactly as it was.
@@ -7195,7 +7289,8 @@ bool MainComponent::loadProjectFromFile (const juce::File& file, juce::String& e
     {
         const juce::ScopedValueSetter<bool> noSweep (suspendSamplerPrune, true);
         loaded = project::load (file, stack, rack, newBpm, error,
-                                &mixer, &automation, &plugins, &tempo, &loopRegion);
+                                &mixer, &automation, &plugins, &tempo, &loopRegion,
+                                &newBeatsPerBar);
     }
 
     if (! loaded)
@@ -7213,6 +7308,11 @@ bool MainComponent::loadProjectFromFile (const juce::File& file, juce::String& e
 
     bpmField.setBpm (audio.getBpm(), false);
     pianoRoll.setBpm (audio.getBpm());
+
+    // Phase 91: the song brings its own metre, applied before anything is
+    // measured in bars — the same order the loop is applied in.
+    setBeatsPerBar (newBeatsPerBar);
+
     pianoRoll.setSelection ({});
     pianoRoll.setPlayheadBeat (0.0);
     pianoRoll.setTransportActive (false);

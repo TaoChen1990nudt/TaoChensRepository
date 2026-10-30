@@ -9,6 +9,7 @@
 #include "Model/HardwareRack.h"
 #include "Model/LayerModel.h"
 #include "Model/LoopRegion.h"
+#include "Model/Meter.h"
 #include "Model/PluginParam.h"
 #include "Model/Routing.h"
 
@@ -693,6 +694,26 @@ public:
         moves nothing, which means no repaint and no undo step. */
     int quantizeSelection (double gridBeats, double strength);
 
+    //-- Phase 91: the project's metre ----------------------------------------
+    /** How many quarter notes a bar holds. Owned by the PROJECT and pushed in
+        from `MainComponent` — the roll is one of three views that read it (the
+        ruler, "复制到后一小节", the metronome's accent), and three copies of a
+        metre is how they drift apart.
+
+        Everything bar-shaped follows: the ruler's numbers, the bar line weight
+        in `gridLineAlpha`, where "复制到后一小节" lands, and the "1 小节" grid
+        in the quantise menu. */
+    void setBeatsPerBar (int beats);
+    int  getBeatsPerBar() const noexcept { return beatsPerBar; }
+
+    /** Phase 91: the corner cell says "1 小节 = 2.00 s" — that number IS the
+        metre, so that cell is where it gets changed. The roll cannot change it
+        itself (the project owns it), so it asks. */
+    std::function<void (juce::Point<int>)> onMeterRequested;
+
+    /** Where that cell is. Public for the self-test, which has to click it. */
+    juce::Rectangle<int> getMeterCornerArea() const;
+
     /** The grid and the strength the menu will use next.
 
         Kept on the COMPONENT, not in the project: reopening a song must not
@@ -1354,7 +1375,11 @@ public:
         from the beat instead of from the loop index is exactly what makes a
         coarse grid still show its bars — with `index % 16` a step of one beat
         painted every bar as a beat. */
-    static float gridLineAlphaForTest (double beat) { return gridLineAlpha (beat); }
+    static float gridLineAlphaForTest (double beat,
+                                       int beatsPerBar = meter::defaultBeatsPerBar)
+    {
+        return gridLineAlpha (beat, beatsPerBar);
+    }
 
     /** Phase 69: shorten a note's tail through the SAME path a tail drag takes.
 
@@ -1646,7 +1671,10 @@ private:
         beat, subdivision) rather than by its index — once the step climbs, an
         index is no longer a fixed number of 1/16s, so `step % 4` stops meaning
         "a beat". */
-    static float gridLineAlpha (double beat) noexcept;
+    /** Phase 91: takes the metre, because a bar line is not "every four beats".
+        Static + explicit parameter rather than a member: the self-test asks this
+        question about a metre it made up, without building a project. */
+    static float gridLineAlpha (double beat, int beatsPerBar = meter::defaultBeatsPerBar) noexcept;
 
     double snapBeat (double beats) const noexcept;
     static bool   isBlackKey (int pitch) noexcept;
@@ -2184,6 +2212,7 @@ private:
 
     void noteUserScroll() noexcept { userScrollBeats = scrollBeats; followScrolled = false; }
     double timelineBeats = totalBeats;
+    int    beatsPerBar   = meter::defaultBeatsPerBar;   // Phase 91
     int    hoveredNoteId   = -1;
     int    lastActiveLayer = -1;
     double playheadBeat    = -1.0;

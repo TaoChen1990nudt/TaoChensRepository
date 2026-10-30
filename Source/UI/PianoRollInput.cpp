@@ -163,6 +163,18 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
         return;
     }
 
+    // ---- Phase 91: the metre, in the ruler's corner ------------------------
+    // Before the ruler and before the keys: the corner cell belongs to neither
+    // (the ruler starts after the keyboard, the keys start below the ruler), and
+    // it is the only pixel that means "how long is a bar".
+    if (getMeterCornerArea().contains (ipos))
+    {
+        if (onMeterRequested != nullptr)
+            onMeterRequested (localPointToGlobal (ipos));
+
+        return;
+    }
+
     // ---- Phase 22: the piano column is a keyboard, not a graphic -----------
     // Before the ruler and the grid: the keys are outside both, and the old
     // code simply fell through to "not in the grid, ignore". A pitch grid you

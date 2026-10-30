@@ -16840,6 +16840,307 @@ juce::String MainComponent::runSelfTest()
         }
     }
 
+    //==========================================================================
+    // Phase 91: the metre is a project property, not a constant
+    //==========================================================================
+    // Four readers shared one `constexpr double beatsPerBar = 4.0` in
+    // Util/SharedRules.h: the ruler's numbers and bar-line weight, "复制到后一
+    // 小节", the metronome's accent, and the quantise menu's "1 小节". The
+    // quantise one was bitten in Phase 90 (quantizeGridAt takes the bar length
+    // as a parameter); the other three are bitten here, plus the document that
+    // has to carry the value between sessions.
+    {
+        //-- A. the arithmetic ----------------------------------------------
+        check (utf8 ("meter::clamp：0 与 99 都变成能用的拍号，4 原样"),
+               meter::clamp (0) == 1 && meter::clamp (-5) == 1 && meter::clamp (99) == 16
+                 && meter::clamp (4) == 4 && meter::clamp (7) == 7,
+               juce::String (meter::clamp (0)) + " / " + juce::String (meter::clamp (99)));
+
+        // Every v28-and-older document has no such attribute, so this constant
+        // is what "old file" resolves to. Change it and every saved song moves.
+        check (utf8 ("默认拍号是 4（v28 及更老的文档只能读成它）"),
+               meter::defaultBeatsPerBar == 4
+                 && meter::minBeatsPerBar <= meter::defaultBeatsPerBar
+                 && meter::defaultBeatsPerBar <= meter::maxBeatsPerBar,
+               juce::String (meter::defaultBeatsPerBar));
+
+        // "Strictly after" is the whole reason this is not `beat + N`: a group
+        // sitting ON a bar line must copy to the NEXT one, not onto itself.
+        check (utf8 ("nextBarLineAfter 是「严格在后」：0 与 4 都答下一条小节线"),
+               std::abs (meter::nextBarLineAfter (0.0, 0.25, 4) - 4.0) < 1.0e-12
+                 && std::abs (meter::nextBarLineAfter (4.0, 0.25, 4) - 8.0) < 1.0e-12
+                 && std::abs (meter::nextBarLineAfter (3.0, 0.25, 4) - 4.0) < 1.0e-12,
+               juce::String (meter::nextBarLineAfter (4.0, 0.25, 4), 3));
+
+        check (utf8 ("同一个起点：3/4 落在 3 的倍数上，4/4 落在 4 的倍数上"),
+               std::abs (meter::nextBarLineAfter (1.0, 0.25, 3) - 3.0) < 1.0e-12
+                 && std::abs (meter::nextBarLineAfter (1.0, 0.25, 4) - 4.0) < 1.0e-12
+                 && std::abs (meter::nextBarLineAfter (7.0, 0.25, 3) - 9.0) < 1.0e-12,
+               juce::String (meter::nextBarLineAfter (1.0, 0.25, 3), 3));
+
+        // The `- 1e-9` is the metronome's downbeat trick, one function over: a
+        // beat already ON a line must answer that line.
+        check (utf8 ("barLineAtOrAfter：正好在小节线上就答这条线，不跳到下一条"),
+               std::abs (meter::barLineAtOrAfter (4.0, 4) - 4.0) < 1.0e-12
+                 && std::abs (meter::barLineAtOrAfter (0.0, 4) - 0.0) < 1.0e-12
+                 && std::abs (meter::barLineAtOrAfter (4.0001, 4) - 8.0) < 1.0e-12,
+               juce::String (meter::barLineAtOrAfter (4.0, 4), 3));
+
+        check (utf8 ("小节号是人读的那个：0 拍是第 1 小节，3.99 拍还是第 1 小节"),
+               meter::barNumberAt (0.0, 4) == 1 && meter::barNumberAt (3.99, 4) == 1
+                 && meter::barNumberAt (4.0, 4) == 2 && meter::barNumberAt (12.0, 3) == 5,
+               juce::String (meter::barNumberAt (4.0, 4)));
+
+        // The grid is a caller's data, not a guarantee: a group whose start is
+        // off the grid still has to get a bar line back, not a division by zero.
+        check (utf8 ("网格传 0 不除零，照样答一条小节线"),
+               std::isfinite (meter::nextBarLineAfter (3.0, 0.0, 4))
+                 && std::abs (meter::nextBarLineAfter (3.0, 0.0, 4) - 4.0) < 1.0e-9,
+               juce::String (meter::nextBarLineAfter (3.0, 0.0, 4), 6));
+
+        //-- B. the roll reads it --------------------------------------------
+        {
+            LayerStack t91;
+            RackModel  r91;
+            PianoRollComponent roll91 (t91, r91);
+            roll91.setSize (1200, 520);
+
+            t91.addLayer (utf8 ("拍号"), palette::layer1);
+
+            check (utf8 ("钢琴窗开出来是 4/4"),
+                   roll91.getBeatsPerBar() == meter::defaultBeatsPerBar,
+                   juce::String (roll91.getBeatsPerBar()));
+
+            roll91.setBeatsPerBar (3);
+            const bool tookThree = roll91.getBeatsPerBar() == 3;
+
+            roll91.setBeatsPerBar (0);
+            const bool clampedLow = roll91.getBeatsPerBar() == meter::minBeatsPerBar;
+
+            roll91.setBeatsPerBar (99);
+            const bool clampedHigh = roll91.getBeatsPerBar() == meter::maxBeatsPerBar;
+
+            check (utf8 ("setBeatsPerBar 收下 3，把 0 夹成 1、把 99 夹成 16"),
+                   tookThree && clampedLow && clampedHigh,
+                   juce::String (roll91.getBeatsPerBar()));
+
+            // One line, two weights: three is a bar in 3/4 and a plain beat in
+            // 4/4. Asked through the same function the paint pass calls, so a
+            // hardcoded 4 cannot hide behind a repaint.
+            const float threeInThree = PianoRollComponent::gridLineAlphaForTest (3.0, 3);
+            const float threeInFour  = PianoRollComponent::gridLineAlphaForTest (3.0, 4);
+
+            check (utf8 ("第 3 拍：3/4 里是小节线（和 4/4 的第 4 拍同重量），4/4 里只是拍线"),
+                   threeInThree == PianoRollComponent::gridLineAlphaForTest (4.0, 4)
+                     && threeInFour == PianoRollComponent::gridLineAlphaForTest (1.0, 4)
+                     && threeInThree > threeInFour,
+                   juce::String (threeInThree, 3) + " / " + juce::String (threeInFour, 3));
+
+            //-- C. the corner cell ------------------------------------------
+            // The cell the ruler and the keys both skip: as wide as the
+            // keyboard, as tall as the ruler, in the one place neither draws.
+            const auto corner = roll91.getMeterCornerArea();
+            const auto music  = roll91.getGridBounds();     // public: "where the music starts"
+
+            check (utf8 ("标尺角落 = 键盘宽 × 标尺高，正好退到网格的左上角之外"),
+                   corner.getX() == 0 && corner.getRight() == PianoRollComponent::keyboardWidth
+                     && corner.getY() == PianoRollComponent::toolbarHeight
+                     && corner.getHeight() == PianoRollComponent::rulerHeight
+                     && corner.getBottom() <= (int) music.getY()
+                     && corner.getRight() <= (int) music.getX(),
+                   corner.toString() + " / " + juce::String ((int) music.getX()) + ","
+                     + juce::String ((int) music.getY()));
+
+            int requests = 0;
+
+            roll91.onMeterRequested = [&requests] (juce::Point<int>) { ++requests; };
+
+            // No early return in handlePress and the same press also scrubs the
+            // ruler to beat 0 — so the playhead staying put is the second half
+            // of "this pixel is the metre, not the transport".
+            const double playheadBefore = roll91.getPlayheadBeatForTest();
+
+            roll91.simulatePressForTest (corner.getCentre().toFloat());
+            const int afterCorner = requests;
+            const bool playheadHeld = roll91.getPlayheadBeatForTest() == playheadBefore;
+
+            // Just below it is the keyboard's first key — one pixel away in the
+            // same column, and a different meaning.
+            roll91.simulatePressForTest ({ (float) corner.getCentreX(),
+                                           (float) corner.getBottom() + 4.0f });
+
+            check (utf8 ("点角落要拍号菜单，不拖播放头；再往下 4 像素是键盘，不要菜单"),
+                   afterCorner == 1 && requests == 1 && playheadHeld,
+                   juce::String (afterCorner) + " -> " + juce::String (requests) + " / "
+                     + juce::String (playheadBefore, 3));
+
+            // The quantise menu's "1 小节" is the other reader, and it must be
+            // this roll's metre — not 4 and not the default.
+            roll91.setBeatsPerBar (3);
+            roll91.setQuantizeGrid (3.0);
+
+            juce::PopupMenu meterMenu;
+            roll91.addQuantizeItems (meterMenu, true);
+
+            juce::String tickedGrid;
+
+            for (juce::PopupMenu::MenuItemIterator it (meterMenu); it.next();)
+                if (it.getItem().subMenu != nullptr)
+                    for (juce::PopupMenu::MenuItemIterator sub (*(it.getItem().subMenu)); sub.next();)
+                        if (sub.getItem().isTicked)
+                            tickedGrid = sub.getItem().text;
+
+            check (utf8 ("量化菜单的「1 小节」勾在 3/4 上（它读的是同一个拍号）"),
+                   tickedGrid == PianoRollComponent::quantizeGridName (4), tickedGrid);
+        }
+
+        //-- D. the document --------------------------------------------------
+        {
+            LayerStack t91p;
+            RackModel  r91p;
+            t91p.addLayer (utf8 ("存"), palette::layer1);
+            t91p.getLayer (0)->addNote ({ 0, 60, 1.0, 1.0, 0.9f });
+
+            const juce::String xml3 = project::toXmlText (t91p, r91p, 120.0, nullptr, nullptr,
+                                                          nullptr, nullptr, nullptr, 3);
+
+            // Written even with no loop: otherwise "4/4, no loop" and "3/4, no
+            // loop" serialise to the same bytes and the metre is lost on save.
+            check (utf8 ("没有循环时 <Transport> 照样写出来，带着 beatsPerBar=\"3\""),
+                   xml3.contains ("<Transport") && xml3.contains ("beatsPerBar=\"3\""),
+                   xml3.fromFirstOccurrenceOf ("<Transport", false, false).upToFirstOccurrenceOf (">", false, false));
+
+            LayerStack t91q;
+            RackModel  r91q;
+            double bpmQ = 0.0;
+            juce::String errQ;
+            int barQ = 0;
+
+            const bool readBack = project::fromXmlText (xml3, t91q, r91q, bpmQ, errQ, nullptr,
+                                                        nullptr, nullptr, nullptr, nullptr, nullptr,
+                                                        &barQ);
+
+            check (utf8 ("拍号往返：写 3 读回 3"),
+                   readBack && barQ == 3, juce::String (barQ) + " / " + errQ);
+
+            // A v28 file: same document, attribute deleted. The target is
+            // preloaded with 7 so "left alone" cannot be mistaken for "read 4".
+            LayerStack t91r;
+            RackModel  r91r;
+            double bpmR = 0.0;
+            juce::String errR;
+            int barR = 7;
+
+            const bool readOld = project::fromXmlText (xml3.replace ("beatsPerBar=\"3\"", ""),
+                                                       t91r, r91r, bpmR, errR, nullptr, nullptr,
+                                                       nullptr, nullptr, nullptr, nullptr, &barR);
+
+            check (utf8 ("v28 老文档没有这个属性：读成 4，不继承上一首歌的 7"),
+                   readOld && barR == meter::defaultBeatsPerBar, juce::String (barR));
+
+            // The other v28 shape: a song saved with no loop has no <Transport>
+            // element at all, so the guarded read never runs. That is why the
+            // default is assigned BEFORE the lookup instead of by it — a
+            // `getIntAttribute` fallback only helps when the element is there.
+            LayerStack t91s;
+            RackModel  r91s;
+            double bpmS = 0.0;
+            juce::String errS;
+            int barS = 7;
+
+            juce::String noTransport = xml3.replace ("beatsPerBar=\"3\"", "");
+            noTransport = noTransport.replace ("<Transport />", "").replace ("<Transport/>", "");
+
+            const bool readNoTransport = project::fromXmlText (noTransport, t91s, r91s, bpmS, errS,
+                                                               nullptr, nullptr, nullptr, nullptr,
+                                                               nullptr, nullptr, &barS);
+
+            check (utf8 ("连 <Transport> 都没有的老文档：也读成 4（默认在查表之前赋值）"),
+                   readNoTransport && ! noTransport.contains ("<Transport")
+                     && barS == meter::defaultBeatsPerBar,
+                   juce::String (barS) + " / " + (noTransport.contains ("<Transport")
+                                                    ? juce::String (utf8 ("元素还在"))
+                                                    : juce::String (utf8 ("元素已去掉"))));
+
+            check (utf8 ("formatVersion 升到 29（多了一个属性就要能认出来）"),
+                   project::formatVersion == 29, juce::String (project::formatVersion));
+        }
+
+        //-- E. 复制到后一小节 ------------------------------------------------
+        // The same group, the same call, two metres. Before P91 both copies
+        // landed on 4.0 because the bar length was a constant.
+        {
+            struct CopyAnswer { double target = -1.0; juce::String status; };
+
+            const auto copyTargetOf = [] (int beats)
+            {
+                LayerStack t;
+                RackModel  r;
+                PianoRollComponent roll (t, r);
+                roll.setSize (1200, 520);
+                roll.setBeatsPerBar (beats);
+
+                t.addLayer (utf8 ("组"), palette::layer1);
+
+                auto* layer = t.getLayer (0);
+
+                // 2.5 beats long, starting at 1.0: in 3/4 it runs past the next
+                // bar line (3.0), so the copy has to go to 6.0; in 4/4 it fits
+                // before 4.0, so the copy goes to 4.0. Two different rules fire.
+                const int note = layer->addNote ({ 0, 60, 1.0, 2.5, 0.9f });
+
+                roll.setSelection ({ note });
+
+                const int groupId = roll.groupSelection();
+
+                CopyAnswer answer;
+
+                if (groupId < 0 || ! roll.duplicateGroupToNextBar (0, groupId))
+                    return answer;
+
+                for (const auto& n : layer->getNotes())
+                    if (n.groupOccurrence != 0)
+                        answer.target = juce::jmin (answer.target < 0.0 ? 1.0e9 : answer.target,
+                                                    n.startBeat);
+
+                answer.status = roll.getStatusText();
+                return answer;
+            };
+
+            const auto inThree = copyTargetOf (3);
+            const auto inFour  = copyTargetOf (4);
+
+            check (utf8 ("3/4：组长超出下一条小节线，副本落在 6.0（4/4 下同样是这段落在 4.0）"),
+                   std::abs (inThree.target - 6.0) < 1.0e-9
+                     && std::abs (inFour.target - 4.0) < 1.0e-9,
+                   juce::String (inThree.target, 3) + " / " + juce::String (inFour.target, 3));
+
+            check (utf8 ("提示里的小节号也是标尺那个数：3/4 的 6.0 是第 3 小节，4/4 的 4.0 是第 2 小节"),
+                   inThree.status.contains (utf8 ("到第 3 小节"))
+                     && inFour.status.contains (utf8 ("到第 2 小节")),
+                   inThree.status + " | " + inFour.status);
+        }
+
+        //-- F. one value, pushed to the two live readers ----------------------
+        {
+            const int before = getBeatsPerBar();
+
+            setBeatsPerBar (3);
+
+            const bool rolled = pianoRollForTest().getBeatsPerBar() == 3;
+            const bool clicked = getPlaybackForTest().getMetronome().getBeatsPerBar() == 3;
+
+            setBeatsPerBar (before);
+
+            check (utf8 ("setBeatsPerBar 推给钢琴窗与节拍器重音，改回去再推一次"),
+                   rolled && clicked && getBeatsPerBar() == before
+                     && pianoRollForTest().getBeatsPerBar() == before
+                     && getPlaybackForTest().getMetronome().getBeatsPerBar() == before,
+                   juce::String (rolled ? 1 : 0) + "/" + juce::String (clicked ? 1 : 0)
+                     + " -> " + juce::String (getPlaybackForTest().getMetronome().getBeatsPerBar()));
+        }
+    }
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

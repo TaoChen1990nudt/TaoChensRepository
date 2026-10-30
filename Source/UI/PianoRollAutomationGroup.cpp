@@ -333,7 +333,7 @@ void PianoRollComponent::drawGridInside (juce::Graphics& g, juce::Rectangle<floa
         if (x < area.getX() - 1.0f || x > area.getRight() + 1.0f)
             continue;
 
-        g.setColour (juce::Colours::white.withAlpha (gridLineAlpha (beat)));
+        g.setColour (juce::Colours::white.withAlpha (gridLineAlpha (beat, beatsPerBar)));
         g.drawVerticalLine ((int) x, area.getY(), area.getBottom());
     }
 

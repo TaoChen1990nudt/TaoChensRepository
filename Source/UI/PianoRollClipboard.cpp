@@ -769,10 +769,10 @@ bool PianoRollComponent::duplicateGroupToNextBar (int layerIndex, int groupId, i
     // lands on the source is not a copy. If the group is longer than the gap,
     // the next line after its own end is used instead, so the two never
     // overlap.
-    double target = nextBarLineAfter (first, gridDivision);
+    double target = meter::nextBarLineAfter (first, gridDivision, beatsPerBar);
 
     if (target < last - 1.0e-9)
-        target = barLineAtOrAfter (last);
+        target = meter::barLineAtOrAfter (last, beatsPerBar);
 
     const double delta = target - first;
 
@@ -792,12 +792,15 @@ bool PianoRollComponent::duplicateGroupToNextBar (int layerIndex, int groupId, i
     if (newNotes.empty() && newClips.empty())
         return false;       // nothing landed; the group is not ours to delete
 
-    ensureTimelineExtendsTo (last + delta + beatsPerBar);
+    ensureTimelineExtendsTo (last + delta + (double) beatsPerBar);
     setMixedSelection (newNotes, newClips);
     stack.notifyNotesChanged();
 
+    // Phase 91: the bar number in the message is the ruler's bar number, so it
+    // comes from the same function the ruler uses. A hardcoded /4 here would
+    // have said "第 2 小节" while the copy was drawn inside bar 1.
     flashStatus (utf8 ("已复制 ") + groupName + membersDescription ((int) newNotes.size(), (int) newClips.size())
-                   + utf8 (" 到第 ") + juce::String ((int) std::floor (target / beatsPerBar) + 1)
+                   + utf8 (" 到第 ") + juce::String (meter::barNumberAt (target, beatsPerBar))
                    + utf8 (" 小节"));
 
     repaint();
@@ -883,7 +886,7 @@ bool PianoRollComponent::placeGroupAppearance (int layerIndex, int groupId, doub
     if (newNotes.empty() && newClips.empty())
         return false;
 
-    ensureTimelineExtendsTo (last + delta + beatsPerBar);
+    ensureTimelineExtendsTo (last + delta + (double) beatsPerBar);
     setMixedSelection (newNotes, newClips);
     stack.notifyNotesChanged();
 

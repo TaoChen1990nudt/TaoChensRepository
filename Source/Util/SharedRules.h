@@ -64,33 +64,10 @@ inline bool spaceStartsPlayback (bool engaged) noexcept { return ! engaged; }
 
 //-- Musical time ---------------------------------------------------------------
 
-/** Four beats to the bar, named once.
-
-    The ruler's bar numbers, "复制到后一小节" and any future bar arithmetic all
-    have to agree, and a literal 4.0 in three files is three chances to change
-    one of them. There is no time-signature setting yet; when there is, this is
-    the one line that becomes a value. */
-inline constexpr double beatsPerBar = 4.0;
-
-/** The first bar line strictly after `beat`. Snapped to the grid first, because
-    "the next bar" means the bar line the ruler draws, not "beat + 4" — those
-    differ the moment the source starts off the grid. */
-inline double nextBarLineAfter (double beat, double grid)
-{
-    const double g = grid > 0.0 ? grid : 1.0e-6;
-    const double snapped = std::round (beat / g) * g;
-
-    return (std::floor (snapped / beatsPerBar) + 1.0) * beatsPerBar;
-}
-
-/** The first bar line at or after `beat` — "clear of here, but not a bar later
-    than it has to be". Used when the thing being moved already ends past the
-    next line: the copy goes where the source stops, not where the ruler's next
-    number happens to fall. */
-inline double barLineAtOrAfter (double beat)
-{
-    return std::ceil (beat / beatsPerBar - 1.0e-9) * beatsPerBar;
-}
+// Phase 91: bar arithmetic moved to Model/Meter.h, together with the metre it
+// needs. It could not stay here: these two functions were the only readers of a
+// constant that is now a project value, and a Util header cannot see a Model
+// one. "复制到后一小节" and the ruler both include Meter.h instead.
 
 //-- Drag payloads --------------------------------------------------------------
 

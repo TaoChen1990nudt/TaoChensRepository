@@ -7,6 +7,7 @@
 #include "HardwareRack.h"
 #include "LayerModel.h"
 #include "LoopRegion.h"
+#include "Meter.h"
 #include "MixerModel.h"
 #include "TempoModel.h"
 
@@ -255,8 +256,19 @@ namespace project
         Both v27 and every earlier file therefore read with the same rule, and a
         v26 reader meeting a v27 file opens it with the samples it cannot
         resolve drawn as "missing" — degraded, but never mis-pointed, which is
-        the reason this is a version bump at all. */
-inline constexpr int formatVersion = 28;
+        the reason this is a version bump at all.
+
+    v29 (Phase 91): `<Transport beatsPerBar>` carries the metre.
+
+      * The project's bar length used to be a `constexpr 4.0` compiled into the
+        ruler, into "复制到后一小节" and into the metronome's accent. It is now
+        a value that travels with the song.
+
+      * **A v28 file has no such attribute and reads as 4/4** — the metre every
+        earlier build drew — so there is no migration and nothing to guess. The
+        element is written even when the loop never was, so "4/4, no loop" and
+        "3/4, no loop" are different documents rather than the same one twice. */
+inline constexpr int formatVersion = 29;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";
@@ -269,7 +281,8 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                         const AutomationModel* automation = nullptr,
                         const TempoModel* tempo = nullptr,
                         const juce::File* projectFile = nullptr,
-                        const LoopRegion* loop = nullptr);
+                        const LoopRegion* loop = nullptr,
+                        int beatsPerBar = meter::defaultBeatsPerBar);
 
 /** Parses a document produced by toXmlText(). Returns false with `error` set
     when the document is not a usable project; the targets are then untouched.
@@ -288,7 +301,8 @@ bool fromXmlText (const juce::String& xmlText,
                   PluginHost* plugins = nullptr,
                   TempoModel* tempo = nullptr,
                   const juce::File* projectFile = nullptr,
-                  LoopRegion* loop = nullptr);
+                  LoopRegion* loop = nullptr,
+                  int* beatsPerBar = nullptr);
 
 bool save (const juce::File& file,
            const LayerStack& stack, const RackModel& rack, double bpm,
@@ -296,7 +310,8 @@ bool save (const juce::File& file,
            const MixerModel* mixer = nullptr,
            const AutomationModel* automation = nullptr,
            const TempoModel* tempo = nullptr,
-           const LoopRegion* loop = nullptr);
+           const LoopRegion* loop = nullptr,
+           int beatsPerBar = meter::defaultBeatsPerBar);
 
 bool load (const juce::File& file,
            LayerStack& stack, RackModel& rack,
@@ -305,7 +320,8 @@ bool load (const juce::File& file,
            AutomationModel* automation = nullptr,
            PluginHost* plugins = nullptr,
            TempoModel* tempo = nullptr,
-           LoopRegion* loop = nullptr);
+           LoopRegion* loop = nullptr,
+           int* beatsPerBar = nullptr);
 
 } // namespace project
 

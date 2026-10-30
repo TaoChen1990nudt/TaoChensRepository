@@ -19,6 +19,7 @@
 #include "Model/AutomationModel.h"
 #include "Model/HardwareRack.h"
 #include "Model/LayerModel.h"
+#include "Model/Meter.h"
 #include "Model/MixerModel.h"
 #include "Model/ProjectIO.h"
 #include "UI/AutomationWindow.h"
@@ -189,6 +190,23 @@ public:
 
     /** Audio thread state, read by the painter: how many counts are left. */
     int getCountInBeatsLeft();
+
+    //-- Phase 91: the project's metre ----------------------------------------
+    /** Quarter notes per bar. THIS is the value — the piano roll, the ruler and
+        the metronome's accent all read a copy that was pushed from here, the
+        same way the tempo is pushed. Change it with `setBeatsPerBar`, which is
+        what the menu calls; the setter clamps, pushes to the views, retunes the
+        click and registers an undo step.
+
+        It is a PROPERTY OF THE SONG, not of the tool: it is written into
+        `<Transport>` and travels with the file. (The quantise grid in the piano
+        roll is the opposite case and stays on the component.) */
+    void setBeatsPerBar (int beats);
+    int  getBeatsPerBar() const noexcept { return beatsPerBar; }
+
+    /** The menu the roll's corner cell opens. Built here because the metre is
+        the project's, and the roll is not allowed to change it. */
+    void showMeterMenu (juce::Point<int> screenPos);
 
     /** The whole landing step in one place: WAV + sampler + clip for the audio,
         notes + group + lanes for the MIDI. Shared by the button and the
@@ -1377,6 +1395,9 @@ private:
     bool  metronomeEnabled = false;
     float metronomeVolume  = 0.5f;
     int   countInBeats     = 4;
+
+    //-- Phase 91 -------------------------------------------------------------
+    int   beatsPerBar      = meter::defaultBeatsPerBar;
 
     bool hoveringSave   = false;
     bool hoveringLoad   = false;
