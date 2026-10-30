@@ -2520,3 +2520,103 @@ assert），可**上一次**同样的错误没有 assert，于是"782/0"是未�
 `grep -n` 一眼**。CRLF 文件再加一条：`io.open(..., newline='')` 读写保持原样，
 但**插入的新行必须自己带 `\r\n`**——用 `\n` 插进去会制造一行"孤儿 LF"，
 之后 `git diff` 会把整个文件算成改动。
+
+## P88 — 节拍器与预备拍：断言得先能咬住自己
+
+### P88-A 一条"在更宽的错下也成立"的断言，等于没写
+
+3/4 拍那条原本写的是：
+
+```cpp
+check ("3/4 拍：第 3 拍是重音", isAccent (clickAt (3)), …);
+```
+
+看着没问题，咬测时把重音判据改成恒 `true`（每拍都重音），**它照样过**。
+因为"第 3 拍是重音"在"每拍都是重音"的实现下是成立的——它只否证了"第 3 拍不是重音"，
+没有否证"第 1 拍也是重音"。
+
+改成同时比同一个 3/4 小节里的第 1 拍：
+
+```cpp
+check ("3/4 拍：第 3 拍是重音，同一个 3/4 小节里的第 1 拍不是",
+       isAccent (clickAt (3)) && ! isAccent (clickAt (1)), …);
+```
+
+重咬后正确挂 2 条（4/4 那条也一起挂，因为 `perBar` 被写死成 `true`）。
+
+规律：**断言必须有一个"错得更宽"的相邻实现**。凡断言形式是"X 具备性质 P"，
+先问一句"有没有一种明显更糟的实现也让 X 具备 P"。有，就把那个实现的反面也写进去。
+
+### P88-B "挂了 2 条"不等于"挂的是这 2 条"
+
+第 12 处咬测（删掉 `setMetronomeEnabled()` 里的 `applyMetronomeSettings()`）跑出来
+显示挂 2 条，但那是**上一处咬测**（重音判据）留下的读数——`Source/MainComponent.cpp`
+是 CRLF，而 anchor 写的是 LF 版本，`assert s.count (old) == 1` 当场挡下、补丁没落盘，
+编译出来的是没改过的代码。
+
+这次拦住了，所以只白跑一轮；**前两次（P85-D / P87-F）没写 assert，直接出了一份
+假通过的 782/0**。
+
+除 assert 之外，还差一道：**看挂的那几条叫什么名字**。判据不是"有没有挂"，
+是"挂的是不是我刚改的那一行管的那几条"。这一轮之后固定成三步：
+`assert count == 1` → 替换 → **先读失败清单再数条数**。
+
+### P88-C `juce::AudioBuffer<float>` 两者都没有：`fill(float)` 和 `add(float)`
+
+写"用 1.0 填满一块"时顺手写了 `buffer.add (1.0f)`，C2039。`AudioBuffer` 只有
+`clear()`、`applyGain()`、`addFrom()`、`copyFrom()`。
+
+要填一个常数：
+
+```cpp
+juce::FloatVectorOperations::fill (buffer.getWritePointer (ch), value, numSamples);
+```
+
+（`juce::AudioBuffer` 在 P23 之后的记忆里一直有"没有 add"这一条，但"没有 fill"是新的：
+`juce::AudioSampleBuffer` 时代也没有，只是从来没需要过一次填满。）
+
+### P88-D `const` 成员函数里不能问引擎
+
+`getCountInBeatsLeft() const` 里写 `return audio.getPlayback().getPreRollBeatsLeft();`，C2662：
+不能把 `const MainComponent*` 转成 `PlaybackEngine&`（`getPlayback()` 是非 const）。
+
+两个选项：给 `getPlaybackForTest()` 那样的 const 重载，或者去掉 `const`。
+**去掉 `const`**，因为它本来就不是"只读这个对象"——它问的是实时音频线程的状态，
+把这种访问标成 const 是个谎。声明与定义一起去掉，别只改一边。
+
+### P88-E 一个上窄下宽的外框加一根斜线，读成 λ
+
+第一版节拍器字形：梯形机身 + 从底边中部斜向右上的臂。8 倍放大截图一看，是个 **λ**。
+
+缺的是**配重**。Maelzel 节拍器那根摆杆上有个能上下滑的铅块，那个圆是整个图标里
+唯一"不是轮廓"的部件——有它，读者才认出"杆上挂着东西，所以这是个节拍器"；
+没有它，剩下的就是"一个字母加一条斜杠"。
+
+补 `armEnd` 处的 3.2px 实心圆，同时把 `halfBase` 6.0 → 6.4、机身放到 `ui::px(34)` 宽。
+三次才过。规律：**图标能不能读出来要靠放大看，不能靠想象的描述**——
+`--cursor-preview` 那条工具链和 8 倍截图就是为这个准备的。
+
+### P88-F `-metronome` 又踩了一次"会改状态的快照必须排最后"
+
+`createMetronomeSnapshot` 会 `setMetronomeEnabled(true)` + `setVolume` + `setCountInBeats`
++ `startPreRoll`。P87-E 才刚把 `-loop` 挪到最后，这一轮又添了一个同样会改状态的。
+
+现在 `Main.cpp` 的快照序列尾部是 `… → -loop → -metronome → (.log)`。
+**新增任何"演示某个状态"的快照，都往队尾放**；默认行为是排队尾，不是排在"主题相近的位置"。
+
+### P88-G 533 个 png 让 `rm -f *.png` 直接报 Argument list too long
+
+P87 那一轮咬测产物攒了 533 个文件，`rm -f p87bite*.png p87final*.png …` 的通配展开超过
+Windows 的 32 KB 命令行上限，整条命令失败。更麻烦的是它**是和"重编 + 跑自检"串在一条
+`&&` 链里的**，于是自检根本没跑，而我第一眼看的是"自检没输出"。
+
+清理用 python 的 `glob` + `os.remove`：
+
+```bash
+python -c "
+import glob, os
+for p in glob.glob('build/AtomicDAW_artefacts/Release/p8[78]*bite*.png'): os.remove(p)
+"
+```
+
+规则：**清理动作不要和验证动作串在同一条 `&&` 链里**。清理失败会伪装成验证失败。

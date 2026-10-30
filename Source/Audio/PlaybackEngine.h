@@ -17,6 +17,7 @@
 
 #include "Effects.h"
 #include "ClipStretch.h"
+#include "Metronome.h"
 #include "PdcDelay.h"
 
 namespace juce { class AudioProcessor; }
@@ -756,6 +757,36 @@ public:
         One array, read at publish, never touched by the audio thread. */
     void setInsertLatencyForTest (int channel, int samples);
 
+    //-- Phase 88: the click track and the count-in ---------------------------
+    /** The metronome belongs to the transport, not to the mixer: it is mixed
+        per segment inside `renderNextBlock`, so it follows the loop and the
+        tempo map, and it is *not* in `renderInto`, so an export can never
+        contain it. */
+    Metronome&       getMetronome() noexcept       { return metronome; }
+    const Metronome& getMetronome() const noexcept { return metronome; }
+
+    /** Message thread. Plays `beats` counts of click BEFORE the transport moves,
+        then hands the rest of that block to the normal renderer.
+
+        The alternative — starting the transport and letting the recording
+        begin four beats later — puts four beats of moving playhead in front of
+        the take and makes `recordStartBeat` a lie. Nothing here advances
+        `positionBeats`: a count-in is the beat arriving, not the song moving. */
+    void startPreRoll (int beats) noexcept;
+    void cancelPreRoll() noexcept;
+
+    bool isPreRolling() const noexcept { return preRollBeatsLeft.load (std::memory_order_relaxed) > 0; }
+
+    /** How many counts are still to come. Drives the "预备 4 3 2 1" readout, so
+        it counts down at the beat rather than at the block. */
+    int getPreRollBeatsLeft() const noexcept;
+    int getPreRollTotalBeats() const noexcept { return preRollBeatsTotal.load (std::memory_order_relaxed); }
+
+    /** Audio thread. Renders the count-in, then — if it ends inside this block —
+        renders the remainder as a normal transport block, so the first beat of
+        the take is not preceded by up to one buffer of silence. */
+    void renderPreRoll (juce::AudioBuffer<float>& output, int numSamples);
+
     //-- Block timing, for the UI's sub-block interpolation -------------------
     double getBlockStartBeats() const noexcept   { return blockStartBeats.load (std::memory_order_relaxed); }
     double getBlockBeats() const noexcept        { return blockBeats.load (std::memory_order_relaxed); }
@@ -1063,6 +1094,15 @@ private:
     std::atomic<double> blockStartBeats  { 0.0 };
     std::atomic<double> blockBeats       { 0.0 };
     std::atomic<double> blockStartTimeMs { 0.0 };
+
+    // Phase 88: the click track, and the count-in that precedes a take. The
+    // count-in is expressed in BEATS and advanced by the audio thread; nothing
+    // about it touches `positionBeats`, which is what makes "the song did not
+    // move during the count-in" true by construction rather than by care.
+    Metronome            metronome;
+    std::atomic<int>     preRollBeatsLeft  { 0 };     // 0 = not counting in
+    std::atomic<int>     preRollBeatsTotal { 0 };
+    std::atomic<double>  preRollBeat       { 0.0 };   // how far into the count-in
 
     std::array<std::atomic<float>, maxMeteredSlots>  meters;
     std::array<std::atomic<float>, maxMeteredLayers> layerMeters;

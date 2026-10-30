@@ -1059,6 +1059,10 @@ MainComponent::MainComponent()
     // name is where its unsaved work goes if the process never gets to close.
     recoveryFile = recovery::getFileFor (currentProject);
 
+    // Phase 88: the metronome is off by default (a click nobody asked for is
+    // the loudest thing in the room), at half level, counting in one bar.
+    applyMetronomeSettings();
+
     // 60 Hz: the playhead is the one thing on screen that has to look like it
     // is moving, and 30 Hz reads as a stutter on a thin bright line.
     startTimerHz (60);
@@ -4120,26 +4124,147 @@ bool MainComponent::startRecording()
     if (recording.load())
         return true;
 
+    // Phase 88: rolling comes first, because play() rewinds a playhead parked at
+    // the very end of the timeline. The take begins wherever the playhead ends
+    // up, not where it was before the transport was engaged — reading the beat
+    // first would put the take's first bar somewhere the song never went.
+    if (! audio.isPlaying())
+        playTransport();
+
+    const int countIn = juce::jlimit (0, 64, countInBeats);
+
+    // The count-in runs where the playhead already is. Nothing here moves it:
+    // the four clicks are the four beats BEFORE the downbeat, and the downbeat
+    // is the beat the playhead is sitting on.
+    if (countIn > 0)
+        audio.getPlayback().startPreRoll (countIn);
+
     recordStartBeat = audio.getPositionBeats();
     takeCollector.begin (recordStartBeat);
     recording.store (true);
 
+    // The tape is armed now, so its first callback is the count-in's first
+    // sample — and skipped past exactly the length of the count-in so the
+    // take's first sample is the downbeat. Starting the recorder when the
+    // count-in ends instead would be a timer tick late, and the take would
+    // begin just after its own first note.
+    const double sampleRate = juce::jmax (1.0, audio.getPlayback().getSampleRate());
+    const int skipSamples = countIn > 0
+        ? (int) std::llround ((double) countIn * audio.getPlayback().getSecondsPerBeat() * sampleRate)
+        : 0;
+
     // The audio side may refuse (no capture channel, or none free). That is not
     // a reason to refuse the MIDI side: a keyboard take is still a take, and the
     // button has to mean something on a machine with no microphone.
-    audio.beginRecording();
-
-    if (! audio.isPlaying())
-        playTransport();
+    audio.beginRecording (300.0, skipSamples);
 
     repaint (topBarBounds);
     return true;
 }
 
+//==============================================================================
+//  Phase 88: the metronome
+//==============================================================================
+void MainComponent::toggleMetronome()
+{
+    setMetronomeEnabled (! metronomeEnabled);
+}
+
+void MainComponent::setMetronomeEnabled (bool shouldClick)
+{
+    if (metronomeEnabled == shouldClick)
+        return;
+
+    metronomeEnabled = shouldClick;
+    applyMetronomeSettings();
+    repaint (getMetronomeButtonBounds());
+}
+
+void MainComponent::setMetronomeVolume (float volume01)
+{
+    metronomeVolume = juce::jlimit (0.0f, 1.0f, volume01);
+    applyMetronomeSettings();
+    repaint (getMetronomeButtonBounds());
+}
+
+void MainComponent::setCountInBeats (int beats)
+{
+    countInBeats = juce::jlimit (0, 64, beats);
+    repaint (getMetronomeButtonBounds());
+}
+
+int MainComponent::getCountInBeatsLeft()
+{
+    return audio.getPlayback().getPreRollBeatsLeft();
+}
+
+void MainComponent::applyMetronomeSettings()
+{
+    auto& click = audio.getPlayback().getMetronome();
+
+    click.setEnabled (metronomeEnabled);
+    click.setVolume (metronomeVolume);
+
+    // The accent follows the project's own bar length, so a 3/4 song clicks in
+    // three. `ui::` has nothing to do with it — this is music, not geometry.
+    click.setBeatsPerBar (juce::jmax (1, (int) std::lround (beatsPerBar)));
+}
+
+void MainComponent::showMetronomeMenu()
+{
+    juce::PopupMenu menu;
+
+    menu.addSectionHeader (utf8 ("节拍器"));
+    menu.addItem (1, utf8 ("节拍器 开 / 关"), true, metronomeEnabled);
+    menu.addSeparator();
+
+    menu.addSectionHeader (utf8 ("音量"));
+    for (int percent : { 0, 25, 50, 75, 100 })
+        menu.addItem (100 + percent, juce::String (percent) + "%", true,
+                      (int) std::lround (metronomeVolume * 100.0f) == percent);
+
+    menu.addSeparator();
+    menu.addSectionHeader (utf8 ("预备拍"));
+
+    // "1 小节" rather than "4 拍": the count-in is a bar of the song's own
+    // metre, and a 3/4 song counts in three.
+    const int barBeats = juce::jmax (1, (int) std::lround (beatsPerBar));
+    menu.addItem (200, utf8 ("关"), true, countInBeats == 0);
+    menu.addItem (201, utf8 ("1 小节（") + juce::String (barBeats) + utf8 (" 拍）"),
+                  true, countInBeats == barBeats);
+    menu.addItem (202, utf8 ("2 小节（") + juce::String (barBeats * 2) + utf8 (" 拍）"),
+                  true, countInBeats == barBeats * 2);
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this)
+                                                  .withTargetScreenArea (getMetronomeButtonBounds()),
+                        [this] (int result)
+                        {
+                            if (result == 0)
+                                return;
+
+                            if (result == 1)
+                                toggleMetronome();
+                            else if (result >= 100 && result <= 200)
+                                setMetronomeVolume ((float) (result - 100) / 100.0f);
+                            else if (result == 200)
+                                setCountInBeats (0);
+                            else if (result == 201)
+                                setCountInBeats (juce::jmax (1, (int) std::lround (beatsPerBar)));
+                            else if (result == 202)
+                                setCountInBeats (juce::jmax (1, (int) std::lround (beatsPerBar)) * 2);
+                        });
+}
+
+
+
 void MainComponent::finishRecording()
 {
     if (! recording.load())
         return;
+
+    // Phase 88: a count-in still running when the take is closed would keep
+    // clicking at a transport that is no longer counting towards anything.
+    audio.getPlayback().cancelPreRoll();
 
     recording.store (false);
 
@@ -5537,7 +5662,19 @@ juce::Rectangle<int> MainComponent::getProjectNameBounds() const
 // then settings.
 juce::Rectangle<int> MainComponent::getNewButtonBounds() const
 {
-    return { ui::px (486), topBarBounds.getY() + ui::px (12), ui::px (54), ui::px (28) };
+    // Phase 88 moved it 36 px right: the metronome took the slot between the
+    // tempo field and the project verb, which is where it belongs musically and
+    // where there was a gap that only looked like room for nothing.
+    return { getMetronomeButtonBounds().getRight() + ui::px (10),
+             topBarBounds.getY() + ui::px (12), ui::px (54), ui::px (28) };
+}
+
+juce::Rectangle<int> MainComponent::getMetronomeButtonBounds() const
+{
+    // Right of the tempo field, left of 新建. Same plate height as every other
+    // button on the row; narrow, because the glyph does the talking.
+    return { getBpmFieldBounds().getRight() + ui::px (6), topBarBounds.getY() + ui::px (12),
+             ui::px (34), ui::px (28) };
 }
 
 juce::Rectangle<int> MainComponent::getUndoButtonBounds() const
@@ -5700,6 +5837,63 @@ void MainComponent::paint (juce::Graphics& g)
             ui::drawTabular (g, formatTime(),
                              readout.withTrimmedTop (ui::px (25)).toFloat(),
                              ui::font (9.5f), juce::Justification::centredLeft);
+
+            // Phase 88: during a count-in the readout says what it is waiting
+            // for. The position is deliberately NOT moving (that is what a
+            // count-in is), so a frozen bar number there reads as a stalled
+            // transport rather than as four, three, two, one.
+            if (const int countingDown = getCountInBeatsLeft(); countingDown > 0)
+            {
+                g.setColour (kTopBar);
+                g.fillRect (readout);
+
+                g.setColour (theme::record.withAlpha (0.95f));
+                g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (11.0f))));
+                g.drawText (utf8 ("预备 ") + juce::String (countingDown), readout,
+                            juce::Justification::centred, false);
+            }
+        }
+
+        //-- Metronome (Phase 88) ---------------------------------------------
+        {
+            auto button = getMetronomeButtonBounds().toFloat();
+
+            drawButtonPlate (button, hoveringMetronome, true, kAccent, metronomeEnabled);
+
+            // A metronome seen from the front: a body that tapers upward and an
+            // arm leaning right. Drawn in strokes like every other glyph on this
+            // row — a filled silhouette would be the only solid shape among
+            // them.
+            g.setColour (kAccent.withAlpha (metronomeEnabled ? 0.95f
+                                               : (hoveringMetronome ? 0.72f : 0.42f)));
+
+            const float centreX  = button.getCentreX();
+            const float topY     = button.getY() + ui::pf (5.5f);
+            const float bottomY  = button.getBottom() - ui::pf (5.5f);
+            const float halfBase = ui::pf (6.4f);
+            const float halfTop  = ui::pf (1.8f);
+
+            juce::Path body;
+            body.startNewSubPath (centreX - halfBase, bottomY);
+            body.lineTo (centreX - halfTop, topY);
+            body.lineTo (centreX + halfTop, topY);
+            body.lineTo (centreX + halfBase, bottomY);
+            body.closeSubPath();
+            g.strokePath (body, juce::PathStrokeType (ui::pf (1.2f)));
+
+            // The arm, with its counterweight. The weight is the detail that
+            // makes this read as a metronome rather than as a lambda: without
+            // it, a tapered outline crossed by a diagonal is just a letter.
+            const juce::Point<float> armEnd (centreX + ui::pf (2.7f), topY + ui::pf (5.0f));
+
+            juce::Path arm;
+            arm.startNewSubPath (centreX, bottomY - ui::pf (1.5f));
+            arm.lineTo (armEnd);
+            g.strokePath (arm, juce::PathStrokeType (ui::pf (1.2f)));
+
+            g.fillEllipse (juce::Rectangle<float> (armEnd.x - ui::pf (1.6f),
+                                                  armEnd.y - ui::pf (1.6f),
+                                                  ui::pf (3.2f), ui::pf (3.2f)));
         }
 
         //-- Phase 8: new / undo / redo / mixer / settings ---------------------
@@ -5908,7 +6102,7 @@ void MainComponent::paint (juce::Graphics& g)
                                 : juce::Colours::white.withAlpha (0.34f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
         g.drawText ((dirtyCache ? juce::String (utf8 ("● ")) : juce::String())
-                      + name + utf8 ("  ·  P39"),
+                      + name + utf8 ("  ·  P88"),
                     getProjectNameBounds(), juce::Justification::centredRight, true);
     }
 
@@ -6060,6 +6254,19 @@ void MainComponent::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
+    if (getMetronomeButtonBounds().contains (pos))
+    {
+        // Phase 88: left toggles, right asks about level and count-in. A
+        // toggle that needs a menu first would make "just turn it on" two
+        // gestures, which is the one thing a metronome must not be.
+        if (e.mods.isPopupMenu())
+            showMetronomeMenu();
+        else
+            toggleMetronome();
+
+        return;
+    }
+
     if (getSaveButtonBounds().contains (pos))
     {
         askToSaveProject();
@@ -6131,9 +6338,10 @@ void MainComponent::mouseMove (const juce::MouseEvent& e)
     const bool newRedo   = getRedoButtonBounds().contains (pos);
     const bool newMixer  = getMixerButtonBounds().contains (pos);
     const bool newGear   = getSettingsButtonBounds().contains (pos);
+    const bool newClick  = getMetronomeButtonBounds().contains (pos);
 
     setMouseCursor ((newPlay || newStop || newRecord || newSave || newLoad || newExport
-                      || newNew || newUndo || newRedo || newMixer || newGear
+                      || newNew || newUndo || newRedo || newMixer || newGear || newClick
                       || hoveredMenuItem >= 0)
                       ? juce::MouseCursor::PointingHandCursor
                       : juce::MouseCursor::NormalCursor);
@@ -6141,7 +6349,8 @@ void MainComponent::mouseMove (const juce::MouseEvent& e)
     if (newPlay != hoveringPlay || newStop != hoveringStop || newRecord != hoveringRecord
          || newSave != hoveringSave || newLoad != hoveringLoad || newExport != hoveringExport
          || newNew != hoveringNew || newUndo != hoveringUndo || newRedo != hoveringRedo
-         || newMixer != hoveringMixer || newGear != hoveringSettings)
+         || newMixer != hoveringMixer || newGear != hoveringSettings
+         || newClick != hoveringMetronome)
     {
         hoveringPlay   = newPlay;
         hoveringStop   = newStop;
@@ -6154,6 +6363,7 @@ void MainComponent::mouseMove (const juce::MouseEvent& e)
         hoveringRedo   = newRedo;
         hoveringMixer  = newMixer;
         hoveringSettings = newGear;
+        hoveringMetronome = newClick;
         repaint (topBarBounds);
     }
 }
@@ -6166,11 +6376,11 @@ void MainComponent::mouseExit (const juce::MouseEvent&)
         repaint (menuBarBounds);
     }
 
-    if (hoveringPlay || hoveringStop || hoveringRecord
+    if (hoveringPlay || hoveringStop || hoveringRecord || hoveringMetronome
          || hoveringSave || hoveringLoad || hoveringExport
          || hoveringNew || hoveringUndo || hoveringRedo || hoveringMixer || hoveringSettings)
     {
-        hoveringPlay = hoveringStop = hoveringRecord = false;
+        hoveringPlay = hoveringStop = hoveringRecord = hoveringMetronome = false;
         hoveringSave = hoveringLoad = hoveringExport = false;
         hoveringNew = hoveringUndo = hoveringRedo = hoveringMixer = hoveringSettings = false;
         repaint (topBarBounds);
@@ -7073,6 +7283,23 @@ juce::Image MainComponent::createLoopSnapshot (double startBeat, double endBeat)
 
     return full.getClippedImage (juce::Rectangle<int> (0, 0, full.getWidth(),
                                                        juce::jmin (full.getHeight(), ui::px (300))));
+}
+
+juce::Image MainComponent::createMetronomeSnapshot (int countInBeatsToShow)
+{
+    setMetronomeEnabled (true);
+    setMetronomeVolume (0.75f);
+    setCountInBeats (countInBeatsToShow);
+
+    // Start a count-in so the readout shows the state the player actually sees.
+    // A headless run has no device, so nothing consumes it — which is exactly
+    // what a still needs: the first count, frozen.
+    audio.getPlayback().startPreRoll (countInBeatsToShow);
+
+    const auto still = createComponentSnapshot (topBarBounds, true);
+
+    audio.getPlayback().cancelPreRoll();
+    return still;
 }
 
 void MainComponent::setLoopRegion (const LoopRegion& region)

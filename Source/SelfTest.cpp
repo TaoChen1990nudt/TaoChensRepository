@@ -16129,6 +16129,398 @@ juce::String MainComponent::runSelfTest()
         }
     }
 
+    //-- P88: 节拍器与预备拍 --------------------------------------------------
+    // 五件事分开验：点击本体（音高、重音、音量、跨块）、预备拍（拍不动、四拍
+    // 正好、交接在同一块里）、走带混进去而导出拿不到、以及预备拍那几拍不进录
+    // 下来的 take。
+    {
+        constexpr double sr88   = 48000.0;
+        constexpr int    block88 = 512;
+
+        // 120 BPM：一拍 0.5 秒 = 24000 采样；点击本体 12 ms = 576 采样。
+        constexpr double bps88 = 1.0 / (sr88 * 0.5);
+
+        auto blockOf = [] (int numSamples, float value)
+        {
+            juce::AudioBuffer<float> buffer (2, numSamples);
+            buffer.clear();
+
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+                juce::FloatVectorOperations::fill (buffer.getWritePointer (ch), value, numSamples);
+
+            return buffer;
+        };
+
+        auto zeroCrossings88 = [] (const juce::AudioBuffer<float>& buffer, int count)
+        {
+            int crossings = 0;
+
+            for (int i = 1; i < count; ++i)
+            {
+                const float previous = buffer.getSample (0, i - 1);
+                const float current  = buffer.getSample (0, i);
+
+                if ((previous <= 0.0f && current > 0.0f) || (previous >= 0.0f && current < 0.0f))
+                    ++crossings;
+            }
+
+            return crossings;
+        };
+
+        //-- A. 点击本体 -----------------------------------------------------
+        {
+            Metronome m88;
+            m88.prepare (sr88);
+            m88.setBeatsPerBar (4);
+            m88.setVolume (1.0f);
+
+            juce::AudioBuffer<float> buf (2, block88);
+            buf.clear();
+
+            m88.setEnabled (false);
+            m88.render (buf, block88, 0.0, bps88, false);
+
+            check (utf8 ("节拍器关着：一个采样都不响"),
+                   buf.getMagnitude (0, 0, block88) == 0.0f && m88.getNumSoundingVoices() == 0,
+                   juce::String (buf.getMagnitude (0, 0, block88)));
+
+            m88.setEnabled (true);
+            buf.clear();
+            m88.render (buf, block88, 0.0, bps88, false);
+
+            const float offsetPeak = buf.getMagnitude (0, 0, block88);
+
+            check (utf8 ("开着：第 0 拍就是一声，而且落在块的第一个采样上"),
+                   offsetPeak > 0.3f && buf.getMagnitude (0, 0, 8) < offsetPeak * 0.5f,
+                   juce::String (offsetPeak, 3));
+
+            // 重音 vs 弱拍：同一个形状，不一样的音高与响度。
+            juce::AudioBuffer<float> accent88 (2, block88);
+            juce::AudioBuffer<float> weak88 (2, block88);
+
+            m88.silence();
+            accent88.clear();
+            m88.render (accent88, block88, 0.0, bps88, false);       // 小节第 1 拍
+
+            m88.silence();
+            weak88.clear();
+            m88.render (weak88, block88, 1.0, bps88, false);         // 第 2 拍
+
+            const int accentCrossings = zeroCrossings88 (accent88, block88);
+            const int weakCrossings   = zeroCrossings88 (weak88, block88);
+
+            check (utf8 ("每小节第一拍是重音：音更高，也更响"),
+                   accentCrossings > weakCrossings
+                     && accent88.getMagnitude (0, 0, block88) > weak88.getMagnitude (0, 0, block88),
+                   juce::String (accentCrossings) + utf8 (" / ") + juce::String (weakCrossings)
+                     + utf8 (" 次过零"));
+
+            // 音量：减半就是减半，0 就是静音。
+            juce::AudioBuffer<float> half88 (2, block88);
+            m88.silence();
+            half88.clear();
+            m88.setVolume (0.5f);
+            m88.render (half88, block88, 0.0, bps88, false);
+
+            const float fullPeak = accent88.getMagnitude (0, 0, block88);
+            const float halfPeak = half88.getMagnitude (0, 0, block88);
+
+            check (utf8 ("音量减半，峰值也正好减半"),
+                   std::abs (halfPeak - fullPeak * 0.5f) < fullPeak * 0.02f,
+                   juce::String (halfPeak, 3) + utf8 (" / ") + juce::String (fullPeak, 3));
+
+            m88.setVolume (0.0f);
+            buf.clear();
+            m88.render (buf, block88, 0.0, bps88, false);
+
+            check (utf8 ("音量 0：一声都不响"),
+                   buf.getMagnitude (0, 0, block88) == 0.0f,
+                   juce::String (buf.getMagnitude (0, 0, block88)));
+
+            // 一块里落两拍：两下都在，中间安静。
+            m88.setVolume (1.0f);
+            juce::AudioBuffer<float> two88 (2, 48000);
+            m88.silence();
+            two88.clear();
+            m88.render (two88, 48000, 0.0, bps88, false);
+
+            check (utf8 ("一块跨两拍：两下点击都在，中间是安静的"),
+                   two88.getMagnitude (0, 0, 700) > 0.3f
+                     && two88.getMagnitude (0, 24000, 700) > 0.3f
+                     && two88.getMagnitude (0, 12000, 700) < 1.0e-4f,
+                   juce::String (two88.getMagnitude (0, 0, 700), 3) + " / "
+                     + juce::String (two88.getMagnitude (0, 12000, 700), 4) + " / "
+                     + juce::String (two88.getMagnitude (0, 24000, 700), 3));
+
+            // 点击 576 采样 > 一块 512：跨块必须接着响。
+            m88.silence();
+            juce::AudioBuffer<float> firstBlock (2, block88);
+            juce::AudioBuffer<float> secondBlock (2, block88);
+            firstBlock.clear();
+            secondBlock.clear();
+
+            m88.render (firstBlock, block88, 0.0, bps88, false);
+            m88.render (secondBlock, block88, (double) block88 * bps88, bps88, false);
+
+            check (utf8 ("点击比一块长：跨块的时候接着响，不在块边界上断掉"),
+                   secondBlock.getMagnitude (0, 0, 64) > 1.0e-3f && m88.getNumSoundingVoices() <= 1,
+                   juce::String (secondBlock.getMagnitude (0, 0, 64), 4));
+
+            // 3/4 拍：第 3 拍才是重音，同一小节里的第 1 拍不是。两条都要，
+            // 只写"第 3 拍是重音"的话，"每拍都当重音"那个坏法照样能过。
+            m88.setBeatsPerBar (3);
+
+            juce::AudioBuffer<float> third88 (2, block88);
+            juce::AudioBuffer<float> inner88 (2, block88);
+
+            m88.silence();
+            third88.clear();
+            m88.render (third88, block88, 3.0, bps88, false);
+
+            m88.silence();
+            inner88.clear();
+            m88.render (inner88, block88, 1.0, bps88, false);
+
+            check (utf8 ("3/4 拍：第 3 拍是重音，同一个 3/4 小节里的第 1 拍不是"),
+                   zeroCrossings88 (third88, block88) == accentCrossings
+                     && zeroCrossings88 (third88, block88) > zeroCrossings88 (inner88, block88),
+                   juce::String (zeroCrossings88 (third88, block88))
+                     + utf8 (" / ") + juce::String (zeroCrossings88 (inner88, block88)));
+        }
+
+        //-- B. 预备拍 -------------------------------------------------------
+        {
+            LayerStack   t88;
+            RackModel    r88;
+            MixerModel   m88;
+            PlaybackEngine e88;
+
+            t88.addLayer (utf8 ("预备"), palette::layer1);
+            e88.prepareToPlay (sr88, block88);
+            e88.publishSchedule (t88, r88, 120.0, 0.0, &m88);
+
+            e88.setPositionBeats (4.0);
+
+            auto& click88 = e88.getMetronome();
+            click88.setVolume (1.0f);
+            click88.setEnabled (false);          // 关着也必须数拍
+
+            juce::AudioBuffer<float> b88 (2, block88);
+            b88.clear();
+
+            e88.startPreRoll (4);
+
+            check (utf8 ("预备拍开始：在数，而且走带一步都没动"),
+                   e88.isPreRolling() && e88.getPreRollBeatsLeft() == 4
+                     && std::abs (e88.getPositionBeats() - 4.0) < 1.0e-9,
+                   juce::String (e88.getPreRollBeatsLeft()));
+
+            e88.renderPreRoll (b88, block88);
+
+            check (utf8 ("节拍器关着，预备拍照样响（这几下就是数给你听的）"),
+                   b88.getMagnitude (0, 0, block88) > 0.3f,
+                   juce::String (b88.getMagnitude (0, 0, block88), 3));
+
+            check (utf8 ("数拍期间播放头原地不动"),
+                   std::abs (e88.getPositionBeats() - 4.0) < 1.0e-9,
+                   juce::String (e88.getPositionBeats(), 3));
+
+            // 四拍 = 4 × 24000 = 96000 采样。已经渲了一块，再 186 块是 95744。
+            for (int i = 0; i < 186; ++i)
+            {
+                b88.clear();
+                e88.renderPreRoll (b88, block88);
+            }
+
+            check (utf8 ("187 块（95744 采样）还没数完四拍"),
+                   e88.isPreRolling(),
+                   juce::String (e88.getPreRollBeatsLeft()));
+
+            b88.clear();
+            e88.renderPreRoll (b88, block88);
+
+            // 第 188 块里：前 256 个采样还在数，后一半已经在走带了。
+            const double expected88 = 4.0 + (double) (188 * block88 - 96000) * bps88;
+
+            check (utf8 ("四拍正好数完：多出来的 256 个采样已经在走带里"),
+                   ! e88.isPreRolling()
+                     && std::abs (e88.getPositionBeats() - expected88) < 1.0e-6,
+                   juce::String (e88.getPositionBeats(), 4) + utf8 (" （应该是 ")
+                     + juce::String (expected88, 4) + utf8 ("）"));
+
+            e88.startPreRoll (4);
+            e88.cancelPreRoll();
+
+            check (utf8 ("取消预备拍：立刻停，不用等它数完"),
+                   ! e88.isPreRolling() && e88.getPreRollBeatsLeft() == 0,
+                   juce::String (e88.getPreRollBeatsLeft()));
+
+            e88.startPreRoll (4);
+            e88.setPositionBeats (2.0);
+
+            check (utf8 ("数拍期间跳位置：预备拍自己取消（数的是个已经不在的地方）"),
+                   ! e88.isPreRolling(),
+                   juce::String (e88.isPreRolling() ? utf8 ("还在数") : utf8 ("停了")));
+
+            e88.startPreRoll (0);
+
+            check (utf8 ("预备 0 拍：不数，也不挡走带"),
+                   ! e88.isPreRolling() && e88.getPreRollTotalBeats() == 0,
+                   juce::String (e88.getPreRollTotalBeats()));
+        }
+
+        //-- C. 走带混进去，导出拿不到 ---------------------------------------
+        {
+            LayerStack   t88b;
+            RackModel    r88b;
+            MixerModel   m88b;
+            PlaybackEngine e88b;
+
+            t88b.addLayer (utf8 ("空"), palette::layer1);
+            e88b.prepareToPlay (sr88, block88);
+            e88b.publishSchedule (t88b, r88b, 120.0, 0.0, &m88b);
+
+            auto& click = e88b.getMetronome();
+            click.setEnabled (true);
+            click.setVolume (1.0f);
+
+            juce::AudioBuffer<float> heard (2, block88);
+            heard.clear();
+            e88b.setPositionBeats (0.0);
+            e88b.renderNextBlock (heard, block88);
+
+            check (utf8 ("走带播放时点击混进输出（空工程也听得到）"),
+                   heard.getMagnitude (0, 0, block88) > 0.3f,
+                   juce::String (heard.getMagnitude (0, 0, block88), 3));
+
+            // 关掉：renderNextBlock 的输出必须和 P88 之前一模一样（全零）。
+            click.setEnabled (false);
+            juce::AudioBuffer<float> silent (2, block88);
+            silent.clear();
+            e88b.setPositionBeats (0.0);
+            e88b.renderNextBlock (silent, block88);
+
+            check (utf8 ("关掉之后，走带的输出回到全零（老会话逐样本不变）"),
+                   silent.getMagnitude (0, 0, block88) == 0.0f,
+                   juce::String (silent.getMagnitude (0, 0, block88)));
+
+            // 导出走的是 renderInto / renderWindow，那条路根本不认识节拍器。
+            click.setEnabled (true);
+
+            juce::AudioBuffer<float> exported (2, 4800);
+            exported.clear();
+            e88b.renderWindow (0.0, 4800, exported, nullptr);
+
+            check (utf8 ("导出拿不到点击：renderWindow 那条路没有节拍器"),
+                   exported.getMagnitude (0, 0, 4800) == 0.0f,
+                   juce::String (exported.getMagnitude (0, 0, 4800)));
+        }
+
+        //-- D. 预备拍那几拍不进 take ----------------------------------------
+        {
+            RecordBuffer tape;
+            tape.prepare (sr88, 2, 10.0);
+            tape.begin (1000);
+
+            auto pre1  = blockOf (600, 0.25f);      // 数拍期间：不该进 take
+            auto pre2  = blockOf (400, 0.25f);
+            auto take1 = blockOf (800, 0.75f);      // 开录之后
+
+            tape.append (pre1.getArrayOfReadPointers(), 2, 600);
+            tape.append (pre2.getArrayOfReadPointers(), 2, 400);
+
+            const int afterPre = tape.getNumSamples();
+
+            tape.append (take1.getArrayOfReadPointers(), 2, 800);
+            tape.finish();
+
+            const auto recorded = tape.takeAudio();
+
+            bool allTakeSamples = recorded.getNumSamples() == 800;
+
+            for (int i = 0; allTakeSamples && i < recorded.getNumSamples(); ++i)
+                allTakeSamples = std::abs (recorded.getSample (0, i) - 0.75f) < 1.0e-6f;
+
+            check (utf8 ("预备拍那 1000 个采样不进 take（跨块累计，一个不漏）"),
+                   afterPre == 0 && allTakeSamples,
+                   juce::String (afterPre) + utf8 (" / ") + juce::String (recorded.getNumSamples()));
+
+            // skip 比一块还长的时候，跨的这几块都不许写。
+            RecordBuffer tape2;
+            tape2.prepare (sr88, 2, 10.0);
+            tape2.begin (1500);
+
+            auto longPre = blockOf (1000, 0.25f);
+            auto after   = blockOf (1000, 0.75f);
+
+            tape2.append (longPre.getArrayOfReadPointers(), 2, 1000);
+            const int stillCounting = tape2.getNumSamples();
+
+            tape2.append (after.getArrayOfReadPointers(), 2, 1000);
+            tape2.finish();
+
+            const auto recorded2 = tape2.takeAudio();
+
+            bool secondAll = recorded2.getNumSamples() == 500;
+
+            for (int i = 0; secondAll && i < recorded2.getNumSamples(); ++i)
+                secondAll = std::abs (recorded2.getSample (0, i) - 0.75f) < 1.0e-6f;
+
+            check (utf8 ("skip 比一块还长：两块里丢掉 1500，剩下的 500 才是 take"),
+                   stillCounting == 0 && secondAll,
+                   juce::String (stillCounting) + utf8 (" / ") + juce::String (recorded2.getNumSamples()));
+        }
+
+        //-- E. 顶栏上的那个按钮 ---------------------------------------------
+        {
+            MainComponent host88;
+
+            const auto button = host88.getMetronomeButtonBounds();
+
+            check (utf8 ("节拍器按钮在顶栏里有一个真的位置（放得下一个 30×28 的板）"),
+                   button.getWidth() >= ui::px (24) && button.getHeight() >= ui::px (24)
+                     && button.getRight() <= host88.getWidth(),
+                   juce::String (button.getX()) + "x" + juce::String (button.getY()) + " "
+                     + juce::String (button.getWidth()) + "x" + juce::String (button.getHeight()));
+
+            const bool beforeToggle = host88.isMetronomeEnabled();
+            host88.toggleMetronome();
+
+            check (utf8 ("点一下：按钮和引擎的节拍器一起开"),
+                   beforeToggle == false && host88.isMetronomeEnabled()
+                     && host88.getPlaybackForTest().getMetronome().isEnabled(),
+                   juce::String (host88.isMetronomeEnabled() ? utf8 ("开") : utf8 ("关")));
+
+            host88.toggleMetronome();
+
+            check (utf8 ("再点一下：一起关"),
+                   ! host88.isMetronomeEnabled()
+                     && ! host88.getPlaybackForTest().getMetronome().isEnabled(),
+                   juce::String (host88.isMetronomeEnabled() ? utf8 ("开") : utf8 ("关")));
+
+            host88.setMetronomeVolume (0.25f);
+
+            check (utf8 ("音量传到引擎（不是只存在按钮里）"),
+                   std::abs (host88.getPlaybackForTest().getMetronome().getVolume() - 0.25f) < 1.0e-6f,
+                   juce::String (host88.getPlaybackForTest().getMetronome().getVolume(), 3));
+
+            host88.setCountInBeats (8);
+
+            check (utf8 ("预备拍长度可以改，默认是一小节（4 拍）"),
+                   host88.getCountInBeats() == 8, juce::String (host88.getCountInBeats()));
+
+            host88.setCountInBeats (-3);
+
+            check (utf8 ("预备拍长度不会变成负数（夹到 0 = 关）"),
+                   host88.getCountInBeats() == 0, juce::String (host88.getCountInBeats()));
+
+            // 重音跟着工程的拍号走：现在全工程是 4/4。
+            check (utf8 ("重音落在工程的拍号上（4/4 就是每 4 拍一个重音）"),
+                   host88.getPlaybackForTest().getMetronome().getBeatsPerBar() == 4,
+                   juce::String (host88.getPlaybackForTest().getMetronome().getBeatsPerBar()));
+        }
+    }
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

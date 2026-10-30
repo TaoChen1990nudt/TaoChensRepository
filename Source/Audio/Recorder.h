@@ -172,7 +172,16 @@ public:
     /** Message thread, before begin(). Channels below 1 record nothing. */
     void prepare (double sampleRateToUse, int numChannels, double maxSeconds);
 
-    void begin();
+    /** Arms the tape.
+
+        `samplesToSkip` (Phase 88) drops that many input samples from the head
+        without ever writing them. A count-in arms the recorder at the moment the
+        user hits the button and then must not keep the four beats of click — and
+        of the player's own warm-up — that happen before the take's first beat.
+        Dropping them here is sample-exact; starting the recorder when the
+        count-in ends would be a timer tick late, and the take would begin
+        slightly after its own downbeat. */
+    void begin (int samplesToSkip = 0);
     void finish();
 
     /** Audio thread. `inputs` may be null when the device has no inputs. */
@@ -202,6 +211,11 @@ private:
     juce::AudioBuffer<float> storage;
     std::atomic<int>  writePos { 0 };
     std::atomic<bool> armed { false };
+
+    /** Phase 88: input samples still to be thrown away before the take starts.
+        Counted down on the audio thread, one block at a time. */
+    std::atomic<int>  skipRemaining { 0 };
+
     double sampleRate = 0.0;
     int    channels   = 0;
 

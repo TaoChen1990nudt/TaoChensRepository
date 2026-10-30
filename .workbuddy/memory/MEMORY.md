@@ -7,7 +7,7 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
 编组、采样、走带、文件树、波形、伸缩、缩放、电平表）；平台陷阱与自检夹具在 `PITFALLS.md`。
 动代码前按主题查这两份，本文件只留跨主题硬规则。
 
-## 二十一条硬规则
+## 二十二条硬规则
 1. **中文一律 `atomic::utf8("...")`**，自检的失败信息也算。裸中文 = 乱码。
 2. **几何走 `ui::px()/pf()`、字号 `ui::sp()`**，唯一密度旋钮 `ui::scale = 1.3f`，禁止裸像素。
    `numPitches` / gutter / 内联自动化框最小宽度不缩放。
@@ -162,9 +162,31 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
     而不是累加 delta，否则每像素的取整误差会攒成漂移。标尺手势只占底部 `ui::px(7)`
     （曾做成 12px + "循环"字样，把 `0:06.0` 压掉了）。
 
+22. **点击是监听，不是声音，也不是定时器**（P88）：`Audio/Metronome` 混进
+    `PlaybackEngine::renderNextBlock` 的**每个 segment**，而 `renderInto`（导出 / 分轨 /
+    离线分析 / 渲染成采样）里没有——所以"导出拿不到点击"是**结构性的**，不是记得关；
+    同理它也不进 `RecordBuffer`，录音要的是干的。
+    **它是按拍和每块 `beatsPerSample` 驱动的**，每一下落在它该在的那个**采样**上
+    （`at = (beat - fromBeat) / beatsPerSample`），块首对齐听起来就是"拖了半块"。
+    分句用 `ceil (fromBeat - 1e-9)`：那个 `-1e-9` 是让正好落在块边界上的那一拍**只算一次**，
+    否则它既是上一块的最后一拍又是下一块的第一拍，重音响两遍。
+    **一击 12 ms、一块可以 46 ms**，所以四个声部：一个声部会把上一击从衰减中途切断，听起来是踉跄。
+    **音量是它自己的**（`setVolume`），不骑主推子——骑主推子意味着动一下混音台就改掉了
+    演奏者的时间参考；音量 0 时先 `silence()` 再返回，否则尾巴冻住、拧回来接着响。
+    重音跟着**工程拍号**走（3/4 就数三下），"每四拍重一下的 3/4 点击"比没有点击更糟。
+    **预备拍不改 `positionBeats`**：数的是下拍**之前**那几拍，所以"数拍期间歌曲没动"是构造性的；
+    做成"先播放再数四拍"，`recordStartBeat` 就是个谎。数完在**同一个块里**交接给
+    `renderNextBlock(rest, …)`——块边界交接会往最后一击和第一个音之间塞一个 buffer 的静音。
+    数拍期间 `blockBeats.store(0.0)`，否则播放头会从一块"正在被数进去"的块往前外推。
+    **`force=true` 让关着也响**：要求被数的人不能因为没开节拍器而听不到数。
+    录音 skip 在 `RecordBuffer::begin`（`skipRemaining`）里生效，不是"数完再 arm"——后者晚一个
+    timer tick，take 会从自己的 downbeat 之后开始。`startRecording()` 的顺序是
+    先 `playTransport()`（它会 rewind）→ `startPreRoll` → 读 `recordStartBeat` → arm。
+    `setPositionBeats` / `pause` / `finishRecording` 一律 `cancelPreRoll()`。
+
 ## 目录
 - `Source/Model/` 数据与路由（LayerModel / **CurveBank** / RackModel / MixerModel / TempoMap / TempoModel / Routing / **SamplePath** / **LoopRegion** / ProjectIO / Gain）
-- `Source/Audio/` 引擎与纯函数 DSP（PlaybackEngine / Recorder / ClipStretch / PdcDelay / 导出）
+- `Source/Audio/` 引擎与纯函数 DSP（PlaybackEngine / Recorder / ClipStretch / PdcDelay / **Metronome** / 导出）
 - `Source/UI/` 时间线、机架、混音台、文件树、自动化、分栏（**钢琴窗 = `PianoRoll*.cpp` 十一个 TU +
   `PianoRollInternals.h`**，见 `REFERENCE.md` 的「钢琴窗的文件布局」）
 - `Source/Util/` 度量与主题 / 文本 / 菜单 / **Recovery**（崩溃恢复）

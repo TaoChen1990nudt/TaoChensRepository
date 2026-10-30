@@ -215,6 +215,67 @@
 - 曾经做成 12px + "循环"两个字，把标尺上的 `0:06.0` 压掉了（截图确认过），所以只剩
   `ui::px(7)` 一条窄带 + 车道底色 + 两条竖线。
 
+## 节拍器与预备拍（P88：点击是监听，不是声音）
+唯一实现 `Audio/Metronome.h/.cpp`。走带读它，导出那条路根本不认识它。
+
+**它住在哪里**
+- `Metronome` 由 `PlaybackEngine` 持有（`getMetronome()`），`setSampleRate()` 里 `prepare()`
+  ——**不是** `prepareToPlay()`：自检走 `setSampleRate`，把形状建在那儿才和真机同一条路。
+- `renderNextBlock` 每个 segment 之后调一次
+  `metronome.render (slice, segment, posBeats, beatsPerSample, false)`。
+- `renderInto` 里**没有**。导出 / 分轨 / 离线分析 / 渲染成采样的"没有点击"是结构性的。
+
+**两种声音**
+- 同一个形状（`sin × exp(-t/0.0035)` × 0.5 ms 淡入），只是音高不同：
+  小节第一拍 1600 Hz / 其余 1000 Hz，增益 0.95 / 0.62（重音更响也更亮）。
+- 淡入不是装饰：包络从 1 起而正弦从 0 起，第 1 个采样就是个台阶，那个台阶听起来"刺"。
+- 长度 `clickLengthMs = 12`：够长到有音高，够短到 300 BPM 时衰减已经结束。
+
+**分句与声部**
+- `for (int beat = ceil (fromBeat - 1e-9); beat < toBeat; ++beat)`。`-1e-9` 保证正好落在
+  块边界上的那一拍只算一次。
+- `at = floor ((beat - fromBeat) / beatsPerSample)`，落在**该在的那个采样**上。
+- 四个声部（`maxVoices = 4`）；满了丢 `position` 最大的那个（衰减已经过去）。
+  `mixVoices` 里 `int i = v.position == 0 ? max (0, v.startAt) : 0`——跨块的那一击从块首继续。
+- 一块跨一个速度变化时，按块首的速度画：误差只在**两击之间的间隔**，不在**块内那一击的位置**。
+
+**开关与音量**
+- `if (! force && ! isEnabled()) return;`。`force = true` 是预备拍：要求被数的人不能因为
+  没开节拍器而听不到数。
+- `gain <= 0` 时**先 `silence()` 再返回**，否则衰减中途把音量拧到 0，尾巴会冻住。
+- 音量是它自己的，不骑主推子（动一下混音台不该改掉演奏者的时间参考）。
+- `setBeatsPerBar` 由 `MainComponent::applyMetronomeSettings()` 从工程拍号喂进来。
+
+**预备拍（`PlaybackEngine`）**
+- `startPreRoll(int beats)` / `cancelPreRoll()` / `isPreRolling()` / `getPreRollBeatsLeft()` /
+  `renderPreRoll(buf, n)`。
+- `startPreRoll` 里**先写 payload 再写 gate**：`preRollBeatsLeft` 是 `isPreRolling()` 读的那个，
+  所以它最后写。中间溜进来的回调渲染一个"total 老了一块"的数拍，无害；加锁更贵。
+- `renderPreRoll` **不改 `positionBeats`**；数拍期间 `blockBeats.store(0.0)`。
+- 数完**同一个块里**交接：`cancelPreRoll()` 后把 `numSamples - segment` 交给 `renderNextBlock`。
+  在块边界交接会塞一个 buffer 的静音（最多 46 ms，且随 buffer 大小变）。
+- `getPreRollBeatsLeft()` = `total - floor (preRollBeat)`，所以读数从 N 掉到 1。
+- 速度取**播放头所在位置**的速度，且数拍内部不跟速度曲线变化（数拍不是音乐）。
+- `setPositionBeats` / `AudioEngine::pause` / `finishRecording` 一律 `cancelPreRoll()`。
+
+**录音与预备拍**
+- `MainComponent::startRecording()` 顺序：`playTransport()`（会 rewind 停在线尾的播放头）
+  → `startPreRoll (countIn)` → 读 `recordStartBeat` → `takeCollector.begin` → `beginRecording`。
+- `skipSamples = countIn × getSecondsPerBeat() × sampleRate`。
+- `Recorder::begin (samplesToSkip)` → `std::atomic<int> skipRemaining`，`append()` 里先按它
+  左移 `sourceOffset`。**不是"数完再 arm"**：那要等一个 timer tick，take 会从自己的
+  downbeat 之后开始。
+
+**顶栏**
+- `getMetronomeButtonBounds()` = `getBpmFieldBounds().getRight() + ui::px(6)`，`ui::px(34) × ui::px(28)`；
+  `getNewButtonBounds()` 跟着右移（P88 挪了 36 px）。
+- 字形：上窄下宽的描边机身 + 斜臂 + **末端 3.2px 实心配重圆**。少了配重读成 λ。
+- 录音时读数区改写 `预备 N`（`theme::record`）；读数区本来在写 `0:02.0`。
+- 左键开关，右键菜单：音量 0/25/50/75/100%、预备拍 关 / 1 小节 / 2 小节
+  （按工程拍号算，3/4 歌写"3 拍"）。
+- 状态还没进工程文件：`metronomeEnabled` / `metronomeVolume` / `countInBeats` 是 `MainComponent`
+  的成员，重启回默认（关 / 50% / 4 拍）。`formatVersion` 仍是 28。
+
 ## 会话与撤销
 - **会话重置唯一入口 `buildSession(withEmptyLayer)`**：清 automation/mixer → restoreLayers →
   restoreSlots → BPM 120 → 清 currentProject → reconcilePlugins。空白 = 1 空图层 + 1 原装音源。

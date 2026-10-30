@@ -234,12 +234,19 @@ void RecordBuffer::prepare (double sampleRateToUse, int numChannels, double maxS
     storage.clear();
 }
 
-void RecordBuffer::begin()
+void RecordBuffer::begin (int samplesToSkip)
 {
     if (channels <= 0 || storage.getNumSamples() <= 0)
         return;
 
     writePos.store (0, std::memory_order_release);
+
+    // Phase 88: a count-in is four beats of click during which the tape must
+    // NOT advance. Dropping the head here rather than starting the recorder
+    // later keeps the drop sample-exact: the message thread would be up to a
+    // timer tick late, and the take would then be missing its first note.
+    skipRemaining.store (juce::jmax (0, samplesToSkip), std::memory_order_relaxed);
+
     frozenSamples = 0;
     armed.store (true, std::memory_order_release);
 }
@@ -255,8 +262,35 @@ void RecordBuffer::finish()
 
 void RecordBuffer::append (const float* const* inputs, int numInputs, int numSamples) noexcept
 {
-    if (! armed.load (std::memory_order_acquire) || inputs == nullptr || numSamples <= 0)
+    if (! armed.load (std::memory_order_acquire) || numSamples <= 0)
         return;
+
+    // Phase 88: the count-in. These samples are real time but not part of the
+    // take, so they are dropped before anything else looks at the block — and
+    // they are dropped per channel, which is why the pointer offset happens
+    // here rather than by shrinking `numSamples` and letting the loop below
+    // copy from the start of the buffer again.
+    const int skip = skipRemaining.load (std::memory_order_relaxed);
+    int sourceOffset = 0;
+
+    if (skip > 0)
+    {
+        const int dropped = juce::jmin (skip, numSamples);
+        skipRemaining.store (skip - dropped, std::memory_order_relaxed);
+        sourceOffset = dropped;
+
+        if (dropped >= numSamples)
+            return;
+    }
+
+    if (inputs == nullptr)
+    {
+        // An input-less device still has a tape, but there is nothing to skip
+        // and nothing to write: the count is over.
+        return;
+    }
+
+    const int remaining = numSamples - sourceOffset;
 
     const int capacity = storage.getNumSamples();
     const int start    = writePos.load (std::memory_order_relaxed);
@@ -269,7 +303,7 @@ void RecordBuffer::append (const float* const* inputs, int numInputs, int numSam
         return;
     }
 
-    const int count = juce::jmin (numSamples, capacity - start);
+    const int count = juce::jmin (remaining, capacity - start);
 
     if (numInputs <= 0)
     {
@@ -290,7 +324,7 @@ void RecordBuffer::append (const float* const* inputs, int numInputs, int numSam
         if (source == nullptr)
             storage.clear (ch, start, count);
         else
-            storage.copyFrom (ch, start, source, count);
+            storage.copyFrom (ch, start, source + sourceOffset, count);
     }
 
     writePos.store (start + count, std::memory_order_release);

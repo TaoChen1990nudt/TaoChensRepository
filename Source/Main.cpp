@@ -281,6 +281,10 @@ namespace
         // roll is photographed on its own with a region already set.
         writePng ("-loop", component.createLoopSnapshot (8.0, 16.0));
 
+        // Same rule as the loop: switching the click on and starting a count-in
+        // changes what the bar says, so this still is taken last as well.
+        writePng ("-metronome", component.createMetronomeSnapshot (4));
+
         pngFile.withFileExtension (".log").replaceWithText (report);
         std::cout << report << std::endl;
 

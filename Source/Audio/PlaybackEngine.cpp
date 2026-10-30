@@ -294,6 +294,10 @@ void PlaybackEngine::setSampleRate (double newSampleRate)
 
     sampleRate = newSampleRate;
 
+    // Phase 88: the click shapes are sample-rate dependent, so they are rebuilt
+    // here with the delay buffers — on the message thread, never in a callback.
+    metronome.prepare (sampleRate);
+
     // Insert memory is sized by sample rate (delay buffers), so it is rebuilt
     // here — on the message thread — never in the callback. Phase 25: only the
     // chains that were ever prepared, which keeps the cost proportional to the
@@ -346,6 +350,11 @@ void PlaybackEngine::prepareToPlay (double newSampleRate, int expectedBlockSize)
 
 void PlaybackEngine::setPositionBeats (double beats)
 {
+    // Phase 88: locating during a count-in means the user changed their mind
+    // about where the take starts, and a count-in that keeps clicking towards
+    // the old beat is counting towards a place the playhead has left.
+    cancelPreRoll();
+
     positionBeats.store (juce::jlimit (0.0, juce::jmax (0.0, getLengthBeats()), beats),
                          std::memory_order_relaxed);
 }
@@ -2382,6 +2391,13 @@ void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numS
 
         renderInto (*current, map.secondsAtBeat (posBeats), segment, slice, &stats);
 
+        // Phase 88: the click rides ON TOP of the render, per segment, so it
+        // follows the loop (a wrapped lap clicks on the region's own beats) and
+        // a tempo change mid-block. `renderInto` is the exporter's entry point
+        // too — keeping the click out of it is what makes "an export cannot
+        // contain a click" structural instead of a setting someone remembers.
+        metronome.render (slice, segment, posBeats, beatsPerSample, false);
+
         offset    += segment;
         remaining -= segment;
         posBeats  += (double) segment * beatsPerSample;
@@ -2450,6 +2466,110 @@ void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numS
                                  output.getMagnitude (ch, 0, numSamples)),
                      std::memory_order_relaxed);
     }
+}
+
+//==============================================================================
+//  Phase 88: the count-in
+//==============================================================================
+void PlaybackEngine::startPreRoll (int beats) noexcept
+{
+    const int total = juce::jlimit (0, 64, beats);
+
+    // Payload before the gate: `preRollBeatsLeft` is what `isPreRolling()` reads,
+    // so it goes last. A callback that slips in between renders a count-in whose
+    // total is one block old — harmless, and the alternative (a lock between the
+    // message thread and the callback) costs more than it fixes.
+    preRollBeatsTotal.store (total, std::memory_order_relaxed);
+    preRollBeat.store (0.0, std::memory_order_relaxed);
+    metronome.silence();
+    preRollBeatsLeft.store (total, std::memory_order_relaxed);
+}
+
+void PlaybackEngine::cancelPreRoll() noexcept
+{
+    preRollBeatsLeft.store (0, std::memory_order_relaxed);
+}
+
+int PlaybackEngine::getPreRollBeatsLeft() const noexcept
+{
+    const int total = preRollBeatsTotal.load (std::memory_order_relaxed);
+
+    if (preRollBeatsLeft.load (std::memory_order_relaxed) <= 0)
+        return 0;
+
+    const int done = (int) std::floor (preRollBeat.load (std::memory_order_relaxed));
+
+    return juce::jmax (0, total - done);
+}
+
+void PlaybackEngine::renderPreRoll (juce::AudioBuffer<float>& output, int numSamples)
+{
+    if (numSamples <= 0)
+        return;
+
+    output.clear();
+
+    const int total = preRollBeatsTotal.load (std::memory_order_relaxed);
+
+    if (total <= 0 || sampleRate <= 0.0)
+    {
+        cancelPreRoll();
+        return;
+    }
+
+    // The tempo of the place the count-in happens at. A count-in is not music,
+    // so it does NOT follow tempo automation within itself: four beats at the
+    // tempo the take starts at is the number the player is being given.
+    const auto* current = getScheduleRaw();
+    const double secondsPerBeat = current != nullptr
+                                    ? current->tempo.secondsPerBeatAt (positionBeats.load (std::memory_order_relaxed))
+                                    : 60.0 / defaultBpm;
+
+    const double beatsPerSample = 1.0 / (sampleRate * juce::jmax (1.0e-4, secondsPerBeat));
+    const double endBeat = (double) total;
+
+    double beat = preRollBeat.load (std::memory_order_relaxed);
+    int segment = numSamples;
+
+    if (beat + (double) numSamples * beatsPerSample > endBeat)
+        segment = juce::jlimit (0, numSamples, (int) std::floor ((endBeat - beat) / beatsPerSample));
+
+    if (segment > 0)
+    {
+        juce::AudioBuffer<float> slice (output.getArrayOfWritePointers(),
+                                        output.getNumChannels(), 0, segment);
+
+        // `force`: the player asked to be counted in. A count-in that is silent
+        // because the metronome switch is off is not a count-in.
+        metronome.render (slice, segment, beat, beatsPerSample, true);
+
+        beat += (double) segment * beatsPerSample;
+        preRollBeat.store (beat, std::memory_order_relaxed);
+    }
+
+    if (beat >= endBeat - 1.0e-9)
+    {
+        // Handing over mid-block is the point of this function: ending the
+        // count-in at a block boundary would put up to one buffer of silence
+        // between the last click and the first note of the take.
+        cancelPreRoll();
+
+        if (segment < numSamples)
+        {
+            juce::AudioBuffer<float> rest (output.getArrayOfWritePointers(),
+                                           output.getNumChannels(), segment, numSamples - segment);
+
+            renderNextBlock (rest, numSamples - segment);
+        }
+
+        return;
+    }
+
+    // The song did not move. Say so, so the playhead does not extrapolate from
+    // a block that is about to be counted into rather than played.
+    blockStartBeats.store (positionBeats.load (std::memory_order_relaxed), std::memory_order_relaxed);
+    blockBeats.store (0.0, std::memory_order_relaxed);
+    blockStartTimeMs.store (juce::Time::getMillisecondCounterHiRes(), std::memory_order_relaxed);
 }
 
 //==============================================================================

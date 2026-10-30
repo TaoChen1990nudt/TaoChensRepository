@@ -163,6 +163,33 @@ public:
     void finishRecording();
     bool isRecording() const noexcept { return recording.load(); }
 
+    //-- Phase 88: the click track ---------------------------------------------
+    /** Sits right of the tempo field: a metronome is a tempo thing before it is
+        a transport thing, and the transport cluster had eight pixels to spare.
+
+        Click toggles it; right-click sets the level and the count-in length.
+        Both settings are remembered for the session only — there is no
+        application settings file in this project, and inventing one to store
+        three numbers would be a bigger change than the feature. */
+    juce::Rectangle<int> getMetronomeButtonBounds() const;
+    void toggleMetronome();
+    void showMetronomeMenu();
+
+    void  setMetronomeEnabled (bool shouldClick);
+    bool  isMetronomeEnabled() const noexcept { return metronomeEnabled; }
+    void  setMetronomeVolume (float volume01);
+    float getMetronomeVolume() const noexcept { return metronomeVolume; }
+    /** 0 = no count-in; anything else is the number of beats. */
+    void setCountInBeats (int beats);
+    int  getCountInBeats() const noexcept { return countInBeats; }
+
+    /** Pushes the three settings onto the engine's metronome. Called whenever
+        one of them changes, and once at construction. */
+    void applyMetronomeSettings();
+
+    /** Audio thread state, read by the painter: how many counts are left. */
+    int getCountInBeatsLeft();
+
     /** The whole landing step in one place: WAV + sampler + clip for the audio,
         notes + group + lanes for the MIDI. Shared by the button and the
         self-test so a take is never built two ways. */
@@ -414,6 +441,10 @@ public:
         to the ruler and the first lanes, with a region already set. */
     juce::Image createLoopSnapshot (double startBeat, double endBeat);
 
+    /** P88: the transport bar with the click switched on and a count-in in
+        progress — the two states a metronome has to be legible in. */
+    juce::Image createMetronomeSnapshot (int countInBeatsToShow);
+
     //-- Phase 6: project files and offline bounce ----------------------------
     /** Writes the whole session to a .atomic file. Also the path the self-test
         and the command line use — the Save button only adds a file chooser in
@@ -495,6 +526,11 @@ public:
         on its name strip. Reading the model instead would only prove the model
         changed, not that the words on screen did. */
     PianoRollComponent& pianoRollForTest() { return pianoRoll; }
+
+    /** P88: the engine's own metronome, so a test can check that the switch on
+        the top bar reaches the thing that clicks rather than only the flag
+        that paints the plate. */
+    PlaybackEngine& getPlaybackForTest() { return audio.getPlayback(); }
 
     //-- Phase 9: VST3 --------------------------------------------------------
     /** The session's plugin host. Main.cpp adds extra search paths here before
@@ -1335,6 +1371,12 @@ private:
     bool hoveringPlay  = false;
     bool hoveringStop  = false;
     bool hoveringRecord = false;      // Phase 81
+    bool hoveringMetronome = false;   // Phase 88
+
+    //-- Phase 88 -------------------------------------------------------------
+    bool  metronomeEnabled = false;
+    float metronomeVolume  = 0.5f;
+    int   countInBeats     = 4;
 
     bool hoveringSave   = false;
     bool hoveringLoad   = false;

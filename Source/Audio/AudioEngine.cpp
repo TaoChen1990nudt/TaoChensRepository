@@ -88,7 +88,7 @@ bool AudioEngine::hasAudioInput() const
     return false;
 }
 
-bool AudioEngine::beginRecording (double maxSeconds)
+bool AudioEngine::beginRecording (double maxSeconds, int samplesToSkip)
 {
     if (! deviceOpen && ! start())
         return false;
@@ -112,7 +112,7 @@ bool AudioEngine::beginRecording (double maxSeconds)
     // Always two tracks. A mono microphone is duplicated by RecordBuffer::append
     // — the loader downmixes to stereo for the same reason: one shape downstream.
     recordBuffer.prepare (device->getCurrentSampleRate(), 2, maxSeconds);
-    recordBuffer.begin();
+    recordBuffer.begin (samplesToSkip);
     return recordBuffer.isRecording();
 }
 
@@ -166,6 +166,9 @@ void AudioEngine::pause()
 {
     if (isPlaying())
     {
+        // Phase 88: pausing during a count-in stops the counting. Resuming
+        // starts the take, not the count — the player has already been given it.
+        playback.cancelPreRoll();
         beginFadeOut();
         transportState.store ((int) TransportState::paused, std::memory_order_release);
     }
@@ -340,6 +343,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     const bool running = isPlaying();
 
+    // Phase 88: a count-in is not the transport rolling, but it is the one
+    // thing that must be heard while it happens. Checked before `running`: when
+    // the count-in ends inside a block, `renderPreRoll` renders the rest of that
+    // block itself, so the branch must not be taken twice.
+    const bool preRolling = playback.isPreRolling();
+
     // Phase 19: a preview (drawing or dragging a note) has to be audible with
     // the transport stopped, so "nothing is playing" is no longer a reason to
     // stop rendering. Phase 20 adds the file browser's sample preview, which
@@ -352,16 +361,31 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // point of it.
     const bool live = playback.hasLiveNotes();
 
-    masterFade.setTargetValue (running ? 1.0f : 0.0f);
+    if (preRolling)
+    {
+        // A count-in has no music to fade in, and fading it would swallow the
+        // downbeat — the one click that has to be unmissable. Snap the ramp to
+        // unity so the first count is at full level, and so the first beat of
+        // the take that follows does not arrive through a swelling fade.
+        masterFade.setCurrentAndTargetValue (1.0f);
+    }
+    else
+    {
+        masterFade.setTargetValue (running ? 1.0f : 0.0f);
+    }
 
     // Once the release ramp has reached zero there is nothing left to render.
-    if (! running && ! audition && ! preview && ! live
+    if (! running && ! preRolling && ! audition && ! preview && ! live
           && ! masterFade.isSmoothing() && masterFade.getCurrentValue() < 1.0e-4f)
         return;
 
     juce::AudioBuffer<float> output (outputChannelData, numOutputChannels, numSamples);
 
-    if (running)
+    if (preRolling)
+    {
+        playback.renderPreRoll (output, numSamples);
+    }
+    else if (running)
     {
         playback.renderNextBlock (output, numSamples);
     }

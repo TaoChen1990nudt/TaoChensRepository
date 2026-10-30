@@ -129,8 +129,11 @@ public:
     /** Message thread. Clears the tape and arms the callback.
 
         `maxSeconds` is preallocated up front because the audio thread must not
-        allocate: a five-minute ceiling at the device's own sample rate. */
-    bool beginRecording (double maxSeconds = 300.0);
+        allocate: a five-minute ceiling at the device's own sample rate.
+
+        `samplesToSkip` (Phase 88) is the count-in: those input samples are
+        dropped, so a take begins on the beat the player was counted in to. */
+    bool beginRecording (double maxSeconds = 300.0, int samplesToSkip = 0);
 
     /** Message thread. Disarms and hands back what was captured. An empty
         buffer means the device had no inputs (or nothing was armed). */
