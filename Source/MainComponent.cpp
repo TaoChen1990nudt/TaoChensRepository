@@ -4294,11 +4294,18 @@ void MainComponent::showMetronomeMenu()
 
     // "1 小节" rather than "4 拍": the count-in is a bar of the song's own
     // metre, and a 3/4 song counts in three.
+    //
+    // The ids start at 210, not 200. They used to be 200/201/202 and the volume
+    // items are `100 + percent` — so 100% was ALSO 200, and because the volume
+    // branch is tested first (`100..200`), selecting 预备拍 ▸ 关 quietly set the
+    // click to full volume instead of turning the count-in off. Three ids below
+    // the volume range would have collided with 0/25/50; 210 is the first free
+    // one and keeps "预备拍" contiguous.
     const int barBeats = meter::clamp (beatsPerBar);
-    menu.addItem (200, utf8 ("关"), true, countInBeats == 0);
-    menu.addItem (201, utf8 ("1 小节（") + juce::String (barBeats) + utf8 (" 拍）"),
+    menu.addItem (210, utf8 ("关"), true, countInBeats == 0);
+    menu.addItem (211, utf8 ("1 小节（") + juce::String (barBeats) + utf8 (" 拍）"),
                   true, countInBeats == barBeats);
-    menu.addItem (202, utf8 ("2 小节（") + juce::String (barBeats * 2) + utf8 (" 拍）"),
+    menu.addItem (212, utf8 ("2 小节（") + juce::String (barBeats * 2) + utf8 (" 拍）"),
                   true, countInBeats == barBeats * 2);
 
     // The second door to the metre. The ruler's corner is the one that is
@@ -4326,13 +4333,15 @@ void MainComponent::showMetronomeMenu()
 
                             if (result == 1)
                                 toggleMetronome();
-                            else if (result >= 100 && result <= 200)
+                            else if (result >= 100 && result < 200)
                                 setMetronomeVolume ((float) (result - 100) / 100.0f);
                             else if (result == 200)
+                                setMetronomeVolume (1.0f);      // 100%
+                            else if (result == 210)
                                 setCountInBeats (0);
-                            else if (result == 201)
+                            else if (result == 211)
                                 setCountInBeats (meter::clamp (beatsPerBar));
-                            else if (result == 202)
+                            else if (result == 212)
                                 setCountInBeats (meter::clamp (beatsPerBar) * 2);
                             else if (result > 300)
                             {
