@@ -60,7 +60,20 @@ target_sources(AtomicDAW PRIVATE
     Source/UI/MixerPanel.cpp
     Source/UI/MixerWindow.cpp
     Source/UI/NoteEnvelopePanel.cpp
+    # Phase 85: the piano roll is one class in eleven translation units, split
+    # by topic so a change to, say, the sample box rebuilds 800 lines and not
+    # 13,000. PianoRollInternals.h is the header-only sliver they share.
     Source/UI/PianoRollComponent.cpp
+    Source/UI/PianoRollInput.cpp
+    Source/UI/PianoRollPaint.cpp
+    Source/UI/PianoRollNoteEdit.cpp
+    Source/UI/PianoRollSelection.cpp
+    Source/UI/PianoRollAutomationNote.cpp
+    Source/UI/PianoRollAutomationGroup.cpp
+    Source/UI/PianoRollAutomationSample.cpp
+    Source/UI/PianoRollClipboard.cpp
+    Source/UI/PianoRollSamples.cpp
+    Source/UI/PianoRollSampleDraw.cpp
     Source/UI/RackPanel.cpp
     Source/UI/SampleEnvelopePanel.cpp
     Source/UI/NameEditor.cpp

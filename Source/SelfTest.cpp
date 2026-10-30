@@ -14703,6 +14703,110 @@ juce::String MainComponent::runSelfTest()
                r79.getSlotName (firstSlot) == utf8 ("自己改"),
                r79.getSlotName (firstSlot));
 
+        //-- C2. P85：双击卡片（名字以外）打开音源界面 ---------------------
+        // P79 把名字的双击给了改名，那「打开」就得落在卡片其余部分。这两条
+        // 必须同时成立，否则合起来就是「双击卡片有时改名有时开窗」——一个
+        // 用户永远学不会的手势。这里钉住三件事：空白区上报槽 id（不是卡片
+        // 序号）、名字仍旧只改名、控件不被抢走。
+        {
+            RackModel  r85;
+            r85.addSynth();
+            r85.addSynth();
+
+            RackPanel cards85 (r85);
+            cards85.setSize (RackPanel::panelWidth, 720);
+
+            std::vector<int> opened;
+            cards85.onCardDoubleClicked = [&opened] (int id) { opened.push_back (id); };
+
+            const int slot85a = r85.getSlotIdAt (0);
+            const int slot85b = r85.getSlotIdAt (1);
+
+            // 空白点是找出来的，不是写死的：卡片布局一改，写死的那个点会
+            // 变成某个按钮，这条测试就会以「开了不该开的窗」的理由失败。
+            const auto findBlank = [&cards85] (int index) -> juce::Point<int>
+            {
+                const auto card = cards85.getCardBoundsForTest (index);
+
+                for (int y = card.getY() + 1; y < card.getBottom(); y += 2)
+                    for (int x = card.getX() + 1; x < card.getRight(); x += 2)
+                        if (! cards85.getNameBounds (index).contains (x, y)
+                             && ! cards85.isOverCardControlForTest (index, { x, y }))
+                            return { x, y };
+
+                return { -1, -1 };
+            };
+
+            const auto blank0 = findBlank (0);
+            const auto blank1 = findBlank (1);
+
+            check (utf8 ("音源卡片上留着一块不属于任何控件的空白（双击它是「打开」）"),
+                   blank0.x >= 0 && blank1.x >= 0,
+                   juce::String (blank0.x) + "," + juce::String (blank0.y));
+
+            cards85.simulateDoubleClickForTest (blank0);
+
+            check (utf8 ("双击卡片空白处上报的是槽 id，不是卡片序号"),
+                   opened.size() == 1 && opened.front() == slot85a,
+                   juce::String ((int) opened.size()) + utf8 (" 次 / ")
+                     + juce::String (opened.empty() ? -1 : opened.front())
+                     + utf8 ("（应为 ") + juce::String (slot85a) + utf8 ("）"));
+
+            cards85.simulateDoubleClickForTest (blank1);
+
+            check (utf8 ("第二张卡上报它自己的槽 id（没有把第一张的 id 复用）"),
+                   opened.size() == 2 && opened.back() == slot85b && slot85b != slot85a,
+                   juce::String ((int) opened.size()) + utf8 (" 次 / ")
+                     + juce::String (opened.empty() ? -1 : opened.back()));
+
+            // 名字：P79 的语义不许被这一步改掉
+            opened.clear();
+            cards85.simulateDoubleClickForTest (cards85.getNameBounds (1).getCentre());
+
+            check (utf8 ("双击名字仍旧只打开改名框，不顺手开界面"),
+                   cards85.getRenamingSlotForTest() == 1 && opened.empty(),
+                   juce::String (cards85.getRenamingSlotForTest()) + utf8 ("（应为 1）/ ")
+                     + juce::String ((int) opened.size()) + utf8 (" 次上报"));
+
+            cards85.getNameEditorForTest().close (true);
+
+            // 控件：第一次点击已经做了事，第二次不该再被解释成「打开」
+            opened.clear();
+            const bool muteBefore = r85.findSlot (slot85a) != nullptr
+                                      && r85.findSlot (slot85a)->muted;
+
+            cards85.simulateDoubleClickForTest (cards85.getMuteBoundsForTest (0).getCentre());
+
+            check (utf8 ("双击静音键是两次切换，不会开界面"),
+                   opened.empty()
+                     && r85.findSlot (slot85a) != nullptr
+                     && r85.findSlot (slot85a)->muted == muteBefore,
+                   juce::String ((int) opened.size()) + utf8 (" 次上报 / 静音 ")
+                     + (muteBefore ? "1" : "0") + " -> "
+                     + (r85.findSlot (slot85a) != nullptr && r85.findSlot (slot85a)->muted
+                          ? "1" : "0"));
+
+            // 折叠卡：整张卡只剩名字和那个 caret，其余仍然算「卡片」
+            r85.setCollapsed (slot85b, true);
+            opened.clear();
+
+            const auto folded = findBlank (1);
+            cards85.simulateDoubleClickForTest (folded);
+
+            check (utf8 ("折叠的卡片也能双击打开（整行只有名字的那个 caret 除外）"),
+                   folded.x >= 0 && opened.size() == 1 && opened.front() == slot85b,
+                   juce::String (folded.x) + "," + juce::String (folded.y) + utf8 (" / ")
+                     + juce::String ((int) opened.size()) + utf8 (" 次上报"));
+
+            // 卡片以外（页脚）什么都不该发生
+            opened.clear();
+            cards85.simulateDoubleClickForTest ({ cards85.getWidth() / 2, cards85.getHeight() - 4 });
+
+            check (utf8 ("页面空白处双击不上报（不是「哪里都能开音源」）"),
+                   opened.empty(),
+                   juce::String ((int) opened.size()) + utf8 (" 次上报"));
+        }
+
         //-- D. 空名一律拒收 ----------------------------------------------
         r79.setSlotName (firstSlot, "   ");
         t79.setLayerName (0, "  ");
@@ -14841,6 +14945,78 @@ juce::String MainComponent::runSelfTest()
                  + (hostStack.getLayer (0)->findSample (followsId) != nullptr
                       ? hostStack.getLayer (0)->findSample (followsId)->name
                       : juce::String (utf8 ("块没了"))));
+
+        //-- J. P85：宿主接上之后，双击真的开得出窗口 ----------------------
+        // 前面那组是面板级，只证明"上报了哪个槽"。这里补另一半：宿主拿到
+        // 槽 id 之后开的必须是那个实例的窗口，而且开第二次是把窗口提到前面
+        // 而不是再开一个——"每个实例一扇窗"是 P38 就定下的，双击不能例外。
+        //
+        // 用 THIS 而不是上面那个 host：`plugins` 是各自的成员，从 this 的
+        // 插件库里 load 出来的实例只有 this 认得，host.openSlotEditor 会
+        // 找不到它（查的是 host.plugins）。
+        {
+            const int oscSlot = getRack().addSynth();
+
+            check (utf8 ("内置合成器没有界面可开：openSlotEditor 答 false"),
+                   ! openSlotEditor (oscSlot),
+                   getRack().getSlotName (oscSlot));
+
+            getRack().removeSlot (oscSlot);
+
+            // 载入失败的槽：pluginId 还在、名字还在，就是没有实例。这种槽
+            // 从外面看和成功的槽一模一样，所以"没有实例就别开窗"必须是这里
+            // 的一条，而不是编辑器窗口构造时的兜底。
+            const int ghostSlot = getRack().addSynth();
+            auto*     ghost     = getRack().findSlot (ghostSlot);
+            ghost->pluginId   = 999999;
+            ghost->pluginName = "Ghost Synth";
+
+            check (utf8 ("插件没能载入时 openSlotEditor 答 false，也不留一扇空窗"),
+                   ! openSlotEditor (ghostSlot) && pluginWindows.count (999999) == 0,
+                   juce::String ((int) pluginWindows.size()) + utf8 (" 扇窗"));
+
+            getRack().removeSlot (ghostSlot);
+
+            juce::PluginDescription testSynth;
+
+            for (const auto& entry : plugins.getLibrary())
+                if (entry.isInstrument && entry.description.name.containsIgnoreCase ("Test Synth"))
+                    testSynth = entry.description;
+
+            if (testSynth.name.isNotEmpty())
+            {
+                const int    slot85 = getRack().addSynth();
+                juce::String loadError;
+                const int    realId85 = plugins.load (testSynth, &loadError);
+
+                getRack().replaceWithPlugin (slot85, testSynth, realId85);
+
+                const bool opened = openSlotEditor (slot85);
+
+                check (utf8 ("双击一个真实 VST3 音源，开的是它那个实例的窗口"),
+                       opened && pluginWindows.count (realId85) == 1
+                         && pluginWindows[realId85]->getInstanceId() == realId85,
+                       "instance " + juce::String (realId85)
+                         + utf8 (" / opened ") + (opened ? "1" : "0")
+                         + utf8 (" / windows ") + juce::String ((int) pluginWindows.size())
+                         + (loadError.isNotEmpty() ? juce::String (" / ") + loadError
+                                                   : juce::String()));
+
+                const auto windowsBefore = pluginWindows.size();
+                openSlotEditor (slot85);
+
+                check (utf8 ("再双击一次是把窗口提到前面，不是又开一个"),
+                       pluginWindows.size() == windowsBefore,
+                       juce::String ((int) pluginWindows.size()) + utf8 (" 扇窗（应为 ")
+                         + juce::String ((int) windowsBefore) + utf8 ("）"));
+
+                pluginWindows.erase (realId85);
+
+                getRack().replaceWithNative (slot85, Waveform::saw);
+                reconcilePlugins();
+                getRack().removeSlot (slot85);
+            }
+        }
     }
 
     //-- P80: 工程速度自动化 -----------------------------------------------

@@ -119,6 +119,18 @@ public:
         piano roll and the layer list. -1 means "the empty rack was clicked". */
     std::function<void (int slotId)> onCardFocused;
 
+    /** Phase 85: a card was double-clicked somewhere other than its name.
+
+        The name keeps the meaning P78 gave it — double-click the words and edit
+        them — so this fires only on the rest of the card. That makes the gesture
+        a pair instead of a conflict: the words are the name, the card is the
+        instrument.
+
+        The panel reports the slot and says nothing about what "open" means: it
+        has no plugin host, so it cannot know whether this synth has a window at
+        all. A built-in oscillator simply has no one listening to do anything. */
+    std::function<void (int slotId)> onCardDoubleClicked;
+
     /** Highlights the synth the current note selection plays on. `hasSelection`
         is separate from the id because "nothing is selected" and "the
         selection resolves to no synth" must not look the same. */
@@ -178,6 +190,22 @@ public:
     /** P79: the real double click, driven by its coordinate. */
     void simulateDoubleClickForTest (juce::Point<int> at) { handleDoubleClick (at); }
     NameEditor& getNameEditorForTest() noexcept { return nameEditor; }
+
+    /** P85: which points of a card are already spoken for.
+
+        The self-test uses this to FIND an empty spot rather than hard-coding
+        one — card layouts move, and a test that asserts "the third pixel of the
+        fourth row is blank" fails for a reason that has nothing to do with the
+        bug it was written to catch. */
+    bool isOverCardControlForTest (int index, juce::Point<int> at) const
+    {
+        return isOverCardControl (index, at);
+    }
+
+    /** P85: the S / M / caret rectangles, so "the button was not swallowed by
+        the open gesture" can be asserted on the real geometry. */
+    juce::Rectangle<int> getMuteBoundsForTest (int index) const     { return getMuteBounds (index); }
+    juce::Rectangle<int> getCollapseBoundsForTest (int index) const { return getCollapseBounds (index); }
 
     /** Which card is highlighted, or -1. The self-test asserts the highlight
         follows the selection, so the id has to be readable. */
@@ -256,6 +284,15 @@ private:
 
     void drawCard (juce::Graphics&, int index);
     void drawLaneHeader (juce::Graphics&, int index);
+
+    /** Phase 85: is this point on one of the card's own controls?
+
+        A double click on the card means "open this instrument", but S, M, the
+        fader and the rest already mean something on the FIRST click — two of
+        those clicks are two toggles, not one request to open a window. Without
+        this test, double-clicking the mute button would un-mute, re-mute, and
+        then pop a plugin window nobody asked for. */
+    bool isOverCardControl (int index, juce::Point<int> pos) const;
 
     void syncLaneEditors();
     void updateLayout();

@@ -641,6 +641,20 @@ MainComponent::MainComponent()
         focusSynth (slotId);
     };
 
+    //-- Phase 85: double-clicking a card opens the instrument ---------------
+    // The name still renames itself (P79) — the panel settles that before it
+    // reaches here. Everywhere else on the card means "show me this synth",
+    // which is the same answer the piano roll gives to a note (P78) and the
+    // same window the card menu's 打开插件界面 opens.
+    //
+    // Silent when there is nothing to open: a built-in oscillator has no
+    // window, and a message box for "you double-clicked a sine wave" would be
+    // the app arguing with the gesture instead of just doing nothing.
+    rackPanel.onCardDoubleClicked = [this] (int slotId)
+    {
+        openSlotEditor (slotId);
+    };
+
     //-- Phase 32: the × on a sampler takes its clips with it -----------------
     // Phase 34: through the question, not straight to the executor — deleting a
     // card is about to delete music.
@@ -2816,21 +2830,23 @@ void MainComponent::applyRackCardChoice (int result, int slotId)
         // mixer inserts use, so a plugin opened from the rack behaves exactly
         // like one opened from a channel strip (one window per instance, and
         // the window closes itself when the instance is unloaded).
+        //
+        // Phase 85: the same entry point the double click uses, so "the menu
+        // item and the gesture agree" is a property of the code and not
+        // something two branches have to keep remembering.
         auto* slot = rack.findSlot (slotId);
 
         if (slot == nullptr || ! slot->isPlugin())
             return;
 
-        if (plugins.getProcessorForEditor (slot->pluginId) == nullptr)
+        if (! openSlotEditor (slotId))
         {
             showMessage (utf8 ("插件没有载入"),
                          utf8 ("这个 VST3 在当前会话里没能加载，所以没有界面可开。\n")
                            + utf8 ("可以在「替换音源」里换一个乐器，或在插件管理器里重新扫描。"),
                          true);
-            return;
         }
 
-        openPluginEditor (slot->pluginId, slot->getDisplayName());
         return;
     }
 
@@ -2935,6 +2951,26 @@ void MainComponent::openInsertEditor (int channel, int slot)
     window->setKeyForwarder (&pluginForwarder);
 
     insertWindows.push_back (std::move (window));
+}
+
+bool MainComponent::openSlotEditor (int slotId)
+{
+    auto* slot = rack.findSlot (slotId);
+
+    // A built-in oscillator or a sampler has no window of its own. Saying so
+    // here — once — is why the double click can stay silent about it.
+    if (slot == nullptr || ! slot->isPlugin())
+        return false;
+
+    // Phase 12's rule: ask the host for the live instance, never assume the id
+    // still resolves. A plugin that failed to load keeps its id and its name,
+    // which is exactly the case a user cannot tell from the outside.
+    if (plugins.getProcessorForEditor (slot->pluginId) == nullptr)
+        return false;
+
+    openPluginEditor (slot->pluginId, slot->getDisplayName());
+
+    return true;
 }
 
 void MainComponent::openPluginEditor (int instanceId, const juce::String& displayName)

@@ -750,6 +750,16 @@ private:
     void closePluginEditor (int instanceId);
     void closeInsertEditor (InsertEditorWindow* window);
 
+    /** Phase 85: open the editor of whatever instrument a rack slot holds.
+
+        Returns false — and shows nothing — when the slot is a built-in synth,
+        or when its VST3 is not loaded. The callers decide how loud to be about
+        it: the card menu already greys the item out and explains itself, while
+        a double click on an oscillator should stay silent, because "double
+        click opens what is under the pointer" is a rule that also has to cope
+        with "there is nothing here to open". */
+    bool openSlotEditor (int slotId);
+
     /** Unloads every plugin instance no slot or insert points at any more.
         One place, called after any model change, instead of every delete path
         remembering to tell the host. */

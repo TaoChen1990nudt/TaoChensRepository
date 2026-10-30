@@ -1507,6 +1507,39 @@ void RackPanel::mouseDoubleClick (const juce::MouseEvent& e)
     handleDoubleClick (e.getPosition());
 }
 
+bool RackPanel::isOverCardControl (int index, juce::Point<int> pos) const
+{
+    const auto* slot = rack.getSlot (index);
+
+    if (slot == nullptr)
+        return true;
+
+    // The caret is a control on an open card AND the whole point of a folded
+    // one, so it is tested before the collapsed early-return below.
+    if (getCollapseBounds (index).contains (pos))
+        return true;
+
+    if (slot->collapsed)
+        return false;      // a folded card is its name, its caret and nothing else
+
+    if (getCloseBounds (index).contains (pos))      return true;
+    if (getSoloBounds (index).contains (pos))       return true;
+    if (getMuteBounds (index).contains (pos))       return true;
+    if (getWaveformBounds (index).contains (pos))   return true;
+    if (getPitchRangeBounds (index).contains (pos)) return true;
+    if (getStretchBounds (index).contains (pos) && slot->isSampler())
+        return true;
+    if (getSendBounds (index).contains (pos))       return true;
+
+    // The faders answer the SECOND click too — dragging inside the expanded
+    // band is how a double click nudges them. They are excluded here for the
+    // same reason the mute button is: those two clicks already have a job.
+    if (getVolumeBounds (index).expanded (0, 6).contains (pos)) return true;
+    if (getPanBounds (index).expanded (0, 6).contains (pos))    return true;
+
+    return false;
+}
+
 void RackPanel::handleDoubleClick (juce::Point<int> pos)
 {
     const int index = cardAt (pos);
@@ -1517,10 +1550,22 @@ void RackPanel::handleDoubleClick (juce::Point<int> pos)
     // P78: a double click opens what is under the pointer. On a card that is
     // the name, so it opens as a name. Every other control keeps its own
     // meaning — a double click on the fader is two nudges, not a rename.
-    if (! getNameBounds (index).contains (pos))
+    if (getNameBounds (index).contains (pos))
+    {
+        beginRenameSlot (index);
         return;
+    }
 
-    beginRenameSlot (index);
+    // P85: the rest of the card opens the instrument. Same "opens what is under
+    // the pointer" rule, one level down: the words are the name, the card is
+    // the synth. The host decides whether there is a window to open, because
+    // only it knows what was loaded.
+    if (getViewArea().contains (pos) && ! isOverCardControl (index, pos))
+    {
+        if (auto* slot = rack.getSlot (index))
+            if (onCardDoubleClicked != nullptr)
+                onCardDoubleClicked (slot->id);
+    }
 }
 
 void RackPanel::mouseUp (const juce::MouseEvent&)
