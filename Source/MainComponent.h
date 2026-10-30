@@ -447,6 +447,14 @@ public:
         called from a headless run — a modal dialog there is a hung test. */
     void offerRecoveryIfAny();
 
+    /** Phase 86: whether a project that opens with missing audio is allowed to
+        say so.
+
+        Off by default for the same reason recovery is: every automated run
+        loads projects, and a modal box on the `--snapshot` path is not a prompt,
+        it is a hang. Only the real startup path turns this on. */
+    void setSampleRelinkPromptEnabled (bool shouldPrompt) { sampleRelinkPrompt = shouldPrompt; }
+
     /** Replaces the session with the contents of a recovery copy, keeping the
         project identity the copy declares.
 
@@ -671,8 +679,14 @@ private:
     /** Returns false when the document no longer parses; the session is then
         untouched. Callers that are undoing ignore it, because a snapshot that
         fails to parse could never have been put on the stack in the first
-        place — the recovery path is the one that has to look. */
-    bool         restoreState (const juce::String& xml);
+        place — the recovery path is the one that has to look.
+
+        Phase 86: `projectFile` is what a relative sample path in the document
+        is relative to. Null means "the project this window has open", which is
+        right for undo and for recovery-restore alike — the two callers that
+        pass nothing. A rescue copy needs it explicitly, because at that moment
+        `currentProject` is still the old (often empty) value. */
+    bool         restoreState (const juce::String& xml, const juce::File* projectFile = nullptr);
     void         commitHistory();
     void         applyHistoryPosition();
 
@@ -693,6 +707,36 @@ private:
 
     /** Points this session at a different project's copy, after a save-as. */
     void resetRecoveryFor (const juce::File& projectFile);
+
+    //-- Phase 86: audio paths that no longer resolve --------------------------
+    /** A block whose file is gone, and the thing that owns the path.
+
+        Exactly one of the two pointers is set. Kept as a pair rather than two
+        separate lists because the repair has to write the answer back into the
+        field it came from, and two parallel lists are how the n-th answer ends
+        up on the m-th question. */
+    struct MissingSample
+    {
+        SampleEvent* clip = nullptr;
+        SynthSlot*   slot = nullptr;
+
+        juce::String& path() const
+        {
+            return clip != nullptr ? clip->path : slot->samplePath;
+        }
+    };
+
+    std::vector<MissingSample> collectMissingSamples();
+
+    /** Repoints every broken path that `folder` can answer for. Returns how many
+        were actually repaired — a caller that reports "done" without counting
+        would be lying about the ones the folder did not contain. */
+    int relinkSamplesTo (const juce::File& folder);
+
+    /** Tells the user how many blocks lost their audio and offers the repair.
+        Silent when nothing is missing, which is the normal case. */
+    void offerSampleRelink();
+    void chooseFolderForRelink();
 
     //-- Phase 8: settings popup ---------------------------------------------
     void showSettingsMenu (juce::Point<int> screenPosition);
@@ -1411,6 +1455,10 @@ private:
         stack. Also stops the autosave from writing the blank session the user
         is about to replace. */
     bool         recoveryPromptOpen = false;
+
+    //-- Phase 86: missing audio -------------------------------------------------
+    /** See setSampleRelinkPromptEnabled. Off for every automated run. */
+    bool         sampleRelinkPrompt = false;
 
     bool       exporting = false;
 

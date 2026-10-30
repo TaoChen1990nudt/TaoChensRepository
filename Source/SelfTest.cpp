@@ -9,6 +9,7 @@
 //==============================================================================
 
 #include "MainComponent.h"
+#include "Model/SamplePath.h"
 #include "Util/SharedRules.h"
 #include "Util/Theme.h"
 
@@ -14967,9 +14968,9 @@ juce::String MainComponent::runSelfTest()
             // 从外面看和成功的槽一模一样，所以"没有实例就别开窗"必须是这里
             // 的一条，而不是编辑器窗口构造时的兜底。
             const int ghostSlot = getRack().addSynth();
-            auto*     ghost     = getRack().findSlot (ghostSlot);
-            ghost->pluginId   = 999999;
-            ghost->pluginName = "Ghost Synth";
+            auto*     unloaded  = getRack().findSlot (ghostSlot);
+            unloaded->pluginId   = 999999;
+            unloaded->pluginName = "Ghost Synth";
 
             check (utf8 ("插件没能载入时 openSlotEditor 答 false，也不留一扇空窗"),
                    ! openSlotEditor (ghostSlot) && pluginWindows.count (999999) == 0,
@@ -15693,6 +15694,193 @@ juce::String MainComponent::runSelfTest()
                    juce::String (wasRecording ? "在录" : "没录") + " / "
                      + juce::String (host.isRecording() ? "还在录" : "已停"));
         }
+    }
+
+    //-- P86: 采样的路径跟着工程走 -------------------------------------------
+    // 工程换一个文件夹、换一台机器，采样块必须还能找到自己的音频。分成三件
+    // 事验：写盘时挑哪种路径、读盘时怎么解释、找不到时怎么救。
+    {
+        auto root86 = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                        .getChildFile ("atomic-p86");
+        root86.deleteRecursively();
+        root86.createDirectory();
+
+        const auto mediaDir = root86.getChildFile ("media");
+        mediaDir.createDirectory();
+
+        const auto wav = mediaDir.getChildFile ("kick86.wav");
+        writeTestSampleFile (wav, 0.5, 44100.0, 2, 220.0);
+
+        const auto project = root86.getChildFile ("song.atomic");
+
+        //-- A. 写盘时挑哪种路径 ---------------------------------------------
+        {
+            const auto inside = samplepath::toStored (wav.getFullPathName(), project);
+
+            check (utf8 ("工程下面的采样写成相对路径"),
+                   inside.isNotEmpty() && ! juce::File::isAbsolutePath (inside)
+                     && samplepath::resolve (inside, project) == wav,
+                   inside);
+
+            // 没有工程就没有"相对于谁"。这时候写相对路径等于把文档的意思交给
+            // 进程的当前目录，换一个启动方式就全错。
+            check (utf8 ("还没存过盘的会话照旧写绝对路径"),
+                   samplepath::toStored (wav.getFullPathName(), juce::File())
+                     == wav.getFullPathName(),
+                   samplepath::toStored (wav.getFullPathName(), juce::File()));
+
+            // 工程外面一层的文件走 `..`：仍然是相对的，而且解回来的必须是同一
+            // 个文件——这条是 toStored 唯一的验收标准，不是"看起来短一点"。
+            const auto outside = root86.getParentDirectory().getChildFile ("atomic-p86-outside.wav");
+            writeTestSampleFile (outside, 0.2, 44100.0, 1, 440.0);
+
+            const auto outsideStored = samplepath::toStored (outside.getFullPathName(), project);
+
+            check (utf8 ("工程外面的采样写成带 .. 的相对路径，并且解得回原文件"),
+                   outsideStored.isNotEmpty()
+                     && ! juce::File::isAbsolutePath (outsideStored)
+                     && samplepath::resolve (outsideStored, project) == outside,
+                   outsideStored);
+
+            outside.deleteFile();
+
+            // 老工程里全是绝对路径，读的时候必须原样返回：读盘时不替用户搬家。
+            check (utf8 ("绝对路径原样返回（v26 以前的工程不变）"),
+                   samplepath::resolve (wav.getFullPathName(), project) == wav,
+                   samplepath::resolve (wav.getFullPathName(), project).getFullPathName());
+
+            check (utf8 ("空路径解成空文件（不是当前目录）"),
+                   samplepath::resolve ("", project) == juce::File(),
+                   "empty");
+        }
+
+        //-- B. 找不到的时候怎么救 -------------------------------------------
+        {
+            const auto gone = juce::File ("C://atomic-does-not-exist//kick86.wav");
+
+            // 绝对路径失效、但工程旁边的 media 里有同名文件：这就是"整个目录
+            // 拷过来，里面的绝对路径还是旧的"那种工程。
+            check (utf8 ("绝对路径失效时，按文件名在工程旁边找到它"),
+                   samplepath::resolveExisting (gone.getFullPathName(), project) == wav,
+                   samplepath::resolveExisting (gone.getFullPathName(), project).getFullPathName());
+
+            const auto noway = juce::File ("C://atomic-does-not-exist//nothing86.wav");
+
+            check (utf8 ("真的找不到时返回那个不存在的路径，不是空文件"),
+                   samplepath::resolveExisting (noway.getFullPathName(), project) == noway,
+                   samplepath::resolveExisting (noway.getFullPathName(), project).getFullPathName());
+
+            // 名字大小写在 Windows 上不该影响匹配，但工程可能在别的地方被写成
+            // 全大写——索引按小写比对。
+            const auto found = samplepath::relinkFrom ({ gone.getFullPathName(),
+                                                         noway.getFullPathName() }, root86);
+
+            check (utf8 ("按名字重新定位：找得到的给文件，找不到的给空"),
+                   found.size() == 2
+                     && found[0] == wav
+                     && found[1] == juce::File(),
+                   juce::String ((int) found.size()) + " / "
+                     + (found.size() > 1 ? found[1].getFullPathName() : juce::String ("?")));
+        }
+
+        //-- C. 端到端：存盘、搬家、再打开 -----------------------------------
+        {
+            LayerStack stack86;
+            RackModel  rack86;
+
+            stack86.addLayer (utf8 ("采样"), palette::layer1);
+
+            const auto loadedWav = loadSampleFile (wav);
+
+            SampleEvent clip;
+            clip.name        = wav.getFileName();
+            clip.path        = wav.getFullPathName();
+            clip.audio       = loadedWav.buffer;
+            clip.startBeat   = 0.0;
+            clip.lengthBeats = 2.0;
+
+            const int clipId86 = stack86.getLayer (0)->addSample (clip);
+
+            juce::String saveError;
+            const bool   saved = project::save (project, stack86, rack86, 120.0, saveError);
+
+            check (utf8 ("带采样的工程存得下来"),
+                   saved && project.existsAsFile(),
+                   saved ? juce::String (project.getSize()) + " bytes" : saveError);
+
+            // 文档里的 path 必须是相对的。查 DOM 而不是查字符串：属性顺序不是
+            // 契约，P82 就在字符串匹配上栽过一次。
+            {
+                auto document = juce::parseXML (project.loadFileAsString());
+                juce::String written;
+
+                if (document != nullptr)
+                    if (auto* samples = document->getChildByName ("Layers"))
+                        if (auto* layerXml = samples->getFirstChildElement())
+                            if (auto* samplesXml = layerXml->getChildByName ("Samples"))
+                                if (auto* sampleXml = samplesXml->getFirstChildElement())
+                                    written = sampleXml->getStringAttribute ("path");
+
+                check (utf8 ("工程文件里存的是相对路径"),
+                       written.isNotEmpty() && ! juce::File::isAbsolutePath (written),
+                       written);
+            }
+
+            // 整个文件夹搬走。存的是绝对路径的话，这一步之后音频就没了。
+            const auto moved = root86.getParentDirectory().getChildFile ("atomic-p86-moved");
+            moved.deleteRecursively();
+            root86.copyDirectoryTo (moved);
+
+            const auto movedProject = moved.getChildFile ("song.atomic");
+            const auto movedWav     = moved.getChildFile ("media").getChildFile ("kick86.wav");
+
+            {
+                LayerStack   readStack;
+                RackModel    readRack;
+                double       readBpm = 0.0;
+                juce::String readError;
+
+                const bool ok = project::load (movedProject, readStack, readRack, readBpm, readError);
+
+                const auto* readClip = readStack.getLayer (0) != nullptr
+                                         ? readStack.getLayer (0)->findSample (clipId86) : nullptr;
+
+                check (utf8 ("整个目录搬走之后，采样块还是找得到音频"),
+                       ok && readClip != nullptr && readClip->audio != nullptr
+                         && juce::File (readClip->path) == movedWav,
+                       ok ? (readClip != nullptr
+                               ? (readClip->audio != nullptr ? readClip->path
+                                                             : juce::String (utf8 ("音频没了")))
+                               : juce::String (utf8 ("块没了")))
+                          : readError);
+            }
+
+            // 最后一种：文件真的丢了。工程旁边放一个同名文件，打开时应该自己
+            // 捡回来——这是"绝对路径时代存下来的工程被搬到新机器"的救法。
+            wav.deleteFile();
+            const auto rescued = root86.getChildFile ("kick86.wav");
+            writeTestSampleFile (rescued, 0.5, 44100.0, 2, 220.0);
+
+            {
+                LayerStack   readStack;
+                RackModel    readRack;
+                double       readBpm = 0.0;
+                juce::String readError;
+
+                const bool ok = project::load (project, readStack, readRack, readBpm, readError);
+
+                const auto* readClip = readStack.getLayer (0) != nullptr
+                                         ? readStack.getLayer (0)->findSample (clipId86) : nullptr;
+
+                check (utf8 ("文件丢了但工程旁边有同名：打开时自己捡回来，并记住新位置"),
+                       ok && readClip != nullptr && readClip->audio != nullptr
+                         && juce::File (readClip->path) == rescued,
+                       readClip != nullptr ? readClip->path : juce::String (utf8 ("块没了")));
+            }
+        }
+
+        root86.deleteRecursively();
+        root86.getParentDirectory().getChildFile ("atomic-p86-moved").deleteRecursively();
     }
 
     // The summary MUST come after the last check. It used to sit mid-function

@@ -225,8 +225,25 @@ namespace project
         `<PanEnvelope>` the one driving pan, `<Automation target="…">` the lane
         driving that target, and a note's `mod` / `pluginparam` attributes say
         where its single curve points. A v25 project therefore opens sounding
-        exactly as it did; it is only re-WRITTEN in the new shape. */
-inline constexpr int formatVersion = 26;
+        exactly as it did; it is only re-WRITTEN in the new shape.
+
+    v27 (Phase 86): a path may be relative to the project file.
+
+      * `<Sample path="…">` and `<Synth sample="…">` are now written RELATIVE
+        to the project's own folder whenever that is possible, so a project
+        folder can be renamed, copied or zipped and still find its audio. It is
+        only possible when the sample sits on a path that, resolved back against
+        the project folder, lands on the same file; otherwise (another drive,
+        the sample lives elsewhere entirely) the absolute path is written
+        exactly as before.
+
+      * **No new attribute.** The value itself says which it is: a path that is
+        absolute is absolute, a path that is not is relative to the document.
+        Both v27 and every earlier file therefore read with the same rule, and a
+        v26 reader meeting a v27 file opens it with the samples it cannot
+        resolve drawn as "missing" — degraded, but never mis-pointed, which is
+        the reason this is a version bump at all. */
+inline constexpr int formatVersion = 27;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";
@@ -237,17 +254,26 @@ inline constexpr const char* fileExtension = ".atomic";
 juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double bpm,
                         const MixerModel* mixer = nullptr,
                         const AutomationModel* automation = nullptr,
-                        const TempoModel* tempo = nullptr);
+                        const TempoModel* tempo = nullptr,
+                        const juce::File* projectFile = nullptr);
 
 /** Parses a document produced by toXmlText(). Returns false with `error` set
-    when the document is not a usable project; the targets are then untouched. */
+    when the document is not a usable project; the targets are then untouched.
+
+    `projectFile` is what a relative sample path is relative TO. It must be the
+    project the document belongs to, which is not always the file being read:
+    a crash-recovery copy lives in the rescue folder but describes a project
+    somewhere else, and resolving its relative paths against its own location
+    would point every clip at the wrong disk. Pass null for a document with no
+    home (a session that has never been saved) — absolute paths still work. */
 bool fromXmlText (const juce::String& xmlText,
                   LayerStack& stack, RackModel& rack,
                   double& bpm, juce::String& error,
                   MixerModel* mixer = nullptr,
                   AutomationModel* automation = nullptr,
                   PluginHost* plugins = nullptr,
-                  TempoModel* tempo = nullptr);
+                  TempoModel* tempo = nullptr,
+                  const juce::File* projectFile = nullptr);
 
 bool save (const juce::File& file,
            const LayerStack& stack, const RackModel& rack, double bpm,

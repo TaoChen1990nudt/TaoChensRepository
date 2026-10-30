@@ -49,6 +49,7 @@ target_sources(AtomicDAW PRIVATE
     Source/Model/MixerModel.cpp
     Source/Model/NoteEnvelope.cpp
     Source/Model/ProjectIO.cpp
+    Source/Model/SamplePath.cpp
     Source/UI/AutomationLaneComponent.cpp
     Source/UI/AutomationWindow.cpp
     Source/UI/BpmField.cpp

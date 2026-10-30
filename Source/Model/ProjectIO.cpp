@@ -1,6 +1,7 @@
 #include "ProjectIO.h"
 
 #include "Media/SampleLibrary.h"
+#include "SamplePath.h"
 
 namespace atomic
 {
@@ -528,12 +529,26 @@ namespace
 //==============================================================================
 juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double bpm,
                         const MixerModel* mixer, const AutomationModel* automation,
-                        const TempoModel* tempo)
+                        const TempoModel* tempo, const juce::File* projectFile)
 {
     juce::XmlElement root ("AtomicDAW");
     root.setAttribute ("version", formatVersion);
     root.setAttribute ("tempo", number (bpm, 4));
     root.setAttribute ("timelineBeats", number (timeline::defaultLengthBeats, 2));
+
+    // Phase 86: every audio path this document writes goes through here.
+    //
+    // The model keeps absolute paths and only the DOCUMENT gets the portable
+    // form — a relative path that leaked into `SampleEvent::path` would be
+    // resolved against the process's current directory by whatever `File` got
+    // handed it next. `toStored` answers the absolute path unchanged when it
+    // cannot produce a relative one that resolves back, so this is never worse
+    // than what v26 wrote.
+    const auto storedPath = [projectFile] (const juce::String& absolute)
+    {
+        return projectFile != nullptr ? samplepath::toStored (absolute, *projectFile)
+                                      : absolute;
+    };
 
     //-- Rack ----------------------------------------------------------------
     {
@@ -585,7 +600,7 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                 xml->setAttribute ("kind", "sampler");
 
                 if (slot->samplePath.isNotEmpty())
-                    xml->setAttribute ("sample", slot->samplePath);
+                    xml->setAttribute ("sample", storedPath (slot->samplePath));
             }
 
             if (slot->plugin != nullptr)
@@ -838,7 +853,7 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                     auto* sampleXml = samplesXml->createNewChildElement ("Sample");
                     sampleXml->setAttribute ("id", sample.id);
                     sampleXml->setAttribute ("name", sample.name);
-                    sampleXml->setAttribute ("path", sample.path);
+                    sampleXml->setAttribute ("path", storedPath (sample.path));
                     sampleXml->setAttribute ("start", number (sample.startBeat, 8));
                     sampleXml->setAttribute ("length", number (sample.lengthBeats, 8));
                     sampleXml->setAttribute ("pitch", sample.pitch);
@@ -936,7 +951,7 @@ bool fromXmlText (const juce::String& xmlText,
                   LayerStack& stack, RackModel& rack,
                   double& bpm, juce::String& error,
                   MixerModel* mixer, AutomationModel* automation, PluginHost* plugins,
-                  TempoModel* tempo)
+                  TempoModel* tempo, const juce::File* projectFile)
 {
     error.clear();
 
@@ -962,6 +977,21 @@ bool fromXmlText (const juce::String& xmlText,
     std::vector<std::unique_ptr<Layer>> parsedLayers;
     int    activeIndex = 0;
     double parsedBpm   = 120.0;
+
+    // Phase 86: every audio path this document mentions is turned into a real
+    // file here, and only here.
+    //
+    // `resolveExisting` is the reader's half of the portability contract. It
+    // resolves a relative path against the project's folder, and — for the
+    // projects that still carry absolute paths — falls back to the same file
+    // name sitting beside the .atomic. When nothing is found the answer is the
+    // unresolved file, which is what makes the block draw as missing instead
+    // of silently playing something else.
+    const auto audioFileFor = [projectFile] (const juce::String& stored)
+    {
+        return projectFile != nullptr ? samplepath::resolveExisting (stored, *projectFile)
+                                      : juce::File (stored);
+    };
 
     // Mixer and automation list are collected here and applied only after the
     // whole document has parsed, same rule as the layers.
@@ -1048,8 +1078,19 @@ bool fromXmlText (const juce::String& xmlText,
                 slot.samplePath = child->getStringAttribute ("sample");
 
                 if (slot.samplePath.isNotEmpty())
-                    if (auto loaded = loadSampleFile (juce::File (slot.samplePath)); loaded.ok())
+                {
+                    const auto file87 = audioFileFor (slot.samplePath);
+
+                    // Phase 86: same rule as a clip — absolute in, absolute
+                    // out, found or not. And where it was actually found is
+                    // what gets remembered: writing the stored value back would
+                    // save the dead path again on the next Ctrl+S, and the
+                    // repair would last exactly one session.
+                    slot.samplePath = file87.getFullPathName();
+
+                    if (auto loaded = loadSampleFile (file87); loaded.ok())
                         slot.sampleBuffer = loaded.buffer;
+                }
             }
 
             // Phase 42: absent in a v17 file, which is "no plugin parameter".
@@ -1301,7 +1342,16 @@ bool fromXmlText (const juce::String& xmlText,
 
                     if (sample.path.isNotEmpty())
                     {
-                        const juce::File audioFile (sample.path);
+                        const auto audioFile = audioFileFor (sample.path);
+
+                        // Phase 86: the model holds ABSOLUTE paths and only
+                        // absolute paths, including when the load failed — a
+                        // relative string left here would be re-interpreted
+                        // against whatever folder the next save happens to use.
+                        // The repaired location is also what gets kept, so a
+                        // save after this writes a path that still works instead
+                        // of the one that did not.
+                        sample.path = audioFile.getFullPathName();
 
                         if (auto loaded = loadSampleFile (audioFile); loaded.ok())
                         {
@@ -1569,7 +1619,11 @@ bool save (const juce::File& file,
 
     // replaceWithText with asUnicode = false writes UTF-8 without a BOM, which
     // is exactly what the XML header in the document declares.
-    if (! file.replaceWithText (toXmlText (stack, rack, bpm, mixer, automation, tempo)))
+    //
+    // Phase 86: the file about to be written IS the base every relative sample
+    // path in it is relative to. Passing it here is what makes "save into
+    // another folder" re-anchor the paths instead of copying the old ones.
+    if (! file.replaceWithText (toXmlText (stack, rack, bpm, mixer, automation, tempo, &file)))
     {
         error = juce::String::fromUTF8 (u8"无法写入 ") + file.getFullPathName();
         return false;
@@ -1593,7 +1647,7 @@ bool load (const juce::File& file,
     }
 
     return fromXmlText (file.loadFileAsString(), stack, rack, bpm, error,
-                        mixer, automation, plugins, tempo);
+                        mixer, automation, plugins, tempo, &file);
 }
 
 } // namespace project

@@ -6,6 +6,7 @@
 
 #include "Model/AutomationStack.h"
 #include "Model/Routing.h"
+#include "Model/SamplePath.h"
 #include "Audio/Mp3Encoder.h"
 #include "UI/MixerLook.h"
 #include "Util/Text.h"
@@ -1078,7 +1079,7 @@ MainComponent::~MainComponent()
 //==============================================================================
 juce::String MainComponent::captureState() const
 {
-    return project::toXmlText (stack, rack, audio.getBpm(), &mixer, &automation, &tempo);
+    return project::toXmlText (stack, rack, audio.getBpm(), &mixer, &automation, &tempo, &currentProject);
 }
 
 void MainComponent::modelChanged()
@@ -1242,7 +1243,7 @@ void MainComponent::applyHistoryPosition()
     repaint();
 }
 
-bool MainComponent::restoreState (const juce::String& xml)
+bool MainComponent::restoreState (const juce::String& xml, const juce::File* projectFile)
 {
     // Phase 71: the session — and with it every slot id — is about to be
     // replaced. A note still held on a plugin preview would be held on a slot
@@ -1252,7 +1253,9 @@ bool MainComponent::restoreState (const juce::String& xml)
     double bpmValue = audio.getBpm();
     juce::String error;
 
-    if (! project::fromXmlText (xml, stack, rack, bpmValue, error, &mixer, &automation, &plugins, &tempo))
+    const juce::File* base = projectFile != nullptr ? projectFile : &currentProject;
+
+    if (! project::fromXmlText (xml, stack, rack, bpmValue, error, &mixer, &automation, &plugins, &tempo, base))
         return false;
 
     setBpm (bpmValue);
@@ -6743,13 +6746,18 @@ bool MainComponent::recoverFromFile (const juce::File& file, juce::String& error
 
     // The identity comes from the copy itself: a session that was never saved
     // has no other record of where it belongs.
-    const auto projectPath = recovery::readProjectPath (file);
+    //
+    // Phase 86: that identity is also what the copy's relative sample paths are
+    // relative TO. The copy lives in the rescue folder, so resolving against
+    // its own location would look for every clip in `Documents/AtomicDAW/`.
+    const auto  projectPath = recovery::readProjectPath (file);
+    const juce::File projectFileForPaths (projectPath);
 
     bool restored = false;
 
     {
         const juce::ScopedValueSetter<bool> guard (restoringHistory, true);
-        restored = restoreState (xml);
+        restored = restoreState (xml, &projectFileForPaths);
     }
 
     if (! restored)
@@ -7019,8 +7027,156 @@ bool MainComponent::loadProjectFromFile (const juce::File& file, juce::String& e
     savedStateText = history.front();
     dirtyCache     = false;
 
+    // Phase 86: the song is open. If parts of it are silent because their files
+    // moved, this is the moment to say so — the alternative is the user finding
+    // out by pressing play and hearing a hole where the drums were.
+    offerSampleRelink();
+
     repaint();
     return true;
+}
+
+//==============================================================================
+//  Phase 86: audio that did not come back with the project
+//==============================================================================
+std::vector<MainComponent::MissingSample> MainComponent::collectMissingSamples()
+{
+    std::vector<MissingSample> missing;
+
+    for (int i = 0; i < stack.getNumLayers(); ++i)
+        if (auto* layer = stack.getLayer (i))
+            for (auto& clip : layer->getSamples())
+                if (clip.path.isNotEmpty() && ! juce::File (clip.path).existsAsFile())
+                    missing.push_back ({ &clip, nullptr });
+
+    // Samplers are collected last and in rack order, which is the same order the
+    // repair walks them in. The two loops being separate is not an ordering
+    // statement about the model — it is just that clips and slots are stored in
+    // different places, and the pairing below only depends on the answer list
+    // matching the question list.
+    for (int i = 0; i < rack.getNumSlots(); ++i)
+        if (auto* slot = rack.getSlot (i); slot != nullptr && slot->isSampler())
+            if (slot->samplePath.isNotEmpty() && ! juce::File (slot->samplePath).existsAsFile())
+                missing.push_back ({ nullptr, slot });
+
+    return missing;
+}
+
+int MainComponent::relinkSamplesTo (const juce::File& folder)
+{
+    auto missing = collectMissingSamples();
+
+    if (missing.empty() || ! folder.isDirectory())
+        return 0;
+
+    std::vector<juce::String> wanted;
+    wanted.reserve (missing.size());
+
+    for (const auto& entry : missing)
+        wanted.push_back (entry.path());
+
+    const auto found = samplepath::relinkFrom (wanted, folder);
+
+    int repaired = 0;
+
+    for (size_t i = 0; i < missing.size() && i < found.size(); ++i)
+    {
+        if (! found[i].existsAsFile())
+            continue;               // that name is not in this folder either
+
+        const auto loaded = loadSampleFile (found[i]);
+
+        if (! loaded.ok())
+            continue;               // found the name, could not read the audio
+
+        // The repaired path is written as an ABSOLUTE one: the model never
+        // holds a relative path, and `toStored` turns it back into the portable
+        // form the next time the project is saved.
+        missing[i].path() = found[i].getFullPathName();
+
+        if (missing[i].clip != nullptr)
+            missing[i].clip->audio = loaded.buffer;
+        else
+            missing[i].slot->sampleBuffer = loaded.buffer;
+
+        ++repaired;
+    }
+
+    if (repaired > 0)
+    {
+        // The schedule froze the old (null) buffers at publish time, so it has
+        // to be rebuilt, not merely repainted — a repaint would show a waveform
+        // over a clip that still plays silence.
+        stack.notifyNotesChanged();
+        rackPanel.repaint();
+        repaint();
+    }
+
+    return repaired;
+}
+
+void MainComponent::offerSampleRelink()
+{
+    if (! sampleRelinkPrompt)
+        return;
+
+    const auto missing = collectMissingSamples();
+
+    if (missing.empty())
+        return;
+
+    const auto example = missing.front().path();
+
+    juce::String text;
+    text << utf8 ("这个工程里有 ") << juce::String ((int) missing.size())
+         << utf8 (" 个采样文件不在原来的位置了。\n\n")
+         << utf8 ("例如：") << example << utf8 ("\n\n")
+         << utf8 ("选一个文件夹，我会按文件名把它们找回来；找不到的保持原样，不会乱认。");
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+
+    juce::AlertWindow::showAsync (
+        juce::MessageBoxOptions()
+            .withIconType (juce::MessageBoxIconType::QuestionIcon)
+            .withTitle (utf8 ("采样文件找不到"))
+            .withMessage (text)
+            .withButton (utf8 ("定位文件夹…"))
+            .withButton (utf8 ("先不管"))
+            .withAssociatedComponent (this),
+        [safe] (int result)
+        {
+            if (safe == nullptr || result != 1)
+                return;
+
+            safe->chooseFolderForRelink();
+        });
+}
+
+void MainComponent::chooseFolderForRelink()
+{
+    chooser = std::make_unique<juce::FileChooser> (utf8 ("采样文件现在在哪个文件夹"),
+                                                   getProjectDirectory());
+
+    juce::Component::SafePointer<MainComponent> safe (this);
+
+    chooser->launchAsync (juce::FileBrowserComponent::openMode
+                            | juce::FileBrowserComponent::canSelectDirectories,
+                          [safe] (const juce::FileChooser& fc)
+                          {
+                              if (safe == nullptr)
+                                  return;
+
+                              const auto folder = fc.getResult();
+
+                              if (! folder.isDirectory())
+                                  return;
+
+                              if (safe->relinkSamplesTo (folder) == 0)
+                                  safe->showMessage (utf8 ("还是没找到"),
+                                                     utf8 ("这个文件夹里没有同名的文件。\n")
+                                                       + utf8 ("把采样和工程放进同一个文件夹，或者放在它下面的 media 里，再打开一次工程也可以。"),
+                                                     true);
+                          });
 }
 
 //==============================================================================

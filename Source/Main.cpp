@@ -669,6 +669,11 @@ public:
                 // feature on by default, a snapshot pass would delete the rescue
                 // copy of whatever the human had open.
                 content->setRecoveryEnabled (true);
+
+                // Phase 86: same rule, same reason. Opening a project that has
+                // lost its audio asks a question; a headless run that asks it
+                // does not finish.
+                content->setSampleRelinkPromptEnabled (true);
             }
             setResizable (true, false);
 
