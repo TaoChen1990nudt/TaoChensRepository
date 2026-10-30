@@ -1884,6 +1884,51 @@ juce::Image MainComponent::createGroupMuteSnapshot (int width, int height)
 }
 
 //==============================================================================
+juce::Image MainComponent::createPerfSnapshot()
+{
+    // A headless run has no sound card, so the meter is fed by hand — through
+    // the same door the callback uses, with the numbers a real session would
+    // produce at 48 kHz / 512 samples. 6.6 ms of a 10.67 ms block is a
+    // comfortable two-thirds; 12.4 ms is one block that missed its deadline,
+    // which is exactly what the peak tick and the 峰 suffix exist to show.
+    //
+    // This is the one frame in the whole list where the load meter has numbers
+    // in it. It cannot be made fully deterministic: the self-test runs on this
+    // same component before any image, a transport check there opens the
+    // device, and the dropout count it leaves behind is what the suffix reports
+    // (76 and 115 on two attempts). Staging the load is still worth it — the
+    // bar, the peak tick and the three-colour rule are what this frame is for.
+    const double previousRate = audio.getPerf().sampleRate;
+
+    audio.setDeviceRateForTest (48000.0);
+
+    for (int i = 0; i < 24; ++i)
+        audio.simulateBlockForTest (6.6, 512);
+
+    audio.simulateBlockForTest (12.4, 512);
+
+    lastPerfText = audio.getPerfText();
+
+    // From the project name to the right edge: the readout means nothing
+    // without the two neighbours that say where it lives.
+    const auto area = getPerfReadoutBounds()
+                        .getUnion (getProjectNameBounds())
+                        .getUnion (getMasterMeterBounds())
+                        .expanded (ui::px (8));
+
+    auto image = createComponentSnapshot (area, true);
+
+    // Put it back — the RATE IT WAS, not zero: a device may well be open by the
+    // time this frame is taken, and clearing the rate would leave every callback
+    // after it with a budget of zero, i.e. unmeasured for the rest of the run.
+    audio.setDeviceRateForTest (previousRate);
+    lastPerfText = {};
+    repaint();
+
+    return image;
+}
+
+//==============================================================================
 juce::Image MainComponent::createAutomationStackSnapshot (int width, int height)
 {
     auto* layer = stack.getActiveLayer();
@@ -4670,6 +4715,21 @@ void MainComponent::timerCallback()
         repaint (getMasterMeterBounds());
     }
 
+    // Phase 93: above the early-out for the same reason the meters are — a
+    // hosted plugin can take the whole block in silence, and "the engine is
+    // pinned while the transport is stopped" is exactly the state a user opens
+    // the load meter to find. Repainted only when the words change: the value
+    // moves a few percent a second, not sixty times.
+    {
+        const auto perf = audio.getPerfText();
+
+        if (perf != lastPerfText)
+        {
+            lastPerfText = perf;
+            repaint (getPerfReadoutBounds().expanded (2));
+        }
+    }
+
     if (! audio.isPlaying())
         return;
 
@@ -5759,6 +5819,18 @@ juce::Rectangle<int> MainComponent::getMasterMeterBounds() const
              ui::px (176), ui::px (24) };
 }
 
+juce::Rectangle<int> MainComponent::getPerfReadoutBounds() const
+{
+    // Anchored to the master meter rather than to the project name, because the
+    // name is the first thing to disappear on a narrow window and the readout
+    // must not move with it. The offsets are derived from the meter's own rect
+    // so the two cannot drift apart: 128 = this block's 120 plus an 8 px gap.
+    const auto meter = getMasterMeterBounds();
+
+    return { meter.getX() - ui::px (128), topBarBounds.getY() + ui::px (13),
+             ui::px (120), ui::px (26) };
+}
+
 //-- Phase 6: the file cluster -----------------------------------------------
 // Phase 25: 保存 / 载入 / 导出 moved out of the right edge and into the edit
 // cluster, between 新建 and 撤销. They were parked against the master meter,
@@ -5849,16 +5921,21 @@ juce::Rectangle<int> MainComponent::getSettingsButtonBounds() const
              ui::px (30), ui::px (28) };
 }
 
+juce::String MainComponent::formatBarBeat (double beats, int beatsPerBar)
+{
+    const auto p = meter::positionAt (beats, beatsPerBar);
+
+    return juce::String (p.bar).paddedLeft ('0', 2) + "."
+             + juce::String (p.beat) + "." + juce::String (p.tick);
+}
+
 juce::String MainComponent::formatBarBeat() const
 {
-    const double beats = audio.getDisplayPositionBeats();
-
-    const int bar  = (int) std::floor (beats / 4.0) + 1;
-    const int beat = (int) std::floor (std::fmod (beats, 4.0)) + 1;
-    const int tick = (int) std::floor (std::fmod (beats, 1.0) * 4.0) + 1;
-
-    return juce::String (bar).paddedLeft ('0', 2) + "."
-             + juce::String (beat) + "." + juce::String (tick);
+    // Phase 93: the arithmetic moved into Model/Meter.h. It used to be four
+    // lines right here with a 4.0 in them, and that literal is why a 3/4 song
+    // read its bars in fours — P91 made the metre a value and this was the one
+    // reader that kept its own copy of it.
+    return formatBarBeat (audio.getDisplayPositionBeats(), beatsPerBar);
 }
 
 juce::String MainComponent::formatTime() const
@@ -6197,10 +6274,14 @@ void MainComponent::paint (juce::Graphics& g)
             // other on a narrow window. Phase 25: the file buttons no longer
             // bound this from the left — they moved into the edit cluster — so
             // the limit is the name readout, or the window edge when it is
-            // hidden.
-            const int limitX = getProjectNameBounds().isEmpty()
-                                 ? getWidth() - ui::px (8)
-                                 : getProjectNameBounds().getX() - ui::px (8);
+            // hidden. Phase 93 adds the load readout to that list: it has a
+            // fixed slot on the right, and the device name is the one that
+            // gives way, because a name cut short still reads and a load cut
+            // short does not.
+            const int limitX = juce::jmin (getProjectNameBounds().isEmpty()
+                                             ? getWidth() - ui::px (8)
+                                             : getProjectNameBounds().getX() - ui::px (8),
+                                           getPerfReadoutBounds().getX() - ui::px (8));
             const int available = limitX - (x + ui::px (18));
 
             if (available >= ui::px (90))
@@ -6213,6 +6294,61 @@ void MainComponent::paint (juce::Graphics& g)
                                                   topBarBounds.getHeight()),
                             juce::Justification::centredLeft, true);
             }
+        }
+    }
+
+    //-- Phase 93: engine load / dropouts --------------------------------------
+    // The readout that answers "was that click me or the machine". The bar is
+    // the smoothed load, the tick is the peak it fell back from, the number is
+    // the same load in words plus the device manager's dropout count. Sitting
+    // next to the master meter on purpose: the two are the same question asked
+    // in two different units, and a console puts them together for that reason.
+    {
+        const auto area = getPerfReadoutBounds();
+
+        if (! area.isEmpty())
+        {
+            const auto p = audio.getPerf();
+
+            auto bars = area.toFloat();
+            const auto bar = bars.removeFromTop (ui::pf (9.0f));
+            bars.removeFromTop (ui::pf (3.0f));
+
+            const float load = (float) juce::jlimit (0.0, 1.0, p.load);
+            const float peak = (float) juce::jlimit (0.0, 1.0, p.peak);
+
+            // Three states, not a ramp: 70% and 95% have to look different from
+            // across the room, and a continuous gradient makes them the same
+            // colour half the time.
+            const bool dropping = p.xruns > 0;
+            const auto tint = (dropping || p.peak >= 0.9) ? theme::record
+                                : (p.peak >= 0.7 ? theme::warn : theme::live);
+
+            g.setColour (theme::surface4.withAlpha (0.5f));
+            g.fillRoundedRectangle (bar, ui::pf (2.0f));
+
+            if (load > 0.001f)
+            {
+                g.setColour (tint.withAlpha (dropping ? 0.85f : 0.55f));
+                g.fillRoundedRectangle (bar.withWidth (bar.getWidth() * load), ui::pf (2.0f));
+            }
+
+            // The peak tick, over the top of the fill and out of the track, so
+            // it reads as a mark rather than as part of the bar. Only when it
+            // is ahead of the fill — otherwise it is a line hidden inside the
+            // thing it is measuring.
+            if (peak > load + 0.02f)
+            {
+                const float x = bar.getX() + bar.getWidth() * peak - ui::pf (0.5f);
+
+                g.setColour (tint.withAlpha (0.9f));
+                g.fillRect (juce::Rectangle<float> (x, bar.getY() - ui::pf (1.5f),
+                                                    ui::pf (1.0f), bar.getHeight() + ui::pf (3.0f)));
+            }
+
+            g.setColour (dropping ? theme::record.withAlpha (0.95f)
+                                  : juce::Colours::white.withAlpha (0.38f));
+            ui::drawTabular (g, audio.getPerfText(), bars, ui::font (8.5f));
         }
     }
 
@@ -6248,7 +6384,7 @@ void MainComponent::paint (juce::Graphics& g)
                                 : juce::Colours::white.withAlpha (0.34f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.5f))));
         g.drawText ((dirtyCache ? juce::String (utf8 ("● ")) : juce::String())
-                      + name + utf8 ("  ·  P88"),
+                      + name + utf8 ("  ·  P93"),
                     getProjectNameBounds(), juce::Justification::centredRight, true);
     }
 

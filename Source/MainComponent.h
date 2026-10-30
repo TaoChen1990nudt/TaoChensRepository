@@ -404,6 +404,14 @@ public:
                                         int width = ui::px (900),
                                         int height = ui::px (420));
 
+    /** Phase 93: the load readout with numbers in it.
+
+        Every other frame in this list is written by a run with no sound card
+        (`--snapshot` does not open one), so the load meter would be a picture of
+        "CPU —" in all of them. This one stages the meter — a normal load, one
+        spike — photographs the top-right corner, and puts the meter back. */
+    juce::Image createPerfSnapshot();
+
     /** Phase 54: a note selection and the cards it plays on, in one frame.
 
         The whole point of the mark is that it is NOT the spotlight — the grid
@@ -1139,6 +1147,11 @@ private:
     juce::Rectangle<int> getExportButtonBounds() const;
     juce::Rectangle<int> getProjectNameBounds() const;
 
+    /** Phase 93: the engine's own two numbers — load bar and dropout count —
+        sit in the gap between the project name and the master meter, on the
+        right where a console puts its CPU meter. */
+    juce::Rectangle<int> getPerfReadoutBounds() const;
+
     //-- Phase 8: new / undo / redo / mixer / settings ------------------------
     juce::Rectangle<int> getNewButtonBounds() const;
     juce::Rectangle<int> getUndoButtonBounds() const;
@@ -1149,6 +1162,16 @@ private:
     /** Shared by paint() and the 60 Hz timer, so only the moving number is
         repainted instead of the whole bar. */
     juce::String formatBarBeat() const;
+
+    /** Phase 93: bar.beat.tick as text, with both inputs explicit.
+
+        The metre belongs to the project, and this used to divide by a literal
+        4.0 — a 3/4 song numbered its bars in fours for two phases. A test for
+        that has to be able to say "beat 6 in 3/4" without building a window,
+        so the rule takes its metre as an argument and the member above passes
+        the project's own. */
+    static juce::String formatBarBeat (double beats, int beatsPerBar);
+
     juce::String formatTime() const;
 
     LayerStack          stack;
@@ -1421,6 +1444,12 @@ private:
     bool hoveringRedo     = false;
     bool hoveringMixer    = false;
     bool hoveringSettings = false;
+
+    /** Phase 93: the load readout is one short string that changes maybe twice a
+        second. Repainting the bar's whole rect on every 60 Hz tick would be
+        sixty times more work than the thing it draws, so the timer compares
+        against this first. */
+    juce::String lastPerfText;
 
     /** The mixer's desktop window. Null until the first time it is opened, and
         destroyed when it is closed — the panel it shows never is. */

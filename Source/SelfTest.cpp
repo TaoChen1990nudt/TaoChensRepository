@@ -17444,6 +17444,252 @@ juce::String MainComponent::runSelfTest()
                  + juce::String (layer->countNotesInGroup (gidA)));
     } ();
 
+    //-- Phase 93: how full the block was, and how close it came --------------
+    // The review's fifth item, and the one everything after it depends on: with
+    // no load and no dropout count, every performance claim has to be argued
+    // from the outside, and "that click was the engine / was the machine" is not
+    // a thing this program can answer.
+    //
+    // The rule is a pure function, so most of this runs with no device at all.
+    // The last group goes through the real callback, because "the timer wraps
+    // every exit" is a claim about a callback and cannot be checked against
+    // arithmetic.
+    {
+        using perf::Numbers;
+
+        //-- A. the rule ------------------------------------------------------
+        {
+            Numbers full;
+
+            for (int i = 0; i < 40; ++i)
+                full = perf::advance (full, 10.0, 10.0);
+
+            check (utf8 ("正好用满预算：负载与峰值都读到 100%，块数照数"),
+                   std::abs (full.load - 1.0) < 1.0e-3
+                     && std::abs (full.peak - 1.0) < 1.0e-9
+                     && full.blocks == 40,
+                   juce::String (full.load, 4) + " / " + juce::String (full.blocks));
+
+            Numbers half;
+
+            for (int i = 0; i < 40; ++i)
+                half = perf::advance (half, 5.0, 10.0);
+
+            check (utf8 ("半满的块：平滑负载收敛到 50%"),
+                   std::abs (half.load - 0.5) < 1.0e-3, juce::String (half.load, 4));
+
+            // The whole reason this module exists: JUCE's number is clamped to
+            // 1.0, so 250% and 100% are the same reading there.
+            const auto spike = perf::advance (Numbers(), 25.0, 10.0);
+
+            check (utf8 ("超预算的块读到 250%，没有被夹到 100%"),
+                   std::abs (spike.peak - 2.5) < 1.0e-9, juce::String (spike.peak, 3));
+
+            check (utf8 ("那一块也把平均抬了起来（不是只记峰值）"),
+                   std::abs (spike.load - 0.5) < 1.0e-9, juce::String (spike.load, 3));
+
+            Numbers held = spike;
+
+            for (int i = 0; i < 100; ++i)          // 1.0 s of audio, silent
+                held = perf::advance (held, 0.0, 10.0);
+
+            check (utf8 ("峰值在 1.5 秒的保持期内一动不动"),
+                   std::abs (held.peak - 2.5) < 1.0e-9, juce::String (held.peak, 3));
+
+            Numbers fallen = held;
+
+            for (int i = 0; i < 100; ++i)          // another 1.0 s
+                fallen = perf::advance (fallen, 0.0, 10.0);
+
+            check (utf8 ("保持期一过就开始落"),
+                   fallen.peak < held.peak - 0.1, juce::String (fallen.peak, 3));
+
+            // A peak is an upper bound. Once the load climbs back up it has to
+            // stop falling, or the meter would claim the block is cheaper than
+            // the block just measured.
+            Numbers settling = spike;
+
+            // 8 s of audio: 1.5 s of hold, then 6.5 s of fall at 0.5/s is 3.25
+            // — more than the 2.5 the peak had to lose, so the floor is what
+            // stops it, not the clock.
+            for (int i = 0; i < 800; ++i)
+                settling = perf::advance (settling, 9.5, 10.0);
+
+            check (utf8 ("峰值落到底就停在当前负载上，不穿到它下面"),
+                   std::abs (settling.peak - 0.95) < 1.0e-9, juce::String (settling.peak, 3));
+
+            // The half of that guard a long run cannot see. With many small
+            // blocks the NEXT block's "use >= peak" branch quietly repairs a
+            // peak that fell through, so the clamp looks redundant. One big
+            // budget makes the fall (0.5 here) larger than the gap, and then
+            // the value the reader gets is the clamped one or nothing.
+            Numbers oneStep;
+
+            oneStep = perf::advance (oneStep, 1000.0, 1000.0);   // peak 1.0, hold 1.5 s
+            oneStep = perf::advance (oneStep, 0.0, 1000.0);      // hold 0.5
+            oneStep = perf::advance (oneStep, 0.0, 1000.0);      // hold gone
+            oneStep = perf::advance (oneStep, 900.0, 1000.0);    // 90%, fall would overshoot
+
+            check (utf8 ("一步落得比缺口还大时，峰值停在这一块的负载上"),
+                   std::abs (oneStep.peak - 0.9) < 1.0e-9, juce::String (oneStep.peak, 3));
+
+            const auto noDevice = perf::advance (Numbers(), 5.0, 0.0);
+
+            check (utf8 ("不知道块多长（预算 0）时什么都不记，也不除零"),
+                   noDevice.blocks == 0 && noDevice.load == 0.0 && noDevice.peak == 0.0,
+                   juce::String (noDevice.load, 3));
+
+            const auto backwards = perf::advance (Numbers(), -3.0, 10.0);
+
+            check (utf8 ("时钟倒走的块被丢掉，不会把平均拉成负数"),
+                   backwards.blocks == 0 && backwards.load == 0.0,
+                   juce::String (backwards.load, 3));
+        }
+
+        //-- B. the meter the audio thread writes -----------------------------
+        {
+            LoadMeter meter;
+
+            check (utf8 ("新表三样都是零，不是上一块设备的残留"),
+                   meter.getLoad() == 0.0f && meter.getPeak() == 0.0f && meter.getBlocks() == 0,
+                   juce::String (meter.getBlocks()));
+
+            for (int i = 0; i < 10; ++i)
+                meter.pushBlock (5.0, 10.0);
+
+            Numbers expected;
+
+            for (int i = 0; i < 10; ++i)
+                expected = perf::advance (expected, 5.0, 10.0);
+
+            // The wrapper must not have a second opinion about the arithmetic —
+            // the same rule, applied in the same order.
+            check (utf8 ("表走的就是那条规则本身，不是另一套算法"),
+                   std::abs (meter.getLoad() - (float) expected.load) < 1.0e-6f
+                     && std::abs (meter.getPeak() - (float) expected.peak) < 1.0e-6f
+                     && meter.getBlocks() == 10,
+                   juce::String (meter.getLoad(), 4) + " / " + juce::String (expected.load, 4));
+
+            meter.reset();
+
+            check (utf8 ("reset 之后三样一起归零"),
+                   meter.getLoad() == 0.0f && meter.getPeak() == 0.0f && meter.getBlocks() == 0,
+                   juce::String (meter.getBlocks()));
+        }
+
+        //-- C. the engine: every exit from the callback is a measured block ---
+        {
+            LayerStack t93;
+            RackModel  r93;
+
+            AudioEngine engine (t93, r93);
+
+            const auto cold = engine.getPerf();
+
+            check (utf8 ("没开设备时读数说「—」，不是一个假的 0%"),
+                   cold.sampleRate == 0.0 && cold.blocks == 0
+                     && engine.getPerfText() == utf8 ("CPU —"),
+                   engine.getPerfText());
+
+            engine.setDeviceRateForTest (48000.0);
+
+            std::vector<float> outL ((size_t) 512, 0.0f), outR ((size_t) 512, 0.0f);
+            float* outputs[2] = { outL.data(), outR.data() };
+
+            const juce::AudioIODeviceCallbackContext ctx {};
+
+            // Two kinds of block, and both of them take an early return —
+            // which is exactly why the timer is a scope guard and not a call at
+            // the bottom: one that gets as far as the "nothing to render" test,
+            // and one with no output channels at all.
+            for (int i = 0; i < 5; ++i)
+                engine.audioDeviceIOCallbackWithContext (nullptr, 0, outputs, 2, 512, ctx);
+
+            for (int i = 0; i < 5; ++i)
+                engine.audioDeviceIOCallbackWithContext (nullptr, 0, outputs, 0, 512, ctx);
+
+            const auto warm = engine.getPerf();
+
+            check (utf8 ("每一个出口都算一块：要渲染的、不用画的、零声道的"),
+                   warm.blocks == 10, juce::String (warm.blocks));
+
+            // And the edge of that rule: zero samples is not a block, because
+            // there is no budget to be a fraction of. Asserted so the guard
+            // cannot grow a division by zero the day somebody feeds it one.
+            engine.audioDeviceIOCallbackWithContext (nullptr, 0, outputs, 2, 0, ctx);
+
+            check (utf8 ("被要求渲染 0 个采样的回调不算一块（没有预算可比）"),
+                   engine.getPerf().blocks == 10, juce::String (engine.getPerf().blocks));
+
+            check (utf8 ("读出的是回调真正用的采样率，不是设备表的快照"),
+                   std::abs (warm.sampleRate - 48000.0) < 1.0e-9,
+                   juce::String (warm.sampleRate, 1));
+
+            check (utf8 ("有设备时读数带「CPU 」和百分号"),
+                   engine.getPerfText().startsWith ("CPU ")
+                     && engine.getPerfText().contains ("%"),
+                   engine.getPerfText());
+
+            // The staged overload: 24 blocks at two thirds of a 10.67 ms block,
+            // then one that misses it. Same door the callback uses.
+            for (int i = 0; i < 24; ++i)
+                engine.simulateBlockForTest (6.6, 512);
+
+            engine.simulateBlockForTest (12.4, 512);
+
+            const auto hot = engine.getPerf();
+
+            check (utf8 ("一次超标的块留在峰值里，读数写明「峰」"),
+                   hot.peak > 1.0 && engine.getPerfText().contains (utf8 ("峰 116%")),
+                   engine.getPerfText());
+
+            engine.setDeviceRateForTest (0.0);
+
+            check (utf8 ("设备关掉之后读数回到「—」，不冻结最后一个数"),
+                   engine.getPerfText() == utf8 ("CPU —"), engine.getPerfText());
+        }
+
+        //-- D. the readout's metre ------------------------------------------
+        // P91 turned the metre into a project value and missed this reader: the
+        // top bar divided by a literal 4.0, so a 3/4 song numbered its bars in
+        // fours. These four checks are the ones that would have caught it.
+        {
+            const auto fourFour = meter::positionAt (6.5, 4);
+
+            check (utf8 ("4/4 第 6.5 拍是第 2 小节第 3 拍"),
+                   fourFour.bar == 2 && fourFour.beat == 3 && fourFour.tick == 3,
+                   juce::String (fourFour.bar) + "." + juce::String (fourFour.beat)
+                     + "." + juce::String (fourFour.tick));
+
+            const auto threeFour = meter::positionAt (6.0, 3);
+
+            check (utf8 ("3/4 第 6 拍是第 3 小节第 1 拍（按 4/4 数会说第 2 小节第 3 拍）"),
+                   threeFour.bar == 3 && threeFour.beat == 1 && threeFour.tick == 1,
+                   juce::String (threeFour.bar) + "." + juce::String (threeFour.beat));
+
+            const auto lateTick = meter::positionAt (0.9999999, 4);
+
+            check (utf8 ("第 1 拍里的最后一个 tick 是 4，永远不会有第 5 个"),
+                   lateTick.bar == 1 && lateTick.beat == 1 && lateTick.tick == 4,
+                   juce::String (lateTick.tick));
+
+            const auto behindZero = meter::positionAt (-3.0, 4);
+
+            check (utf8 ("负位置夹到 01.1.1，不出现第 0 小节"),
+                   behindZero.bar == 1 && behindZero.beat == 1 && behindZero.tick == 1,
+                   juce::String (behindZero.bar) + "." + juce::String (behindZero.beat));
+
+            // End to end, through the formatter the top bar calls: this is the
+            // half a bite test can reach — the arithmetic above can be right
+            // while the text around it still says 4/4.
+            check (utf8 ("顶栏的字串也读同一份拍号：3/4 第 6 拍写 03.1.1"),
+                   MainComponent::formatBarBeat (6.0, 3) == "03.1.1"
+                     && MainComponent::formatBarBeat (6.5, 4) == "02.3.3",
+                   MainComponent::formatBarBeat (6.0, 3) + " / "
+                     + MainComponent::formatBarBeat (6.5, 4));
+        }
+    }
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

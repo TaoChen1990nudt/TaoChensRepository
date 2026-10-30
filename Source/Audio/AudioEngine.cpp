@@ -1,9 +1,47 @@
 #include "AudioEngine.h"
 
 #include "PluginHost.h"
+#include "Util/Text.h"
 
 namespace atomic
 {
+
+namespace
+{
+    /** Phase 93: times one callback and hands the result to the meter on the way
+        out, early returns included.
+
+        A scope guard rather than a call at the bottom because the callback has
+        four exits, and the two cheapest ones (nothing to render) are the
+        blocks a hand-placed call would forget. Their absence would bias the
+        average upward, and the biased average would be used to decide that the
+        engine is too slow.
+
+        Zero budget means no device has told us its rate yet; nothing is
+        measured rather than something wrong. */
+    struct BlockClock
+    {
+        BlockClock (LoadMeter& meterToUse, int numSamples, double sampleRate)
+            : meter (meterToUse),
+              budgetMs (sampleRate > 0.0 ? (double) numSamples * 1000.0 / sampleRate : 0.0)
+        {
+            if (budgetMs > 0.0)
+                startMs = juce::Time::getMillisecondCounterHiRes();
+        }
+
+        ~BlockClock()
+        {
+            if (budgetMs > 0.0)
+                meter.pushBlock (juce::Time::getMillisecondCounterHiRes() - startMs, budgetMs);
+        }
+
+        JUCE_DECLARE_NON_COPYABLE (BlockClock)
+
+        LoadMeter& meter;
+        double budgetMs;
+        double startMs = 0.0;
+    };
+} // namespace
 
 //==============================================================================
 AudioEngine::AudioEngine (LayerStack& layerStackToUse, RackModel& rackToUse)
@@ -66,6 +104,12 @@ void AudioEngine::stop()
         deviceManager.closeAudioDevice();
         deviceOpen = false;
     }
+
+    // Phase 93: no device, no block budget, no numbers. Clearing the rate as
+    // well as the meter is what makes the readout say "—" instead of freezing
+    // the last load the closed device happened to be at.
+    currentSampleRate = 0.0;
+    loadMeter.reset();
 
     playback.resetMeters();
 }
@@ -283,6 +327,12 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 {
     if (device != nullptr)
     {
+        // Phase 93: the block budget comes from the device, and the meters start
+        // from nothing — a new device is a new set of numbers, not a
+        // continuation of the last one's.
+        currentSampleRate = device->getCurrentSampleRate();
+        loadMeter.reset();
+
         // prepareToPlay sizes the mixer's scratch bus once, so the callback
         // never allocates, and clears the synth filters' memory.
         playback.prepareToPlay (device->getCurrentSampleRate(),
@@ -304,6 +354,57 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 void AudioEngine::audioDeviceStopped()
 {
     playback.resetMeters();
+
+    // Phase 93: the device is gone; the numbers it produced are not the current
+    // engine's any more. `audioDeviceAboutToStart` would clear them on restart
+    // anyway — doing it here too means a device that never comes back does not
+    // leave a stale load on screen.
+    currentSampleRate = 0.0;
+    loadMeter.reset();
+}
+
+//==============================================================================
+AudioEngine::Perf AudioEngine::getPerf() const
+{
+    Perf p;
+
+    p.load   = loadMeter.getLoad();
+    p.peak   = loadMeter.getPeak();
+    p.blocks = loadMeter.getBlocks();
+    p.xruns  = deviceManager.getXRunCount();
+
+    // The rate the CALLBACK used, not the rate the device happens to report
+    // now: those are the same number while a device is open, and only one of
+    // them exists when it is not.
+    p.sampleRate = currentSampleRate;
+
+    if (auto* device = deviceManager.getCurrentAudioDevice())
+        p.blockSize = device->getCurrentBufferSizeSamples();
+
+    return p;
+}
+
+juce::String AudioEngine::getPerfText() const
+{
+    const auto p = getPerf();
+
+    // No device: say so. "CPU 0%" would read as "the engine is idle" when the
+    // truth is that there is no engine running to be idle.
+    if (p.sampleRate <= 0.0)
+        return utf8 ("CPU —");
+
+    auto text = "CPU " + juce::String (juce::roundToInt (p.load * 100.0)) + "%";
+
+    // One warning at a time, and the dropout wins: a counted xrun is a thing
+    // that happened, a peak is a thing that nearly did. Two suffixes on one
+    // 120 px slot would be four numbers competing for the eye, and the one that
+    // matters would be the one that got truncated.
+    if (p.xruns > 0)
+        text << " · " << utf8 ("丢音 ") << juce::String (p.xruns);
+    else if (p.peak > p.load + 0.08)
+        text << " · " << utf8 ("峰 ") << juce::String (juce::roundToInt (p.peak * 100.0)) << "%";
+
+    return text;
 }
 
 void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputChannelData,
@@ -314,6 +415,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                                     const juce::AudioIODeviceCallbackContext& context)
 {
     juce::ignoreUnused (context);
+
+    // Phase 93: first statement in the callback, and the only thing that runs on
+    // every single block regardless of what it decides to render.
+    const BlockClock blockClock (loadMeter, numSamples, currentSampleRate);
 
     // Phase 81: the tape. Runs first and unconditionally (it checks its own
     // armed flag) so a recorded take is aligned with the callbacks that produced

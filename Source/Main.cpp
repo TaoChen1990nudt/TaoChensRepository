@@ -252,6 +252,14 @@ namespace
         // what it produced: a row whose parameter column says 音源参数.
         writePng ("-slotparam", component.createSlotParamAutomationSnapshot());
 
+        // P93: the load readout with numbers in it. Shot here, above
+        // startAudio(), for tidiness only — the device is already open by now,
+        // because the self-test runs on this same component before any image
+        // and one of its transport checks opens it. So this frame documents the
+        // warning state the process is actually in: a lit bar, a peak tick past
+        // the fill, and a dropout count that grows for the rest of the run.
+        writePng ("-perf", component.createPerfSnapshot());
+
         // The audio page lists device, sample rate and buffer size — none of
         // which exist until something is open. Opening a device here only fills
         // that page in; the main window's pixels are already on disk.

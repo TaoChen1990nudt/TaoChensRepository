@@ -68,5 +68,43 @@ namespace meter
 
         return (int) std::floor (beat / bar + 1.0e-9) + 1;
     }
+
+    /** A position in the units a musician reads: bar.beat.tick, both 1-based,
+        four ticks to the beat.
+
+        Phase 93: this arithmetic used to be four lines in `MainComponent` with a
+        literal 4.0 in them, so a 3/4 song counted its bars in fours for two
+        phases — P91 turned the metre into a project value and missed the one
+        reader that puts it into words. It lives here because the other three
+        readers of that number live here, and because a rule with a `constexpr`
+        copy in it is a rule with two implementations.
+
+        Ticks are quarter-beats, matching the ruler's own subdivision; the
+        rounding is asked for with the same `+ 1e-9` the other functions use,
+        since 2.9999999 beats is beat 3 and not beat 2. */
+    struct Position
+    {
+        int bar  = 1;
+        int beat = 1;
+        int tick = 1;
+    };
+
+    inline Position positionAt (double beats, int beatsPerBar) noexcept
+    {
+        const double bar  = (double) clamp (beatsPerBar);
+        const double safe = std::max (0.0, beats);
+
+        Position p;
+        p.bar = (int) std::floor (safe / bar) + 1;
+
+        const double inBar = safe - (double) (p.bar - 1) * bar;
+
+        p.beat = (int) std::floor (inBar + 1.0e-9) + 1;
+
+        const double fraction = std::max (0.0, inBar - std::floor (inBar));
+        p.tick = (int) std::floor (fraction * 4.0) + 1;
+
+        return p;
+    }
 } // namespace meter
 } // namespace atomic

@@ -98,6 +98,14 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
     不是整个组；目标没有别的出现才由 `pruneEmptyGroups` 把整行送走。**不许用 A 替换 A**
     写在函数里，不靠调用方记得。
 
+26. **一个度量只有一个来源**（P93）：`Audio/LoadMeter.h` 的 `perf::advance` 是唯一的负载/峰值规则，
+    平滑系数 0.2 与 JUCE 相同（同屏两个表不能各走各的）。**丢帧不自己数**——
+    `AudioDeviceManager::getXRunCount()` 已含设备原生计数与 JUCE 的估算，我们的回调在它的计时器
+    里面，再数一遍就是重复计。**峰值不夹到 1.0**（那正是 JUCE 丢掉的那个数）。**预算来自
+    `numSamples`**：0 采样的回调不算一块，没开设备（率 0）什么都不记。计时器是 **RAII scope guard**
+    ——回调有四个出口，最便宜的两个正是手写一次调用会忘的。读数用**回调真正用的采样率**。
+    顶栏的 `bar.beat.tick` 读 `meter::positionAt`，**不许再写字面量 4.0**。
+
 ## 索引
 - 目录结构、构建命令（含 `unset *proxy*`）、CI 四条门禁、`formatVersion` 逐版字段、自检夹具
   —— 全在 `STATUS.md` 与 `REFERENCE.md`，本文件不重复。

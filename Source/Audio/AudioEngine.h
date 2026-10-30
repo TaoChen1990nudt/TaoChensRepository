@@ -4,6 +4,7 @@
 
 #include <atomic>
 
+#include "Audio/LoadMeter.h"
 #include "Audio/PlaybackEngine.h"
 #include "Audio/Recorder.h"
 #include "Model/HardwareRack.h"
@@ -46,6 +47,61 @@ public:
     bool isRunning() const noexcept { return deviceOpen; }
     juce::String getStatusText() const;
     juce::String getLastError() const { return lastError; }
+
+    //-- Phase 93: how hard the audio thread is working -----------------------
+    /** Everything the two meters need, read once so the bar and the number
+        cannot report two different blocks. */
+    struct Perf
+    {
+        /** Smoothed share of the block the callback used: 1.0 is exactly full.
+            Measured here rather than read from JUCE so it is the same quantity
+            as `peak` — see LoadMeter.h for why JUCE's own number is not. */
+        double load = 0.0;
+
+        /** Held peak, in the same units. MAY EXCEED 1.0: a block that took two
+            and a half budgets is the one case the user needs to see, and it is
+            the one case a clamped meter cannot show. */
+        double peak = 0.0;
+
+        /** Callbacks measured since the device started. Distinguishes "0% load"
+            from "nobody is measuring". */
+        int blocks = 0;
+
+        /** Blocks that missed their deadline, as the device manager counts them
+            (`AudioDeviceManager::getXRunCount`): the driver's own tally where
+            it has one, JUCE's estimate otherwise. Not counted a second time
+            here — our callback runs inside JUCE's timer, so our own tally would
+            be a subset of this one, and adding them would double-count every
+            overload. */
+        int xruns = 0;
+
+        /** 0 when no device is open, which is how the readout knows to say
+            "—" instead of lying with a 0%. */
+        double sampleRate = 0.0;
+        int    blockSize  = 0;
+    };
+
+    Perf getPerf() const;
+
+    /** One line for the top bar: "CPU 12% · 峰 41% · 丢音 2". The peak and the
+        dropout count only appear when there is something to say. */
+    juce::String getPerfText() const;
+
+    /** Test only: the callback needs the device's sample rate to know how long
+        a block lasts, and the self-test has no sound card. */
+    void setDeviceRateForTest (double sampleRate) noexcept { currentSampleRate = sampleRate; }
+
+    /** Test and snapshot only: feeds one measured block into the meter without a
+        device. The callback is the only thing that does this in a real session —
+        `--snapshot` never opens a sound card, so every frame it writes would
+        otherwise show an empty meter. */
+    void simulateBlockForTest (double elapsedMs, int numSamples) noexcept
+    {
+        loadMeter.pushBlock (elapsedMs,
+                             currentSampleRate > 0.0
+                               ? (double) numSamples * 1000.0 / currentSampleRate
+                               : 0.0);
+    }
 
     //-- Transport ------------------------------------------------------------
     /** Starts, or resumes from wherever the playhead was parked.
@@ -186,6 +242,15 @@ private:
     std::atomic<double> fadeOutBeats { 0.0 };
 
     RecordBuffer recordBuffer;
+
+    /** Phase 93. Fed once per callback by a scope guard, so a block that leaves
+        through one of the early returns is still measured — those are the
+        cheapest blocks, and leaving them out would bias the average high. */
+    LoadMeter loadMeter;
+
+    /** What the device told us in `audioDeviceAboutToStart`. Zero until a device
+        opens, which is how the meters know they have nothing to say. */
+    double currentSampleRate = 0.0;
 
     bool        deviceOpen = false;
     double      bpm        = PlaybackEngine::defaultBpm;

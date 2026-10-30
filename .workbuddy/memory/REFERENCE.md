@@ -149,6 +149,27 @@ build Release → `--snapshot selftest.png`。
 - 窗口门写作 `if (audio.isPlaying() || audio.getPlayback().hasMeters())`，**放在
   `if (! audio.isPlaying()) return;` 之前**——放后面就漏掉"停止后还在落"那一段，而那正是用户会看的。
 
+## 引擎负载与丢帧（P93：一个度量，一个来源）
+- **规则只有一份**：`Audio/LoadMeter.h` 的 `perf::advance (Numbers, elapsedMs, budgetMs)` 是纯函数
+  （指数平均 + 峰值保持 + 线性回落），`LoadMeter` 只是它 + 三个 `atomic` 发布位（音频线程写、
+  任意线程读，不加锁）。`state` 是普通 double，**只有一个写者**；`reset()` 必须在回调之外调用
+  （`audioDeviceAboutToStart` / `stop` / `audioDeviceStopped`）。
+- **平滑系数 0.2 与 JUCE 相同**是有意的：屏幕上有两个"同一个测量"的表，它们不该各走各的。
+- **丢帧计数不自己数**：`AudioDeviceManager::getXRunCount()` = 设备原生计数（有的话）+ JUCE 从
+  回调耗时估出来的次数。我们的回调在 JUCE 的计时器**里面**，自己再数一遍就是重复计。
+- **峰值不夹到 1.0**。JUCE 的 `getLoadAsProportion()` 夹到 [0,1] 且不留峰值，所以"这一块用了
+  250% 的预算"在那里和"正好 100%"长得一样——那正是这里存在的理由。
+- **预算是 `numSamples * 1000 / sampleRate`**，所以 `numSamples == 0` 的回调不是一块；设备没开
+  （率 0）时预算为 0，什么都不记。计时器是 **RAII scope guard**，不是函数末尾的一次调用——
+  回调有四个出口，最便宜的两个（什么都不用画）正是手写一次调用会忘掉的。
+- 读数用的是**回调真正用的采样率**（`currentSampleRate`），不是设备表的快照：设备关掉之后那张表
+  还是上次的值，而回调已经不在跑了。
+- 顶栏读数（`getPerfReadoutBounds`）挂在 master 表的左边，**从 master 表算位置**而不是从工程名：
+  名字是窄窗口第一个消失的东西，读数不能跟着它跑。
+- 顶栏的 `bar.beat.tick`（`meter::positionAt`）：**第四个读拍号的人**。它曾经自己写着 `4.0`，
+  于是 3/4 的歌按 4/4 数小节——P91 把拍号变成值的时候漏的就是这里。字串化留在
+  `MainComponent::formatBarBeat (beats, beatsPerBar)`（静态，两个输入都显式），测试才不必造一个窗口。
+
 ## 工程文件（`.atomic`，`formatVersion` = 29）
 - **先解析到临时对象、末尾一次性提交**，坏文件绝不破坏当前会话。载入后重置
   `nextNoteId`/`nextSlotId`/组 id（max+1）。
