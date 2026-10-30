@@ -1,0 +1,296 @@
+{
+  "verdict": "AtomicDAW P92 是『音符级编组 + 图层叠加』这一套想法的原型机：节奏与 MC 编辑的心智模型已经成立，但作为能交付作品的 DAW，录音链路（无 take / 无监听 / 无录音侧补偿）、混音总线（0 条 send / 无侧链）与 MIDI 力度、CC 三处结构性缺口，让它对『录音棚』与『影视后期』两个场景不成立，对『卧室制作』也只能承担编曲半边。",
+  "daw": {
+    "name": "AtomicDAW",
+    "version": "Phase 92（commit f3e8c66）",
+    "build": "2026-10-30 Release / MSVC 19.x / JUCE 8.0.4",
+    "platform": "Windows 11 26300",
+    "license": "自研未发布（无定价、无授权模型）",
+    "preset": "general",
+    "reviewer": "陈俊龙",
+    "date": "2026-10-30",
+    "test_hours": 3,
+    "coverage": "引擎：仅 cpu_efficiency 取得离线渲染实测（1/8/32 轨阶梯）；rt_stability / latency_pdc / seamless_audio / driver_platform 因无实时设备、无 loopback 采集链路未测，按 5.0 中性占位。工作流：W1-W9 只做了源码级可达性判定（c 步数 / x 视图切换可数，t 无法计时），未做真人计时。视觉：--snapshot 31 张 + 自检 865 条。",
+    "hardware": {
+      "cpu": "Intel Core i7-13700KF（8P + 8E，16 核 24 线程）",
+      "ram": "32 GB",
+      "interface": "未接专业声卡（无 RTL 数据）",
+      "driver": "未测；启动走 juce::AudioDeviceManager::initialise(2,2)，不指定设备类型",
+      "sample_rate": 44100,
+      "buffer": "未测（--snapshot 不打开声卡）",
+      "os": "Windows 11 家庭中文版 10.0.26300",
+      "notes": "离线渲染测量在同一台机器上跑，best-of-N 取最小墙钟时间"
+    }
+  },
+  "measurements": {
+    "E1": {
+      "max_tracks": 32,
+      "first_dropout_load": "未测（无实时设备，无法计数 dropout）",
+      "cpu_total_pct": null,
+      "cpu_single_core_pct": null,
+      "p_core_ok": null,
+      "notes": "离线渲染吞吐（30 s 音频，每轨 240 音符 + EQ + COMP）：1 轨 318×、8 轨 45.8×、32 轨 25.2× 实时；渲染是单线程串行遍历，多核无收益"
+    },
+    "E2": {
+      "dropouts": null,
+      "mem_growth_mb": null,
+      "mem_leak_suspect": null,
+      "crashes": 0,
+      "duration_min": 0,
+      "notes": "未跑 60 分钟长跑。同类信息：8 轨同工程连渲 8 次，吞吐离散度 10.4%，无逐次劣化"
+    },
+    "E3": {
+      "short_residual_db": null,
+      "long_residual_db": null,
+      "buffer_switch_residual_db": null,
+      "record_path_offset_ms": null,
+      "hw_insert_ping": "无硬件插入功能",
+      "notes": "无法构造：内置 8 种效果全部 0 延迟上报（只有 VST3 走 PluginHost::getLatencySamples），且无 loopback 采集链路。代码事实：PDC 只在汇合点补偿（Audio/PdcDelay.h），录音侧完全不补偿"
+    },
+    "E4": {
+      "max_gap_ms": null,
+      "click": null,
+      "ops_tested": 0,
+      "ops_failed": 0,
+      "notes": "未测。架构上热插拔应当无缝：音频线程只读不可变 PublishedSchedule，插件/路由改动由消息线程 publish 后整块换指针，不存在『停播重建』路径"
+    },
+    "E5": {
+      "min_buffer": null,
+      "rtl_ms": null,
+      "dpc_max_us": null,
+      "formats": "VST3 仅此一种；无 VST2 / AU / AAX / CLAP；内置 8 种效果",
+      "notes": "有 JUCE AudioDeviceSelectorComponent（设置窗 → 音频设置），可改驱动/采样率/缓冲；但默认不点名 ASIO"
+    }
+  },
+  "metrics": [
+    {
+      "id": 1,
+      "key": "rt_stability",
+      "score": 5.0,
+      "evidence_level": "S",
+      "evidence_refs": ["E1-未测", "E2-未测", "source:Audio/AudioEngine.cpp:31"],
+      "finding": "没有任何 dropout 计数器，也没有实时设备可用：60 分钟长跑与爆音计数一条都没测到，5.0 是『未知』而不是『及格』。代码侧唯一的稳定性证据是音频线程不读模型（只读不可变 schedule）。"
+    },
+    {
+      "id": 2,
+      "key": "cpu_efficiency",
+      "score": 4.0,
+      "evidence_level": "M",
+      "evidence_refs": ["BENCH-1tr-318x", "BENCH-8tr-45.8x", "BENCH-32tr-25.2x", "source:Audio/PlaybackEngine.cpp:1360"],
+      "finding": "单线程渲染：32 轨（每轨 240 音符 + EQ + COMP）离线 25.2× 实时，8 轨 45.8×，1 轨 318×。绝对吞吐够用，但加核零收益——没有 worker pool，实时线程一颗核顶到满就是全部上限。"
+    },
+    {
+      "id": 3,
+      "key": "latency_pdc",
+      "score": 5.0,
+      "evidence_level": "S",
+      "evidence_refs": ["E3-未测", "source:Audio/PdcDelay.h:164", "source:Audio/PluginHost.cpp:490"],
+      "finding": "PDC 有唯一解算表且只在汇合点补偿（P83 的正确形状），但反相抵消一次都没测到残余 dB；另外录音路径完全不补偿，监听在代码里根本不存在——录音棚场景这一项是结构缺口，不是精度问题。"
+    },
+    {
+      "id": 4,
+      "key": "seamless_audio",
+      "score": 5.0,
+      "evidence_level": "S",
+      "evidence_refs": ["E4-未测", "source:Audio/PlaybackEngine.h:686"],
+      "finding": "无 loopback 采集，7 项热插拔操作一项未测；架构上整块换 schedule 指针（getScheduleRaw 是 acquire load）意味着插入插件不该停播，但『没有停播路径』和『没有 gap』是两回事，必须回采才算数。"
+    },
+    {
+      "id": 5,
+      "key": "driver_platform",
+      "score": 4.0,
+      "evidence_level": "S",
+      "evidence_refs": ["source:CMakeLists.txt:124", "source:UI/SettingsWindow.cpp:815", "E5-未测"],
+      "finding": "插件格式只有 VST3（CMakeLists 里 VST/AU 全关），AAX 缺失即录音棚出局；设备设置窗能改驱动与缓冲，但启动时不点名 ASIO，RTL 与 DPC 全未测。"
+    },
+    {
+      "id": 6,
+      "key": "recording_comping",
+      "score": 2.0,
+      "evidence_level": "S",
+      "evidence_refs": ["source:MainComponent.cpp:4529", "source:Audio/AudioEngine.cpp:321", "W1-不可完成"],
+      "finding": "W1 无法完成：录第二遍只是往同一图层再叠一个『录音 N』组，没有 take 容器、没有 take lane、没有接缝交叉淡化，也没有输入监听（输出块先被清空，输入从不混入）。多遍录音在结构上不成立。"
+    },
+    {
+      "id": 7,
+      "key": "audio_editing",
+      "score": 4.0,
+      "evidence_level": "S",
+      "evidence_refs": ["source:Audio/ClipStretch.h:151", "W2-部分可完成"],
+      "finding": "W2 能做完但只有整块处理：两种读头半 grain 交叉淡化，grain 固定 50 ms 不可调，比例夹在 0.125–8.0，没有 transient 检测、没有 warp marker、没有质量档，逐拍变调只能靠整块变调近似。"
+    },
+    {
+      "id": 8,
+      "key": "ara_integration",
+      "score": 2.5,
+      "evidence_level": "S",
+      "evidence_refs": ["source:Source-无ARA符号", "W3-只能当普通插件"],
+      "finding": "全源码零 ARA 符号（ARAAudioSource / DocumentController 均无）；W3 只能把 Melodyne 当普通 VST3 插在通道上，跨 clip 编辑、随工程保存这些 ARA 语义全部没有。"
+    },
+    {
+      "id": 9,
+      "key": "midi_editing",
+      "score": 3.5,
+      "evidence_level": "S",
+      "evidence_refs": ["source:UI/PianoRollPaint.cpp:239", "source:Model/Quantize.h:20", "W4-部分可完成"],
+      "finding": "W4 只能做一半：力度只显示『vel 0.80』没有任何拖拽/输入手势，CC lane 完全不存在（录制的 CC 只被折算成组的 level/pan）；有的是量化（5 档网格 × 4 档强度）与音符级 level/pan/pitch 包络。"
+    },
+    {
+      "id": 10,
+      "key": "composition_tools",
+      "score": 4.0,
+      "evidence_level": "S",
+      "evidence_refs": ["source:Model/Quantize.h", "W5-无生成工具"],
+      "finding": "W5 的『生成一个 variation』不可完成：零琶音器、零概率/随机化、零 pattern 变体管理；能用的只有量化、组复制（含自动化）与『渲染为采样』这种手工打印。"
+    },
+    {
+      "id": 11,
+      "key": "builtin_content",
+      "score": 4.0,
+      "evidence_level": "S",
+      "evidence_refs": ["source:Model/HardwareRack.h:19", "source:Audio/Effects.h:20"],
+      "finding": "能出声但撑不起作品：合成器每 voice 单振荡器 4 波形 + 一阶低通，无 ADSR/包络/ unison；采样器只是容器没有 keyzone 与力度层；8 种效果（LP/DRIVE/DELAY/AIR/EQ/COMP/REVERB/VST3）覆盖了混音骨架但每个都只有 2-6 个参数。"
+    },
+    {
+      "id": 12,
+      "key": "mixing_routing",
+      "score": 4.0,
+      "evidence_level": "S",
+      "evidence_refs": ["source:Model/MixerModel.h:88", "W6-不可完成"],
+      "finding": "W6 无法完成：0 条 send/aux/return、无侧链（COMP 没有外部键输入）、无 VCA、无并行返回；只有『通道输出接另一通道或主输出』的单向串联（带拓扑排序与环检测）+ master，127 条同级通道、每通道 8 插槽。"
+    },
+    {
+      "id": 13,
+      "key": "post_tools",
+      "score": 2.0,
+      "evidence_level": "S",
+      "evidence_refs": ["source:Source-无video/SMPTE/AAF", "W8-不可完成"],
+      "finding": "W8 三项都不可完成：无视频轨、无时间码/SMPTE、无 AAF/OMF，工程是纯立体声（连 5.1 采样都只保留两声道）。"
+    },
+    {
+      "id": 14,
+      "key": "workflow_consistency",
+      "score": 6.0,
+      "evidence_level": "S",
+      "evidence_refs": ["W-步数:拍号1击0切换", "W-步数:音频设置3步1切换", "source:UI/PianoRollInput.cpp"],
+      "finding": "模型层一致性是这台的强项：同一个动作在各视图里走同一条规则（按下的话事权归『你以为在按的东西』、双击=打开、改名只在名字那一行）。但界面没有 tooltip、没有 dropout/CPU 显示，『现在是不是在改组』这类状态仍要靠边框猜。"
+    },
+    {
+      "id": 15,
+      "key": "customization",
+      "score": 2.0,
+      "evidence_level": "S",
+      "evidence_refs": ["source:MainComponent.cpp:6536", "W9-不可完成"],
+      "finding": "W9 两项都不可完成：快捷键全部硬编码在 keyPressed 与 handleGlobalKeyPress，菜单里的按键只是文案；没有 keymap 文件、没有宏、没有脚本、主题是编译期常量、布局（缩放/滚动/窗口位置）不入工程文件。"
+    },
+    {
+      "id": 16,
+      "key": "learnability",
+      "score": 5.5,
+      "evidence_level": "S",
+      "evidence_refs": ["Nielsen-10项:5通过3部分2失败", "W-冷启动:空工程到第一声约4步"],
+      "finding": "中文标签 + 新会话自带一层一音源，画个音符按空格就出声（约 4 步），但概念密度高（图层/编组/出现/机架/插入/自动化五套名词），无内置帮助、无 tooltip，第 9 条『错误可恢复』靠恢复副本（P84）兜底。"
+    },
+    {
+      "id": 17,
+      "key": "cost_model",
+      "score": 5.0,
+      "evidence_level": "S",
+      "evidence_refs": ["无公开定价", "未发布"],
+      "finding": "未发布、无定价、无授权模型，按中性 5.0 占位；不参与任何选型结论。"
+    }
+  ],
+  "fatal": [
+    {
+      "metric": 6,
+      "phenomenon": "录第二遍就多出一个『录音 N』组，永远拼不成一条最佳版本；录音时也听不到自己。",
+      "evidence": "W1 不可完成：MainComponent.cpp:4529 每遍只 addGroup（录音 N），无 take 容器；AudioEngine.cpp:321 输出块清空后输入从不混入，全源码无 inputMonitor。",
+      "root_cause": "录音被实现成『往图层追加一个组』，而不是『一条轨上的一组 take』；信号链里没有监听分支（引擎只有播放路径）。",
+      "impact": "录音棚、人声/乐器录制、任何需要多遍挑片段的场景直接出局；这也是『录音侧延迟补偿』缺失的同一处缺口。"
+    },
+    {
+      "metric": 13,
+      "phenomenon": "任何带画面的活都做不了：不能导入视频、对不到帧、导不出带画面的混音。",
+      "evidence": "W8 三项均不可完成：Source 内无 video/SMPTE/AAF 符号；SampleLibrary.cpp:184 明确 5.1 只保留两声道。",
+      "root_cause": "工程模型是纯音乐时间轴（拍为唯一单位），没有帧/时间码这一层时间表示，也没有多声道总线。",
+      "impact": "影视后期、游戏音频、广告配乐全部不可用；也是导出只能 44.1k 立体声的同源问题。"
+    },
+    {
+      "metric": 15,
+      "phenomenon": "用熟了也快不起来：改不了键位、存不了布局、没有宏，换台机器一切归零。",
+      "evidence": "W9 两项均不可完成：快捷键写死在 MainComponent.cpp:6536/6622；ProjectIO 不保存 zoom/scroll/窗口位置；主题是 Theme.h 的编译期常量。",
+      "root_cause": "命令没有 id 层——菜单项直接调用成员函数，按键直接 switch 硬编码，所以没有可被重绑定的『命令』对象。",
+      "impact": "长期用户的肌肉记忆无法沉淀，重度编曲效率停在鼠标层；这也是所有工作流类分数的隐形天花板。"
+    },
+    {
+      "metric": 8,
+      "phenomenon": "修音只能开一个插件窗，改完不能随手回到时间线上继续。",
+      "evidence": "W3 只能当普通 VST3 插入：全源码零 ARA 符号；跨 clip 编辑、随工程保存均无。",
+      "root_cause": "宿主侧没有实现 ARA2 的文档/音源映射层，插件只能看到实时音频块。",
+      "impact": "人声修音、和声对齐、鼓替换这类高频工序效率减半；对录音棚场景是持续摩擦。"
+    }
+  ],
+  "recommendations": [
+    {
+      "title": "给录音链路补上『监听 + 录音侧延迟补偿』",
+      "action": "在 AudioEngine 的输出块里加一条监听分支（输入直通 + 该轨插件链），并把录音写盘按该轨 PDC 延迟前移。先做直通监听，再挂插件链。",
+      "acceptance": "E3-D 可复现：监听链插 50 ms 线性相位插件，录 1 kHz 点击串，录回波形瞬态相对参考点偏移 ≤1 ms（44 采样内）；关掉插件后偏移 ≤0.1 ms。",
+      "target_scenario": "录音棚 / 卧室制作",
+      "impact": 5,
+      "confidence": 4,
+      "cost": 4
+    },
+    {
+      "title": "把『录音 N』升级成 take 容器，再做 comping",
+      "action": "给录音组加 take 归属（同一 takeSet 的第 n 遍），钢琴窗/时间线显示 take lane，接缝处自动 3-5 ms 交叉淡化；comp 结果仍落成一个组，保持『组=可复制的一次出现』的现有语义。",
+      "acceptance": "W1 四遍 8 小节、3 处跨遍拼接，熟练用户中位耗时 ≤150 s；接缝回采在 ±2 ms 内振幅连续（无 click 尖峰 > -40 dBFS）。",
+      "target_scenario": "录音棚",
+      "impact": 5,
+      "confidence": 4,
+      "cost": 5
+    },
+    {
+      "title": "补力度与 CC lane（先把『能改』做出来，再谈精细）",
+      "action": "钢琴窗底部加一条可切换 lane：velocity 柱状（框选批量 + 拖拽）与 CC 曲线（至少 CC1/11/64）；velocity 改动走既有 notesChanged + 撤销手势，不要新开一条数据通路。",
+      "acceptance": "W4 的 16 个音符力度可一次框选改完（操作步数 ≤3，t ≤20 s）；画出的 CC1 能驱动宿主 VST3 并在导出波形中可测（同一工程两次导出 RMS 差 <0.1 dB）。",
+      "target_scenario": "电子 / 卧室制作",
+      "impact": 4,
+      "confidence": 4,
+      "cost": 3
+    },
+    {
+      "title": "混音台加 send/return 与侧链输入",
+      "action": "通道加 2 条 send（推子前/后可选）+ 独立 return 通道；COMP 加外部键输入，侧链源从『任一通道/总线』选。侧链延迟并入既有 pdc::solve 的唯一延迟表，不要新开补偿路径。",
+      "acceptance": "W6 三项（3 轨编组、kick 侧链 bass、并行压缩返回）全程 ≤200 s；反相测试：同一信号经『通道直连主输出』与『经一条 send 到 return 再回主输出』，残余 ≤ -60 dBFS。",
+      "target_scenario": "录音棚 / 电子",
+      "impact": 4,
+      "confidence": 4,
+      "cost": 4
+    },
+    {
+      "title": "先让引擎『可观测』：dropout 计数 + 单核占用显示",
+      "action": "AudioEngine 在 audioDeviceIOCallback 里统计『块超时/丢弃』次数与每块耗时峰值，主界面显示 dropout 计数与最差单核占比。这是所有引擎类评测的前置条件——没有它，谁都没法判断一次爆音是引擎还是系统。",
+      "acceptance": "播放时界面实时显示 dropout 计数与块耗时峰值；人为在音频线程里 sleep(2× 块长) 能稳定计到 dropout（自检可断言该计数 +1）。",
+      "target_scenario": "全场景（尤其现场）",
+      "impact": 3,
+      "confidence": 5,
+      "cost": 2
+    },
+    {
+      "title": "命令 id 层 + keymap 持久化",
+      "action": "把菜单/快捷键收敛成『命令表（id → 名称 → 默认键）』，keyPressed 查表派发；keymap 与窗口布局存进 ApplicationProperties/工程文件。",
+      "acceptance": "同一个动作（如『量化 1/16』）可从菜单、快捷键、自定义键位三条路触发且行为一致；改键后重启仍生效（写盘可读回）。",
+      "target_scenario": "全场景",
+      "impact": 3,
+      "confidence": 4,
+      "cost": 3
+    }
+  ],
+  "limitations": [
+    "未覆盖：rt_stability / latency_pdc / seamless_audio / driver_platform 四项没有实时测量。原因具体：--snapshot 模式按设计不打开声卡（Main.cpp:677），沙箱无法启动 GUI 或驱动，机器上没有可用于 loopback 的采集链路。这四项按协议给 5.0 中性占位，不是及格分。",
+    "硬件偏差：单机单次，i7-13700KF + 32 GB + 无专业声卡；离线渲染数据与实时表现不是一回事（实时受驱动、DPC、调度影响，离线只看 DSP 成本）。跨机复测（Step 7 校准）未做。",
+    "单人体验官偏差：评审者熟悉源码，learnability 与 workflow 的步数是读代码数出来的 c / x，没有真人计时 t；对老用户友好的地方可能被高估。",
+    "样本偏差：只测 44.1 kHz、只有内置效果与一个工程规模；没有第三方 VST3 参与，插件崩溃隔离（子进程扫描 + SEH）只在代码层读过，没有实测。",
+    "cost_model 无公开定价（未发布），按中性 5.0 占位，不参与结论；评分卡里的总分应当读作『相对商业 DAW（7-9 分区间）的成熟度指数』，不是对一个 0.x 项目的成绩单。"
+  ]
+}
