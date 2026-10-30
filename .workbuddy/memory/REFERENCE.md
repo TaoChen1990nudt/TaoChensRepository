@@ -777,12 +777,52 @@
   与混音台 insert 共用 `PluginEditorWindow`（一实例一窗口，实例卸载时窗口自毁）。
   enabled 条件 = `plugins.isLoaded(pluginId)`；没载入时文案写「· 未载入」而不是把项藏掉。
   P42 起窗口尾部 `setKeyForwarder(&pluginForwarder)` —— 前台时的空格与电脑键盘音符靠它。
+- **双击卡片打开界面**（P85）：`RackPanel::handleDoubleClick` 里先问名字——**名字那块是改名**
+  （P79），**其余部分**才 `onCardDoubleClicked(slotId)`。面板不解释"打开"是什么意思（它没有插件
+  宿主），宿主侧 `MainComponent::openSlotEditor(slotId)` 回答：非插件槽 / 实例没载入 → `false`
+  且不弹窗，否则 `openPluginEditor` 并返回 `true`。菜单第 41 项与这个手势共用同一个函数，
+  「菜单和手势一致」因此是代码的结论，不是两条分支各自记得。
+  排除区在 `RackPanel::isOverCardControl`：caret / × / S / M / 波形 pill / 只变调 / 拉伸 /
+  → 输出 / 两个推子的 `expanded(0,6)` 带。**折叠卡的 caret 要单独先测**——折叠后整张卡都是
+  标题行，`collapsed` 分支一律返回 `false` 会把 caret 一起放行。
 - **卡片右键的「创建自动化 ▸」**（P42）列出该槽三样东西：`滤波器` / `音量` / `音源参数 ▸`；
   「音源参数」展开后是该插件自己的参数表（下标直通 `pluginParam`），内置振荡器没有这一段。
 - 替换 = `replaceWithPlugin` / `replaceWithNative`，**槽 id 不变**，路由 / override / 自动化全保留。
   两者都返回被换下来的旧实例 id，调用方接 `reconcilePlugins()` 收尸。
 - 替换后不用手动 republish：`AudioEngine` 自己是 rack 的 listener，`rackChanged()` → `republish()`。
   这条不成立时"换音源没声音变化"就会回来。
+
+## 钢琴窗的文件布局（P85：一个类，十一个 TU）
+拆的是**文件边界**，不是类：`PianoRollComponent` 的 316 个成员函数按主题分开定义在
+`Source/UI/PianoRoll*.cpp` 里。C++ 允许一个类的成员函数分散在多个翻译单元，所以不需要
+friend、不需要改一行头文件、也不存在"两个对象互相问状态"的问题。
+
+| 文件 | 管什么 |
+|---|---|
+| `PianoRollComponent.cpp` | 构造/析构、三个 listener、坐标与网格、滚动与时间线、工具与光标、试听、走带 |
+| `PianoRollInput.cpp` | `mouseDown/Drag/Up/Move/Exit`、`handlePress`、`handleDoubleClick`、`keyPressed`、两处 `hitTestActiveLayer` |
+| `PianoRollPaint.cpp` | `paint` 与全部 `draw*`（工具条、标尺、键盘、音符、组框、播放头、跑马灯） |
+| `PianoRollNoteEdit.cpp` | 音符增删改、拖拽夹取、形状同步、进/出组编辑、`simulate*` |
+| `PianoRollSelection.cpp` | 选择集、路由、编组归属、三个菜单（组/画布/音源参数） |
+| `PianoRollAutomationNote.cpp` | 音符自动化框（几何、命中、两个下拉、绘制） |
+| `PianoRollAutomationGroup.cpp` | 编组自动化框 + 曲线剪贴板（`readSelectedCurve`…`dropCurveSelection`） |
+| `PianoRollAutomationSample.cpp` | 采样自动化框 |
+| `PianoRollClipboard.cpp` | 音符/采样/编组的复制粘贴、`GroupClip`、`duplicate*` |
+| `PianoRollSamples.cpp` | 采样块编辑：窗口、裁切、拆分、反相、拉伸、挂载、删除 |
+| `PianoRollSampleDraw.cpp` | 采样块绘制、拖放预览、采样块菜单 |
+| `PianoRollInternals.h` | **唯一**的共享层：调色板别名、菜单 id 段、`boldFont` / `groupLabelText` / `curveCellFitsText` / `addCurveItems` / `neutralCurveValue` / `uniqueGroupName` 等 |
+
+- 共享层放在 `namespace atomic::roll`，**每个定义都 `inline`**，每个 TU 顶部一句
+  `using namespace roll;`。链接器合并 inline 定义，所以十一份 include 只有一份代码。
+  **不要退回匿名 namespace 写进头文件**：那是每个 TU 各一份副本，且 MSVC 会为没用到的
+  静态函数准备 C4505 警告位。
+- 仍然留在各自 cpp 里的匿名 namespace：画笔/橡皮光标图（只有 core 用）、
+  `membersDescription`（只有剪贴板用）、`subEnvelope`（只有 `splitSamplesAt` 用）。
+  **判断标准是"几个 TU 用"**，不是"它看起来像工具函数"。
+- 新增一个函数时先问：它在哪个主题里？跨主题才进 internals。**放进 internals 的代价是
+  改它要重编十一个 TU**（实测约为单文件的三倍），所以宁可留在主题文件里。
+- 改一个主题文件 ≈ 1,000–1,700 行重编（实测 1,028 行 ≈ 22 秒，JUCE 模板的实例化占绝大部分），
+  改 internals ≈ 十一个全编。这就是这次拆分唯一的收益，别把它再长回去。
 
 ## 采样包络窗（P78）
 - `SampleEnvelopePanel`，452×314，和 `NoteEnvelopePanel` 同尺寸同一套行距；浮动 child，

@@ -2363,3 +2363,57 @@ recovery::write (... captureState () ...);
 
 **教训**：缓存是为了省一次计算，不是为了让别人依赖它的新鲜度。凡是在**定时器**里读缓存，
 先问一句"它是不是在另一个时机被写的"。定时器不排队、不等你。
+
+## P85 — 拆 13,125 行：脚本比手抄可靠，但脚本也会骗人
+
+### P85-A 函数名的"起点"不是函数名那一行
+
+机械切分靠正则抓 `PianoRollComponent::(\w+)`，抓错的地方有四种：
+
+- **返回类型里也有 `::`**：`PianoRollComponent::ClipEdge PianoRollComponent::edgeOfClip (...)`、
+  `PianoRollComponent::GroupClip PianoRollComponent::captureGroupClip (...)` —— 取第一个匹配
+  得到的是返回类型，函数会挂到别人的文件里。**取最后一个匹配**。
+- **析构函数的 `~` 不在 `\w` 里**：`PianoRollComponent::~PianoRollComponent` 加 `~?\w+` 才抓得到，
+  否则 `~PianoRollComponent` 那段块无名、被当成"未分配的块"。
+- **返回类型可以单独成行**：`std::pair<juce::Rectangle<float>, juce::Rectangle<float>>` 一行，
+  函数名在下一行（`splitCurveRow`）。块的首行没有函数名，要从**整块文本**里提名字，
+  不能只看首行。
+- **文件级 `static` 辅助也在顶层**：`static float groupValueToY (...)` 没有 `PianoRollComponent::`，
+  得靠后备正则 `[\w:<>,\s\*&]+?\b(\w+)\s*\(` 提名字，并显式分配（它只被编组自动化那三个函数用）。
+
+兜底不是猜，是**断言**：分组表里每个名字必须恰好出现一次，解析出来的每一块必须有归属，
+否则脚本直接报错退出。316 个函数，靠眼看是看不完的。
+
+### P85-B 生成脚本的输入就是它自己的输出
+
+`PianoRollComponent.cpp` 既是切分的源、又是十一个输出之一。第一次跑完，源文件从 13,125 行
+变成 1,233 行；第二次跑时 `roll_segments.json` 里的行号全部指向别处，报错是
+`StopIteration`（找不到 `namespace` 那一行），看着像脚本语法问题，其实是数据错位。
+
+两条防线：**每次跑之前 `git checkout -- Source/UI/PianoRollComponent.cpp`**；脚本开头
+`assert len(lines) > 13000, 'SRC already split - git checkout it first'`。
+"再来一次"应该是幂等的，不幂等的生成脚本要在第一行把自己拦住。
+
+### P85-C "编译过了"不等于"一个字没丢"
+
+internals 头是从两段匿名 namespace 生成的。第一版从 `namespace` 那一行开始取内容，
+于是段**前面**的引导注释被吞了——`// Phase 82: one row, two buttons` 这种解释"这两个下拉
+为什么长这样"的话，正好在 `namespace` 上面。
+
+编译器当然不报错。发现它的是**逐行比对**：把 HEAD 版本的原文按非空行拆成多重集，
+和新文件（十一个 cpp + internals）的非空行做减法，允许两种规范化（internals 加了
+`inline ` 前缀、两处 `namespace` 包裹换成了 `namespace roll`）。剩 5 行差异，全是预期的。
+10,493 个非空行，丢一行都看得出来。
+
+拆分类重构的验收标准不是"能编译、断言全过"，是**这一条**。断言保的是行为，
+行为可以完全正确而注释、空行、`//====` 分隔线已经错位到别处。
+
+### P85-D CRLF 让咬测静默失效
+
+`MainComponent.cpp` 是 CRLF（`SelfTest.cpp`、`MainComponent.h` 是 LF，仓库里两种并存）。
+python 里 `s.replace('    if (...)\n        return false;', ...)` 对 CRLF 文件**匹配不到**，
+`replace` 不报错、返回原文——于是咬测跑的是**没改过的代码**，结果"全过"，看着像
+"这条断言咬不住"。前后浪费两轮。
+
+判据很简单：替换完 `print(t != s)`，或者立刻 `grep` 一眼。**改文件前先问它是哪种行尾**；
+用 Edit 工具改 CRLF 文件是安全的，用脚本改就必须带 `\r\n`。

@@ -7,7 +7,7 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
 编组、采样、走带、文件树、波形、伸缩、缩放、电平表）；平台陷阱与自检夹具在 `PITFALLS.md`。
 动代码前按主题查这两份，本文件只留跨主题硬规则。
 
-## 十八条硬规则
+## 十九条硬规则
 1. **中文一律 `atomic::utf8("...")`**，自检的失败信息也算。裸中文 = 乱码。
 2. **几何走 `ui::px()/pf()`、字号 `ui::sp()`**，唯一密度旋钮 `ui::scale = 1.3f`，禁止裸像素。
    `numPitches` / gutter / 内联自动化框最小宽度不缩放。
@@ -53,6 +53,10 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
     `handleDoubleClick()` 里采样那一问必须排在 `hitTestActiveLayer` **之后**——`drawSamples` 先画、
     块在音符**下面**，压在块上的音符才是指针看着的东西。闭组里的块那一击仍旧是「让我进去」（P73），
     进组后再双击才开窗。
+    机架卡片同理（P85），而且**名字和卡片是两个语义**：名字那块是改名（P79），其余部分才是
+    「打开这个音源」。S / M / 推子 / 折叠 caret 一律排除——那两次点击已经各有各的活儿
+    （双击静音键是两次切换，不是一次开窗）。只有插件槽有窗可开；内置合成器答 false 且
+    **不弹窗**，「双击了正弦波」不值得一个模态框。
 
 13. **名字是一份数据，不是一个副本**（P79）：图层 / 编组 / 音源三个名字只有一处字段
     （`Layer::name` / `NoteGroup::name` / `SynthSlot::name`），三处入口（图层栏、编组栏、机架卡）
@@ -120,10 +124,23 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
     这个功能**默认关闭**，只有 `Main.cpp` 的窗口路径打开：无头运行构造同一个类，而
     `renderHeadlessReport` 开工第一件事就是 `saveProjectToFile`，默认开启会删掉用户的副本。
 
+19. **一个类可以住在多个 TU 里，但共享的辅助必须是 inline 的**（P85）：`PianoRollComponent` 的
+    316 个成员函数分开住在 `Source/UI/PianoRoll*.cpp` 十一个文件里，一个文件一个主题
+    （布局见 `REFERENCE.md`）。**拆的是文件边界，不是逻辑**——结构改动只动 include 和函数归属，
+    一行实现都不碰；两万行交互代码加 753 条断言，"顺手改一点"的代价是无从归因的失败。
+    共享层是 `UI/PianoRollInternals.h`：`namespace atomic::roll` + **每个定义都 `inline`** +
+    每个 TU 顶部 `using namespace roll;`。**不要退回把匿名 namespace 写进头文件**：那是每个 TU
+    一份副本，还给未使用的静态函数留警告位（MSVC 的 C4505）。
+    **判断一个辅助该不该进 internals 的标准是"几个 TU 用"**，不是"它看起来像工具函数"——
+    改 internals 要重编十一个 TU（约单文件的三倍），宁可让它留在主题文件里。
+    验收标准不是"能编译 + 断言全过"，是**逐行比对**：原文按非空行做多重集，和新文件做减法，
+    允许的差异只有 `inline ` 前缀和 namespace 包裹这两处。
+
 ## 目录
 - `Source/Model/` 数据与路由（LayerModel / **CurveBank** / RackModel / MixerModel / TempoMap / TempoModel / Routing / ProjectIO / Gain）
-- `Source/Audio/` 引擎与纯函数 DSP（PlaybackEngine / Recorder / ClipStretch / 导出）
-- `Source/UI/` 时间线、机架、混音台、文件树、自动化、分栏
+- `Source/Audio/` 引擎与纯函数 DSP（PlaybackEngine / Recorder / ClipStretch / PdcDelay / 导出）
+- `Source/UI/` 时间线、机架、混音台、文件树、自动化、分栏（**钢琴窗 = `PianoRoll*.cpp` 十一个 TU +
+  `PianoRollInternals.h`**，见 `REFERENCE.md` 的「钢琴窗的文件布局」）
 - `Source/Util/` 度量与主题 / 文本 / 菜单 / **Recovery**（崩溃恢复）
 - `Source/MainComponent.*` 装配、走带、撤销、快照与自检
 

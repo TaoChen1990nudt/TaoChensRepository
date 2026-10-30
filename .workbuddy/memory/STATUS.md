@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-30 · **Phase 84**（崩溃恢复与自动保存）
+> 最后更新：2026-10-30 · **Phase 85**（钢琴窗拆分 / 双击打开音源界面）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**，约 6 千字。
 > 规则 `MEMORY.md` · 制度 `REFERENCE.md` · 坑 `PITFALLS.md` · 逐阶段实现记录 `memory/<日期>.md`
 > · 被压掉的历史叙述（阶段全文 / 咬测流水 / 逐版沿革 / P62–P82 经验）在 **`STATUS-archive.md`**。
@@ -19,20 +19,29 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 84** — 崩溃恢复与自动保存。`Util/Recovery.h` 把「未保存的工作」变成磁盘上的一份副本：`captureState()` 的整篇会话写进 `Documents/AtomicDAW/Recovery/`，文件名带工程路径的 hash（同名不同目录不会撞），根元素追加 `recoveryOf` / `recoveredAt` 两个属性——**它仍是一个能被直接打开的工程**。写入靠 `File::replaceWithText`（JUCE 的 `TemporaryFile` 语义），崩溃在写一半也只丢这一次的更新，不会留下半截文件。核心不变量只有一句：**副本存在 ⟺ 有未保存的编辑且进程没能正常收尾**——保存删、显式放弃删、正常关闭时本来就没有，所以它唯一能活下来的方式就是崩溃。启动时只 offer 比工程文件**严格更新**的那一份，打平算 stale |
-| 自检 | **742 ALL PASSED / 0 FAIL**，失败退出码 1 |
+| 已完成阶段 | **Phase 85** — 钢琴窗拆成十一个翻译单元 + 机架卡片双击打开音源界面。13,125 行的那一件东西按主题分成 `Source/UI/PianoRoll*.cpp` 十个新文件，共享的 13 个 inline 辅助与 9 个调色板别名进 `PianoRollInternals.h`；**拆的是文件边界，不是逻辑**，10,493 个非空行逐行比对过，除 inline 前缀与 namespace 包裹外全部原样。机架卡片上名字以外的部分是「打开这个音源」（名字仍是改名，P79），宿主侧 `MainComponent::openSlotEditor()` 统一回答，右键菜单第 41 项与双击共用它 |
+| 自检 | **753 ALL PASSED / 0 FAIL**，失败退出码 1 |
 | 编译 | 零 error 零 warning |
-| `formatVersion` | **26**（P83 不升：延迟是运行时的；P84 也不升：恢复副本就是一份工程，两个属性是附加的、解析器忽略）— 新增 `<Curve id name target pluginparam enabled>` + `<CurveState active/>`；**v25 及更老的文件照常打开**，只有重新保存才写新形状 |
+| `formatVersion` | **26**（P85 不升：纯结构重构，不动一个字节的存档。P83/P84 也没升）— 新增 `<Curve id name target pluginparam enabled>` + `<CurveState active/>`；**v25 及更老的文件照常打开**，只有重新保存才写新形状 |
 | 可执行 | `build/AtomicDAW_artefacts/Release/AtomicDAW.exe` |
 | 技术栈 | JUCE 8.0.4（FetchContent）+ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + C++17 |
-| 源码规模 | `Source/` 下 91 个 .cpp/.h，分 Model / Audio / UI / Util / Media |
+| 源码规模 | `Source/` 下 **102 个** .cpp/.h，分 Model / Audio / UI / Util / Media。最大的单文件从 13,125 行降到 **1,718 行**（`PianoRollInput.cpp`）——现在最大的三个是 `SelfTest.cpp` 15,709 / `MainComponent.cpp` 8,143 / `PlaybackEngine.cpp` 3,607 |
 
 ## 下一步
 
-**未定**，等你给功能排期。P58–P84 的逐条主题不在这里重复，见下面的表和 `STATUS-archive.md`。
+**未定**，等你给功能排期。P58–P85 的逐条主题不在这里重复，见下面的表和 `STATUS-archive.md`。
+
+仍值得排期的两件事（都不是 bug）：
+- **混音台插入槽的双击**：目前只有右键菜单能开效果器界面。机架卡片这条路刚打通，混音台的 `InsertEditorWindow` 是同一个窗口类，形状几乎一样——但它是 `fx::Type` 而不是插件实例，得先决定"双击要不要区分内置效果和 VST3"。
+- **`MainComponent.cpp` 还有 8,143 行**：拆分收益已经证明过了（P85），下一个候选是它。
 
 ## 最近八轮（新会话最需要的前情）
 
+- **P85 拆分与双击** — 结构重构的验收标准**不是**"能编译 + 断言全过"，是逐行比对：
+  原文按非空行做多重集、和新文件做减法，允许的差异只有 `inline ` 前缀和 namespace 包裹两处。
+  守卫断言保的是行为，行为可以完全正确而注释、空行、`//====` 分隔线已经错位。
+  双击的语义要**分开**：名字是改名（P79），卡片其余部分是打开音源——不是一个手势两种读法；
+  S/M/推子/caret 全排除，那两次点击已经各有各的活儿。插件没载入 → 答 false 且不弹窗。
 - **P84 崩溃恢复** — 恢复副本**不是工程**：写它的那条路绝不能改 `currentProject`，否则下一次 Ctrl+S 会把歌存进恢复目录。
   只 offer「比工程文件严格更新」的副本；`dirtyCache` 这类缓存不算数（`hasUnsavedChanges()` 会当场重算）。
   恢复出来的会话**故意仍算未保存**，否则下一次关闭会一声不响把它扔掉。
