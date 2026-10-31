@@ -375,6 +375,20 @@ void GroupPanel::drawRow (juce::Graphics& g, int rowIndex)
     if (group == nullptr)
         return;
 
+    //-- Phase 95: an inactive take is not the one you hear -------------------
+    // Washed out rather than hidden: it is still a take of yours, still
+    // editable, and the whole reason to keep four of them on screen is to
+    // compare them. But a silent row drawn exactly like a sounding one is a row
+    // you will mix into by mistake.
+    //
+    // Scoped, because a row is one iteration of a loop: the fade has to end
+    // with the row. `drawRow` returns early for a folded group, so the guard
+    // lives in a scope rather than at the end of the function.
+    juce::Graphics::ScopedSaveState fade (g);
+
+    if (group->isTake() && ! group->isActiveTake())
+        g.setOpacity (0.55f);
+
     const auto* layer = stack.getLayer (ref.layerIndex);
     const auto  bounds = getRowBounds (rowIndex);
     const bool  collapsed = group->isCollapsed();
@@ -427,6 +441,63 @@ void GroupPanel::drawRow (juce::Graphics& g, int rowIndex)
     g.setFont (boldFont (11.5f));
     g.drawText (group->getName(), getNameBounds (rowIndex),
                 juce::Justification::centredLeft, false);
+
+    //-- Phase 95: "2 / 4" ----------------------------------------------------
+    // Which take of how many, right after the name — where the eye already is,
+    // and the only question a stack of takes raises: where am I in it. The
+    // active one is filled, the rest are outlined, so "which one sounds" is
+    // answered by shape as well as by the wash above.
+    //
+    // Measured off the name rather than placed at a fixed x, because the badge
+    // is a suffix of the title, not a column: "录音 2" and "Chorus" have to put
+    // it in the same place relative to themselves.
+    if (group->isTake() && layer != nullptr)
+    {
+        const auto nameFont = boldFont (11.5f);
+        const auto nameRect = getNameBounds (rowIndex);
+
+        // GlyphArrangement, not Font::getStringWidth: the latter is deprecated
+        // in JUCE 8 (it cannot see kerning or the shaper), and this project
+        // builds with zero warnings.
+        juce::GlyphArrangement glyphs;
+        glyphs.addLineOfText (nameFont, group->getName(), 0.0f, 0.0f);
+        const int nameWidth = juce::jmin (nameRect.getWidth(),
+                                          juce::roundToInt (glyphs.getBoundingBox (0, glyphs.getNumGlyphs(), true)
+                                                              .getWidth()));
+
+        const juce::Rectangle<int> badge (nameRect.getX() + nameWidth + ui::px (5),
+                                          nameRect.getY() + ui::px (2),
+                                          ui::px (30), ui::px (14));
+
+        const bool sounding = group->isActiveTake();
+        const auto members  = layer->getTakeSetGroupIds (group->getTakeSetId());
+        const int  count    = (int) members.size();
+
+        // The POSITION in the set, not the stored index: delete take 1 and the
+        // survivor still holds index 3, which would print "3 / 2" for a set of
+        // two. The index is identity (it decides order and survives a load);
+        // the number on screen is a place in a list, so it is read off the list.
+        int position = 1;
+
+        for (int i = 0; i < count; ++i)
+            if (members[(size_t) i] == group->getId())
+            {
+                position = i + 1;
+                break;
+            }
+
+        const auto pill = badge.toFloat();
+
+        g.setColour (accent.withAlpha (sounding ? 0.26f : 0.06f));
+        g.fillRoundedRectangle (pill, ui::pf (3));
+        g.setColour (accent.withAlpha (sounding ? 0.90f : 0.38f));
+        g.drawRoundedRectangle (pill, ui::pf (3), 1.0f);
+
+        g.setColour (juce::Colours::white.withAlpha (sounding ? 0.92f : 0.40f));
+        g.setFont (boldFont (9.0f));
+        g.drawText (juce::String (position) + "/" + juce::String (count),
+                    badge, juce::Justification::centred, false);
+    }
 
     g.setColour (juce::Colours::white.withAlpha (0.26f));
     g.setFont (plainFont (9.0f));

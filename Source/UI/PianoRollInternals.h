@@ -36,6 +36,32 @@ namespace roll
     inline const juce::Colour& kText           = theme::inkMuted;
     inline const juce::Colour& kPlayheadColour = theme::record;
 
+    /** Phase 95: how much of itself a member of a take keeps when it is not the
+        one you hear.
+
+        The sheet draws every take, because choosing between them is looking at
+        them — but a pass that makes no sound must not look like the pass that
+        does. Dimming is the same answer the panel gives the row and the frame
+        gives the pill, at the same weight, so the three views cannot disagree
+        about which take is the comp.
+
+        One function, three call sites (notes, blocks, pills): the number is a
+        visual rule, not three coincidences. */
+    inline constexpr float kInactiveTakeAlpha = 0.45f;
+
+    inline float takeFadeOf (const Layer& layer, int groupId)
+    {
+        if (groupId < 0)
+            return 1.0f;
+
+        const auto* group = layer.findGroup (groupId);
+
+        if (group == nullptr || ! group->isTake() || group->isActiveTake())
+            return 1.0f;
+
+        return kInactiveTakeAlpha;
+    }
+
     /** DESIGN pixels: a note has one of these bands at each end, and dragging
         inside it changes the note's length instead of moving it. Both ends,
         because a note you cannot shorten from the front is a note you have to

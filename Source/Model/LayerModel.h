@@ -11,6 +11,7 @@
 #include "Gain.h"
 #include "Media/SampleLibrary.h"
 #include "NoteEnvelope.h"
+#include "TakeSet.h"
 
 namespace atomic
 {
@@ -560,6 +561,60 @@ public:
     bool isCollapsed() const noexcept              { return collapsed; }
     void setCollapsed (bool shouldCollapse) noexcept { collapsed = shouldCollapse; }
 
+    //-- Phase 95: the group as one TAKE of something ------------------------
+    /** Recording the same bars twice used to make two groups that both sounded.
+
+        A take set is the container that fixes that: several groups sharing one
+        `takeSetId`, of which exactly one is active — the one you hear. Like an
+        appearance (P58), the container is DERIVED from a field every member
+        carries; there is no set object to keep in step, and a set whose last
+        member is deleted simply stops existing.
+
+        `takeSetId == 0` is "an ordinary group", which is what every group was
+        before this phase. That default is why a single-pass recording still
+        produces exactly the group it used to: a set only comes into being when
+        a second take joins it.
+
+        `takeIndex` is 1-based within the set and only meaningful when there is
+        a set. `takeActive` is the flag the voice stage reads; the set never
+        decides audibility by counting, because "the last one" is not the same
+        answer as "the one you chose". */
+    int  getTakeSetId() const noexcept             { return takeSetId; }
+    int  getTakeIndex() const noexcept             { return takeIndex; }
+    bool isTake() const noexcept                   { return takeSetId != 0; }
+
+    /** Does this take sound? An ordinary group always does — silence is what
+        `muted` is for, and an inactive take is not a mute: it is the other
+        performance, still there, still editable, just not the comp. */
+    bool isActiveTake() const noexcept             { return takeActive; }
+
+    /** Membership alone: which set, which take.
+
+        Separate from audibility on purpose. "Which set am I in" is a fact about
+        the recording; "do I sound" is a decision the user makes afterwards, and
+        there is exactly one writer for it (`Layer::setActiveTake`, which has to
+        see the whole set to keep "exactly one" true). Handing a value in here
+        would be a second door onto that flag — and the value would be
+        provisional anyway, because the gate runs straight afterwards. */
+    void setTakeMembership (int setId, int index) noexcept
+    {
+        takeSetId = setId;
+        takeIndex = index;
+    }
+
+    /** Membership AND the flag, for the one caller that has all three in hand:
+        loading a document. */
+    void setAsTake (int setId, int index, bool active) noexcept
+    {
+        takeSetId  = setId;
+        takeIndex  = index;
+        takeActive = active;
+    }
+
+    /** Which take sounds. Siblings are silenced by Layer::setActiveTake, which
+        is the only caller — a flag flipped here alone would leave two. */
+    void setTakeActive (bool active) noexcept      { takeActive = active; }
+
     //-- Phase 82: the group's curves ----------------------------------------
     /** Phase 16 shipped one lane, Phase 20 a second, Phase 24 a third — and all
         three were RESIDENT, an array indexed by the enum. That made the enum the
@@ -658,6 +713,11 @@ private:
     float pan       = 0.0f;
     bool  collapsed = false;
     bool  muted     = false;      // Phase 35: silences notes AND sample blocks
+
+    //-- Phase 95: which take of which set (0 / 0 = an ordinary group) -------
+    int  takeSetId  = 0;
+    int  takeIndex  = 0;
+    bool takeActive = true;       // an ordinary group always sounds
 
     /** Phase 82: 0..1 multipliers over project time, as a bank.
 
@@ -913,6 +973,56 @@ public:
 
     std::vector<int> getOccurrenceSampleIds (int groupId, int occurrence) const;
     int  countSamplesInOccurrence (int groupId, int occurrence) const noexcept;
+
+    //-- Phase 95: take sets --------------------------------------------------
+    /** What this group covers in beats: notes AND sample blocks, every
+        appearance. Empty when it has no members.
+
+        Both kinds, because a take is one performance whether it arrived as MIDI
+        or as audio — a vocal take whose notes were never played still has an
+        extent, and a set that measured only notes would call it empty and
+        refuse to join the second pass to it. */
+    takes::Span getGroupSpan (int groupId) const;
+
+    /** The groups of one set, in take order. Derived from the membership field,
+        so a set with one deleted take simply has one fewer entry. */
+    std::vector<int> getTakeSetGroupIds (int takeSetId) const;
+
+    /** The one join rule: does `newGroupId` belong to a set that is already
+        there?
+
+        Returns the set id it joined, or 0 when it stayed an ordinary group.
+        Three outcomes, and the promotion is the interesting one:
+
+          * a set already covers the new take   → joins it as the next index,
+            and becomes the active take (you just played it — you want to hear it)
+          * a single ordinary group covers it    → that group is PROMOTED into a
+            set of its own (it becomes take 1, silently), and the new take joins
+            as take 2. This is why a one-pass recording still leaves exactly the
+            group it always did: the set only comes into being on the second pass.
+          * nothing covers it                    → 0, nothing happens.
+
+        The ratio test lives in takes::shouldJoin; this function only decides
+        WHICH set, which is "the best covered one" (takes::bestCandidate). */
+    int joinTakeSet (int newGroupId, double ratio = takes::joinRatio);
+
+    /** Makes this take the one you hear. Every sibling in the set goes quiet.
+
+        The only writer of the active flag — a second door would be a second
+        place to forget the siblings. Doing nothing for an unknown id keeps this
+        safe from a menu that fires after the group was deleted. */
+    void setActiveTake (int groupId);
+
+    /** Exactly one active take per set, and never zero.
+
+        Called once after a project load, for the same reason
+        materialiseOccurrenceStarts is: a document is text, and text can say
+        "two active takes" or "none". Which one it should have been is not
+        recoverable, so the rule is stated once — the highest index wins, because
+        the last pass is the one the user heard when they stopped recording —
+        and every reader afterwards can assume the invariant. Returns true when
+        something had to be fixed (the self-test reads that). */
+    bool normaliseTakeSets();
 
     /** Replaces the group list (project load). Ids are preserved and the id
         counter is raised past them, exactly like restoreNotes(). */

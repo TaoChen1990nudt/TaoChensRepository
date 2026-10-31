@@ -897,6 +897,210 @@ std::vector<int> Layer::getAllNoteIds() const
     return ids;
 }
 
+//-- Phase 95: take sets ------------------------------------------------------
+takes::Span Layer::getGroupSpan (int groupId) const
+{
+    takes::Span span { 0.0, 0.0 };
+    bool any = false;
+
+    for (const auto& n : notes)
+    {
+        if (n.groupId != groupId)
+            continue;
+
+        const double start = n.startBeat;
+        const double end   = n.startBeat + n.lengthBeats;
+
+        span.start = any ? juce::jmin (span.start, start) : start;
+        span.end   = any ? juce::jmax (span.end,   end)   : end;
+        any = true;
+    }
+
+    for (const auto& c : samples)
+    {
+        if (c.groupId != groupId)
+            continue;
+
+        span.start = any ? juce::jmin (span.start, c.startBeat)                 : c.startBeat;
+        span.end   = any ? juce::jmax (span.end,   c.startBeat + c.lengthBeats) : c.startBeat + c.lengthBeats;
+        any = true;
+    }
+
+    return any ? span : takes::Span {};
+}
+
+std::vector<int> Layer::getTakeSetGroupIds (int takeSetId) const
+{
+    std::vector<int> ids;
+
+    if (takeSetId == 0)
+        return ids;
+
+    for (const auto& g : groups)
+        if (g.getTakeSetId() == takeSetId)
+            ids.push_back (g.getId());
+
+    std::sort (ids.begin(), ids.end(), [this] (int a, int b)
+    {
+        const auto* ga = findGroup (a);
+        const auto* gb = findGroup (b);
+
+        return (ga != nullptr ? ga->getTakeIndex() : 0) < (gb != nullptr ? gb->getTakeIndex() : 0);
+    });
+
+    return ids;
+}
+
+int Layer::joinTakeSet (int newGroupId, double ratio)
+{
+    auto* incoming = findGroup (newGroupId);
+
+    if (incoming == nullptr)
+        return 0;
+
+    // Never twice: a group that already belongs to a set is not a new take, and
+    // re-running the rule on it would answer "join your own set" — which would
+    // silence itself.
+    if (incoming->isTake())
+        return incoming->getTakeSetId();
+
+    const auto incomingSpan = getGroupSpan (newGroupId);
+
+    if (takes::isEmpty (incomingSpan))
+        return 0;
+
+    // One candidate per set, plus one per ordinary group: both can be joined,
+    // and "which" is decided once by the pure rule. A set is represented by the
+    // span of its ACTIVE take — that is the shape the user is looking at, and
+    // the alternates are, by construction, copies of the same region.
+    std::vector<takes::Span> candidates;
+    std::vector<int>         candidateSets;    // 0 = an ordinary group, else the set id
+    std::vector<int>         candidateGuids;   // for the ordinary-group case
+
+    for (const auto& g : groups)
+    {
+        if (g.getId() == newGroupId)
+            continue;
+
+        if (g.isTake())
+        {
+            if (! g.isActiveTake())
+                continue;
+
+            candidates.push_back (getGroupSpan (g.getId()));
+            candidateSets.push_back (g.getTakeSetId());
+            candidateGuids.push_back (-1);
+            continue;
+        }
+
+        candidates.push_back (getGroupSpan (g.getId()));
+        candidateSets.push_back (0);
+        candidateGuids.push_back (g.getId());
+    }
+
+    const int best = takes::bestCandidate (candidates, incomingSpan, ratio);
+
+    if (best < 0)
+        return 0;
+
+    //-- the ordinary group is promoted into a set of one ---------------------
+    int setId = candidateSets[(size_t) best];
+
+    if (setId == 0)
+    {
+        auto* first = findGroup (candidateGuids[(size_t) best]);
+
+        if (first == nullptr)
+            return 0;
+
+        // A set id that is free by construction: one past the highest in use.
+        setId = 1;
+
+        for (const auto& g : groups)
+            setId = juce::jmax (setId, g.getTakeSetId() + 1);
+
+        first->setTakeMembership (setId, 1);
+    }
+
+    int nextIndex = 1;
+
+    for (const auto& g : groups)
+        if (g.getTakeSetId() == setId && g.getId() != newGroupId)
+            nextIndex = juce::jmax (nextIndex, g.getTakeIndex() + 1);
+
+    incoming->setTakeMembership (setId, nextIndex);
+
+    // The gate for "exactly one sounds". Handing the flag to the new take is not
+    // enough — the one that was active has to give it up, and the only place that
+    // knows all of them is here.
+    setActiveTake (newGroupId);
+
+    return setId;
+}
+
+void Layer::setActiveTake (int groupId)
+{
+    auto* group = findGroup (groupId);
+
+    if (group == nullptr || ! group->isTake())
+        return;
+
+    const int setId = group->getTakeSetId();
+
+    for (auto& g : groups)
+        if (g.getTakeSetId() == setId)
+            g.setTakeActive (g.getId() == groupId);
+}
+
+bool Layer::normaliseTakeSets()
+{
+    bool changed = false;
+
+    // Sets are found by walking the groups, not by keeping a list: the list
+    // would be a second place that can disagree about which sets exist.
+    std::vector<int> seen;
+
+    for (const auto& g : groups)
+    {
+        const int setId = g.getTakeSetId();
+
+        if (setId == 0 || std::find (seen.begin(), seen.end(), setId) != seen.end())
+            continue;
+
+        seen.push_back (setId);
+
+        int  activeCount = 0;
+        int  highestId   = -1;
+        int  highest     = -1;
+
+        for (const auto& member : groups)
+        {
+            if (member.getTakeSetId() != setId)
+                continue;
+
+            if (member.isActiveTake())
+                ++activeCount;
+
+            if (member.getTakeIndex() > highest)
+            {
+                highest   = member.getTakeIndex();
+                highestId = member.getId();
+            }
+        }
+
+        if (activeCount == 1)
+            continue;
+
+        changed = true;
+
+        for (auto& member : groups)
+            if (member.getTakeSetId() == setId)
+                member.setTakeActive (member.getId() == highestId);
+    }
+
+    return changed;
+}
+
 void Layer::restoreGroups (std::vector<NoteGroup> restoredGroups)
 {
     groups = std::move (restoredGroups);

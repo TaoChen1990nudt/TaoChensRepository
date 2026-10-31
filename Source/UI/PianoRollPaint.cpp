@@ -445,7 +445,11 @@ void PianoRollComponent::drawNotes (juce::Graphics& g)
             if (! getNoteBounds (note).intersects (area))
                 continue;
 
-            drawNote (g, note, active->getColour(), solidAlpha,
+            // Phase 95: a note that belongs to a take which is not the one you
+            // hear is drawn faded — the sheet still shows every pass, because
+            // choosing between them means looking at them.
+            drawNote (g, note, active->getColour(),
+                      solidAlpha * takeFadeOf (*active, note.groupId),
                       isSelected (note.id), note.id == hoveredNoteId, progressOf (note));
         }
     }
@@ -532,8 +536,14 @@ void PianoRollComponent::drawGroupFrames (juce::Graphics& g)
                 const bool editing = (group.getId() == editingGroupId);
                 const auto colour  = group.getColour();
 
-                g.setColour (colour.withAlpha (baseAlpha * (editing ? 1.0f
-                                                                  : (focused ? 0.85f : 0.34f))));
+                // Phase 95: the outline of a take that is not the comp fades
+                // with its members. A bright frame around faded notes would say
+                // "this is the one" about the one that is not.
+                const float takeAlpha = takeFadeOf (*layer, group.getId());
+
+                g.setColour (colour.withAlpha (baseAlpha * takeAlpha
+                                                 * (editing ? 1.0f
+                                                            : (focused ? 0.85f : 0.34f))));
 
                 // Half a pixel in: a 1px stroke on the exact edge is drawn ON the
                 // clip's own border and reads as "the clip got thicker" rather
@@ -617,7 +627,11 @@ void PianoRollComponent::drawGroupLabels (juce::Graphics& g)
             // but loses most of its fill, because "this group is silent" has to
             // be visible on the thing that names it — a mute whose only witness
             // is a row in a side panel is a mute you will debug twice.
-            const float pillAlpha = group.isMuted() ? alpha * 0.45f : alpha;
+            //
+            // Phase 95: and so is a take that is not the comp, at the same
+            // ratio its notes and blocks lose.
+            const float pillAlpha = (group.isMuted() ? alpha * 0.45f : alpha)
+                                      * takeFadeOf (*layer, group.getId());
 
             // Focused and hovered pills are filled; the rest are outlined so a
             // screen with six groups is not six shouting tabs.

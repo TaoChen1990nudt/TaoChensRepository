@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-30 · **Phase 93**（引擎负载与丢帧看得见）
+> 最后更新：2026-10-30 · **Phase 95**（多遍录音终于是一个容器）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**，约 6 千字。
 > 规则 `MEMORY.md` · 制度 `REFERENCE.md` · 坑 `PITFALLS.md` · 逐阶段实现记录 `memory/<日期>.md`
 > · 被压掉的历史叙述（阶段全文 / 咬测流水 / 逐版沿革 / P62–P82 经验）在 **`STATUS-archive.md`**。
@@ -19,10 +19,19 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 94** — 听得见自己，且弹的落在拍上。录音键顺手开监听（`setMonitoringEnabled`，默认关；单声道话筒按 `RecordBuffer` 同一条规矩复制到两耳，混在走带淡变**之后**，所以走带停着也听得见），松键就关——不询问就活的输入是啸叫。补偿是**两条链两个数**：`getRecordOffsetSamples`（输出+输入+监听链）给话筒，`getMidiRecordOffsetSamples`（输出+监听链）给键盘——键盘没走过采集缓冲，摊给它输入项就是让每个音符提前。二者都**不看监听开关**（`finishRecording` 在 `commitTake` 之前就关了监听），换算走秒不走拍分数。校正只在 `commitTake` 门口做一次：音符、CC 曲线、音频块各自挪到该在的拍上，下游全部读已经对的数。**P93** — **Phase 93** — 引擎负载与丢帧看得见。顶栏右上角多了一块读数：一根负载条（平滑负载 + 峰值刻度）和一行字 `CPU 12% · 峰 41% · 丢音 2`。负载与峰值是 `Audio/LoadMeter.h` 的 `perf::advance`（纯函数：指数平均 + 1.5 s 峰值保持 + 线性回落，**不夹到 100%**，因为 JUCE 夹掉的那个数正是「这一块用了 250% 预算」）；丢帧直接用 `AudioDeviceManager::getXRunCount()`（设备原生计数 + JUCE 的估算），**不自己再数一遍**。计时是回调开头的 RAII scope guard，四个出口都算一块。顺手修了顶栏的 `bar.beat.tick`：它当时自己写着 4.0，3/4 的歌按 4/4 数小节（P91 漏掉的第四个读者）。P92 拖组到组上＝替换。P92 补上「从编组栏拖一行出来」的另一半：落在空网格上仍是「再放一处」，落在**已经在那儿的组**上则是**替换那一处**——目标那一处的成员（音符与采样块）被拿掉，拖来的组按**目标的出现原点**站过去，目标没有别的出现就整行离开列表；只认同图层，命中顺序照按下的顺序（成员优先，框在后）。P91 把拍号变成工程属性。P86 把工程文件里的 `path` 从绝对改成**相对工程目录**（解不回来才退回绝对），模型里仍是绝对；找不到时能按用户挑的目录按文件名重定位。P87 让走带能循环任意一段：`Model/LoopRegion` 是唯一的区间规则，标尺底部一条 7px 窄带画它、拖它，关掉不忘记位置。P88 加了点击轨与数拍：`Audio/Metronome` 只混进走带的块（导出结构性拿不到），录音前可数一小节。P89 给自检的退出码装了个听众：GitHub Actions 跑 configure → build → `--snapshot`，四条门禁全判在 ASCII 上。P90 让已弹的东西回到网格：`Model/Quantize.h` 一个纯函数（就近 + 0..1 强度），右键菜单五档网格 × 四档强度，音符与采样块都动，编组先重锚定出现原点再同步形状。P91 把写了八十八个阶段的 `constexpr double beatsPerBar = 4.0` 变成值：`Model/Meter.h` 是唯一的拍号规则，写进 `<Transport beatsPerBar>`，四个读者（标尺/复制到后一小节/节拍器重音/量化菜单）读同一份 |
-| 自检 | **909 ALL PASSED / 0 FAIL**，失败退出码 1 |
+| 已完成阶段 | **Phase 95** — 多遍录音终于是一个容器。以前录第二遍只是往同一图层再叠一个
+「录音 N」组，两遍一起发声（一个和弦）。现在一组 take 共用一个 `takeSetId`，**恰好一遍出声**：
+入组只有一个判据 `Layer::joinTakeSet`（`Model/TakeSet.h` 纯函数，覆盖率按**长**的那段量，0.9 起——
+按短的量会让「8 小节里补 2 小节」拿 100%，正好把要防的事放进来），普通组被第二遍撞上时**当场提升**
+成 take 1，所以单遍录音的行为与 P92 逐字节相同。发声门在发布：`GroupMix::takeSilent` 折进
+`gainAt` 一处（**不是 mute**，两个字段分开），音符与块共用。`commitTake` 现在**一遍 = 一个组，
+音符与音频块都在里面**——纯音频 take（人声）也有容器，顺带修掉「录音 N」的推子够不到录音这件事。
+编组栏行内多一个 `2/4` 徽标、非当前那遍整行变淡；右键「当前 take」子菜单切换；钢琴窗里非当前的
+take 音符/块/组框按 0.45 变淡。存盘 v30（`takeset` / `take` / `takeactive`，缺省 = 普通组 / 当前），
+加载后 `normaliseTakeSets()` 按最大序号修好坏文档。**P94** — 听得见自己，且弹的落在拍上。录音键顺手开监听（`setMonitoringEnabled`，默认关；单声道话筒按 `RecordBuffer` 同一条规矩复制到两耳，混在走带淡变**之后**，所以走带停着也听得见），松键就关——不询问就活的输入是啸叫。补偿是**两条链两个数**：`getRecordOffsetSamples`（输出+输入+监听链）给话筒，`getMidiRecordOffsetSamples`（输出+监听链）给键盘——键盘没走过采集缓冲，摊给它输入项就是让每个音符提前。二者都**不看监听开关**（`finishRecording` 在 `commitTake` 之前就关了监听），换算走秒不走拍分数。校正只在 `commitTake` 门口做一次：音符、CC 曲线、音频块各自挪到该在的拍上，下游全部读已经对的数。**P93** — **Phase 93** — 引擎负载与丢帧看得见。顶栏右上角多了一块读数：一根负载条（平滑负载 + 峰值刻度）和一行字 `CPU 12% · 峰 41% · 丢音 2`。负载与峰值是 `Audio/LoadMeter.h` 的 `perf::advance`（纯函数：指数平均 + 1.5 s 峰值保持 + 线性回落，**不夹到 100%**，因为 JUCE 夹掉的那个数正是「这一块用了 250% 预算」）；丢帧直接用 `AudioDeviceManager::getXRunCount()`（设备原生计数 + JUCE 的估算），**不自己再数一遍**。计时是回调开头的 RAII scope guard，四个出口都算一块。顺手修了顶栏的 `bar.beat.tick`：它当时自己写着 4.0，3/4 的歌按 4/4 数小节（P91 漏掉的第四个读者）。P92 拖组到组上＝替换。P92 补上「从编组栏拖一行出来」的另一半：落在空网格上仍是「再放一处」，落在**已经在那儿的组**上则是**替换那一处**——目标那一处的成员（音符与采样块）被拿掉，拖来的组按**目标的出现原点**站过去，目标没有别的出现就整行离开列表；只认同图层，命中顺序照按下的顺序（成员优先，框在后）。P91 把拍号变成工程属性。P86 把工程文件里的 `path` 从绝对改成**相对工程目录**（解不回来才退回绝对），模型里仍是绝对；找不到时能按用户挑的目录按文件名重定位。P87 让走带能循环任意一段：`Model/LoopRegion` 是唯一的区间规则，标尺底部一条 7px 窄带画它、拖它，关掉不忘记位置。P88 加了点击轨与数拍：`Audio/Metronome` 只混进走带的块（导出结构性拿不到），录音前可数一小节。P89 给自检的退出码装了个听众：GitHub Actions 跑 configure → build → `--snapshot`，四条门禁全判在 ASCII 上。P90 让已弹的东西回到网格：`Model/Quantize.h` 一个纯函数（就近 + 0..1 强度），右键菜单五档网格 × 四档强度，音符与采样块都动，编组先重锚定出现原点再同步形状。P91 把写了八十八个阶段的 `constexpr double beatsPerBar = 4.0` 变成值：`Model/Meter.h` 是唯一的拍号规则，写进 `<Transport beatsPerBar>`，四个读者（标尺/复制到后一小节/节拍器重音/量化菜单）读同一份 |
+| 自检 | **933 ALL PASSED / 0 FAIL**，失败退出码 1 |
 | 编译 | 零 error 零 warning |
-| `formatVersion` | **29**（P86 = 27 只改值不改标签；P87 = 28 加 `<Transport loop loopStart loopEnd>`；**P88 不升**——节拍器开关/音量/预备拍长度还没进工程文件；**P91 = 29** 加 `<Transport beatsPerBar>`，且 `<Transport>` 改成**永远写**——否则「4/4 无循环」和「3/4 无循环」是同一份文档）— 新增 `<Curve id name target pluginparam enabled>` + `<CurveState active/>`；**v28 及更老的文件照常打开**（没有 `beatsPerBar` 就读 4/4），只有重新保存才写新形状 |
+| `formatVersion` | **30**（P86 = 27 只改值不改标签；P87 = 28 加 `<Transport loop loopStart loopEnd>`；**P88 不升**——节拍器开关/音量/预备拍长度还没进工程文件；**P91 = 29** 加 `<Transport beatsPerBar>`，且 `<Transport>` 改成**永远写**；**P95 = 30** 给 `<Group>` 加 `takeset` / `take` / `takeactive`，三者**缺省即「普通组 / 当前」**，所以单遍录音写出来与 P92 逐字节相同）— 另含 `<Curve id name target pluginparam enabled>` + `<CurveState active/>`。**v29 及更老的文件照常打开**，加载后 `normaliseTakeSets()` 按最大序号修好坏文档，只有重新保存才写新形状 |
 | 可执行 | `build/AtomicDAW_artefacts/Release/AtomicDAW.exe` |
 | 技术栈 | JUCE 8.0.4（FetchContent）+ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + C++17 |
 | 源码规模 | `Source/` 下 **110 个** .cpp/.h，共 **82,322 行**，分 Model / Audio / UI / Util / Media。最大的三个是 `SelfTest.cpp` 17,704 / `MainComponent.cpp` 8,869 / `PlaybackEngine.cpp` 3,748 |
@@ -32,10 +41,13 @@
 **未定**，等你给功能排期。P58–P92 的逐条主题不在这里重复，见下面的表和 `STATUS-archive.md`。
 
 体验官诊断（`docs/review-p92/`）给了五条按 impact×confidence÷cost 排的候选。第 5 条
-「引擎可观测」在 P93 落地，第 1 条「监听 + 录音侧延迟补偿」在 P94 落地，剩下三条：
+「引擎可观测」在 P93 落地，第 1 条「监听 + 录音侧延迟补偿」在 P94 落地，第 2 条的**前半**
+（take 容器）在 P95 落地。剩下：
 
-1. **take 容器 → comping**（5×4÷5）— 录第二遍现在只是多一个「录音 N」组；验收：四遍 8 小节、
-   3 处拼接，中位 ≤150 s，接缝 ±2 ms 内无 >−40 dBFS 尖峰。
+1. **comping**（take 容器的后半）— 容器有了，但还没有「从第 2 遍取第 3–4 小节、其余取第 1 遍」。
+   验收：四遍 8 小节、3 处拼接，中位 ≤150 s；接缝 ±2 ms 内无 >−40 dBFS 尖峰。
+   接缝要 3–5 ms 交叉淡化；comp 结果仍是一个组（保住「组 = 可复制的一次出现」）。
+   现在**局部补录会自成一个普通组**（覆盖率 0.25，故意不并），这正是 comping 要接手的那半。
 2. **力度 + CC lane**（4×4÷3）— 力度现在只显示 `vel 0.80`，没有任何编辑手势。
 3. **send/return + 侧链**（4×4÷4）— 0 条 aux；侧链延迟要并进既有的 `pdc::solve`，别新开一条补偿路径。
 
@@ -214,6 +226,7 @@ P94 留下的两件小事，谁接手谁看：
 | P92 | 拖组到组上＝替换那一处：`getGroupReplaceTargetAt` + `replaceGroupAppearance` + 预览换形状 | `memory/2026-10-30.md` |
 | P93 | 引擎可观测：`Audio/LoadMeter.h`（纯规则）+ 回调里的 RAII 计时 + 顶栏读数 + `-perf` 快照；顺手把顶栏的 `4.0` 换成 `meter::positionAt` | `memory/2026-10-30.md` |
 | P94 | 监听 + 录音补偿：录音键开直通监听 + `getRecordOffsetSamples` / `getMidiRecordOffsetSamples` 两条链两个数 + `commitTake` 门口一次校正 | `memory/2026-10-30.md` |
+| P95 | take 容器：`Model/TakeSet.h`（覆盖率按长的量，0.9）+ `Layer::joinTakeSet`（含普通组提升）+ `GroupMix::takeSilent` 发声门 + 编组栏 `2/3` 徽标与非当前 take 变淡 + 右键切换 + v30 + `-takes` 快照 | `memory/2026-10-30.md` |
 | 踩坑索引 | 各阶段的不变量与咬测 | `PITFALLS.md` |
 
 ## 构建
@@ -241,11 +254,15 @@ build/AtomicDAW_artefacts/Release/AtomicDAW.exe --snapshot docs/phaseNN.png > do
 tail -3 docs/phaseNN.log   # 要看到 "ALL CHECKS PASSED"
 ```
 
-断言总数只增不减。**新增功能要加断言并报出新的总数**（当前基准 **909**），退回去说明有东西坏了。
+断言总数只增不减。**新增功能要加断言并报出新的总数**（当前基准 **933**），退回去说明有东西坏了。
 
-视觉回归：每轮入库 33 张 `docs/pNN-*.png`（`--snapshot p94.png` 会顺带写出 32 张后缀图 + 主图；
-`-perf` 是 P93 新加的）。与上一轮逐字节比，**遮住顶栏读数之后 P94 是 18/33 相同**，其余 15 张里
-9 张是抖动集（混音台电平表、恢复时间戳、播放头），**另外 6 张是真差异**：
+视觉回归：每轮入库 **34 张** `docs/pNN-*.png`（`--snapshot p95.png` 会顺带写出 33 张后缀图 + 主图；
+`-perf` 是 P93 新加的，`-takes` 是 P95 新加的——三遍 take 的徽标与变淡，面板那一半只有图上能看到）。与上一轮逐字节比，**P95 是 18/33 相同**，其余 15 张里 9 张是抖动集，
+**另外 6 张（主图 / `-sampler` / `-spotlight` / `-selectmark-shell` / `-groupauto` / `-dropnote`）
+全部来自同一行**：录音块现在进了它的 take 组，组框与组带把块也圈进去，块与音符一起被选中时
+采样卡会亮。定界实验证实——只把 `assignSamplesToGroup` 那一行关掉重拍，立刻回到 22/33 相同、
+差异全部落在抖动集与读数区。所以这不是渲染回归，是 P95 要的语义。
+P94 那 6 张（下面这段）是另一件事，留着当历史：
 `-dropnote` / `-dropgroup` / `-groups` / `-loop` / `-spotlight` / 主图里那个「录音 1.wav」块
 **整体左移了 3–4 px**（左边缘 112→109、275→271）。它不是渲染变了——那个块本身就是一路 take，
 P94 的补偿按这台声卡报的延迟把它挪到了该在的拍上。**这 6 张因此带本机声卡延迟**，
@@ -261,7 +278,7 @@ P94 的补偿按这台声卡报的延迟把它挪到了该在的拍上。**这 6
 
 **CI（P89）**：推上去就跑 `.github/workflows/selftest.yml`（也可以手动 dispatch）。
 门禁只有四条，全判在 ASCII 上：退出码 0 / `[FAIL]` 数为 0 / 日志含 `ALL CHECKS PASSED` /
-PASS 数 ≥ `env.MIN_CHECKS`（909）。**加断言的那一轮要在同一个提交里把 `MIN_CHECKS` 调大**，
+PASS 数 ≥ `env.MIN_CHECKS`（933）。**加断言的那一轮要在同一个提交里把 `MIN_CHECKS` 调大**，
 它是"只增不减"唯一执法的地方。CI 跑在**仓库根**（cwd ≠ exe 目录），本地一样能这么跑，
 出图与 `demo.atomic` 会落在根上——`.gitignore` 里已忽略。
 

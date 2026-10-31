@@ -802,6 +802,43 @@ MainComponent::MainComponent()
 
         menu.addItem (2, utf8 ("挂载音源…"));
         menu.addSeparator();
+
+        //-- Phase 95: which take sounds --------------------------------------
+        // The list shows every pass so you can compare them; this is where you
+        // pick the one that plays. Only for a group that IS a take — an
+        // ordinary group has no siblings to choose between, and offering a
+        // one-entry submenu would be offering a decision nobody has.
+        if (group->isTake() && layer != nullptr)
+        {
+            const auto members = layer->getTakeSetGroupIds (group->getTakeSetId());
+
+            if (members.size() > 1)
+            {
+                juce::PopupMenu takeMenu;
+
+                for (int i = 0; i < (int) members.size(); ++i)
+                {
+                    const auto* member = layer->findGroup (members[(size_t) i]);
+
+                    if (member == nullptr)
+                        continue;
+
+                    // The id band is 100+: the menu's own verbs are 1..5, and a
+                    // take list is open-ended — a shared band would mean the
+                    // fifth take fires "折叠该编组".
+                    // Position in the list, not the stored index — same reason as
+                    // the row badge: an index that survived a deletion would number
+                    // itself out of range.
+                    takeMenu.addItem (100 + i,
+                                      utf8 ("第 ") + juce::String (i + 1) + utf8 (" 遍"),
+                                      true, member->isActiveTake());
+                }
+
+                menu.addSubMenu (utf8 ("当前 take"), takeMenu);
+                menu.addSeparator();
+            }
+        }
+
         menu.addItem (3, utf8 ("跟随图层输出"), group->getOutputSlotId() >= 0);
         menu.addSeparator();
         menu.addItem (4, group->isCollapsed() ? utf8 ("展开该编组") : utf8 ("折叠该编组"));
@@ -820,6 +857,30 @@ MainComponent::MainComponent()
 
                                 if (g == nullptr)
                                     return;
+
+                                //-- Phase 95: the take list (id band 100+) --
+                                // Re-read, not remembered: the menu is async and
+                                // the set may have changed while it was open. The
+                                // index is looked up again in the CURRENT list, so
+                                // a take deleted meanwhile shifts the rest by one
+                                // instead of activating whatever slid into its
+                                // place.
+                                if (result >= 100)
+                                {
+                                    if (! g->isTake())
+                                        return;
+
+                                    const auto members = l->getTakeSetGroupIds (g->getTakeSetId());
+                                    const int  which   = result - 100;
+
+                                    if (! juce::isPositiveAndBelow (which, (int) members.size()))
+                                        return;
+
+                                    l->setActiveTake (members[(size_t) which]);
+                                    safe->stack.notifyNotesChanged();
+                                    safe->republish();
+                                    return;
+                                }
 
                                 if (result == 1 || result == 5)
                                 {
@@ -1926,6 +1987,58 @@ juce::Image MainComponent::createPerfSnapshot()
     repaint();
 
     return image;
+}
+
+//==============================================================================
+juce::Image MainComponent::createTakeSetSnapshot()
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr)
+        return {};
+
+    // A set id nobody else can be using: one past the highest in play, which is
+    // the same rule joinTakeSet follows. Hard-coding 1 would collide with a set
+    // the self-test already made on this layer.
+    int setId = 1;
+
+    for (const auto& g : layer->getGroups())
+        setId = juce::jmax (setId, g.getTakeSetId() + 1);
+
+    // Bars 1-2, three passes of the same phrase at three pitches — the picture
+    // is about the CONTAINER, so the notes only have to be distinguishable.
+    static const int pitches[3] = { 60, 64, 67 };
+
+    for (int i = 0; i < 3; ++i)
+    {
+        const int groupId = layer->addGroup (utf8 ("录音 take ") + juce::String (i + 1),
+                                             groupPalette::nextGroupColour ((int) layer->getGroups().size()));
+
+        std::vector<int> ids;
+
+        for (int step = 0; step < 4; ++step)
+            ids.push_back (layer->addNote ({ 0, pitches[i] + (step % 2 == 0 ? 0 : 4),
+                                             0.0 + step * 0.5, 0.4, 0.75f }));
+
+        layer->assignNotesToGroup (ids, groupId, 0);
+
+        // Membership and audibility separately, exactly like the recorder: the
+        // second pass is the comp in this picture, so the other two go quiet.
+        layer->findGroup (groupId)->setTakeMembership (setId, i + 1);
+        layer->findGroup (groupId)->setTakeActive (false);
+    }
+
+    if (const auto members = layer->getTakeSetGroupIds (setId); members.size() > 1)
+        layer->setActiveTake (members[1]);
+
+    stack.notifyNotesChanged();
+
+    // The three new rows are at the bottom of a list that now overflows, and a
+    // badge nobody can see documents nothing.
+    groupPanel.setScrollY (groupPanel.getContentHeight());
+    repaint();
+
+    return createComponentSnapshot (getLocalBounds(), true);
 }
 
 //==============================================================================
@@ -4630,7 +4743,7 @@ int MainComponent::commitTake (Take take, const juce::AudioBuffer<float>& audioT
         }
     }
 
-    //-- 2. the notes: one group per take -------------------------------------
+    //-- 2. the take becomes one container: its notes AND its audio -----------
     std::vector<int> noteIds;
     noteIds.reserve (take.notes.size());
 
@@ -4645,17 +4758,35 @@ int MainComponent::commitTake (Take take, const juce::AudioBuffer<float>& audioT
         noteIds.push_back (layer->addNote (std::move (note)));
     }
 
-    if (! noteIds.empty())
+    // Phase 95: before this, a take was "a group of notes" and the audio block
+    // it came with was a separate thing on the same layer — so a vocal take,
+    // which has no notes at all, had no container, and a MIDI-plus-audio take
+    // had a group whose fader and mute did not reach the recording. One
+    // container per take, both kinds inside, is what makes a second pass
+    // comparable with the first.
+    if (! noteIds.empty() || lastRecordClipId >= 0)
     {
         const int groupIndex = (int) layer->getGroups().size();
         const int groupId = layer->addGroup (utf8 ("录音 ") + juce::String (recordingCounter),
                                              groupPalette::nextGroupColour (groupIndex));
 
-        layer->assignNotesToGroup (noteIds, groupId, 0);
+        if (! noteIds.empty())
+            layer->assignNotesToGroup (noteIds, groupId, 0);
+
+        if (lastRecordClipId >= 0)
+            layer->assignSamplesToGroup ({ lastRecordClipId }, groupId, 0);
+
         lastRecordGroupId = groupId;
 
-        if (auto* group = layer->findGroup (groupId))
-            applyRecordedControls (*group, take);
+        if (! take.notes.empty())
+            if (auto* group = layer->findGroup (groupId))
+                applyRecordedControls (*group, take);
+
+        // Phase 95: the second pass over the same bars joins the first as
+        // take 2 — and silences it — instead of stacking a second performance
+        // on top of the first. Returns 0 when nothing covered it, which is
+        // exactly the single-pass case: the group stays an ordinary group.
+        layer->joinTakeSet (groupId);
     }
 
     commitHistory();

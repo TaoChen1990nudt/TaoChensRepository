@@ -115,6 +115,17 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
     按开关取值正好抹掉监听链那一项。换算**走秒不走拍分数**（速度会变）；零点由 `TempoMap` 兜，
     **不许在落点再加一个死的 `jmax`**（咬测证明它不可达）。
 
+28. **一遍录音 = 一个容器，只有当前那一遍出声**（P95）：take 集合是**派生的**（成员各带
+    `takeSetId`/`takeIndex`/`takeActive`），没有 set 实体。**入组只有一个判据**
+    `Layer::joinTakeSet`，覆盖率按**长**的那一段量（0.9 起）——按短的量会让「8 小节里补 2 小节」
+    拿到 100%，正好把要防的那件事放进来。补录因此自成一个普通组，不是并进去。
+    **提升是隐式的**：普通组被第二遍撞上时才变成 take 1，所以单遍录音的行为与 P92 逐字节相同。
+    **`setActiveTake` 是唯一写 active 的地方**，`joinTakeSet` 末尾必须调它——只把新 take 标成
+    当前而不管旧的那遍，就是两遍同时出声。发声门在发布：`GroupMix::takeSilent` → `gainAt`
+    一处，音符与块共用；**它不是 mute**，别把两个字段合成一个。存盘 **没有 `takeset` 就是
+    普通组**、**没有 `takeactive` 就是当前**；加载后 `normaliseTakeSets`（序号最大的赢）。
+    **`groups` 是 vector，录一遍就 realloc**：不许跨一次录音缓存 `NoteGroup*`，一律按 id 取。
+
 ## 索引
 - 目录结构、构建命令（含 `unset *proxy*`）、CI 四条门禁、`formatVersion` 逐版字段、自检夹具
   —— 全在 `STATUS.md` 与 `REFERENCE.md`，本文件不重复。

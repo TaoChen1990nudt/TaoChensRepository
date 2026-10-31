@@ -351,9 +351,18 @@ struct GroupMix
         a muted group is silent. */
     bool  muted = false;
 
+    /** Phase 95: this group is a take, and not the one you hear.
+
+        Deliberately a second flag rather than "muted = muted || !active":
+        `muted` is the user's decision and the panel draws it as such, while an
+        inactive take is not silenced — it is simply not the comp. Both are
+        folded into `gainAt` below, so the arithmetic still has one gate and a
+        note and a clip still cannot disagree. */
+    bool  takeSilent = false;
+
     float gainAt (double beat) const noexcept
     {
-        if (muted)
+        if (muted || takeSilent)
             return 0.0f;
 
         const float curve = levelAutomated ? automationValueAt (levelPoints, beat) : 1.0f;

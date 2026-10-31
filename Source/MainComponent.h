@@ -412,6 +412,21 @@ public:
         spike — photographs the top-right corner, and puts the meter back. */
     juce::Image createPerfSnapshot();
 
+    /** Phase 95: three passes over the same two bars, and the badge that says
+        which one you hear.
+
+        Every other frame in the list is of a session with no multi-pass
+        recording in it, so "the row shows 2 / 3 and the other two are washed
+        out" had no picture at all — and that is the half of this phase a test
+        cannot read back. The takes are built through the same model calls the
+        recorder uses (`addGroup` + membership + `setActiveTake`), not by
+        hand-writing XML, so the frame documents the real path.
+
+        Left in the session afterwards on purpose: this is the last frame that
+        photographs the main window, and deleting the rows again would be code
+        whose only job is to tidy up after a photograph. */
+    juce::Image createTakeSetSnapshot();
+
     /** Phase 54: a note selection and the cards it plays on, in one frame.
 
         The whole point of the mark is that it is NOT the spotlight — the grid

@@ -17062,8 +17062,8 @@ juce::String MainComponent::runSelfTest()
                                                     ? juce::String (utf8 ("元素还在"))
                                                     : juce::String (utf8 ("元素已去掉"))));
 
-            check (utf8 ("formatVersion 升到 29（多了一个属性就要能认出来）"),
-                   project::formatVersion == 29, juce::String (project::formatVersion));
+            check (utf8 ("formatVersion 升到 30（take 归属多两个属性就要能认出来）"),
+                   project::formatVersion == 30, juce::String (project::formatVersion));
         }
 
         //-- E. 复制到后一小节 ------------------------------------------------
@@ -17885,7 +17885,8 @@ juce::String MainComponent::runSelfTest()
             engine94.setDeviceLatencyForTest (24000, 24000);
 
             const int lateId = host94.commitTake (take94, voice94, 48000.0);
-            const double lateStart = startOfClip (lateId);
+            const int lateClipId = host94.getLastRecordClipId();
+            const double lateStart = startOfClip (lateClipId);
 
             check (utf8 ("晚一秒的链：写在 8.0 拍的 take 落在 6.0 拍"),
                    lateId > 0 && std::abs (lateStart - 6.0) < 1.0e-9,
@@ -17896,7 +17897,7 @@ juce::String MainComponent::runSelfTest()
             engine94.setDeviceLatencyForTest (0, 0);
 
             const int exactId = host94.commitTake (take94, voice94, 48000.0);
-            const double exactStart = startOfClip (exactId);
+            const double exactStart = startOfClip (host94.getLastRecordClipId());
 
             check (utf8 ("设备不报延迟时 8.0 拍还是 8.0 拍（不补一个不存在的链）"),
                    exactId > 0 && std::abs (exactStart - 8.0) < 1.0e-9,
@@ -17988,13 +17989,359 @@ juce::String MainComponent::runSelfTest()
             take94.startBeat = 0.5;
 
             const int topId = host94.commitTake (take94, voice94, 48000.0);
-            const double topStart = startOfClip (topId);
+            const double topStart = startOfClip (host94.getLastRecordClipId());
 
             check (utf8 ("曲子最开头的 take 夹在 0，不会跑成负拍"),
                    topId > 0 && topStart == 0.0,
                    juce::String (topStart, 9));
 
             folder.deleteRecursively();
+        }
+    }
+
+    //-- Phase 95: 多遍录音是一个 take 容器 ------------------------------------
+    // 诊断第 2 条的前半：录第二遍以前只是往同一图层再叠一个「录音 N」组，
+    // 两组同时发声 —— 两遍演奏叠成一个和弦。这一块钉的是「一遍 = 一个容器，
+    // 只有当前那一遍出声」，comping（跨遍拼接）留给下一轮。
+    {
+        // (A) 判据先单独测：它是一段算术，不该非得搭一个工程才能问。
+        {
+            const takes::Span eight { 8.0, 16.0 };
+
+            check (utf8 ("同一段两遍：覆盖率 1"),
+                   std::abs (takes::coverage (eight, eight) - 1.0) < 1.0e-12,
+                   juce::String (takes::coverage (eight, eight), 9));
+
+            check (utf8 ("按长的量：8 小节重录成 8.5 小节 = 8/8.5，仍算重录"),
+                   std::abs (takes::coverage (eight, { 8.0, 16.5 }) - 8.0 / 8.5) < 1.0e-12
+                     && takes::shouldJoin (eight, { 8.0, 16.5 }),
+                   juce::String (takes::coverage (eight, { 8.0, 16.5 }), 9));
+
+            check (utf8 ("补录 2 小节 = 0.25，不够 0.9，不合并"),
+                   std::abs (takes::coverage (eight, { 10.0, 12.0 }) - 0.25) < 1.0e-12
+                     && ! takes::shouldJoin (eight, { 10.0, 12.0 }),
+                   juce::String (takes::coverage (eight, { 10.0, 12.0 }), 9));
+
+            // 10 与 9 这两个数在 double 里算出来的比值与字面量 0.9 是同一个数，
+            // 边界才测得住；换成 15.2 会差一个 ulp 掉到线下，测的就不是规则了。
+            check (utf8 ("刚好 0.9 也合并（>= 不是 >），8.9/10 就不合并"),
+                   takes::shouldJoin ({ 0.0, 10.0 }, { 0.0, 9.0 })
+                     && ! takes::shouldJoin ({ 0.0, 10.0 }, { 0.0, 8.9 }),
+                   juce::String (takes::coverage ({ 0.0, 10.0 }, { 0.0, 9.0 }), 9));
+
+            check (utf8 ("零长度不算覆盖，也不除零"),
+                   takes::coverage ({ 4.0, 4.0 }, eight) == 0.0
+                     && ! takes::shouldJoin ({ 4.0, 4.0 }, eight),
+                   juce::String (takes::coverage ({ 4.0, 4.0 }, eight), 9));
+
+            const std::vector<takes::Span> sets { { 0.0, 8.0 }, { 30.0, 38.0 } };
+
+            // 两个候选都够格时选覆盖最多的：{0,10} 覆盖 0.9，{0,9} 覆盖 1.0。
+            // 少了这一条，「返回第一个够格的」也能全部通过。
+            const std::vector<takes::Span> nested { { 0.0, 10.0 }, { 0.0, 9.0 } };
+
+            check (utf8 ("bestCandidate 选覆盖最多的那个，不是第一个够格的"),
+                   takes::bestCandidate (sets, { 30.0, 38.0 }) == 1
+                     && takes::bestCandidate (sets, { 0.0, 8.0 }) == 0
+                     && takes::bestCandidate (nested, { 0.0, 9.0 }) == 1,
+                   juce::String (takes::bestCandidate (sets, { 30.0, 38.0 }))
+                     + " / " + juce::String (takes::bestCandidate (nested, { 0.0, 9.0 })));
+
+            check (utf8 ("一个都不够就答 -1"),
+                   takes::bestCandidate (sets, { 12.0, 14.0 }) == -1,
+                   juce::String (takes::bestCandidate (sets, { 12.0, 14.0 })));
+        }
+
+        // (B) 真的录三遍：容器、序号、谁出声。
+        MainComponent host95;
+        auto* layer95 = host95.getLayerStack().getActiveLayer();
+
+        if (layer95 != nullptr)
+        {
+            auto playPass = [&host95] (double at, double until, int pitch)
+            {
+                host95.beginTakeForTest (at);
+                host95.recordNoteAt (pitch, 0.8f, true,  at);
+                host95.recordNoteAt (pitch, 0.8f, false, until);
+                return host95.endTakeForTest (until);
+            };
+
+            auto countActive = [layer95] (int setId)
+            {
+                int n = 0;
+
+                for (int id : layer95->getTakeSetGroupIds (setId))
+                {
+                    const auto* g = layer95->findGroup (id);
+                    n += (g != nullptr && g->isActiveTake()) ? 1 : 0;
+                }
+
+                return n;
+            };
+
+            // A NOTE ON THE POINTERS: `groups` is a vector, and recording one
+            // more take pushes into it. A `NoteGroup*` taken before the next
+            // pass therefore points at freed storage — which is exactly how the
+            // first version of this block failed: five checks, one dangling
+            // pointer. Everything below asks by id.
+            auto groupOf = [layer95] (int id) -> NoteGroup*
+            {
+                return layer95->findGroup (id);
+            };
+
+            auto takeSetOf = [&groupOf] (int id)
+            {
+                const auto* g = groupOf (id);
+                return g != nullptr ? g->getTakeSetId() : -1;
+            };
+
+            const int pass1 = playPass (8.0, 9.0, 60);
+
+            check (utf8 ("第一遍还是普通编组：没有 set，也没有兄弟"),
+                   pass1 > 0 && groupOf (pass1) != nullptr && ! groupOf (pass1)->isTake(),
+                   juce::String (pass1) + utf8 (" / set ") + juce::String (takeSetOf (pass1)));
+
+            const int pass2 = playPass (8.0, 9.0, 64);
+
+            check (utf8 ("第二遍并进同一 set，成为第 2 遍"),
+                   groupOf (pass1) != nullptr && groupOf (pass2) != nullptr
+                     && takeSetOf (pass1) != 0
+                     && takeSetOf (pass1) == takeSetOf (pass2)
+                     && groupOf (pass1)->getTakeIndex() == 1
+                     && groupOf (pass2)->getTakeIndex() == 2,
+                   juce::String (takeSetOf (pass2))
+                     + utf8 (" / 第 ")
+                     + juce::String (groupOf (pass2) != nullptr ? groupOf (pass2)->getTakeIndex() : -1)
+                     + utf8 (" 遍"));
+
+            check (utf8 ("只有刚弹的那一遍出声，第一遍让位"),
+                   groupOf (pass1) != nullptr && groupOf (pass2) != nullptr
+                     && groupOf (pass2)->isActiveTake() && ! groupOf (pass1)->isActiveTake(),
+                   juce::String ((int) groupOf (pass1)->isActiveTake())
+                     + " / " + juce::String ((int) groupOf (pass2)->isActiveTake()));
+
+            const int pass3 = playPass (8.0, 9.0, 67);
+
+            check (utf8 ("第三遍接着排：3 个 take，只有第 3 遍出声"),
+                   groupOf (pass3) != nullptr && groupOf (pass3)->getTakeIndex() == 3
+                     && groupOf (pass3)->isActiveTake()
+                     && countActive (takeSetOf (pass3)) == 1,
+                   juce::String (groupOf (pass3) != nullptr ? groupOf (pass3)->getTakeIndex() : -1)
+                     + utf8 (" 遍 / ") + juce::String (countActive (takeSetOf (pass3)))
+                     + utf8 (" 个出声"));
+
+            check (utf8 ("容器按 take 序号排序（徽标按这个顺序读）"),
+                   layer95->getTakeSetGroupIds (takeSetOf (pass3))
+                     == std::vector<int> { pass1, pass2, pass3 },
+                   juce::String ((int) layer95->getTakeSetGroupIds (takeSetOf (pass3)).size()));
+
+            // 换回第一遍：这是 UI 那个「当前 take」子菜单落到的唯一入口。
+            layer95->setActiveTake (pass1);
+
+            check (utf8 ("切回第 1 遍：它出声，另外两遍安静，还是只有一个出声"),
+                   groupOf (pass1)->isActiveTake()
+                     && ! groupOf (pass2)->isActiveTake() && ! groupOf (pass3)->isActiveTake()
+                     && countActive (takeSetOf (pass1)) == 1,
+                   juce::String (countActive (takeSetOf (pass1))) + utf8 (" 个出声"));
+
+            // 局部补录不是重录：8 小节里补 2 小节，绝不并进那 3 遍里。
+            const int longPass = playPass (20.0, 28.0, 60);
+            const int punchIn  = playPass (22.0, 24.0, 62);
+
+            check (utf8 ("补录 2 小节不并进 8 小节的 take 组（并了就是删掉六小节）"),
+                   groupOf (longPass) != nullptr && groupOf (punchIn) != nullptr
+                     && ! groupOf (longPass)->isTake()
+                     && ! groupOf (punchIn)->isTake(),
+                   utf8 ("set ") + juce::String (takeSetOf (punchIn)));
+
+            // (C) 纯音频 take 也要有容器：人声没有音符。
+            juce::AudioBuffer<float> voice95 (2, 32000);
+
+            for (int i = 0; i < 32000; ++i)
+            {
+                const float value = std::sin ((float) i * 0.01f) * 0.5f;
+                voice95.setSample (0, i, value);
+                voice95.setSample (1, i, value);
+            }
+
+            host95.takeAudioForTest (voice95, 48000.0);
+            host95.beginTakeForTest (40.0);
+
+            const int audioOnly = host95.endTakeForTest (41.0);
+            const int clip95    = host95.getLastRecordClipId();
+
+            check (utf8 ("纯音频 take 也有容器：没有音符照样建组，块是它的成员"),
+                   groupOf (audioOnly) != nullptr && clip95 > 0
+                     && layer95->getGroupIdOfSample (clip95) == audioOnly,
+                   juce::String (audioOnly) + utf8 (" / 块 ") + juce::String (clip95)
+                     + utf8 (" 属于 ") + juce::String (layer95->getGroupIdOfSample (clip95)));
+
+            const auto audioSpan = layer95->getGroupSpan (audioOnly);
+
+            check (utf8 ("容器的跨度算上了音频块，不是只看音符"),
+                   takes::lengthOf (audioSpan) > 1.0,
+                   juce::String (takes::lengthOf (audioSpan), 4));
+
+            // (D) 发声门：音符与块共用 gainAt 这一处。
+            GroupMix takeQuiet;
+            takeQuiet.takeSilent = true;
+
+            GroupMix takeLive;
+
+            check (utf8 ("非当前 take 的编组增益是 0，当前的是 1"),
+                   takeQuiet.gainAt (8.0) == 0.0f && takeLive.gainAt (8.0) == 1.0f,
+                   juce::String (takeQuiet.gainAt (8.0)) + " / " + juce::String (takeLive.gainAt (8.0)));
+
+            // (D2) 端到端：同一个音高同一个力度两声，合成器会把它们加起来，
+            // 所以「只有一遍出声」在渲染里就是峰值减半。这条钉的是发布那一行
+            // ——上面那条只测了 gainAt 本身，把 publish 里的接线删掉它照样过。
+            {
+                LayerStack ts;
+                RackModel  tr;
+                PlaybackEngine engine95;
+
+                const int slotT = tr.getFirstSlotId();
+                ts.addLayer (utf8 ("take 发声"), palette::layer1);
+                ts.setLayerOutputSlot (0, slotT);
+                ts.setLayerLevelDb (0, 0.0f);
+
+                auto* tl = ts.getLayer (0);
+                const int noteA = tl->addNote ({ 0, 57, 0.0, 4.0, 0.9f });
+                const int noteB = tl->addNote ({ 0, 57, 0.0, 4.0, 0.9f });
+
+                const int setA = tl->addGroup (utf8 ("第 1 遍"), groupPalette::group1);
+                const int setB = tl->addGroup (utf8 ("第 2 遍"), groupPalette::group2);
+
+                tl->assignNotesToGroup ({ noteA }, setA);
+                tl->assignNotesToGroup ({ noteB }, setB);
+
+                auto renderPeak = [&] ()
+                {
+                    juce::AudioBuffer<float> out95;
+                    out95.setSize (2, 44100);
+                    out95.clear();
+
+                    engine95.publishSchedule (ts, tr, 120.0, 0.0, nullptr);
+                    engine95.resetMixState();
+                    engine95.renderWindow (0.30, 44100, out95, nullptr);
+
+                    return out95.getMagnitude (0, 0, 44100);
+                };
+
+                // 两个普通组：同一声两遍，合成器加起来，峰值是两倍。
+                const float both95 = renderPeak();
+
+                tl->findGroup (setA)->setAsTake (11, 1, false);
+                tl->findGroup (setB)->setAsTake (11, 2, true);
+
+                const float one95 = renderPeak();
+                const float ratio95 = both95 > 0.0f ? one95 / both95 : 0.0f;
+
+                check (utf8 ("同一段两个 take：峰值是一遍不是两遍（发声门接在发布上）"),
+                       ratio95 > 0.45f && ratio95 < 0.55f,
+                       juce::String (both95, 4) + " → " + juce::String (one95, 4)
+                         + " = x" + juce::String (ratio95, 3));
+            }
+
+            // (E) 坏文档的修复：两个都标成当前，加载时只留序号最大的。
+            {
+                const int setId95 = takeSetOf (pass1);
+
+                layer95->setActiveTake (pass3);
+                groupOf (pass1)->setTakeActive (true);     // 手写第二个「当前」
+
+                const int  before95 = countActive (setId95);
+                const bool fixed95  = layer95->normaliseTakeSets();
+
+                check (utf8 ("两个都标成当前时，修复只留序号最大的那遍"),
+                       before95 == 2 && fixed95 && countActive (setId95) == 1
+                         && groupOf (pass3)->isActiveTake(),
+                       juce::String (before95) + utf8 (" → ") + juce::String (countActive (setId95)));
+
+                check (utf8 ("已经合法就不再改写（第二次返回 false）"),
+                       ! layer95->normaliseTakeSets(),
+                       juce::String ((int) layer95->normaliseTakeSets()));
+            }
+        }
+
+        // (F) 存盘：v30 的两个属性写出去、读回来；旧文件读成普通组。
+        {
+            LayerStack io95;
+            RackModel  rack95;
+
+            io95.addLayer (utf8 ("take 存盘"), palette::layer1);
+            auto* ioLayer = io95.getLayer (0);
+
+            const int gA = ioLayer->addGroup (utf8 ("录音 1"), groupPalette::group1);
+            const int gB = ioLayer->addGroup (utf8 ("录音 2"), groupPalette::group2);
+            const int gC = ioLayer->addGroup (utf8 ("普通组"),  groupPalette::group3);
+
+            // 特意让「当前」是第 1 遍而不是最大序号：否则读侧漏掉 takeactive 时，
+            // 加载修复（最大序号赢）会把它悄悄改对，变异就咬不动。
+            ioLayer->findGroup (gA)->setAsTake (7, 1, true);
+            ioLayer->findGroup (gB)->setAsTake (7, 2, false);
+
+            const int nA = ioLayer->addNote ({ 0, 60, 0.0, 4.0, 0.8f });
+            ioLayer->assignNotesToGroup ({ nA }, gA, 0);
+
+            const auto xml95 = project::toXmlText (io95, rack95, 120.0);
+
+            check (utf8 ("存盘写出 takeset / take / takeactive"),
+                   xml95.contains ("takeset=\"7\"")
+                     && xml95.contains ("take=\"2\"")
+                     && xml95.contains ("takeactive=\"0\""),
+                   juce::String (xml95.contains ("takeset") ? 1 : 0)
+                     + " / " + juce::String (xml95.contains ("takeactive") ? 1 : 0));
+
+            LayerStack back95;
+            RackModel  backRack95;
+            double     bpm95 = 0.0;
+            juce::String err95;
+
+            const bool ok95 = project::fromXmlText (xml95, back95, backRack95, bpm95, err95);
+
+            auto* backLayer = back95.getLayer (0);
+            const auto* backA = backLayer != nullptr ? backLayer->findGroup (gA) : nullptr;
+            const auto* backB = backLayer != nullptr ? backLayer->findGroup (gB) : nullptr;
+            const auto* backC = backLayer != nullptr ? backLayer->findGroup (gC) : nullptr;
+
+            check (utf8 ("读回来还是同一套 take：set、序号、当前那一遍"),
+                   ok95 && backA != nullptr && backB != nullptr
+                     && backA->getTakeSetId() == 7 && backB->getTakeSetId() == 7
+                     && backA->getTakeIndex() == 1 && backB->getTakeIndex() == 2
+                     && backA->isActiveTake() && ! backB->isActiveTake(),
+                   err95.isNotEmpty() ? err95
+                                      : juce::String (backA != nullptr ? backA->getTakeSetId() : -1));
+
+            check (utf8 ("没写 takeset 的组读成普通组（v29 文件的行为不变）"),
+                   backC != nullptr && ! backC->isTake(),
+                   juce::String (backC != nullptr ? backC->getTakeSetId() : -1));
+
+            // 文件里两个都写着「当前」：加载时按最大序号修好。
+            const auto broken95 = xml95.replace ("takeactive=\"0\"", "takeactive=\"1\"");
+
+            LayerStack bad95;
+            RackModel  badRack95;
+            double     badBpm95 = 0.0;
+            juce::String badErr;
+
+            const bool okBad = project::fromXmlText (broken95, bad95, badRack95, badBpm95, badErr);
+
+            auto* badLayer = bad95.getLayer (0);
+            int badActive = 0;
+            int badWinner = 0;
+
+            if (badLayer != nullptr)
+                for (int id : badLayer->getTakeSetGroupIds (7))
+                    if (const auto* g = badLayer->findGroup (id); g != nullptr && g->isActiveTake())
+                    {
+                        ++badActive;
+                        badWinner = g->getTakeIndex();
+                    }
+
+            check (utf8 ("文件里写两个当前 take，加载后只剩序号最大的那遍"),
+                   okBad && badActive == 1 && badWinner == 2,
+                   juce::String (badActive) + utf8 (" 个当前 / 第 ") + juce::String (badWinner));
         }
     }
 

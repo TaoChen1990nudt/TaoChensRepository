@@ -831,6 +831,20 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                     if (group.isCollapsed())
                         groupXml->setAttribute ("collapsed", 1);
 
+                    // Phase 95 (v30): which take of which set. Written only for
+                    // a group that belongs to one, so a project that never
+                    // recorded twice keeps every line it had in v29.
+                    if (group.isTake())
+                    {
+                        groupXml->setAttribute ("takeset", group.getTakeSetId());
+                        groupXml->setAttribute ("take", group.getTakeIndex());
+
+                        // Absent = the one you hear, the same convention `mute`
+                        // uses: the common case costs nothing.
+                        if (! group.isActiveTake())
+                            groupXml->setAttribute ("takeactive", 0);
+                    }
+
                     // Phase 24: which plugin parameter the plugin curve drives.
                     // Still an attribute of <Group> rather than of the curve: it
                     // is the group's ADDRESS (Phase 24's rule — an index alone
@@ -1263,6 +1277,19 @@ bool fromXmlText (const juce::String& xmlText,
                     group.setPluginParam (g->getIntAttribute ("pluginparam", -1));
                     group.setMuted (g->getBoolAttribute ("mute", false));   // Phase 35
 
+                    // Phase 95 (v30): a take of a set, or an ordinary group.
+                    // Absent `takeset` is the common case and means "ordinary",
+                    // which is the only reading a v29 file can have. The index
+                    // is clamped at 1 because an index of 0 would sort before
+                    // every real take while still claiming to be one.
+                    {
+                        const int setId = g->getIntAttribute ("takeset", 0);
+
+                        group.setAsTake (setId > 0 ? setId : 0,
+                                         setId > 0 ? juce::jmax (1, g->getIntAttribute ("take", 1)) : 0,
+                                         g->getBoolAttribute ("takeactive", true));
+                    }
+
                     bool enabled = false, expanded = false;
                     juce::String groupTargetText;
 
@@ -1471,6 +1498,12 @@ bool fromXmlText (const juce::String& xmlText,
             // members are all still there. A loaded song must not move the first
             // time a group member is deleted.
             layer->materialiseOccurrenceStarts();
+
+            // Phase 95: exactly one take per set sounds. Run here for the same
+            // reason as the line above — the document is text, and text can
+            // claim two active takes; every reader afterwards may assume it
+            // cannot.
+            layer->normaliseTakeSets();
 
             parsedLayers.push_back (std::move (layer));
         }

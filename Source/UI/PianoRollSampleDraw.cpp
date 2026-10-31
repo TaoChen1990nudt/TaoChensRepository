@@ -1063,7 +1063,12 @@ void PianoRollComponent::drawSamples (juce::Graphics& g)
             // Phase 28: only the active layer can hold a selection, so a ghost
             // block can never light up as "selected" while the click that would
             // move it lands somewhere else.
-            drawSampleBlock (g, i, sample, layer->getColour(), alpha,
+            //
+            // Phase 95: a block that is one take of a set gets the same fade
+            // the notes of that take get — the recorded audio of a pass that is
+            // not the comp is not the one you hear either.
+            drawSampleBlock (g, i, sample, layer->getColour(),
+                             alpha * takeFadeOf (*layer, sample.groupId),
                              onActive && isSampleSelected (sample.id));
         }
     }

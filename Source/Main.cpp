@@ -260,6 +260,11 @@ namespace
         // the fill, and a dropout count that grows for the rest of the run.
         writePng ("-perf", component.createPerfSnapshot());
 
+        // P95: three passes over the same two bars. The badges, the wash on the
+        // two that are not the comp, and the roll's faded takes are all in this
+        // one frame — the panel half is what no assertion can read back.
+        writePng ("-takes", component.createTakeSetSnapshot());
+
         // The audio page lists device, sample rate and buffer size — none of
         // which exist until something is open. Opening a device here only fills
         // that page in; the main window's pixels are already on disk.

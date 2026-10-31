@@ -691,6 +691,7 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             mix.gain    = group.getGainLinear();
             mix.pan     = group.getPan();
             mix.muted   = group.isMuted();      // Phase 35: folded into gainAt()
+            mix.takeSilent = ! group.isActiveTake();   // Phase 95: the other passes
 
             const auto& lane = group.getLevelAutomation();
             mix.levelAutomated = lane.isEnabled();

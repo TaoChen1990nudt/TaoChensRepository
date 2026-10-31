@@ -267,8 +267,20 @@ namespace project
       * **A v28 file has no such attribute and reads as 4/4** — the metre every
         earlier build drew — so there is no migration and nothing to guess. The
         element is written even when the loop never was, so "4/4, no loop" and
-        "3/4, no loop" are different documents rather than the same one twice. */
-inline constexpr int formatVersion = 29;
+        "3/4, no loop" are different documents rather than the same one twice.
+
+    v30 (Phase 95): a group can be one TAKE of a set.
+
+      * `<Group takeset="3" take="2">` — which set, and which take of it. Both
+        attributes are written only for a group that belongs to a set, so a
+        project with no multi-pass recording keeps every line it had in v29 and
+        an older reader sees a group it understands.
+      * `takeactive="0"` — this is not the take you hear. Absent = it is, which
+        is what every v29 group meant and what an ordinary group still means.
+      * A set whose file says "two active" or "none" is repaired on load (the
+        highest take wins); the document cannot be asked which pass the user
+        intended, and guessing per-read would make two readers disagree. */
+inline constexpr int formatVersion = 30;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";
