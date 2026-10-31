@@ -279,8 +279,19 @@ namespace project
         is what every v29 group meant and what an ordinary group still means.
       * A set whose file says "two active" or "none" is repaired on load (the
         highest take wins); the document cannot be asked which pass the user
-        intended, and guessing per-read would make two readers disagree. */
-inline constexpr int formatVersion = 30;
+        intended, and guessing per-read would make two readers disagree.
+
+    v31 (Phase 96): a take can be a COMP — spliced from the other takes.
+
+      * `<Group takecomp="1">` — this take is the one the splices went into.
+        Written only for a group that is both a take and a comp, so nothing
+        changes for a project that never spliced, and a v30 reader simply sees
+        another take.
+      * Absent = an ordinary take. The flag cannot be inferred from the members
+        (a comp's blocks look like any others), and it is not a playback fact:
+        inferring it would mean guessing, and a wrong guess forks a second comp
+        the next time the user splices. */
+inline constexpr int formatVersion = 31;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";

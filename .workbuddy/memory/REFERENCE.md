@@ -170,7 +170,7 @@ build Release → `--snapshot selftest.png`。
   于是 3/4 的歌按 4/4 数小节——P91 把拍号变成值的时候漏的就是这里。字串化留在
   `MainComponent::formatBarBeat (beats, beatsPerBar)`（静态，两个输入都显式），测试才不必造一个窗口。
 
-## 工程文件（`.atomic`，`formatVersion` = 29）
+## 工程文件（`.atomic`，`formatVersion` = 31）
 - **先解析到临时对象、末尾一次性提交**，坏文件绝不破坏当前会话。载入后重置
   `nextNoteId`/`nextSlotId`/组 id（max+1）。
 - 老文件必须仍能开：v3 `mod=`、v4 插件（标签 **"PLUGIN"** 全大写）、v5 `mixer=`、
@@ -204,6 +204,9 @@ build Release → `--snapshot selftest.png`。
   v29（P91）在同一个 `<Transport>` 上加 **`beatsPerBar="3"`**，而且 `<Transport>` 从
   "有循环才写"改成**永远写**（v29 起没有循环也有那个元素，只带 `beatsPerBar`）。
   缺失 = 4/4，**所以 v28 及更老的文件零迁移**。读侧默认值要在查表之前赋值，理由见「拍号」一节。
+  v30（P95）给 `<Group>` 加 **`takeset=` / `take=` / `takeactive="0"`**，三者都只在属于 take 集合时写，
+  缺省 = 普通组 / 当前，所以单遍录音的工程与 P92 逐字节相同。v31（P96）再加 **`takecomp="1"`**，
+  只在"是 take 且是 comp"时写；读侧要求 `takeset > 0` 才认它（普通组不可能是拼出来的）。
 - **选中哪条 lane 显式写 `autotarget`，不靠元素顺序推断**：三条 lane 都写出来之后，
   "最后读到的那条算选中"恒把 target 变成 `plugin`。回退规则只在 `autotarget` **缺失**时启用。
 - **P70：`<Layer autotarget>` 同理**。图层只有 volume/pan 两条 lane，所以后果不是
@@ -654,6 +657,38 @@ build Release → `--snapshot selftest.png`。
   顺带修掉"「录音 N」的推子和静音够不到录进来的音频"这件事。
 - **测试注意**：`groups` 是 `std::vector`，每录一遍都可能 realloc——**跨一次录音缓存
   `NoteGroup*` 一定拿到悬垂指针**（P95 的断言第一版就是这么一片红的）。一律按 id 取。
+
+## 拼接 / comping（P96：把这段换成那一遍的材料）
+
+- **规则在 `Model/Comp.h`**（`namespace comping`）：`crossfadeSeconds = 0.004`（3–5 ms 的窗口
+  里取中，48 kHz 有 ~190 个采样可以斜）、`minRangeBeats = 0.25`（与循环区间同理：再短就只是一个
+  像素）、`fadeBeats(secondsPerBeat)`、`fadeFraction(fadeBeats, 块的拍长)`（**按块自己的长度
+  折算**，钳在 1/4）。
+- **成员判据两句话**：`noteJoins` 只认**起点**在区间里的音符（切一半会把连奏变成两个起音）；
+  `blockJoins` 只要**碰到**就算（块会被裁）。
+- **操作是「把 [a,b) 换成那一遍的材料」，不是记一张分段表**。分段表要活过存盘，而 take 集合
+  是派生的（P95），没有实体能挂它；写成替换之后三处接缝是三次独立编辑，顺序无关、重复无害，
+  也不需要 provenance。
+- **第一次拼接先分一份**：目标是 set 里第一个 `isComp()` 的组；没有就把**当前那一遍**复制成
+  一个新 take（序号 = 集合最大 + 1）并设为当前，名字加后缀 ` 拼接`。之后每次拼接都改这一份，
+  所以三处接缝只多一遍（咬测 M3：每次都新分一份 → "第二处拼接落在同一遍" 立刻红）。
+- **接缝 = 重叠 + 互补斜坡，不是首尾相接**：进来那一段比 `a` 早 `fadeBeats` 开始、比 `b` 晚
+  `fadeBeats` 结束；两侧邻居裁到 `a` / 从 `b` 开始，各自在**自己那一端**淡到 0。少掉提前量
+  就退化成"淡出 + 淡入"，中间一段静音——那叫接缝，不叫交叉淡化。
+- **淡化是在原曲线上乘**（`comping::addEdgeFade`），并且**必须插肩点**（`fraction` 处那个点）。
+  不插的话斜坡从块边一路斜到曲线的下一个点（常常是块的另一头），4 ms 变成整块——咬测 M2 里
+  连渲染电平都塌了。`maxPoints = 24` 满了就丢肩点，退化成"能多陡就多陡"。
+- **切块只走 `splitSampleBlocksRaw`**（`PianoRollComponent`，`splitSamplesAt` 的算术半边：
+  不动选区、不发通知、不重画）。源窗口 / 变速 / 倒放的换算 P50 写过一遍，拼接里不再写第二遍。
+  拼接过程中最多切四次，全是中间步骤。
+- **手势**：编组栏 take 菜单 →「用这一遍接上 a - b 拍」，`a`/`b` 取**循环区间**
+  （`LoopRegion::hasSpan()`，不看 `enabled`：那个开关一直只表示"重复"，不表示"存在"）。
+  跨图层时先把那一层设为活动层，否则拼接会落到别的图层上。
+- **接缝不许在渲染里判**：采样器自己在块的边沿就有一小段包络，把 `fade` 改成 0，渲染里接缝
+  的最大跳变只从 0.00040 变 0.00046 —— 这条判据咬不动。要看**块本身**：提前量对不对、三块贴
+  在接缝那一端的音量曲线值是不是 0。
+- **存盘（v31）**：`<Group takecomp="1">`，只在"是 take 且是 comp"时写。读侧要求 `takeset > 0`
+  才认这个标记——普通组不可能是拼出来的。没拼过的工程与 v30 逐字节相同。
 
 ## 三层叠加（P36：`Model/AutomationStack.h`）
 **法则只有一份**，纯函数，引擎与界面都调它，禁止在别处再写一遍乘法链。
@@ -1112,7 +1147,7 @@ build Release → `--snapshot selftest.png`。
 - 替换后不用手动 republish：`AudioEngine` 自己是 rack 的 listener，`rackChanged()` → `republish()`。
   这条不成立时"换音源没声音变化"就会回来。
 
-## 钢琴窗的文件布局（P85：一个类，十一个 TU）
+## 钢琴窗的文件布局（P85：一个类，十二个 TU）
 拆的是**文件边界**，不是类：`PianoRollComponent` 的 316 个成员函数按主题分开定义在
 `Source/UI/PianoRoll*.cpp` 里。C++ 允许一个类的成员函数分散在多个翻译单元，所以不需要
 friend、不需要改一行头文件、也不存在"两个对象互相问状态"的问题。

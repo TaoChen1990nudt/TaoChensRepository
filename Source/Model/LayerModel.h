@@ -615,6 +615,21 @@ public:
         is the only caller — a flag flipped here alone would leave two. */
     void setTakeActive (bool active) noexcept      { takeActive = active; }
 
+    //-- Phase 96: this take is a comp ----------------------------------------
+    /** Is this take one that was spliced together from the others?
+
+        Phase 96 needs to answer exactly one question with this flag: the first
+        splice has to leave the take it copied from alone, and the second splice
+        into the same set must edit THAT comp instead of forking a new one every
+        time. "Which take is the comp" cannot be derived from anything else —
+        a comp looks like any other take, and a take that happens to contain
+        copied material is not the same statement.
+
+        Nothing about playback reads it: a comp is a take like any other, and
+        exactly one take of a set sounds whether or not it is the spliced one. */
+    bool isComp() const noexcept                   { return comp; }
+    void setComp (bool isComposite) noexcept       { comp = isComposite; }
+
     //-- Phase 82: the group's curves ----------------------------------------
     /** Phase 16 shipped one lane, Phase 20 a second, Phase 24 a third — and all
         three were RESIDENT, an array indexed by the enum. That made the enum the
@@ -718,6 +733,7 @@ private:
     int  takeSetId  = 0;
     int  takeIndex  = 0;
     bool takeActive = true;       // an ordinary group always sounds
+    bool comp       = false;      // Phase 96: spliced from the other takes
 
     /** Phase 82: 0..1 multipliers over project time, as a bank.
 

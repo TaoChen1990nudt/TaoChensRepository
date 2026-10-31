@@ -9,6 +9,7 @@
 //==============================================================================
 
 #include "MainComponent.h"
+#include "Model/Comp.h"
 #include "Model/Quantize.h"
 #include "Model/SamplePath.h"
 #include "Util/SharedRules.h"
@@ -17062,8 +17063,8 @@ juce::String MainComponent::runSelfTest()
                                                     ? juce::String (utf8 ("元素还在"))
                                                     : juce::String (utf8 ("元素已去掉"))));
 
-            check (utf8 ("formatVersion 升到 30（take 归属多两个属性就要能认出来）"),
-                   project::formatVersion == 30, juce::String (project::formatVersion));
+            check (utf8 ("formatVersion 升到 31（take 归属与 comp 标记要能认出来）"),
+                   project::formatVersion == 31, juce::String (project::formatVersion));
         }
 
         //-- E. 复制到后一小节 ------------------------------------------------
@@ -18342,6 +18343,276 @@ juce::String MainComponent::runSelfTest()
             check (utf8 ("文件里写两个当前 take，加载后只剩序号最大的那遍"),
                    okBad && badActive == 1 && badWinner == 2,
                    juce::String (badActive) + utf8 (" 个当前 / 第 ") + juce::String (badWinner));
+        }
+    }
+
+    //-- Phase 96: comping —— 从几遍里拼出一遍 --------------------------------
+    // 诊断第 2 条的后半。P95 让一组 take 只有一遍出声；这一块钉的是
+    // 「第 1 遍的第 10–12 拍 + 第 2 遍的其余」，接缝处 4 ms 交叉淡化，
+    // 拼出来仍然是一个组。
+    {
+        // (A) 纯规则先单独问，不必搭一个工程。
+        {
+            check (utf8 ("4 ms 在 120 BPM 是 0.008 拍"),
+                   std::abs (comping::fadeBeats (0.5) - 0.008) < 1.0e-12,
+                   juce::String (comping::fadeBeats (0.5), 9));
+
+            check (utf8 ("淡化不超过块的四分之一，再短的块也留得住声音"),
+                   std::abs (comping::fadeFraction (0.008, 4.0) - 0.002f) < 1.0e-7f
+                     && comping::fadeFraction (0.008, 0.02) == comping::maxFadeFraction,
+                   juce::String (comping::fadeFraction (0.008, 0.02), 4));
+
+            check (utf8 ("选区不到十六分音符就不算选区"),
+                   comping::isUsable ({ 0.0, 0.25 }) && ! comping::isUsable ({ 0.0, 0.2 }),
+                   juce::String (comping::lengthOf ({ 0.0, 0.2 }), 4));
+
+            // 音符取整颗（起点在区间里才算），块碰到边就算碰到 —— 两句话不一样，
+            // 因为一个被切开的块还是会响的那半。
+            check (utf8 ("音符只认起点在区间内的，块只要碰到就算"),
+                   comping::noteJoins (2.0, { 2.0, 4.0 })
+                     && ! comping::noteJoins (1.5, { 2.0, 4.0 })
+                     && ! comping::noteJoins (4.0, { 2.0, 4.0 })
+                     && comping::blockJoins (1.0, 1.5, { 2.0, 4.0 })
+                     && ! comping::blockJoins (0.0, 2.0, { 2.0, 4.0 }),
+                   juce::String ((int) comping::blockJoins (0.0, 2.0, { 2.0, 4.0 })));
+
+            // 淡化是在原曲线上乘，不是另画一条。用平线测（makeFlat 是 0.7，
+            // 不是 1.0）：尾巴归零、平线中间一点不碰；0.99 处正好一半，说明
+            // 斜坡只有 4 ms 那么长 —— 少了肩点的话它会从 0 一路斜到 1.0，
+            // 那条断言立刻红。
+            NoteEnvelope fadeCurve = NoteEnvelope::makeFlat();
+
+            comping::addEdgeFade (fadeCurve, false, 0.02f);
+
+            check (utf8 ("尾淡化：端点归零，块中间的曲线一点不动"),
+                   fadeCurve.valueAt (1.0f) < 1.0e-4f
+                     && std::abs (fadeCurve.valueAt (0.5f) - 0.7f) < 1.0e-4f,
+                   juce::String (fadeCurve.valueAt (1.0f), 5)
+                     + " / " + juce::String (fadeCurve.valueAt (0.5f), 5));
+
+            check (utf8 ("淡化的斜坡只有 4 ms 那么长，不是整块"),
+                   std::abs (fadeCurve.valueAt (0.99f) - 0.35f) < 0.035f,
+                   juce::String (fadeCurve.valueAt (0.99f), 4));
+        }
+
+        // (B) 端到端：两遍电平不同的录音，从第 1 遍取 10–12 拍。
+        // 电平故意不同（0.5 / 0.25）：一样的话接缝处什么也不会变，接缝的断言
+        // 就成了永远通过的空话。
+        MainComponent host96;
+        const auto folder96 = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                .getChildFile ("atomic-p96-comp");
+        folder96.deleteRecursively();
+        host96.setRecordingsFolder (folder96);
+
+        auto& engine96 = host96.getAudioEngineForTest();
+        engine96.setDeviceRateForTest (48000.0);
+        engine96.setDeviceLatencyForTest (0, 0);
+        engine96.setMonitorChainLatency (0);
+
+        auto* layer96 = host96.getLayerStack().getActiveLayer();
+
+        if (layer96 != nullptr)
+        {
+            // 8 拍 = 4 s @120 BPM，正好 192000 个采样。
+            auto recordPass = [&host96] (float level)
+            {
+                juce::AudioBuffer<float> buf (2, 192000);
+
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < buf.getNumSamples(); ++i)
+                        buf.setSample (ch, i, level);
+
+                host96.beginTakeForTest (8.0);
+                host96.takeAudioForTest (buf, 48000.0);
+                return host96.endTakeForTest (16.0);
+            };
+
+            const int passA = recordPass (0.5f);      // 第 1 遍
+            const int passB = recordPass (0.25f);     // 第 2 遍，录完就是当前
+
+            const int compId = host96.pianoRollForTest().compTakeRange (passA, 10.0, 12.0);
+
+            auto* compGroup = layer96->findGroup (compId);
+            const auto members96 = layer96->getTakeSetGroupIds (compGroup != nullptr
+                                                                  ? compGroup->getTakeSetId() : 0);
+
+            check (utf8 ("拼接分出一遍新的：三遍里第 3 遍是 comp，而且它是当前"),
+                   compId > 0 && compGroup != nullptr && compGroup->isComp()
+                     && compGroup->isActiveTake() && members96.size() == 3,
+                   juce::String (compId) + " / " + juce::String ((int) members96.size()));
+
+            // 原两遍没有被改写：「从这一遍取」不是「把这一遍改掉」。
+            check (utf8 ("拼接不动原来的那两遍"),
+                   layer96->findGroup (passA) != nullptr && layer96->findGroup (passB) != nullptr
+                     && ! layer96->findGroup (passA)->isComp()
+                     && ! layer96->findGroup (passB)->isComp(),
+                   juce::String ((int) (layer96->findGroup (passA) != nullptr)));
+
+            // 拼接前的那一遍被切成两半、中间填进第 1 遍的材料 → 三块。
+            int compClips = 0;
+
+            for (const auto& s : layer96->getSamples())
+                compClips += s.groupId == compId ? 1 : 0;
+
+            check (utf8 ("拼完是三块：左边、中间那一段、右边"),
+                   compClips == 3, juce::String (compClips));
+
+            //-- 真渲染：接缝处的电平换了，而且没有跳变 --------------------
+            PlaybackEngine pe96;
+            pe96.setSampleRate (48000.0);
+            pe96.publishSchedule (host96.getLayerStack(), host96.getRack(), 120.0, 0.0, nullptr);
+            pe96.resetMixState();
+
+            juce::AudioBuffer<float> out96 (2, 192000);   // 4.0 - 8.0 s = 拍 8 - 16
+            out96.clear();
+            pe96.renderWindow (4.0, 192000, out96, nullptr);
+
+            const float levelEarly = std::abs (out96.getSample (0, 45600));   // 拍 9.9
+            const float levelMid   = std::abs (out96.getSample (0, 72000));   // 拍 11
+            const float levelLate  = std::abs (out96.getSample (0, 120000));  // 拍 13
+
+            check (utf8 ("中间那两拍换成第 1 遍的电平（0.25 → 0.5）"),
+                   levelMid > levelEarly * 1.5f && levelEarly > 0.01f,
+                   juce::String (levelEarly, 4) + " → " + juce::String (levelMid, 4));
+
+            check (utf8 ("接缝之后又回到第 2 遍的电平"),
+                   std::abs (levelLate - levelEarly) < std::abs (levelMid - levelEarly) * 0.1f,
+                   juce::String (levelEarly, 4) + " / " + juce::String (levelLate, 4));
+
+            //-- 接缝的交叉淡化：在模型里看得见 ----------------------------
+            // 采样器自己在块的边沿就有一小段包络，所以「渲染出来的跳变有多大」
+            // 分不出一段有没有淡化 —— 咬测作证：把 fade 改成 0，渲染里的最大
+            // 跳变只从 0.00040 变成 0.00046。真正的证据在块本身：进来那一段
+            // 比接缝早 fadeBeats 开始（否则两段首尾相接，各自的淡出淡入分别在
+            // 一边，中间那段是静音，不是交叉淡化），以及三块贴在接缝上的那一
+            // 端，音量曲线都归零。
+            const double fade96 = comping::fadeBeats (0.5);   // 120 BPM
+
+            const SampleEvent* leftPiece  = nullptr;
+            const SampleEvent* midPiece   = nullptr;
+            const SampleEvent* rightPiece = nullptr;
+
+            for (const auto& s : layer96->getSamples())
+            {
+                if (s.groupId != compId)
+                    continue;
+
+                if (std::abs (s.endBeat() - 10.0) < 1.0e-6)
+                    leftPiece = &s;
+
+                if (s.startBeat < 10.0 - 1.0e-6 && s.endBeat() > 12.0 + 1.0e-6)
+                    midPiece = &s;
+
+                if (std::abs (s.startBeat - 12.0) < 1.0e-6)
+                    rightPiece = &s;
+            }
+
+            auto endValue = [] (const SampleEvent* clip, bool atEnd)
+            {
+                if (clip == nullptr)
+                    return -1.0f;
+
+                const auto* curve = clip->curveDriving (SampleAutomationTarget::volume);
+
+                return curve != nullptr ? curve->valueAt (atEnd ? 1.0f : 0.0f) : -1.0f;
+            };
+
+            check (utf8 ("进来那一段比接缝早 4 ms 开始、比结尾晚 4 ms 结束"),
+                   midPiece != nullptr
+                     && std::abs (midPiece->startBeat - (10.0 - fade96)) < 1.0e-9
+                     && std::abs (midPiece->endBeat() - (12.0 + fade96)) < 1.0e-9,
+                   midPiece != nullptr ? juce::String (midPiece->startBeat, 6)
+                                         + " - " + juce::String (midPiece->endBeat(), 6)
+                                       : juce::String ("-"));
+
+            check (utf8 ("接缝两侧的块各在自己那一端淡到 0"),
+                   endValue (leftPiece, true) == 0.0f
+                     && endValue (rightPiece, false) == 0.0f,
+                   juce::String (endValue (leftPiece, true), 4) + " / "
+                     + juce::String (endValue (rightPiece, false), 4));
+
+            check (utf8 ("中间那一段两头都淡到 0（它两头都是接缝）"),
+                   endValue (midPiece, false) == 0.0f && endValue (midPiece, true) == 0.0f,
+                   juce::String (endValue (midPiece, false), 4) + " / "
+                     + juce::String (endValue (midPiece, true), 4));
+
+            check (utf8 ("淡化只占块的一小段，不是整块（端点之外还是原电平）"),
+                   midPiece != nullptr
+                     && midPiece->curveDriving (SampleAutomationTarget::volume) != nullptr
+                     && midPiece->curveDriving (SampleAutomationTarget::volume)->valueAt (0.5f) > 0.5f,
+                   midPiece != nullptr
+                     ? juce::String (midPiece->curveDriving (SampleAutomationTarget::volume) != nullptr
+                                       ? midPiece->curveDriving (SampleAutomationTarget::volume)->valueAt (0.5f)
+                                       : -1.0f, 4)
+                     : juce::String ("-"));
+
+            //-- 第二次拼接：改的是同一遍 comp，不是又分一份 ---------------
+            const int again = host96.pianoRollForTest().compTakeRange (passB, 13.0, 14.0);
+            int comps96 = 0;
+
+            for (const auto& g : layer96->getGroups())
+                comps96 += (g.isComp() && g.getTakeSetId() != 0) ? 1 : 0;
+
+            const auto membersAfter = layer96->getTakeSetGroupIds (compGroup != nullptr
+                                                                     ? compGroup->getTakeSetId() : 0);
+
+            check (utf8 ("第二处拼接落在同一遍 comp 上，不再多出一遍"),
+                   again == compId && comps96 == 1 && membersAfter.size() == 3,
+                   juce::String (again) + " / comp " + juce::String (comps96)
+                     + " / " + juce::String ((int) membersAfter.size()));
+
+            //-- 拒绝的三种情形 -------------------------------------------
+            const int ordinary96 = layer96->addGroup (utf8 ("普通组"), groupPalette::group3);
+
+            check (utf8 ("普通组没有 take 可拼，答 -1"),
+                   host96.pianoRollForTest().compTakeRange (ordinary96, 8.0, 9.0) < 0,
+                   juce::String (ordinary96));
+
+            check (utf8 ("选区短于十六分音符答 -1"),
+                   host96.pianoRollForTest().compTakeRange (passA, 9.0, 9.1) < 0,
+                   "0.1");
+        }
+
+        // (C) 存盘：v31 只多一个属性，而且只有 comp 才写。
+        {
+            LayerStack io96;
+            RackModel  rack96;
+
+            io96.addLayer (utf8 ("comp 存盘"), palette::layer1);
+            auto* ioLayer = io96.getLayer (0);
+
+            const int gTake  = ioLayer->addGroup (utf8 ("录音 1"), groupPalette::group1);
+            const int gComp  = ioLayer->addGroup (utf8 ("录音 1 拼接"), groupPalette::group2);
+            const int gPlain = ioLayer->addGroup (utf8 ("普通组"), groupPalette::group3);
+
+            ioLayer->findGroup (gTake)->setAsTake (5, 1, false);
+            ioLayer->findGroup (gComp)->setAsTake (5, 2, true);
+            ioLayer->findGroup (gComp)->setComp (true);
+
+            const auto xml96 = project::toXmlText (io96, rack96, 120.0);
+
+            check (utf8 ("存盘版本 31，且只有 comp 写 takecomp"),
+                   project::formatVersion == 31 && xml96.contains ("version=\"31\"")
+                     && xml96.contains ("takecomp=\"1\""),
+                   juce::String (project::formatVersion));
+
+            LayerStack back96;
+            RackModel  backRack96;
+            double     bpmBack = 0.0;
+            juce::String errBack;
+
+            const bool ok96 = project::fromXmlText (xml96, back96, backRack96, bpmBack, errBack);
+
+            auto* backLayer = back96.getLayer (0);
+            const auto* bc = backLayer != nullptr ? backLayer->findGroup (gComp)  : nullptr;
+            const auto* bt = backLayer != nullptr ? backLayer->findGroup (gTake)  : nullptr;
+            const auto* bp = backLayer != nullptr ? backLayer->findGroup (gPlain) : nullptr;
+
+            check (utf8 ("读回来还是 comp，普通那遍不是"),
+                   ok96 && bc != nullptr && bt != nullptr && bp != nullptr
+                     && bc->isComp() && bc->isActiveTake() && ! bt->isComp() && ! bp->isComp(),
+                   errBack.isNotEmpty() ? errBack
+                                        : juce::String ((int) (bc != nullptr && bc->isComp())));
         }
     }
 

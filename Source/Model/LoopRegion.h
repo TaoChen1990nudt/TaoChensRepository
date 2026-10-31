@@ -48,6 +48,18 @@ struct LoopRegion
 
     double lengthBeats() const noexcept { return endBeat - startBeat; }
 
+    /** Does the region name a stretch at all — flag ignored?
+
+        Phase 96 borrows the region as a pair of scissors: "splice this range"
+        needs two beats and does not care whether the transport is repeating
+        them. The flag has always meant "repeat", never "exist" (that is why
+        switching the loop off keeps its position), so this is the same
+        question asked without it. */
+    bool hasSpan() const noexcept
+    {
+        return endBeat - startBeat >= minLengthBeats;
+    }
+
     bool contains (double beat) const noexcept
     {
         return beat >= startBeat && beat < endBeat;

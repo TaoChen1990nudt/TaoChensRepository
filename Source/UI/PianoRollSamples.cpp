@@ -589,6 +589,37 @@ int PianoRollComponent::splitSelectedSamplesAtPlayhead()
 
 int PianoRollComponent::splitSamplesAt (const std::vector<int>& ids, double at)
 {
+    std::vector<int> newSelection;
+    const int split = splitSampleBlocksRaw (ids, at, newSelection);
+
+    if (split == 0)
+        return 0;
+
+    // Phase 62: same as the note cut — one member became two, everywhere.
+    std::vector<int> cutClipIds (ids.begin(), ids.end());
+    syncShapesOfMembers ({}, cutClipIds);
+
+    ensureTimelineExtendsTo (at);
+    setSampleSelection (newSelection);
+    stack.notifyNotesChanged();
+    repaint();
+
+    return split;
+}
+
+
+/** Phase 96: the cut itself, with no selection or notification attached.
+
+    Comping splits a block up to four times inside one gesture, and every one of
+    those cuts is an intermediate: the piece that matters is whichever survives
+    the trimming. Running the public `splitSamplesAt` for each would move the
+    user's selection four times and repaint four times for an edit that has not
+    finished yet — so the arithmetic lives here and the public verb keeps its
+    own bookkeeping on top. The two paths cut identically because there is only
+    one of them. */
+int PianoRollComponent::splitSampleBlocksRaw (const std::vector<int>& ids, double at,
+                                              std::vector<int>& newSelection)
+{
     auto* layer = stack.getActiveLayer();
 
     if (layer == nullptr || ids.empty() || at < 0.0)
@@ -599,7 +630,7 @@ int PianoRollComponent::splitSamplesAt (const std::vector<int>& ids, double at)
     // a cut function that also moves the cut would be two features in one.
     int split = 0;
 
-    std::vector<int> newSelection;
+    newSelection.clear();
 
     for (const int id : ids)
     {
@@ -680,18 +711,6 @@ int PianoRollComponent::splitSamplesAt (const std::vector<int>& ids, double at)
         newSelection.push_back (newId);
         ++split;
     }
-
-    if (split == 0)
-        return 0;
-
-    // Phase 62: same as the note cut — one member became two, everywhere.
-    std::vector<int> cutClipIds (ids.begin(), ids.end());
-    syncShapesOfMembers ({}, cutClipIds);
-
-    ensureTimelineExtendsTo (at);
-    setSampleSelection (newSelection);
-    stack.notifyNotesChanged();
-    repaint();
 
     return split;
 }

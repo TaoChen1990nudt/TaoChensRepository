@@ -843,6 +843,12 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                         // uses: the common case costs nothing.
                         if (! group.isActiveTake())
                             groupXml->setAttribute ("takeactive", 0);
+
+                        // Phase 96 (v31): only a comp writes this. Every other
+                        // take is silent about it, so a project that never
+                        // spliced keeps the v30 shape.
+                        if (group.isComp())
+                            groupXml->setAttribute ("takecomp", 1);
                     }
 
                     // Phase 24: which plugin parameter the plugin curve drives.
@@ -1288,6 +1294,12 @@ bool fromXmlText (const juce::String& xmlText,
                         group.setAsTake (setId > 0 ? setId : 0,
                                          setId > 0 ? juce::jmax (1, g->getIntAttribute ("take", 1)) : 0,
                                          g->getBoolAttribute ("takeactive", true));
+
+                        // Phase 96 (v31): a comp is a take, so the flag is only
+                        // meaningful inside a set — an ordinary group that
+                        // claimed to be a comp would be a group with no siblings
+                        // to have been spliced from.
+                        group.setComp (setId > 0 && g->getBoolAttribute ("takecomp", false));
                     }
 
                     bool enabled = false, expanded = false;

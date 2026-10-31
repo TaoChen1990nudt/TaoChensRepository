@@ -835,6 +835,19 @@ MainComponent::MainComponent()
                 }
 
                 menu.addSubMenu (utf8 ("当前 take"), takeMenu);
+
+                //-- Phase 96: splice this pass into the comp ------------------
+                // The range is the loop region's, and it is the only pair of
+                // beats the app already lets you set by dragging: "these eight
+                // bars" is that same stretch whether or not the transport is
+                // repeating it, so asking for a second range widget would be
+                // asking the user to draw the same thing twice.
+                if (loopRegion.hasSpan())
+                    menu.addItem (6, utf8 ("用这一遍接上 ")
+                                       + juce::String (loopRegion.startBeat, 1)
+                                       + utf8 (" - ") + juce::String (loopRegion.endBeat, 1)
+                                       + utf8 (" 拍"));
+
                 menu.addSeparator();
             }
         }
@@ -879,6 +892,29 @@ MainComponent::MainComponent()
                                     l->setActiveTake (members[(size_t) which]);
                                     safe->stack.notifyNotesChanged();
                                     safe->republish();
+                                    return;
+                                }
+
+                                //-- Phase 96: splice the loop region from here --
+                                if (result == 6)
+                                {
+                                    if (! safe->loopRegion.hasSpan())
+                                        return;
+
+                                    // The roll edits the active layer, so a group
+                                    // menu opened on a layer that is not the one
+                                    // shown has to bring that layer forward first
+                                    // — otherwise the splice would land in the
+                                    // wrong sheet, or in none.
+                                    if (safe->stack.getActiveLayer() != l)
+                                        safe->stack.setActiveLayerIndex (layerIndex);
+
+                                    if (safe->pianoRoll.compTakeRange (groupId,
+                                                                       safe->loopRegion.startBeat,
+                                                                       safe->loopRegion.endBeat) > 0)
+                                        safe->commitHistory();
+
+                                    safe->repaint();
                                     return;
                                 }
 

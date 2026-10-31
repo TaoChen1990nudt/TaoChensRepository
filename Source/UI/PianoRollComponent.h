@@ -1366,6 +1366,22 @@ public:
     int splitSamplesAt (const std::vector<int>& ids, double at);
     int splitNotesAt (const std::vector<int>& ids, double at);
 
+    /** Phase 96: the same cut without the selection, the notification and the
+        repaint — the arithmetic half, which comping needs up to four times in
+        one gesture. Writes the left id followed by the right id per cut into
+        `newSelection` and answers how many blocks it actually cut. */
+    int splitSampleBlocksRaw (const std::vector<int>& ids, double at,
+                              std::vector<int>& newSelection);
+
+    /** Phase 96: comping — splice `from`…`to` out of take `takeGroupId` into
+        this set's comp, with a four-millisecond crossfade at each seam.
+
+        The comp is forked from the take you were hearing the first time and
+        reused afterwards, so three seams leave one group and not three. Answers
+        the comp's group id, or -1 when there was nothing to splice (no set, a
+        range shorter than a sixteenth, an ordinary group). */
+    int compTakeRange (int takeGroupId, double from, double to);
+
     /** Phase 51: test hook — where the block's curve chevron sits, so "top
         edge, same inset as the note's" is asserted instead of eyeballed. */
     juce::Rectangle<float> getSampleAutomationHandleForTest (int sampleId) const
