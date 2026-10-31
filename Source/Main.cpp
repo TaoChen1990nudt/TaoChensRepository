@@ -271,6 +271,13 @@ namespace
         // without that layer in the list.
         writePng ("-velocity", component.createVelocityLaneSnapshot());
 
+        // P98: the same strip showing a controller instead of bars. Four tabs in
+        // the gutter, a curve with its flat tails drawn, and the destination
+        // line — which on this session reads "内置音源，收不到 CC", because the
+        // demo rack has no hosted instrument. That sentence on the strip is the
+        // reason the frame exists: a curve that transmits nothing has to say so.
+        writePng ("-cc", component.createCcLaneSnapshot());
+
         // The audio page lists device, sample rate and buffer size — none of
         // which exist until something is open. Opening a device here only fills
         // that page in; the main window's pixels are already on disk.

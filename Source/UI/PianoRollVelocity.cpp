@@ -34,33 +34,9 @@ using namespace roll;
 //     about being one, and this lane edits, it does not report.
 //==============================================================================
 
-juce::Rectangle<float> PianoRollComponent::velocityTrackArea() const
-{
-    const auto strip = getVelocityLaneArea();
-
-    if (strip.isEmpty())
-        return {};
-
-    // The x range is the GRID's, not the strip's: beat 0 has to land on the same
-    // column here as it does up there, or the lane edits a different moment than
-    // the one it is drawn under. `getGridArea` is already trimmed at the bottom,
-    // so only its x and width are borrowed.
-    const auto grid = getGridArea();
-
-    if (grid.getWidth() <= 0.0f)
-        return {};
-
-    // Air above and below: a bar at 1.0 must not be welded to the border, and a
-    // bar at the floor must still have pixels to be grabbed by.
-    return juce::Rectangle<float> (grid.getX(), (float) strip.getY(),
-                                   grid.getWidth(), (float) strip.getHeight())
-             .reduced (0.0f, ui::pf (3.0f));
-}
-
-
 juce::Rectangle<float> PianoRollComponent::velocityBarFor (const NoteEvent& note) const
 {
-    const auto track = velocityTrackArea();
+    const auto track = laneTrackArea();
 
     if (track.isEmpty())
         return {};
@@ -230,7 +206,7 @@ void PianoRollComponent::handleVelocityPress (juce::Point<float> position,
 
 void PianoRollComponent::applyVelocityDragToScreenY (float screenY)
 {
-    const auto track = velocityTrackArea();
+    const auto track = laneTrackArea();
 
     if (track.isEmpty() || velocityOriginals.empty())
         return;
@@ -281,7 +257,7 @@ void PianoRollComponent::drawVelocityLane (juce::Graphics& g)
     if (strip.isEmpty())
         return;
 
-    const auto track  = velocityTrackArea();
+    const auto track  = laneTrackArea();
     const auto gutter = strip.withWidth (keyboardWidth);
 
     g.setColour (kGridBackground);
@@ -354,43 +330,43 @@ void PianoRollComponent::drawVelocityLane (juce::Graphics& g)
         g.drawRect (band, 1.0f);
     }
 
-    //-- The gutter -----------------------------------------------------------
+    //-- The readout ----------------------------------------------------------
+    // Phase 98 moved this out of the gutter, because the gutter is now four tab
+    // buttons wide and a title there would have overlapped them.
+    //
+    // Top-LEFT of the lane, in a dark HUD, which is also where the controller
+    // lane puts its own status line. One corner for both tenants on purpose:
+    // the eye learns one place, and a tab switch does not move the number it is
+    // following. The HUD is opaque enough to sit over a bar rather than beside
+    // it — an 8 px bar at beat 0 is exactly where the first number appears.
+    juce::String readout;
+
+    if (dragMode == DragMode::velocityDrag && ! velocityOriginals.empty())
     {
-        auto label = gutter.reduced (ui::px (8), ui::px (4)).toFloat();
+        if (const auto* active = stack.getActiveLayer())
+            if (const auto* grabbed = active->findNote (velocityOriginals.front().id))
+                readout = juce::String (grabbed->velocity, 2);
+    }
+    else if (selection.size() == 1)
+    {
+        if (const auto* active = stack.getActiveLayer())
+            if (const auto* only = active->findNote (selection.front()))
+                readout = juce::String (only->velocity, 2);
+    }
 
-        g.setColour (kText.withAlpha (0.75f));
-        g.setFont (ui::section (8.5f));
-        g.drawText (utf8 ("力度"),
-                    label.withHeight (ui::pf (13.0f)),
-                    juce::Justification::topLeft, false);
+    if (readout.isNotEmpty() && ! track.isEmpty())
+    {
+        const auto hud = track.toNearestInt()
+                              .withHeight (ui::px (14))
+                              .withWidth (ui::px (34))
+                              .translated (ui::px (5), ui::px (3));
 
-        // The number under the title: the grabbed bar while dragging, or the one
-        // selected note's value. A lane whose bars are the only readout makes
-        // "0.62 or 0.66?" a guess.
-        juce::String readout;
+        g.setColour (juce::Colours::black.withAlpha (0.62f));
+        g.fillRoundedRectangle (hud.toFloat().reduced (ui::pf (1.0f)), ui::pf (3.0f));
 
-        if (dragMode == DragMode::velocityDrag && ! velocityOriginals.empty())
-        {
-            if (const auto* active = stack.getActiveLayer())
-                if (const auto* grabbed = active->findNote (velocityOriginals.front().id))
-                    readout = juce::String (grabbed->velocity, 2);
-        }
-        else if (selection.size() == 1)
-        {
-            if (const auto* active = stack.getActiveLayer())
-                if (const auto* only = active->findNote (selection.front()))
-                    readout = juce::String (only->velocity, 2);
-        }
-
-        if (readout.isNotEmpty())
-        {
-            g.setColour (theme::accent);
-            ui::drawTabular (g, readout,
-                             label.withY (label.getY() + ui::pf (15.0f))
-                                  .withHeight (ui::pf (15.0f)),
-                             juce::Font (juce::FontOptions (ui::sp (13.0f))),
-                             juce::Justification::topLeft);
-        }
+        g.setColour (theme::accent);
+        g.setFont (ui::section (9.0f));
+        g.drawText (readout, hud, juce::Justification::centred, false);
     }
 
     // Seam above the lane, drawn last so the bars cannot paint over it.

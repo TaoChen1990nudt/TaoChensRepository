@@ -436,6 +436,7 @@ public:
         one note (the gutter readout earns its keep only with a selection), and
         leaves the lane open for the rest of the run. */
     juce::Image createVelocityLaneSnapshot();
+    juce::Image createCcLaneSnapshot();
 
     /** Phase 54: a note selection and the cards it plays on, in one frame.
 

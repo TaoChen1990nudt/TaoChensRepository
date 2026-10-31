@@ -1477,6 +1477,28 @@ public:
     bool isVelocityLaneVisible() const noexcept { return showVelocityLane; }
     void setVelocityLaneVisible (bool shouldShow);
 
+    /** Phase 98: what the lane is showing. Four tabs share one strip.
+
+        The numbers are the TAB order, not `MidiCcLane`'s order — 0 is velocity
+        and the controllers follow — because the tab strip is a UI fact and the
+        model's enum is a file fact, and tying them together would mean
+        inserting a controller in the middle of the model renumbered the tabs. */
+    enum class LaneTab { velocity = 0, modWheel, expression, sustain };
+
+    /** Four tabs, one strip. Named here rather than derived from the enum so a
+        loop that walks the tabs cannot silently stop at three. */
+    static constexpr int numLaneTabs = 4;
+
+    LaneTab getLaneTab() const noexcept  { return laneTab; }
+    void    setLaneTab (LaneTab tab) noexcept;
+
+    /** The `MidiCcLane` the current tab edits, or -1 for the velocity tab.
+        One conversion, so a caller never has to write the offset by hand. */
+    static int laneTabToCc (LaneTab tab) noexcept
+    {
+        return tab == LaneTab::velocity ? -1 : (int) tab - 1;
+    }
+
     /** The whole strip, gutter included. Empty when the lane is hidden. */
     juce::Rectangle<int> getVelocityLaneArea() const;
 
@@ -1486,6 +1508,14 @@ public:
         Paint, hit test and marquee all ask THIS. A bar you can see and a bar
         you can grab are one rectangle or they are two bugs. */
     juce::Rectangle<float> getVelocityBarBounds (int noteId) const;
+
+    /** Phase 98: where a tab button is, in local coordinates. Empty when the
+        lane is hidden or the index is out of range.
+
+        Public because the self-test asserts the strip's layout, and the
+        alternative — a test-side copy of this arithmetic — would be asserting
+        the copy. */
+    juce::Rectangle<int> getLaneTabBounds (int tab) const;
 
     /** Phase 97: the velocity drag without a MouseEvent, the same shape as the
         loop's test hook — press decides which gesture it is, the drag applies
@@ -1498,6 +1528,17 @@ public:
         changes nothing" cannot be tested at all. The press still goes through
         the real handler, so the bar under it is found by the real hit test. */
     void simulateVelocityDragForTest (int noteId, float fromY, float toY);
+
+    /** Phase 98: the controller lane without a MouseEvent.
+
+        Two halves because the gesture has two halves that are separately
+        interesting: a click on empty lane ADDS a point (and switches the curve
+        on), and a drag MOVES whatever point the press grabbed. Driving them
+        through the real handlers is the point — a fixture that called
+        `addPoint` directly would prove the model works and nothing about the
+        lane. */
+    void simulateCcClickForTest (double beat, float value);
+    void simulateCcDragForTest (double beat, float value);
 
     double snapBeatForTest (double beats) const { return snapBeat (beats); }
 
@@ -1720,7 +1761,7 @@ private:
                           resizeSampleTop, resizeSampleBottom,
                           rulerScrub, rulerZoom, groupAutomationPoint, sampleCurvePoint,
                           loopStart, loopEnd, loopMove, loopNew,
-                          velocityDrag };
+                          velocityDrag, ccDrag };
 
     /** Phase 72: which edge of a block the pointer is on. Two of them trim the
         LENGTH (head / tail) and two change how many pitch lanes the block
@@ -1763,12 +1804,18 @@ private:
     float  screenXForBeat (double beat) const noexcept;
     double beatAtScreenX (float x) const noexcept;
 
-    //-- Phase 97: the velocity lane -----------------------------------------
-    /** The part of the strip the bars live in: the grid's x range, with a pixel
-        of air above and below so a bar at 1.0 is not welded to the border and a
-        bar at the floor still has something to grab. */
-    juce::Rectangle<float> velocityTrackArea() const;
+    //-- Phase 97/98: the lane at the bottom ----------------------------------
+    /** The part of the strip the curves live in: the grid's x range, with a
+        pixel of air above and below so a value at 1.0 is not welded to the
+        border and a value at the floor still has something to grab.
 
+        One area for all four tabs. The velocity bars and the controller curves
+        draw different things but they address the same pixels, and a lane that
+        changed height when its tab changed would make "drag this point up" a
+        different gesture depending on what you were looking at. */
+    juce::Rectangle<float> laneTrackArea() const;
+
+    //-- Velocity (Phase 97) -------------------------------------------------
     juce::Rectangle<float> velocityBarFor (const NoteEvent&) const;
 
     /** The bar under the pointer, or -1. Walks the paint order BACKWARDS, so
@@ -1778,7 +1825,41 @@ private:
 
     void handleVelocityPress (juce::Point<float> position, juce::ModifierKeys mods);
     void applyVelocityDragToScreenY (float screenY);
+
+    //-- Controllers (Phase 98) ----------------------------------------------
+    /** Where one breakpoint of a controller curve sits. THE geometry: paint,
+        hit test and the drag all ask this, so "the dot I can see" and "the dot
+        I can grab" are the same circle. */
+    juce::Point<float> ccPointFor (int lane, int index) const;
+
+    /** The breakpoint under the pointer, or -1. Nearest-in-range wins, so a
+        grab near two dots takes the one you aimed at. */
+    int ccPointAt (int lane, juce::Point<float> position) const;
+
+    void handleCcPress (juce::Point<float> position, juce::ModifierKeys mods);
+    void applyCcDragToScreen (juce::Point<float> position);
+
+    /** Which tab a point is on, or -1. Private: only the press handler asks,
+        and everything else should be talking about `getLaneTabBounds`. */
+    int laneTabAt (juce::Point<int> position) const;
+
+    void drawLaneArea (juce::Graphics&);
     void drawVelocityLane (juce::Graphics&);
+    void drawCcLane (juce::Graphics&);
+
+    /** The four tabs, painted last so the curve cannot cover the way out.
+
+        Also draws a dot beside a controller tab whose curve is switched on:
+        "which of these three did I actually draw" is otherwise three clicks
+        away, and the answer is invisible from the strip. */
+    void drawLaneTabs (juce::Graphics&);
+
+    /** Whether the active layer's instrument can receive controllers at all.
+
+        Answered by the same `routing::layerSlotId` the publisher uses, plus the
+        slot's plugin id — so the line drawn here and the MIDI actually sent
+        cannot describe two different instruments. */
+    bool hasMidiTargetForLane() const;
 
     /** Phase 67: one ruler-scrub step, in screen pixels.
 
@@ -2363,6 +2444,16 @@ private:
         Captured at the press for the same reason `marqueeAdditive` is: by the
         time the release runs, the origin is gone. */
     bool  marqueeInLane = false;
+
+    //-- Phase 98: controller curves -----------------------------------------
+    LaneTab laneTab = LaneTab::velocity;
+
+    /** Which point of which lane this gesture is holding. -1 / -1 means "not
+        dragging a point". The lane is remembered as a model index, not as the
+        tab, so a tab switch mid-drag cannot re-point the gesture at a different
+        curve. */
+    int ccDragLane  = -1;
+    int ccDragIndex = -1;
 
     float  scrollY     = 0.0f;
     double scrollBeats = 0.0;

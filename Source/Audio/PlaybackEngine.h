@@ -121,6 +121,34 @@ struct ScheduledNote
 };
 
 //==============================================================================
+/** Phase 98: one controller curve, frozen and pointed at a synthesiser.
+
+    Carries the SLOT, not the layer it came from. The audio thread has exactly
+    one use for a CC lane — put it in that instrument's MIDI buffer — and
+    "which bus is this layer on" is a model question with a four-tier answer
+    (`routing::resolve`). Resolving it here keeps the audio thread from walking
+    the rack once per block, which is the same reason `ScheduledNote` carries a
+    slotId rather than a layer index.
+
+    `slotId == -1` means the layer currently plays through something that
+    cannot receive MIDI (the built-in oscillator, which has no MIDI input at
+    all). The curve is still published, because the panel has to be able to say
+    so out loud — a lane that silently transmits nothing is the kind of thing
+    that costs an afternoon.
+*/
+struct ScheduledCc
+{
+    int  slotId     = -1;
+    int  layerIndex = -1;
+    int  number     = 1;      // 1 / 11 / 64
+    bool enabled    = false;
+
+    /** Absolute beats, 0..1 values. Copied, never referenced: the audio thread
+        must not dereference a layer that the message thread may be editing. */
+    std::vector<AutomationPoint> points;
+};
+
+//==============================================================================
 /** A layer's channel strip, frozen at publish time.
 
     `audible` already folds in mute and the "somebody else is soloed" rule. The
@@ -500,6 +528,9 @@ struct PublishedSchedule
     /** Phase 24: curves that write a hosted instrument's parameter, sorted by
         ascending priority so "apply them all in order" is the whole rule. */
     std::vector<PluginParamCurve> pluginParams;
+
+    /** Phase 98: controller curves, already pointed at their instrument. */
+    std::vector<ScheduledCc> ccLanes;
 
     /** Phase 23: the order the console strips must be summed in, sources
         first. Resolved once at publish time, from the strip routing, because
@@ -1184,6 +1215,38 @@ private:
     PluginHost* pluginHost = nullptr;
     mutable juce::AudioBuffer<float> pluginBuffer;
     mutable juce::MidiBuffer        pluginMidi;
+
+    //-- Phase 98: controller memory ------------------------------------------
+    /** The last controller value sent to each (slot, lane).
+
+        Why remember anything at all: a CC is a STATE, not an event. Without
+        this the renderer would send one message per chunk — several hundred
+        identical ones for a sustained mod wheel — and the plugin would see a
+        stream where the user drew a line.
+
+        Indexed by `slotId & (ccMemorySlots - 1)`, a hash rather than a lookup.
+        A collision costs exactly one redundant message (the remembered value
+        looks different, so the current one is re-sent), which is inaudible; a
+        `std::map` would allocate on the audio thread, which is not a trade
+        worth making for tidiness. */
+    static constexpr int ccMemorySlots = 32;
+
+    /** `mutable`, because the render path is a const member (it is called from
+        a const `process`, and its buffers are mutable for the same reason).
+        This is state the block keeps between calls, not state of the engine —
+        the same category `pluginMidi` is in. */
+    mutable std::array<std::array<int, 3>, ccMemorySlots> lastCcValue {};
+
+    /** Bumped on every locate; the audio thread compares and forgets.
+
+        One atomic integer instead of ninety-six: locating is "forget every
+        controller", so it is one fact, not ninety-six writes from the message
+        thread into memory the audio thread is reading. This is Rule 17's "a
+        delay line is memory, not a constant" applied to a different piece of
+        memory — a remember-value that survives a locate is a plugin stuck on a
+        controller nobody is drawing any more. */
+    mutable std::atomic<int> ccEpoch { 0 };
+    mutable int ccSeenEpoch = 0;
 
     /** Set by the message thread on stop / loop, honoured by the audio thread
         under the plugin lock. A flag instead of a call, because the message

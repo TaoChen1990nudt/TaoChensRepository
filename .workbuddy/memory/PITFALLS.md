@@ -2981,3 +2981,77 @@ LNK2019」。原因很简单：`CMakeLists.txt` 里 `Source/UI/` 是一个一个
 
 **测"相对量保持不变"时，起点必须落在量程中间**——量程两端是夹紧的地盘，那里任何"保持"
 都会被它自己吃掉。
+
+## P98 — CC lane：一句"已经有了"，四次验证
+
+### P98-A 「模型里已经有了」是一句没验证过的判断
+
+上一轮收尾时我写的是「CC 曲线在模型里已经有了（`Take::controls` → `NoteGroup` 的 lane），
+缺的是画与改」。这一轮开工第一件事是 grep，结果是**那句话是错的**：
+
+- `Take::controls` 这个类型**根本不存在**（`grep -rn "ControlPoint\|ControlLane" Source/` 零命中）。
+- 真正存在的是 `AutomationLane`——图层/插槽/编组的**内部参数**自动化。
+- 而 `Source/Audio/` 里**除了实时输入没有任何 `MidiBuffer` 的生产者**：音符是靠
+  `pluginMidi.addEvent (noteOn/noteOff)` 一条条手塞的，CC 从来没有通路。
+
+所以诊断要求的「画出的 CC1 能驱动宿主 VST3」不是补一层画面，是**新建一条数据通路**。
+如果照原来的判断直接写 UI，会得到一个"画得很好、什么都不发"的 lane——第 5 条诊断建议
+（引擎可观测）当年就是为了防这件事才排在第一位。
+
+**判据**：说"某功能已有模型"之前，先 `grep` 那个符号。**"我上次写的"不是证据，
+源码是**。写记忆时也要按这个标准：`STATUS.md` 里那句错话存在了一整轮，没人会去验它。
+
+### P98-B 在 `Rectangle<float>` 上算出来的 HUD 框，一个像素都不画
+
+读数框最初写的是：
+
+```cpp
+const auto box = track.withHeight (ui::pf (14.0f))
+                      .removeFromRight (ui::pf (34.0f));
+g.drawText (readout, box, juce::Justification::centred, false);
+```
+
+`track` 是 `Rectangle<float>`，`box` 算出来的坐标看着没问题，但**画面上什么都没有**。
+先在右上角看不见，改成右下角还是看不见；改成 `track.toNearestInt().withHeight(...)`
+（`Rectangle<int>`）并放到左上角，立刻出现。
+
+**根因没有查清**（`Rectangle<float>` → `drawText` 这条链上到底哪一步吞了它，
+没做定界实验），所以这条记的是**处置**不是**机理**：这个项目里所有"浮在内容上的小框"
+统一用 `Rectangle<int>` 从 `toNearestInt()` 出发，别在 float 矩形上做 `withHeight` +
+`removeFromRight` 的链式运算。
+
+顺带得到的布局结论：**力度与 CC 的读数都在 lane 左上角的同一个 HUD 里**。位置一致比位置
+"各自最优"重要——切页签时眼睛跟着的那个数字不能跳地方。
+
+### P98-C 又一次把断言写在了不会失败的地方（M2 咬不动）
+
+咬测的 M2 是「`midicc::nothingSent` 从 -1 改成 0」，预期咬住"第一次一定发"。
+结果 **0 red**。
+
+原因：那条断言问的是 `valueToSend (...) == 64`。哨兵改成 0 之后，0.5 的曲线照样返回 64，
+**断言照样通过**——它验的是"值算对了"，不是"发没发"。
+
+补的断言问的是唯一能分开这两件事的问题：
+
+```cpp
+const int sent = midicc::valueToSend (zero, 0.0, midicc::nothingSent);
+check (..., sent != midicc::nothingSent, ...);
+```
+
+（曲线的第一个值恰好是 **0**——如果哨兵也是 0，"要归零"这条消息永远发不出去。）
+
+这与 **P50-B「排版断言写在了不会失败的地方」是同一个坑**：断言必须问那个**区分了两种实现**
+的量。写之前先想一遍"变异之后这条还过吗"，比事后跑咬测便宜。
+
+### P98-D 快照夹具借了层不还，一帧比一帧长
+
+`-velocity` 与 `-cc` 都 `stack.addLayer (...)` 借一张新表，**都没有还**。P97 收尾时只还原了
+活动层索引与选区，于是 P98 的帧里层列表已经是从上往下的五行。
+
+修法是 `stack.removeLayer (layerIndex)`，位置在 `setActiveLayerIndex (activeWas)` **之后**
+（先还原索引再删，索引才不会因为删除左移而指错）。
+
+**这条的判据与 P97-B 相同**：抖动不算回归，**继承算**——同一份二进制跑两遍都一样、
+但和上一版不同，那说明改的是"谁的状态"。加一个夹具时要问一句「它借了什么，
+还给谁」。P97-B 记的是"还原状态"，这条是"归还资源"——状态会表现在像素上，
+资源（多出来的一层、一个选区）会表现在**后面所有帧**上。

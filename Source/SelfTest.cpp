@@ -10,6 +10,7 @@
 
 #include "MainComponent.h"
 #include "Model/Comp.h"
+#include "Model/MidiCc.h"
 #include "Model/VelocityLane.h"
 #include "Model/Quantize.h"
 #include "Model/SamplePath.h"
@@ -17066,8 +17067,8 @@ juce::String MainComponent::runSelfTest()
                                                     ? juce::String (utf8 ("元素还在"))
                                                     : juce::String (utf8 ("元素已去掉"))));
 
-            check (utf8 ("formatVersion 升到 31（take 归属与 comp 标记要能认出来）"),
-                   project::formatVersion == 31, juce::String (project::formatVersion));
+            check (utf8 ("formatVersion 是 32（P98 的 CC lane 要能认出来）"),
+                   project::formatVersion == 32, juce::String (project::formatVersion));
         }
 
         //-- E. 复制到后一小节 ------------------------------------------------
@@ -18594,8 +18595,8 @@ juce::String MainComponent::runSelfTest()
 
             const auto xml96 = project::toXmlText (io96, rack96, 120.0);
 
-            check (utf8 ("存盘版本 31，且只有 comp 写 takecomp"),
-                   project::formatVersion == 31 && xml96.contains ("version=\"31\"")
+            check (utf8 ("存盘版本 32，且只有 comp 写 takecomp"),
+                   project::formatVersion == 32 && xml96.contains ("version=\"32\"")
                      && xml96.contains ("takecomp=\"1\""),
                    juce::String (project::formatVersion));
 
@@ -18720,8 +18721,8 @@ juce::String MainComponent::runSelfTest()
                 loud->velocity  = 0.7f;
                 quiet->velocity = 0.3f;
 
-                check (utf8 ("力度 lane 不改工程格式：还是 v31（力度本来就在文件里）"),
-                       project::formatVersion == 31,
+                check (utf8 ("力度 lane 没有自己的文件字段（仍然只写 Note 的 velocity）"),
+                       project::formatVersion == 32,
                        juce::String (project::formatVersion));
 
                 roll97b.setSelection ({ loudId, quietId });
@@ -18891,6 +18892,274 @@ juce::String MainComponent::runSelfTest()
                      && std::abs (backNote97e->velocity - 0.42f) < 1.0e-6f,
                    err97e.isNotEmpty() ? err97e
                                        : juce::String (backNote97e != nullptr ? backNote97e->velocity : -1.0f, 3));
+        }
+
+        //== Phase 98: CC lane ===============================================
+        // 五段：页签把一条 lane 分成四格、点能点得出来也拖得动、存得下读得回、
+        // 发布时指向对的那个乐器、以及「一块只发一次」这条把几千条消息省掉的
+        // 规则——最后一段是纯函数，所以没有声卡也能咬。
+        {
+            LayerStack t98;
+            RackModel  rack98;
+            PianoRollComponent roll98 (t98, rack98);
+            roll98.setSize (1400, 520);
+
+            t98.addLayer (utf8 ("控制器"), palette::layer1);
+            roll98.setVelocityLaneVisible (true);
+
+            const auto laneArea98 = roll98.getVelocityLaneArea();
+
+            //-- A. the tab strip ------------------------------------------
+            {
+                std::array<juce::Rectangle<int>, 4> tabs;
+                int overlapping = 0;
+                bool allInside  = true;
+
+                for (int tab = 0; tab < PianoRollComponent::numLaneTabs; ++tab)
+                {
+                    tabs[(size_t) tab] = roll98.getLaneTabBounds (tab);
+
+                    allInside = allInside && laneArea98.contains (tabs[(size_t) tab]);
+
+                    for (int other = 0; other < tab; ++other)
+                        if (tabs[(size_t) other].intersects (tabs[(size_t) tab]))
+                            ++overlapping;
+                }
+
+                check (utf8 ("页签四格都在 lane 的 gutter 里，互不重叠"),
+                       allInside && overlapping == 0,
+                       juce::String (utf8 (allInside ? "都在" : "有出去的"))
+                         + " / " + juce::String (overlapping));
+
+                // Top-to-bottom in tab order, and the gutter's whole width —
+                // "力度" and "CC11" have to be readable, and a strip that put
+                // them side by side in 74 px would not hold four labels.
+                bool ordered = true;
+
+                for (int tab = 1; tab < PianoRollComponent::numLaneTabs; ++tab)
+                    ordered = ordered && tabs[(size_t) tab].getY() >= tabs[(size_t) tab - 1].getBottom();
+
+                check (utf8 ("页签按顺序从上往下排，四格一样宽"),
+                       ordered
+                         && tabs[0].getWidth() == tabs[3].getWidth()
+                         && tabs[0].getHeight() == tabs[3].getHeight(),
+                       juce::String (tabs[0].getY()) + " → " + juce::String (tabs[3].getY()));
+
+                roll98.setLaneTab (PianoRollComponent::LaneTab::velocity);
+
+                check (utf8 ("力度页签不对应任何 CC lane，其余三个依次是 1 / 11 / 64"),
+                       PianoRollComponent::laneTabToCc (PianoRollComponent::LaneTab::velocity) == -1
+                         && midiCcNumber (PianoRollComponent::laneTabToCc (PianoRollComponent::LaneTab::modWheel)) == 1
+                         && midiCcNumber (PianoRollComponent::laneTabToCc (PianoRollComponent::LaneTab::expression)) == 11
+                         && midiCcNumber (PianoRollComponent::laneTabToCc (PianoRollComponent::LaneTab::sustain)) == 64,
+                       juce::String (PianoRollComponent::laneTabToCc (PianoRollComponent::LaneTab::sustain)));
+            }
+
+            //-- B. click adds, drag moves ---------------------------------
+            {
+                auto* layer98 = t98.getLayer (0);
+                roll98.setLaneTab (PianoRollComponent::LaneTab::modWheel);
+
+                auto& curve = layer98->ccLane (atomic::ccModWheel);
+
+                check (utf8 ("一条从没画过的 CC lane：平零、关着、一点都不发"),
+                       ! curve.isEnabled() && curve.getPoints().size() == 2
+                         && juce::approximatelyEqual (curve.valueAtBeat (4.0), 0.0f),
+                       juce::String (curve.valueAtBeat (4.0), 3));
+
+                roll98.simulateCcClickForTest (4.0, 0.5f);
+
+                check (utf8 ("空 lane 上按一下：多一个点、曲线被点醒、值就在按的地方"),
+                       curve.isEnabled() && curve.getPoints().size() == 3
+                         && std::abs (curve.valueAtBeat (4.0) - 0.5f) < 0.02f,
+                       juce::String ((int) curve.getPoints().size()) + " / "
+                         + juce::String (curve.valueAtBeat (4.0), 3));
+
+                roll98.simulateCcDragForTest (4.0, 0.9f);
+
+                check (utf8 ("拖动把那个点搬到指针上（绝对值，不是位移）"),
+                       std::abs (curve.valueAtBeat (4.0) - 0.9f) < 0.02f,
+                       juce::String (curve.valueAtBeat (4.0), 3));
+
+                check (utf8 ("一个点都没多：拖动搬的是刚才那个，不是又加一个"),
+                       curve.getPoints().size() == 3,
+                       juce::String ((int) curve.getPoints().size()));
+
+                // The point must still be findable by the geometry after the
+                // values changed underneath — that is what makes "the dot I can
+                // see is the dot I can grab" true rather than approximately so.
+                roll98.setLaneTab (PianoRollComponent::LaneTab::expression);
+                roll98.setLaneTab (PianoRollComponent::LaneTab::modWheel);
+
+                check (utf8 ("换个页签再回来，曲线还在（页签不是四个模型）"),
+                       layer98->ccLane (atomic::ccModWheel).getPoints().size() == 3
+                         && juce::approximatelyEqual (layer98->ccLane (atomic::ccExpression).valueAtBeat (4.0), 0.0f),
+                       juce::String ((int) layer98->ccLane (atomic::ccExpression).getPoints().size()));
+            }
+
+            //-- C. the file ------------------------------------------------
+            {
+                auto* layer98 = t98.getLayer (0);
+
+                layer98->ccLane (atomic::ccSustain).resetFlat (0.0f, 32.0);
+                layer98->ccLane (atomic::ccSustain).addPoint (8.0, 1.0f, 32.0);
+                layer98->ccLane (atomic::ccSustain).setEnabled (true);
+
+                // A second layer that never touched a controller: it must NOT
+                // grow a <CC> element, or every project written by this version
+                // would carry three flat lines per layer for ever.
+                t98.addLayer (utf8 ("干净的"), palette::layer2);
+
+                const auto xml98 = project::toXmlText (t98, rack98, 120.0);
+
+                // Two layers: one with CC 1 and CC 64 drawn, one untouched. The
+                // count is the assertion, not just "contains" — a writer that
+                // emitted a silent <CC> for every lane of every layer would pass
+                // a contains-check and triple the size of every project.
+                int ccElements = 0;
+
+                for (int at = 0; (at = xml98.indexOf (at, "<CC ")) >= 0; ++at)
+                    ++ccElements;
+
+                check (utf8 ("画过的 lane 写 <CC number>，没画过的层一条都不写"),
+                       xml98.contains ("<CC number=\"1\"")
+                         && xml98.contains ("<CC number=\"64\"")
+                         && ! xml98.contains ("<CC number=\"11\"")
+                         && ccElements == 2
+                         && xml98.contains ("version=\"32\""),
+                       juce::String (ccElements) + " 个 / " + juce::String (xml98.length()) + " chars");
+
+                LayerStack back98;
+                RackModel  backRack98;
+                double     bpm98 = 0.0;
+                juce::String err98;
+
+                const bool ok98 = project::fromXmlText (xml98, back98, backRack98, bpm98, err98);
+
+                const auto* backLayer98 = back98.getLayer (0);
+
+                check (utf8 ("CC 曲线存得下、读得回：点数、值、开关都在"),
+                       ok98 && backLayer98 != nullptr
+                         && backLayer98->ccLane (atomic::ccSustain).isEnabled()
+                         && backLayer98->ccLane (atomic::ccSustain).getPoints().size() == 3
+                         && std::abs (backLayer98->ccLane (atomic::ccSustain).valueAtBeat (8.0) - 1.0f) < 1.0e-4f,
+                       err98.isNotEmpty() ? err98
+                         : juce::String (backLayer98 != nullptr
+                                           ? (int) backLayer98->ccLane (atomic::ccSustain).getPoints().size()
+                                           : -1));
+
+                // Reading a file that predates this version: no <CC> anywhere,
+                // and the layer must come back with three silent lanes rather
+                // than three that read 1.0 (which would be full modulation).
+                const auto* cleanLayer98 = back98.getLayer (1);
+
+                check (utf8 ("老文件读进来：三条 lane 都是平零、都关着"),
+                       cleanLayer98 != nullptr
+                         && ! cleanLayer98->ccLane (atomic::ccModWheel).isEnabled()
+                         && juce::approximatelyEqual (cleanLayer98->ccLane (atomic::ccModWheel).valueAtBeat (4.0), 0.0f),
+                       juce::String (cleanLayer98 != nullptr
+                                       ? cleanLayer98->ccLane (atomic::ccModWheel).valueAtBeat (4.0)
+                                       : 9.0f, 3));
+            }
+        }
+
+        //-- 发布：曲线指向的是「你听到的那个乐器」 ---------------------------
+        {
+            LayerStack t98b;
+            RackModel  rack98b;
+            PlaybackEngine pe98;
+
+            t98b.addLayer (utf8 ("控制器"), palette::layer1);
+
+            auto* layer98b = t98b.getLayer (0);
+            layer98b->ccLane (atomic::ccModWheel).resetFlat (0.5f, 32.0);
+            layer98b->ccLane (atomic::ccModWheel).setEnabled (true);
+
+            pe98.publishSchedule (t98b, rack98b, 120.0);
+            auto published = pe98.getSchedule();
+
+            check (utf8 ("只有开着的 lane 被发布，一条不多"),
+                   published != nullptr && published->ccLanes.size() == 1
+                     && published->ccLanes[0].number == 1,
+                   juce::String (published != nullptr ? (int) published->ccLanes.size() : -1));
+
+            // The rack has no plugin, so the layer plays through the built-in
+            // oscillator, which has no MIDI input. Publishing with -1 is the
+            // engine saying so out loud — the panel reads the same resolver and
+            // prints the same answer.
+            check (utf8 ("内置音源的目标是 -1（它收不到 CC，引擎自己说出来）"),
+                   published != nullptr && ! published->ccLanes.empty()
+                     && published->ccLanes[0].slotId == -1,
+                   juce::String (published != nullptr && ! published->ccLanes.empty()
+                                   ? published->ccLanes[0].slotId
+                                   : -99));
+        }
+
+        //-- 发送规则：一块只发一次，变了才发 ---------------------------------
+        // 纯函数，所以没有声卡也能断言。这一段是「画一条平线不会变成几百条
+        // MIDI 消息」的全部论证。
+        {
+            AutomationLane flat;
+            flat.resetFlat (0.5f, 32.0);
+            flat.setEnabled (true);
+
+            const int first = midicc::valueToSend (flat, 0.0, midicc::nothingSent);
+
+            check (utf8 ("第一次一定发（哨兵不是 0：零也是一个真值）"),
+                   first == 64,
+                   juce::String (first));
+
+            // The reason the sentinel is -1 and not 0, made executable: a curve
+            // whose first value happens to be ZERO must still transmit once, or
+            // a plugin that kept a value from the previous pass never learns to
+            // let go. `first == 64` above cannot catch this — a sentinel of 0
+            // passes it, because 64 != 0 either way. This one asks the only
+            // question that separates the two: did anything go out at all?
+            {
+                AutomationLane zero;
+                zero.resetFlat (0.0f, 32.0);
+                zero.setEnabled (true);
+
+                check (utf8 ("曲线第一个值恰好是零也要发一次（零不是「没发送」）"),
+                       midicc::valueToSend (zero, 0.0, midicc::nothingSent) != midicc::nothingSent,
+                       juce::String (midicc::valueToSend (zero, 0.0, midicc::nothingSent)));
+            }
+
+            check (utf8 ("同一个值第二次不发——这就是平线只发一条的原因"),
+                   midicc::valueToSend (flat, 4.0, first) == midicc::nothingSent,
+                   juce::String (midicc::valueToSend (flat, 4.0, first)));
+
+            AutomationLane ramp;
+            ramp.resetFlat (0.0f, 32.0);
+            ramp.addPoint (8.0, 1.0f, 32.0);
+            ramp.setEnabled (true);
+
+            const int atZero = midicc::valueToSend (ramp, 0.0, midicc::nothingSent);
+            const int atFour = midicc::valueToSend (ramp, 4.0, atZero);
+            const int atEight = midicc::valueToSend (ramp, 8.0, atFour);
+
+            check (utf8 ("斜坡：每跨一步都发一个新值，而且是单调上去的"),
+                   atZero == 0 && atFour > atZero && atEight > atFour && atEight == 127,
+                   juce::String (atZero) + " → " + juce::String (atFour) + " → " + juce::String (atEight));
+
+            flat.setEnabled (false);
+
+            check (utf8 ("关掉的 lane 什么都不发（不是发一条平线）"),
+                   midicc::valueToSend (flat, 0.0, midicc::nothingSent) == midicc::nothingSent,
+                   juce::String (midicc::valueToSend (flat, 0.0, midicc::nothingSent)));
+
+            // Round-tripping the wire value: 0..1 goes out as 0..127 and comes
+            // back to the same step, which is what "the number I drew is the
+            // number the plugin got" means given MIDI's resolution.
+            int wrong = 0;
+
+            for (int raw = 0; raw <= 127; ++raw)
+                if (midicc::toMidi (midicc::fromMidi (raw)) != raw)
+                    ++wrong;
+
+            check (utf8 ("127 个台阶来回不丢（量化只在发出去那一步做）"),
+                   wrong == 0,
+                   juce::String (wrong));
         }
 
     // The summary MUST come after the last check. It used to sit mid-function

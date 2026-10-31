@@ -1147,7 +1147,7 @@ build Release → `--snapshot selftest.png`。
 - 替换后不用手动 republish：`AudioEngine` 自己是 rack 的 listener，`rackChanged()` → `republish()`。
   这条不成立时"换音源没声音变化"就会回来。
 
-## 钢琴窗的文件布局（P85：一个类，十三个 TU）
+## 钢琴窗的文件布局（P85：一个类，十四个 TU）
 拆的是**文件边界**，不是类：`PianoRollComponent` 的成员函数按主题分开定义在
 `Source/UI/PianoRoll*.cpp` 里。C++ 允许一个类的成员函数分散在多个翻译单元，所以不需要
 friend、不需要改一行头文件、也不存在"两个对象互相问状态"的问题。
@@ -1166,6 +1166,7 @@ friend、不需要改一行头文件、也不存在"两个对象互相问状态"
 | `PianoRollSamples.cpp` | 采样块编辑：窗口、裁切、拆分、反相、拉伸、挂载、删除 |
 | `PianoRollSampleDraw.cpp` | 采样块绘制、拖放预览、采样块菜单 |
 | `PianoRollVelocity.cpp` | **P97** 力度 lane：条宽/条高、命中、按下与拖动、lane 内的框选、lane 的绘制与读数 |
+| `PianoRollCcLane.cpp` | **P98** 控制器 lane：四个页签的几何与绘制、`ccPointFor`（唯一几何）、命中、加点/拖点、lane 区整体的调度（`drawLaneArea`）与「这条曲线发到哪」的 HUD |
 | `PianoRollInternals.h` | **唯一**的共享层：调色板别名、菜单 id 段、`boldFont` / `groupLabelText` / `curveCellFitsText` / `addCurveItems` / `neutralCurveValue` / `uniqueGroupName` 等 |
 
 - 共享层放在 `namespace atomic::roll`，**每个定义都 `inline`**，每个 TU 顶部一句
@@ -1176,9 +1177,9 @@ friend、不需要改一行头文件、也不存在"两个对象互相问状态"
   `membersDescription`（只有剪贴板用）、`subEnvelope`（只有 `splitSamplesAt` 用）。
   **判断标准是"几个 TU 用"**，不是"它看起来像工具函数"。
 - 新增一个函数时先问：它在哪个主题里？跨主题才进 internals。**放进 internals 的代价是
-  改它要重编十三个 TU**（实测约为单文件的三倍），所以宁可留在主题文件里。
+  改它要重编十四个 TU**（实测约为单文件的三倍），所以宁可留在主题文件里。
 - 改一个主题文件 ≈ 1,000–1,700 行重编（实测 1,028 行 ≈ 22 秒，JUCE 模板的实例化占绝大部分），
-  改 internals ≈ 十三个全编。这就是这次拆分唯一的收益，别把它再长回去。
+  改 internals ≈ 十四个全编。这就是这次拆分唯一的收益，别把它再长回去。
 
 ## 力度 lane（P97）
 - **数值规则全在 `Model/VelocityLane.h`**（`namespace velocitylane`，header-only）：
@@ -1202,6 +1203,39 @@ friend、不需要改一行头文件、也不存在"两个对象互相问状态"
   手势的 `beginUndoGesture/endUndoGesture`，编组靠 `expandToWholeOccurrences`。`formatVersion` 不动。
 - **纵向定位**：`setTopPitch (pitch)` / `getTopPitch()` 是 `setScrollBeats` 的纵向孪生。
   `resized()` 与滚轮都写 `scrollY`，所以"保证某个音高在画面里"以前只能靠猜。
+
+## CC lane 与 MIDI 控制器通路（P98）
+- **曲线不是新类型**：`MidiCcSet` 里三条 `AutomationLane`。CC 就是"绝对拍的 0..1 折线"，
+  与图层的 volume/pan 同一个类、同一个 `valueAtBeat`、同一套 `addPoint/movePoint/loadPoints`。
+  新增的只有两件事：**归属**（挂在 `Layer` 上，按 `MidiCcLane` 索引）与**何时发送**。
+- **挂在图层，不挂在编组、也不挂在插槽**：编组是"一个形状多处出现"，挂上去要么每次出现各存
+  一份（用户画了一条、屏幕上四条），要么跟着组跑（控制器在没有音乐移动时移动）。插槽是"声音
+  从哪儿出来"，它会因为删掉一张机架卡而换人（`routing::layerSlotId` 会退到第一个乐器）。
+  图层恰好存在一次、指向一个乐器，那就是 MIDI 通道。
+- **量化只在发送那一步**：模型存 0..1 连续值，`midicc::toMidi` 出去时乘 127 取整。
+  MIDI 的 128 级是**线的事**，不是画的事——模型连续，拖动行为才和其他曲线一致。
+- **哨兵是 -1 不是 0**：`midicc::nothingSent`。零是一个真值（无调制），一条曲线的第一个点
+  恰好是零时**也必须发一次**，否则插件保留上一遍的值，永远不知道要归零。这条有一个专门的
+  断言（`曲线第一个值恰好是零也要发一次`），因为 `first == 64` 那种写法**区分不了 0 与没发**。
+- **只在值变化时发**：`midicc::valueToSend`。控制器是**状态**不是事件——一条平线横跨四秒
+  是一百多条 `controllerEvent` 里的**一条**。取值的时刻是 chunk 起点，所以曲线的时间分辨率
+  等于块长（几毫秒）；块内逐样本插值只会让插件收到一串用不上的中间值，与
+  `applyHostedParamAutomation` 采样一次是同一笔交易。
+- **通路是 `publishSchedule` → `ScheduledCc` → 同一个 `pluginMidi`**。发布时用
+  `routing::layerSlotId` 把 slotId 解析好（内置音源发布成 `-1`），渲染时在音符之后、`processBlock`
+  之前 `addEvent`。**音频线程不读图层**，与音符同一条规矩。
+- **定位记忆要清**：`lastCcValue`（按 `slotId & 31` 哈希，碰撞只是一条多余消息）+ `ccEpoch`
+  一个原子。`setPositionBeats` 里 `fetch_add`，音频线程比一次就全体遗忘。**不这样做，跳到
+  安静的段落会带着上一段的 CC 值过去** —— 规则 17 的"延迟线是记忆体不是常数"换了个地方。
+- **`enabled=false` 是什么都不发**，不是发一条平线。插件保留最后收到的值，这是所有宿主的行为。
+  **点一下曲线就把它点亮**（`handleCcPress` 的第一条分支），因为"画了但没反应、开关在三级菜单外"
+  是这套 UI 里最贵的一种困惑。
+- **面板说的和引擎做的是同一个判据**：`hasMidiTargetForLane()` 问 `routing::layerSlotId` + `pluginId`，
+  与 `publishSchedule` 一模一样。所以 HUD 里那句「内置音源，收不到 CC」不会和实际行为分家。
+- **文件**：`<CC number="1" enabled="1">` + `<Point beat value>`（与 `<Automation>` 同一个点格式，
+  单独写六行而不共用 `writeLane`，因为键是**控制器编号**、`target` 属性在 CC 上没有意义）。
+  **没画过的 lane 一条都不写**，所以没碰过控制器的工程与 v31 逐字节相同。读侧先 `resetFlat(0)`
+  再 `loadPoints`——空控制器是"没有调制"，不是 `loadPoints` 默认的 1.0。
 
 ## 采样包络窗（P78）
 - `SampleEnvelopePanel`，452×314，和 `NoteEnvelopePanel` 同尺寸同一套行距；浮动 child，

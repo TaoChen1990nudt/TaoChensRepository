@@ -2148,11 +2148,86 @@ juce::Image MainComponent::createVelocityLaneSnapshot()
     // with no selection highlight. Either way, three frames that are about the
     // loop band and the count-in would have been photographing something else.
     stack.setActiveLayerIndex (activeWas);
+    stack.removeLayer (layerIndex);
 
     // One call, not two: `setSelection` and `setSampleSelection` each clear the
     // other half (that is how "a click picks one kind" works), so restoring them
     // in sequence would hand back a frame whose notes lost their outline to the
     // clips.
+    pianoRoll.setMixedSelection (notesWere, blocksWere);
+
+    return image;
+}
+
+//==============================================================================
+juce::Image MainComponent::createCcLaneSnapshot()
+{
+    const int  activeWas  = stack.getActiveLayerIndex();
+    const auto notesWere  = pianoRoll.getSelection();
+    const auto blocksWere = pianoRoll.getSampleSelection();
+
+    const double scrollWas = pianoRoll.getScrollBeats();
+    const int    topWas    = pianoRoll.getTopPitch();
+    const auto   tabWas    = pianoRoll.getLaneTab();
+
+    // A layer of its own, holding a phrase for the curve to shape. A controller
+    // lane photographed over an empty grid is a line floating in a rectangle:
+    // the point of the picture is that the swell sits over the notes it swells.
+    const int layerIndex = stack.addLayer (utf8 ("控制器"), palette::layer4);
+    auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr)
+        return {};
+
+    stack.setActiveLayerIndex (layerIndex);
+
+    static const int pitches[8] = { 60, 64, 67, 64, 60, 64, 67, 72 };
+
+    for (int step = 0; step < 8; ++step)
+        layer->addNote ({ 0, pitches[step], 0.0 + step * 1.0, 0.85, 0.72f });
+
+    // A mod-wheel swell: up over the first half, easing back down. Five points,
+    // which is what a hand-drawn controller curve actually looks like — the
+    // interesting thing to photograph is that the flat tails either side of the
+    // first and last point are DRAWN, because that is what the plugin receives.
+    auto& cc = layer->ccLane (atomic::ccModWheel);
+
+    cc.resetFlat (0.05f, 32.0);
+    cc.addPoint (2.0, 0.45f, 32.0);
+    cc.addPoint (4.0, 0.92f, 32.0);
+    cc.addPoint (6.0, 0.60f, 32.0);
+    cc.addPoint (7.5, 0.30f, 32.0);
+    cc.setEnabled (true);
+
+    stack.notifyNotesChanged();
+
+    pianoRoll.setVelocityLaneVisible (true);
+    pianoRoll.setLaneTab (PianoRollComponent::LaneTab::modWheel);
+
+    pianoRoll.setScrollBeats (0.0);
+    pianoRoll.setTopPitch (74);
+
+    repaint();
+
+    auto image = createComponentSnapshot (getLocalBounds(), true);
+
+    // Give everything back. This frame runs after `-velocity`, which already
+    // showed the cost of forgetting: the fixtures that follow (`-blank`,
+    // `-loop`, `-metronome`) photograph a workspace whose active layer, camera,
+    // lane height and tab are whatever the last fixture left behind.
+    pianoRoll.setScrollBeats (scrollWas);
+    pianoRoll.setTopPitch (topWas);
+    pianoRoll.setLaneTab (tabWas);
+    pianoRoll.setVelocityLaneVisible (false);
+
+    stack.setActiveLayerIndex (activeWas);
+
+    // And REMOVE the layer too. A fixture that borrows a sheet and never
+    // gives it back changes every frame after it — which is why the layer
+    // list in this picture already ran to four rows before P98 added one.
+    // `activeWas` is restored first so the removal cannot strand it.
+    stack.removeLayer (layerIndex);
+
     pianoRoll.setMixedSelection (notesWere, blocksWere);
 
     return image;

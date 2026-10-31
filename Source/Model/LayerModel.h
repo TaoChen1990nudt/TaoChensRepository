@@ -10,6 +10,7 @@
 #include "CurveBank.h"
 #include "Gain.h"
 #include "Media/SampleLibrary.h"
+#include "MidiCc.h"
 #include "NoteEnvelope.h"
 #include "TakeSet.h"
 
@@ -855,6 +856,34 @@ public:
     LayerAutomationTarget getAutomationTarget() const noexcept { return automationTarget; }
     void setAutomationTarget (LayerAutomationTarget t) noexcept { automationTarget = t; }
 
+    //-- Phase 98: the three MIDI controllers --------------------------------
+    /** This layer's CC curves: drawn in the piano roll's lane area, sent to
+        whatever instrument the layer plays through.
+
+        A LAYER, not a group, and the reason is the difference between a
+        controller and a shape. A group is one shape that can stand in several
+        places at once (P58/P62), so hanging a mod-wheel curve on it would mean
+        either "every appearance keeps its own copy" — four curves where the
+        user drew one — or "one curve follows the group around", which is a
+        controller that moves when nothing musical moved. A layer exists
+        exactly once and points at exactly one instrument, which is what a MIDI
+        channel is.
+
+        And a layer, not a slot: the slot is where the notes come OUT, the
+        layer is what the user draws ON. A slot can outlive the sheet that was
+        mounted on it (`routing::layerSlotId` falls back to the first
+        instrument), and a curve must not change destination because a rack card
+        was deleted.
+
+        Three lanes are always resident, indexed by `MidiCcLane`, the same way
+        the volume and pan lanes are always resident: "which lane is the mod
+        wheel" must never depend on what has been drawn. */
+    MidiCcSet&       midiCc() noexcept       { return ccLanes; }
+    const MidiCcSet& midiCc() const noexcept { return ccLanes; }
+
+    AutomationLane&       ccLane (int lane) noexcept       { return ccLanes[lane]; }
+    const AutomationLane& ccLane (int lane) const noexcept { return ccLanes[lane]; }
+
     /** Whether the lane is unfolded in the panel. View state, but it lives with
         the layer so the row layout stays a pure function of the model. */
     bool isAutomationExpanded() const noexcept     { return automationExpanded; }
@@ -1105,6 +1134,11 @@ private:
     LayerAutomationTarget automationTarget = LayerAutomationTarget::volume;
     bool                  automationExpanded = false;
     bool                  collapsed = false;
+
+    /** Phase 98: CC 1 / 11 / 64. Always three, always resident; a lane that was
+        never drawn is a flat zero that is switched off, so it transmits
+        nothing and reads as "no modulation" rather than "full modulation". */
+    MidiCcSet ccLanes;
 
     JUCE_LEAK_DETECTOR (Layer)
 };

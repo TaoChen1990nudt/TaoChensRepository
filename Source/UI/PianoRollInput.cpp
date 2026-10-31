@@ -201,7 +201,21 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
             return;
         }
 
-        handleVelocityPress (pos, mods);
+        // Phase 98: the gutter row of the strip is four tab buttons, and they
+        // come BEFORE the tenant. A tab is a switch, not an edit — handling it
+        // as "press on the lane" would have inserted a controller point behind
+        // the label the user just clicked.
+        if (const int tab = laneTabAt (ipos); tab >= 0)
+        {
+            setLaneTab ((LaneTab) tab);
+            return;
+        }
+
+        if (laneTab == LaneTab::velocity)
+            handleVelocityPress (pos, mods);
+        else
+            handleCcPress (pos, mods);
+
         return;
     }
 
@@ -1266,6 +1280,15 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
             stack.notifyNotesChanged();
             break;
 
+        case DragMode::ccDrag:
+            // Phase 98: same shape as the velocity drag, one difference that is
+            // the point — the controller curve is written ABSOLUTELY (the point
+            // follows the pointer) because a controller point is one point, not
+            // a set that has to keep its internal differences.
+            applyCcDragToScreen (e.position);
+            stack.notifyNotesChanged();
+            break;
+
         case DragMode::none:
         default:
             break;
@@ -1338,6 +1361,8 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent&)
     dragTrimOriginals.clear();     // Phase 56: armed by a clip trim as well
     dragSpanOriginals.clear();     // Phase 72: armed by a clip height drag
     velocityOriginals.clear();     // Phase 97: armed by a velocity bar drag
+    ccDragLane  = -1;              // Phase 98: armed by a controller point drag
+    ccDragIndex = -1;
     dragResizeNoteId = -1;
     dragEnvelopePoint = -1;
     dragSampleId = -1;

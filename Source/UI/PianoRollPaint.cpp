@@ -48,7 +48,7 @@ void PianoRollComponent::paint (juce::Graphics& g)
     drawToolbar (g);
     drawRuler (g);
     drawKeyboard (g);
-    drawVelocityLane (g);      // Phase 97: the strip between the keys and the bar
+    drawLaneArea (g);          // Phase 97/98: the strip between the keys and the bar
     drawScrollBar (g);
 
     // The inline note automation box floats above the notes and is clipped to

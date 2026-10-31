@@ -290,8 +290,22 @@ namespace project
       * Absent = an ordinary take. The flag cannot be inferred from the members
         (a comp's blocks look like any others), and it is not a playback fact:
         inferring it would mean guessing, and a wrong guess forks a second comp
-        the next time the user splices. */
-inline constexpr int formatVersion = 31;
+        the next time the user splices.
+
+    v32 (Phase 98): a layer can carry MIDI controller curves.
+
+      * `<CC number="1" enabled="1">` with the same `<Point beat value>`
+        children an `<Automation>` has. Three lanes are resident in the model
+        (CC 1 / 11 / 64) but a lane that was never drawn is NOT written, so a
+        song that predates this version re-saves to exactly the bytes it came
+        from.
+
+        Keyed by `number` rather than by a semantic name, which is the one
+        place this file departs from its own convention — deliberately. A
+        reader can check `number="11"` against the MIDI specification without
+        this source tree, whereas `target="expression"` would only mean
+        something to us. */
+inline constexpr int formatVersion = 32;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";

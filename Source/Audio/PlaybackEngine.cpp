@@ -355,6 +355,13 @@ void PlaybackEngine::setPositionBeats (double beats)
     // the old beat is counting towards a place the playhead has left.
     cancelPreRoll();
 
+    // Phase 98: a controller curve is read AT the playhead, so every locate
+    // invalidates what we think we have already sent. Without this, jumping
+    // into a quiet passage would leave the plugin holding the value from the
+    // loud one it came from — the audio thread compares epochs and forgets, so
+    // the first chunk after a locate transmits unconditionally.
+    ccEpoch.fetch_add (1, std::memory_order_relaxed);
+
     positionBeats.store (juce::jlimit (0.0, juce::jmax (0.0, getLengthBeats()), beats),
                          std::memory_order_relaxed);
 }
@@ -681,6 +688,45 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
 
         if (layer == nullptr)
             continue;
+
+        //-- Phase 98: the layer's controller curves --------------------------
+        // Resolved to the slot the layer's notes play through, so the audio
+        // thread never walks the rack. `layerSlotId` is the same answer every
+        // note of this layer gets (P27: skips samplers, falls back to the rack's
+        // first instrument), which is what makes "the CC I drew shapes what I
+        // hear" true rather than approximately true.
+        {
+            const auto& ccSet = layer->midiCc();
+
+            if (ccSet.anyEnabled())
+            {
+                const int   layerSlot = routing::layerSlotId (*layer, rack);
+                const auto* mount     = rack.findSlot (layerSlot);
+
+                // A built-in oscillator has no MIDI input at all. Publishing the
+                // curve anyway — with slotId -1 — is deliberate: the panel reads
+                // it to say "this layer's instrument cannot receive
+                // controllers", which is a far better answer than a curve that
+                // looks alive and transmits nothing.
+                const bool sendsMidi = mount != nullptr && mount->pluginId > 0;
+
+                for (int laneIndex = 0; laneIndex < numMidiCcLanes; ++laneIndex)
+                {
+                    const auto& lane = ccSet[laneIndex];
+
+                    if (! lane.isEnabled())
+                        continue;
+
+                    ScheduledCc cc;
+                    cc.slotId     = sendsMidi ? layerSlot : -1;
+                    cc.layerIndex = layerIndex;
+                    cc.number     = midiCcNumber (laneIndex);
+                    cc.enabled    = true;
+                    cc.points     = lane.getPoints();
+                    fresh->ccLanes.push_back (std::move (cc));
+                }
+            }
+        }
 
         // Phase 16: groups before their notes, so the audio thread can look a
         // group up while it renders the notes that point at it.
@@ -2004,6 +2050,19 @@ void PlaybackEngine::renderHostedInstruments (const PublishedSchedule& current, 
 
         float slotPeak = 0.0f;
 
+        // Phase 98: a locate since the last block means every controller value
+        // we remember is about to be wrong. One atomic read forgets all
+        // ninety-six — the alternative, having the message thread write them,
+        // would be a locate blocked on whatever the audio thread is doing.
+        if (const int epoch = ccEpoch.load (std::memory_order_relaxed); epoch != ccSeenEpoch)
+        {
+            for (auto& perSlot : lastCcValue)
+                for (auto& lane : perSlot)
+                    lane = midicc::nothingSent;
+
+            ccSeenEpoch = epoch;
+        }
+
         for (int chunkStart = 0; chunkStart < numSamples; )
         {
             const int chunkLen = juce::jmin (chunkMax, numSamples - chunkStart);
@@ -2087,11 +2146,49 @@ void PlaybackEngine::renderHostedInstruments (const PublishedSchedule& current, 
                         pluginMidi.addEvent (juce::MidiMessage::noteOff (1, event.pitch), 0);
                 }
 
+            //-- Phase 98: the layer's controllers, into the SAME buffer -------
+            // After the notes, before the block, so a CC that lands on the same
+            // sample as a note-on is seen by the plugin in the order the
+            // timeline put them — which is the only order the user drew.
+            //
+            // Only a CHANGE is sent (`midicc::valueToSend`). A controller is a
+            // state, not an event: a flat line held across four seconds is one
+            // message here and would be several hundred if this sent every
+            // chunk. The remembered value is per (slot, lane) and is forgotten
+            // on every locate — see the epoch check above the chunk loop.
+            if (slot.pluginId > 0 && ! current.ccLanes.empty())
+            {
+                const double ccBeat = current.tempo.beatAtSeconds (
+                                          startSeconds + (double) chunkStart / sampleRate);
+
+                auto& remembered = lastCcValue[(size_t) (slot.slotId & (ccMemorySlots - 1))];
+
+                for (const auto& cc : current.ccLanes)
+                {
+                    if (cc.slotId != slot.slotId)
+                        continue;
+
+                    // Keyed by LANE, not by the transmitted number: a project
+                    // written by a future version could name a controller we do
+                    // not keep a lane for, and the loader funnels those into the
+                    // mod wheel lane. Remembering by number would then believe it
+                    // had already sent a value it never sent.
+                    const int laneIndex = midiCcLaneFromNumber (cc.number);
+                    const int value     = midicc::valueToSend (cc.points, cc.enabled, ccBeat,
+                                                               remembered[(size_t) laneIndex]);
+
+                    if (value == midicc::nothingSent)
+                        continue;
+
+                    remembered[(size_t) laneIndex] = value;
+                    pluginMidi.addEvent (juce::MidiMessage::controllerEvent (1, cc.number, value), 0);
+                }
+            }
+
             // Plugins are not required to clear their output, and a leftover
             // from the last chunk is exactly the kind of noise nobody can
             // explain later.
             pluginBuffer.clear (0, chunkLen);
-
             // Phase 24: any curve that writes one of this instrument's
             // parameters lands here — after the MIDI for this chunk is built,
             // before it is processed, so the parameter and the notes it shapes
@@ -3711,6 +3808,19 @@ void PlaybackEngine::resetMixState()
 
     for (auto& line : pdcExit)
         line.reset();
+
+    // Phase 98: a bounce must not inherit a controller value from whatever was
+    // playing live either. `nothingSent` rather than 0 — zero is a real value
+    // (no modulation) and a lane whose first point is zero must still be
+    // transmitted once, or a plugin that kept a value from the previous pass
+    // never learns to let go. This is the same reasoning `pdcEntry.reset()`
+    // above uses for delay tails, applied to a piece of memory nobody thinks of
+    // as one.
+    for (auto& slot : lastCcValue)
+        for (auto& lane : slot)
+            lane = midicc::nothingSent;
+
+    ccSeenEpoch = ccEpoch.load (std::memory_order_relaxed);
 }
 
 //==============================================================================

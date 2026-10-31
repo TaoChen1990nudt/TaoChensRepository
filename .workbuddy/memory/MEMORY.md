@@ -151,6 +151,15 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
     选区 / 滚动 / lane 开关）：`setSelection` 与 `setSampleSelection` 各清另一半，还原要用
     `setMixedSelection` 一次给。
 
+31. **说「某功能已有模型」之前先 `grep` 那个符号**（P98）：`STATUS.md` 里「CC 曲线在模型里已经有了
+    （`Take::controls`）」这句话活了整整一轮，而 **`Take::controls` 这个类型从来不存在**——
+    `grep -rn "ControlPoint\|ControlLane" Source/` 零命中，`Source/Audio/` 里除实时输入
+    也没有任何 `MidiBuffer` 生产者。判据只有一条：**「我上次写的」不是证据，源码是**。
+    于是 P98 的真实工作是**新建一条数据通路**，不是画图——所以先确认「通路在哪」再估工作量。
+    **能复用就不新建**：CC 就是「绝对拍的 0..1 折线」，直接复用 `AutomationLane`
+    （没有第二种插值、没有第二个 `addPoint`）。**要让规则在无声卡环境里咬得动，就把「何时发送」
+    抽成纯函数**（`midicc::valueToSend`）——音频线程那侧只剩「调它、有值就 addEvent」。
+
 ## 索引
 - 目录结构、构建命令（含 `unset *proxy*`）、CI 四条门禁、`formatVersion` 逐版字段、自检夹具
   —— 全在 `STATUS.md` 与 `REFERENCE.md`，本文件不重复。

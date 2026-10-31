@@ -126,6 +126,28 @@ namespace
         }
     }
 
+    /** Phase 98: a CC lane's file shape.
+
+        Same `<Point beat value>` children as an `<Automation>`, and the same
+        precision, but written out here rather than sharing `writeLane` — the
+        key is the controller NUMBER, and `writeLane` would insist on a
+        `target` attribute that means nothing on a controller. Six duplicated
+        lines buy a file a reader can verify against the MIDI spec without this
+        source tree, which is the trade this project makes everywhere else. */
+    void writeCcLane (juce::XmlElement& parent, const AutomationLane& lane, int ccNumber)
+    {
+        auto* xml = parent.createNewChildElement ("CC");
+        xml->setAttribute ("number", ccNumber);
+        xml->setAttribute ("enabled", (int) lane.isEnabled());
+
+        for (const auto& point : lane.getPoints())
+        {
+            auto* p = xml->createNewChildElement ("Point");
+            p->setAttribute ("beat", number (point.beat, 8));
+            p->setAttribute ("value", number (point.value));
+        }
+    }
+
     void writeEnvelope (juce::XmlElement& parent, const NoteEnvelope& envelope,
                         const char* tag = "Envelope")
     {
@@ -251,6 +273,35 @@ namespace
         enabled  = xml.getBoolAttribute ("enabled", false);
         targetText = xml.getStringAttribute ("target");
         expanded = xml.getBoolAttribute ("expanded", false);
+    }
+
+    /** Phase 98: reads a `<CC>` element into one of the layer's three lanes.
+
+        Reset to a flat ZERO first, not to `loadPoints`' flat 1.0: an empty
+        controller message means "no modulation", and 127 is the loudest
+        possible answer to a question nobody asked. Doing it here rather than
+        trusting `loadPoints`' repair keeps the two defaults apart — a level
+        lane's idle is unity and a mod wheel's idle is silence, and they only
+        look interchangeable until the day one of them is wrong. */
+    void readCcLane (const juce::XmlElement& xml, AutomationLane& lane)
+    {
+        std::vector<AutomationPoint> points;
+
+        for (auto* child = xml.getFirstChildElement(); child != nullptr; child = child->getNextElement())
+        {
+            if (! child->hasTagName ("Point"))
+                continue;
+
+            points.push_back ({ child->getDoubleAttribute ("beat", 0.0),
+                                (float) child->getDoubleAttribute ("value", 0.0) });
+        }
+
+        lane.resetFlat (0.0f, timeline::defaultLengthBeats);
+
+        if (! points.empty())
+            lane.loadPoints (std::move (points));
+
+        lane.setEnabled (xml.getBoolAttribute ("enabled", false));
     }
 
     void readEnvelope (const juce::XmlElement& xml, NoteEnvelope& envelope)
@@ -795,6 +846,23 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                            layerTargetToText (target),
                            target == layer->getAutomationTarget() && layer->isAutomationExpanded());
 
+            //-- Phase 98: CC lanes, written only when there is something there --
+            // A lane nobody drew is a flat zero that is switched off, which is
+            // exactly what a file with no <CC> element means. Skipping it is
+            // therefore not an optimisation — it is what makes a project
+            // written before this version re-save to the same bytes, and what
+            // keeps a three-lane layer from tripling the size of a file whose
+            // author only ever touched the mod wheel.
+            for (int laneIndex = 0; laneIndex < numMidiCcLanes; ++laneIndex)
+            {
+                const auto& cc = layer->ccLane (laneIndex);
+
+                if (! cc.isEnabled() && cc.getPoints().size() <= 2)
+                    continue;
+
+                writeCcLane (*xml, cc, midiCcNumber (laneIndex));
+            }
+
             //-- Phase 16: groups, written BEFORE the notes ---------------
             // A group owns its mount and its curve; the notes only carry the
             // id. Reading a note whose group is missing repairs to "ungrouped",
@@ -1254,6 +1322,19 @@ bool fromXmlText (const juce::String& xmlText,
                 layer->setAutomationTarget (layerTargetFromText (child->getStringAttribute ("autotarget")));
             else if (legacyKnown)
                 layer->setAutomationTarget (legacyTarget);
+
+            //-- Phase 98: CC lanes ---------------------------------------
+            // A layer with no <CC> element keeps the constructor's state
+            // (three flat zeros, all switched off), which is the same thing an
+            // empty lane means in the model — so "old file" and "nothing drawn"
+            // need no separate branch.
+            for (auto* ccXml = child->getFirstChildElement(); ccXml != nullptr; ccXml = ccXml->getNextElement())
+            {
+                if (! ccXml->hasTagName ("CC"))
+                    continue;
+
+                readCcLane (*ccXml, layer->ccLane (midiCcLaneFromNumber (ccXml->getIntAttribute ("number", 1))));
+            }
 
             std::vector<NoteEvent> notes;
             std::vector<NoteGroup> groups;

@@ -517,6 +517,48 @@ void PianoRollComponent::setVelocityLaneVisible (bool shouldShow)
 }
 
 
+void PianoRollComponent::setLaneTab (LaneTab tab) noexcept
+{
+    if (laneTab == tab)
+        return;
+
+    laneTab = tab;
+
+    // A tab switch is not a gesture: whatever point the pointer was holding
+    // belonged to the lane that just left the screen, and continuing to drag it
+    // would edit a curve nobody is looking at.
+    ccDragLane  = -1;
+    ccDragIndex = -1;
+
+    updateCursor();
+    repaint();
+}
+
+
+juce::Rectangle<float> PianoRollComponent::laneTrackArea() const
+{
+    const auto strip = getVelocityLaneArea();
+
+    if (strip.isEmpty())
+        return {};
+
+    // The x range is the GRID's, not the strip's: beat 0 has to land on the same
+    // column here as it does up there, or the lane edits a different moment than
+    // the one it is drawn under. `getGridArea` is already trimmed at the bottom,
+    // so only its x and width are borrowed.
+    const auto grid = getGridArea();
+
+    if (grid.getWidth() <= 0.0f)
+        return {};
+
+    // Air above and below: a value at 1.0 must not be welded to the border, and
+    // a value at the floor must still have pixels to be grabbed by.
+    return juce::Rectangle<float> (grid.getX(), (float) strip.getY(),
+                                   grid.getWidth(), (float) strip.getHeight())
+             .reduced (0.0f, ui::pf (3.0f));
+}
+
+
 juce::Rectangle<int> PianoRollComponent::getRulerArea() const
 {
     return getLocalBounds().withTrimmedLeft (keyboardWidth)
