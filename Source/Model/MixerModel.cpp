@@ -25,6 +25,12 @@ MixerModel::MixerModel()
     // Phase 23: every strip starts plugged into the master. A fresh project
     // therefore renders exactly like it did before this routing existed.
     channelOutputs.fill (masterChannel);
+
+    // Phase 100: and no strip has anything patched into its detector. The fill
+    // is not decoration: the default for an `int` array is ZERO, and a zero here
+    // means "every compressor on this console listens to strip 1" — a factory
+    // session that ducks everything to whatever channel 0 happens to play.
+    channelKeys.fill (noKeySource);
 }
 
 //==============================================================================
@@ -93,6 +99,16 @@ bool MixerModel::reaches (int from, int to) const noexcept
 
         for (const auto& send : channelSends[(size_t) channel])
             if (send.isLive() && visit (send.destination))
+                return true;
+
+        // Phase 100: the key is an edge too, but it is declared on the OTHER
+        // end — a strip does not know who listens to it. So the donor's
+        // outgoing edges include "every strip whose detector points at me",
+        // which is a scan rather than a field. A cycle can hide here (0 feeds 1
+        // and 1 is 0's key), which is exactly what a chain-walking cursor used
+        // to miss.
+        for (int listener = 0; listener < numChannels; ++listener)
+            if (channelKeys[(size_t) listener] == channel && visit (listener))
                 return true;
     }
 
@@ -274,6 +290,69 @@ bool MixerModel::isSendTarget (int channel) const noexcept
     return false;
 }
 
+//==============================================================================
+int MixerModel::getSidechainSource (int channel) const noexcept
+{
+    if (! juce::isPositiveAndBelow (channel, numChannels))
+        return noKeySource;
+
+    const int source = channelKeys[(size_t) channel];
+
+    // Read-side safety net, the same one `getSend` applies: a donor that is no
+    // longer a live strip reads as "nothing patched in", because a compressor
+    // listening to a bus nobody writes is a compressor that never ducks again.
+    if (source != noKeySource
+          && (! juce::isPositiveAndBelow (source, channelCount) || source == channel))
+        return noKeySource;
+
+    return source;
+}
+
+bool MixerModel::setSidechainSource (int channel, int source)
+{
+    if (! juce::isPositiveAndBelow (channel, channelCount))
+        return false;
+
+    if (source == noKeySource)
+    {
+        if (channelKeys[(size_t) channel] == noKeySource)
+            return true;
+
+        channelKeys[(size_t) channel] = noKeySource;
+        notify();
+        return true;
+    }
+
+    // No self-key: a strip whose detector listens to the signal it is about to
+    // compress is just a compressor, which is what noKeySource already says.
+    //
+    // No master either, and for a different reason: the master is DOWNSTREAM of
+    // every strip, so its finished signal does not exist yet when a strip's
+    // inserts run. Refusing it here is cheaper than a cycle check that would
+    // have to special-case it anyway.
+    if (! juce::isPositiveAndBelow (source, channelCount) || source == channel)
+        return false;
+
+    // Judge the NEW edge alone: the key this strip has now must not count as
+    // the way back, or re-pointing a key inside a legal graph would be refused.
+    const int previous = channelKeys[(size_t) channel];
+    channelKeys[(size_t) channel] = noKeySource;
+
+    const bool loops = reaches (channel, source);   // listener -> donor is a cycle
+
+    channelKeys[(size_t) channel] = previous;
+
+    if (loops)
+        return false;
+
+    if (previous == source)
+        return true;
+
+    channelKeys[(size_t) channel] = source;
+    notify();
+    return true;
+}
+
 bool MixerModel::setChannelOutput (int channel, int destination)
 {
     if (! juce::isPositiveAndBelow (channel, channelCount))
@@ -349,6 +428,16 @@ void MixerModel::sanitiseRouting()
                 send.enabled     = false;
             }
         }
+
+        // Phase 100: a key pointing at a strip that no longer exists falls back
+        // to the strip's own signal, which is the default and needs no notice.
+        // Clearing (rather than re-pointing) is the same call the sends make: no
+        // donor is obviously the one that was meant.
+        const int keySource = channelKeys[(size_t) channel];
+
+        if (keySource != noKeySource
+              && (keySource == channel || ! juce::isPositiveAndBelow (keySource, channelCount)))
+            channelKeys[(size_t) channel] = noKeySource;
     }
 }
 
@@ -525,12 +614,14 @@ bool MixerModel::removeChannelAt (int channel)
         channelMono[(size_t) i]    = channelMono[(size_t) i + 1];
         channelOutputs[(size_t) i] = channelOutputs[(size_t) i + 1];
         channelSends[(size_t) i]   = channelSends[(size_t) i + 1];   // Phase 99
+        channelKeys[(size_t) i]    = channelKeys[(size_t) i + 1];     // Phase 100
     }
 
     inserts[(size_t) last]        = {};
     channelMono[(size_t) last]    = false;
     channelOutputs[(size_t) last] = masterChannel;
     channelSends[(size_t) last]   = {};
+    channelKeys[(size_t) last]    = noKeySource;
 
     // 2. Routes, now that every strip sits at its final index: a destination
     //    above the hole is the same physical strip one number lower, and a
@@ -566,6 +657,16 @@ bool MixerModel::removeChannelAt (int channel)
                 --send.destination;
             }
         }
+
+        // Phase 100: same two halves for a key — the donor follows the strip it
+        // meant, and a key whose donor WAS the removed strip falls back to the
+        // strip's own signal instead of pointing at whoever moved into the hole.
+        int& key = channelKeys[(size_t) src];
+
+        if (key == channel)
+            key = noKeySource;
+        else if (key > channel)
+            --key;
     }
 
     --channelCount;
@@ -623,6 +724,10 @@ void MixerModel::resetToDefault()
 
     // Phase 25: and no strip is monitoring in mono.
     channelMono.fill (false);
+
+    // Phase 100: and nothing patched into any detector. `noKeySource`, not
+    // zero — zero is strip 1, and a factory compressor listens to itself.
+    channelKeys.fill (noKeySource);
 
     for (auto& lane : masterAutomation)
         lane.setEnabled (false);

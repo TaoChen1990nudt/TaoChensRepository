@@ -306,6 +306,27 @@ inline juce::String displayName (const Settings& s)
 }
 
 //==============================================================================
+/** Phase 100 — a detector signal borrowed from another strip.
+
+    Only the compressor reads it, and only its LEVEL: the detector is an
+    envelope follower, so what it wants is "how loud is the key this sample",
+    not a second audio path to sum. Two pointers, no ownership, and the length
+    is the block — the caller has already aligned it, which is the whole point
+    of reading it out of the same delay line the console uses for sends.
+
+    A null `left` means "nothing is patched in", which is NOT the same as a
+    silent key: a silently-patched key holds the envelope at zero and therefore
+    releases the compressor, while nothing patched in means "listen to the
+    signal you are compressing". The two produce different sound on purpose. */
+struct KeySignal
+{
+    const float* left  = nullptr;
+    const float* right = nullptr;
+
+    bool isLive() const noexcept { return left != nullptr; }
+};
+
+//==============================================================================
 /** Per-slot DSP memory. Lives in the engine, never in the model: the message
     thread may change an insert while the audio thread is filtering with it. */
 struct SlotState
@@ -428,14 +449,21 @@ struct ChainState
 
     /** Audio thread. Applies every active built-in insert in order, in place.
         Hosted VST3 inserts are skipped here — they need the PluginHost, so the
-        engine drives those itself, slot by slot, through processSlot(). */
+        engine drives those itself, slot by slot, through processSlot().
+
+        Phase 100: `key` is the whole chain's sidechain signal, or null. It is
+        one per CHAIN, not one per slot, because the key lives on the strip
+        (MixerModel::getSidechainSource) and a strip has one detector bus —
+        "the compressor listens to channel 1" is a fact about the strip, and
+        two compressors on it cannot sensibly listen to two different donors. */
     void process (const std::array<Settings, maxSlots>& settings,
                   juce::AudioBuffer<float>& buffer,
                   int numSamples,
-                  double sampleRate)
+                  double sampleRate,
+                  const KeySignal* key = nullptr)
     {
         for (int i = 0; i < maxSlots; ++i)
-            processSlot (i, settings[(size_t) i], buffer, numSamples, sampleRate);
+            processSlot (i, settings[(size_t) i], buffer, numSamples, sampleRate, key);
     }
 
     /** Audio thread. One slot, one effect, in place. Order is the caller's
@@ -444,7 +472,8 @@ struct ChainState
     void processSlot (int index, const Settings& setting,
                       juce::AudioBuffer<float>& buffer,
                       int numSamples,
-                      double sampleRate)
+                      double sampleRate,
+                      const KeySignal* key = nullptr)
     {
         if (! setting.active() || setting.type == Type::vst)
             return;
@@ -461,7 +490,7 @@ struct ChainState
             case Type::delay:    applyDelay    (state, setting, buffer, numSamples, sampleRate); break;
             case Type::air:      applyAir      (state, setting, buffer, numSamples, sampleRate); break;
             case Type::eq:       applyEq       (state, setting, buffer, numSamples, sampleRate); break;
-            case Type::comp:     applyComp     (state, setting, buffer, numSamples, sampleRate); break;
+            case Type::comp:     applyComp     (state, setting, buffer, numSamples, sampleRate, key); break;
             case Type::reverb:   applyReverb   (state, setting, buffer, numSamples, sampleRate); break;
             case Type::vst:
             case Type::none:
@@ -699,9 +728,17 @@ private:
     /** Compressor. Params: 0 threshold (-40..0 dB), 1 ratio (1..20), 2 makeup
         (0..+18 dB), 3 attack (1..200 ms), 4 release (20..2000 ms), 5 knee
         width (0..24 dB, the soft-knee quadratic from Reiss & McPherson).
-        Linked-stereo envelope (max of both channels — never shift the image). */
+        Linked-stereo envelope (max of both channels — never shift the image).
+
+        Phase 100: `key` replaces the DETECTOR's input, not the signal path. The
+        audio being compressed is still `buffer`; only "how loud is it right now"
+        comes from elsewhere. That is the whole of what a sidechain is, and
+        keeping it at this one line means the gain computer, the knee, the
+        attack/release and the makeup are shared by both modes instead of
+        duplicated into a second function that would drift. */
     static void applyComp (SlotState& state, const Settings& s,
-                           juce::AudioBuffer<float>& buffer, int numSamples, double sampleRate)
+                           juce::AudioBuffer<float>& buffer, int numSamples, double sampleRate,
+                           const KeySignal* key = nullptr)
     {
         const float thresholdDb = compThresholdDb (s.params[(size_t) 0]);
         const float ratio       = compRatio (s.params[(size_t) 1]);
@@ -714,10 +751,19 @@ private:
         auto* l = buffer.getWritePointer (0);
         auto* r = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
 
+        // Resolved once per block, not per sample: the pointer test inside the
+        // loop would be the same answer a thousand times.
+        const bool  keyed  = key != nullptr && key->isLive();
+        const float* keyL  = keyed ? key->left  : nullptr;
+        const float* keyR  = keyed ? key->right : nullptr;
+
         for (int n = 0; n < numSamples; ++n)
         {
-            const float level = juce::jmax (std::abs (l[n]),
-                                            r != nullptr ? std::abs (r[n]) : 0.0f);
+            const float level = keyed
+                                  ? juce::jmax (std::abs (keyL[n]),
+                                                keyR != nullptr ? std::abs (keyR[n]) : 0.0f)
+                                  : juce::jmax (std::abs (l[n]),
+                                                r != nullptr ? std::abs (r[n]) : 0.0f);
             state.compEnv += (level - state.compEnv) * (level > state.compEnv ? att : rel);
 
             float target = 1.0f;

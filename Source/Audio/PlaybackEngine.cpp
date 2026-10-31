@@ -557,6 +557,27 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
                 slot.gain        = send.getGainLinear();
                 slot.preInsert   = send.preInsert;
             }
+
+            //-- Phase 100: the sidechain key ---------------------------------
+            // Published only when something actually listens. A key with no
+            // active COMP behind it is not an edge: it would put this strip
+            // behind the donor's latency for a detector nobody reads, which is
+            // an audible change from a wiring change that makes no sound.
+            {
+                const int source = mixer->getSidechainSource (channel);
+
+                bool listens = false;
+
+                for (const auto& insert : mix.inserts)
+                    if (insert.active() && insert.type == fx::Type::comp)
+                    {
+                        listens = true;
+                        break;
+                    }
+
+                if (listens && juce::isPositiveAndBelow (source, liveChannels))
+                    mix.keySource = source;
+            }
         }
 
         fresh->channels.push_back (std::move (mix));
@@ -629,6 +650,21 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
 
             if (! send.preInsert)
                 offset = juce::jmax (offset, mix.insertLatency);
+        }
+
+        //-- Phase 100: the key ------------------------------------------------
+        // The one edge that is declared on the DESTINATION instead of the
+        // source: `keySource` says "my detector listens to that strip", so the
+        // strip that must wait is the listener, not the donor. Same tap point
+        // as a post-insert send (the donor's finished signal), so the same
+        // offset — and a PRE-insert key does not exist, deliberately: a
+        // compressor that ducks to material which is not on the record is a
+        // control nobody would ask for twice.
+        if (juce::isPositiveAndBelow (destination, (int) fresh->channels.size())
+              && fresh->channels[(size_t) destination].keySource == source)
+        {
+            feeds  = true;
+            offset = juce::jmax (offset, mix.insertLatency);
         }
 
         return feeds;
@@ -1370,6 +1406,24 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
         bus.clear (0, numSamples);
     }
 
+    // Phase 100: a listening strip needs a block of its own to hold the donor's
+    // signal. Sized here, next to the buses and for the same reason, but only
+    // for the strips that have a key — the ceiling is 127 strips and a session
+    // with no sidechain must not pay for 127 buffers of nothing.
+    //
+    // Not cleared: the only thing that ever reads one is the code that just
+    // wrote it, in the same block.
+    for (const auto& mix : current.channels)
+    {
+        if (mix.keySource < 0 || ! juce::isPositiveAndBelow (mix.channel, MixerModel::numChannels))
+            continue;
+
+        auto& buffer = channelKeyBuffers[(size_t) mix.channel];
+
+        if (buffer.getNumChannels() < 2 || buffer.getNumSamples() < numSamples)
+            buffer.setSize (2, numSamples, false, false, false);
+    }
+
     // Layer peaks are measured at the voice stage now that layers have no bus
     // of their own. The layer panel's meter must still mean "this sheet is
     // producing sound".
@@ -1892,6 +1946,64 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
                             ? current.channels[(size_t) channel]
                             : kNoMix;
 
+        //-- Phase 100: the key ------------------------------------------------
+        // A sidechain is a send that feeds a DETECTOR: the donor's finished
+        // signal, held back to THIS strip's entry instant, handed to the
+        // compressor instead of summed into a bus. The delay is the same
+        // subtraction the post-insert send makes (`entry[here] - donorEnd`),
+        // and that is not a coincidence — it is the same tap, read at the same
+        // instant, only delivered somewhere else.
+        //
+        // A donor of -1 is not "a silent key": it means nothing is patched in,
+        // and the compressor falls back to listening to itself.
+        fx::KeySignal key;
+
+        if (mix.keySource >= 0
+              && juce::isPositiveAndBelow (mix.keySource, (int) current.channels.size()))
+        {
+            const int   source   = mix.keySource;
+            const auto& sourceMix = current.channels[(size_t) source];
+            const int   donorEnd = juce::jmin (pdc::maxSamples,
+                                               sourceMix.entryLatency + sourceMix.insertLatency);
+            const int   delay    = juce::jmax (0, mix.entryLatency - donorEnd);
+
+            auto& buffer = channelKeyBuffers[(size_t) channel];
+
+            if (buffer.getNumSamples() >= numSamples && buffer.getNumChannels() >= 1)
+            {
+                const bool donorLineLive = current.maxPdcLatency > 0
+                                             && pdcExit[(size_t) source].isReady();
+
+                if (donorLineLive)
+                {
+                    pdcExit[(size_t) source].readInto (buffer, delay, numSamples, false);
+                }
+                else if (delay == 0)
+                {
+                    // No compensation in this console, so the donor's bus IS the
+                    // aligned signal. Its own block, already finished: the loop
+                    // walks `channelOrder`, so a strip that feeds this one has
+                    // run before it.
+                    for (int ch = 0; ch < 2; ++ch)
+                        buffer.copyFrom (ch, 0, channelBuses[(size_t) source],
+                                         juce::jmin (ch, 1), 0, numSamples);
+                }
+                else
+                {
+                    // A donor that is late and a line that is not ready: there is
+                    // nothing honest to hand over, so no key is handed over (and
+                    // NOT a silent one). `key` stays empty, which reads as "nothing
+                    // patched in" — the compressor falls back to itself for this
+                    // block rather than ducking to the wrong beat. The strip still
+                    // renders: this is a missing detector signal, not a muted
+                    // channel, and `continue` here would silence the audio too.
+                }
+
+                key.left  = buffer.getReadPointer (0);
+                key.right = buffer.getNumChannels() > 1 ? buffer.getReadPointer (1) : nullptr;
+            }
+        }
+
         //-- Phase 99: the pre-insert tap -------------------------------------
         // Taken BEFORE the inserts run, and into its own line: the inserts are
         // about to overwrite `bus` in place, so a copy that is only "read
@@ -1907,9 +2019,9 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
             pdcPre[(size_t) channel].push (bus, numSamples);
 
         if (pluginsLive)
-            processInsertChain (mix.inserts, bus, numSamples, chain);
+            processInsertChain (mix.inserts, bus, numSamples, chain, &key);
         else
-            chain.process (mix.inserts, bus, numSamples, sampleRate);
+            chain.process (mix.inserts, bus, numSamples, sampleRate, &key);
 
         // Phase 25: mono monitoring, straight after the inserts. Here and not
         // before them because the chain is set up for a stereo signal — summing
@@ -2517,7 +2629,8 @@ void PlaybackEngine::applyHostedParamAutomation (juce::AudioProcessor& plugin,
 //==============================================================================
 void PlaybackEngine::processInsertChain (const std::array<fx::Settings, fx::ChainState::maxSlots>& settings,
                                          juce::AudioBuffer<float>& buffer, int numSamples,
-                                         fx::ChainState& chain) const
+                                         fx::ChainState& chain,
+                                         const fx::KeySignal* key) const
 {
     // Slot order is the whole point: a native delay before a hosted reverb has
     // to sound different from the other way round.
@@ -2531,7 +2644,7 @@ void PlaybackEngine::processInsertChain (const std::array<fx::Settings, fx::Chai
         if (setting.type == fx::Type::vst)
             processHostedEffect (setting.pluginId, buffer, numSamples);
         else
-            chain.processSlot (i, setting, buffer, numSamples, sampleRate);
+            chain.processSlot (i, setting, buffer, numSamples, sampleRate, key);
     }
 }
 

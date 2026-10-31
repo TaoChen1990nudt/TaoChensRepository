@@ -741,6 +741,12 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                 if (mixer->getSend (channel, index).isLive())
                     return true;
 
+            // Phase 100: a hidden strip whose detector is patched to a live one
+            // keeps its key, or shrinking the console and growing it back would
+            // silently un-sidechain every compressor on it.
+            if (mixer->getSidechainSource (channel) != MixerModel::noKeySource)
+                return true;
+
             return false;
         };
 
@@ -764,6 +770,12 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
 
             if (mixer->isChannelMono (channel))
                 channelXml->setAttribute ("mono", 1);
+
+            // Phase 100: the donor this strip's detector listens to. Only when
+            // one is patched in — "no key" is the absence of the attribute, the
+            // same way "no send" is the absence of a `<Send>`.
+            if (mixer->getSidechainSource (channel) != MixerModel::noKeySource)
+                channelXml->setAttribute ("key", mixer->getSidechainSource (channel));
 
             writeInserts (*channelXml, mixer->getInserts (channel));
 
@@ -1188,6 +1200,13 @@ bool fromXmlText (const juce::String& xmlText,
     // a factory console has, so a v32 project reopens flat.
     std::array<std::array<MixerModel::Send, MixerModel::numSends>,
                MixerModel::numChannels> parsedSends {};
+
+    // Phase 100: the sidechain keys, staged with the rest. `noKeySource` is not
+    // zero, so the array must be filled — a zero here would mean "every strip
+    // listens to strip 1", which is the one default that would make an old
+    // project duck.
+    std::array<int, MixerModel::numChannels> parsedKeys {};
+    parsedKeys.fill (MixerModel::noKeySource);
 
     /** v11 and older used 8 as the master sentinel because the ceiling was eight
         strips; from v12 the sentinel is the ceiling itself. An old `out="8"`
@@ -1676,6 +1695,18 @@ bool fromXmlText (const juce::String& xmlText,
 
                 parsedMono[(size_t) channel] = child->getIntAttribute ("mono", 0) != 0;
 
+                //-- Phase 100: the sidechain key -----------------------------
+                // Validated like a send's destination, and for the same reason:
+                // the staged value is what the commit loop believes, so a donor
+                // that is not a live strip (or is this strip) is dropped here
+                // rather than refused a second time.
+                {
+                    const int key = child->getIntAttribute ("key", MixerModel::noKeySource);
+
+                    if (juce::isPositiveAndBelow (key, MixerModel::numChannels) && key != channel)
+                        parsedKeys[(size_t) channel] = key;
+                }
+
                 //-- Phase 99: sends ------------------------------------------
                 // `index` is written explicitly rather than inferred from the
                 // order of the elements, because only the live ones are saved:
@@ -1856,6 +1887,13 @@ bool fromXmlText (const juce::String& xmlText,
         // doing it because the new project says nothing about it.
         for (int channel = 0; channel < parsedChannelCount; ++channel)
             mixer->setChannelMono (channel, parsedMono[(size_t) channel]);
+
+        // Phase 100: keys, last of the three edge kinds — a key's loop test
+        // walks everything the outputs and the sends have just established, and
+        // every strip is visited so a key from the previous project cannot
+        // survive a load that says nothing about it.
+        for (int channel = 0; channel < MixerModel::numChannels; ++channel)
+            mixer->setSidechainSource (channel, parsedKeys[(size_t) channel]);
 
         mixer->notify();
     }

@@ -251,6 +251,19 @@ struct ChannelMix
     };
 
     std::array<ScheduledSend, MixerModel::numSends> sends {};
+
+    /** Phase 100: the strip whose finished signal feeds this strip's compressor
+        detectors, or -1 for "its own signal".
+
+        Resolved like the sends, and for the same reason — the audio thread must
+        not ask the model anything — but it is also filtered here: a key that no
+        active compressor listens to is published as -1, because a key with no
+        listener is not an edge and must not hold another strip back by its
+        latency. The model's loop test is deliberately stricter than this (it
+        does not look at insert types): refusing a loop that would only exist
+        once a compressor is added is cheap, and a graph that becomes
+        unrenderable when you drop a COMP into a slot is not. */
+    int keySource = -1;
 };
 
 //==============================================================================
@@ -1087,10 +1100,16 @@ private:
                                   RenderStats* stats) const;
 
     /** One insert chain, in slot order. Native effects come from `chain`,
-        VST3 effects from the plugin host. */
+        VST3 effects from the plugin host.
+
+        Phase 100: `key` is the strip's sidechain signal (null when nothing is
+        patched into it). It is threaded through rather than looked up here
+        because the strip already resolved it, and a second lookup inside the
+        chain would be a second answer to "what is my key". */
     void processInsertChain (const std::array<fx::Settings, fx::ChainState::maxSlots>& settings,
                              juce::AudioBuffer<float>& buffer, int numSamples,
-                             fx::ChainState& chain) const;
+                             fx::ChainState& chain,
+                             const fx::KeySignal* key = nullptr) const;
 
     /** One hosted insert, in place. */
     void processHostedEffect (int pluginInstanceId, juce::AudioBuffer<float>& buffer,
@@ -1184,6 +1203,16 @@ private:
         so all of them can exist; the insert chains cannot — see chainsReady. */
     static constexpr int numBuses = MixerModel::numChannels + 1;
     mutable std::array<juce::AudioBuffer<float>, numBuses> channelBuses;
+
+    /** Phase 100: one block of somebody else's signal, per listening strip.
+
+        Its own buffer and not the donor's bus, because the key must be aligned
+        to the LISTENER's entry instant — reading the donor's bus directly would
+        hand the detector the copy before the compensation delay, which is the
+        one-sample-or-96-samples mistake the null test exists to find. Empty
+        unless a strip actually has a key: sizing 127 of them for a session with
+        none would be 500 kB of nothing. */
+    mutable std::array<juce::AudioBuffer<float>, MixerModel::numChannels> channelKeyBuffers;
 
     /** Insert memory for every bus the console can address. The objects stay
         EMPTY until prepare() sizes their delay lines, and prepare() is only ever

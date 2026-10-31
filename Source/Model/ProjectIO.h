@@ -319,8 +319,21 @@ namespace project
 
       * `pre` means the copy is taken BEFORE the strip's insert chain. Absent =
         after, which is the overwhelmingly common case and the one a v32 reader
-        would draw if it ignored the attribute entirely. */
-inline constexpr int formatVersion = 33;
+        would draw if it ignored the attribute entirely.
+
+    v34 (Phase 100): a strip's compressor can listen to another strip.
+
+      * `<Channel key="2">` — this strip's detector is fed by strip 3's
+        finished signal. Written only when a key is patched in, so a song with
+        no sidechain re-saves to the bytes it came from.
+
+      * The attribute lives on the LISTENING strip and names the DONOR, which
+        is the direction the user thinks in ("duck the bass to the kick") and
+        the direction the dependency runs at render time. Absent = the detector
+        listens to the signal it is compressing, i.e. an ordinary compressor —
+        which is also what a v33 reader draws, since it ignores the attribute
+        and every strip starts un-keyed. */
+inline constexpr int formatVersion = 34;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";

@@ -170,7 +170,7 @@ build Release → `--snapshot selftest.png`。
   于是 3/4 的歌按 4/4 数小节——P91 把拍号变成值的时候漏的就是这里。字串化留在
   `MainComponent::formatBarBeat (beats, beatsPerBar)`（静态，两个输入都显式），测试才不必造一个窗口。
 
-## 工程文件（`.atomic`，`formatVersion` = 33）
+## 工程文件（`.atomic`，`formatVersion` = 34）
 - **先解析到临时对象、末尾一次性提交**，坏文件绝不破坏当前会话。载入后重置
   `nextNoteId`/`nextSlotId`/组 id（max+1）。
 - 老文件必须仍能开：v3 `mod=`、v4 插件（标签 **"PLUGIN"** 全大写）、v5 `mixer=`、
@@ -213,6 +213,10 @@ build Release → `--snapshot selftest.png`。
   `index` 必须写（活的不连续，读侧猜就会把 send 1 的目的地装到 send 0 上），
   `to` 必须是通道号（写 master 是坏文件），**缺 `pre` = 推子后**。
   读侧先 `setSendDestination`（被拒即清空）再电平/pre/开关——**顺序不能反**，没目的地打不开。
+  v34（P100）给 `<Channel>` 加 **`key="2"`**（这条通道的压缩器听 3 号条的成品信号）：
+  **只在接了键时写**，缺省 = 听自己，所以没接键的工程与 v33 逐字节相同。
+  读侧暂存 `parsedKeys`（**`fill(noKeySource)` 过**，默认 0 会读成"每条都听 1 号条"），
+  提交在 `restoreRouting` 与发送**之后**——键的查环要看到前两种边已经建立。
 - **选中哪条 lane 显式写 `autotarget`，不靠元素顺序推断**：三条 lane 都写出来之后，
   "最后读到的那条算选中"恒把 target 变成 `plugin`。回退规则只在 `autotarget` **缺失**时启用。
 - **P70：`<Layer autotarget>` 同理**。图层只有 volume/pan 两条 lane，所以后果不是
@@ -499,6 +503,41 @@ build Release → `--snapshot selftest.png`。
   一行只在接上时才出现，会让通道条高度在鼠标底下变。`getFaderRowBounds()` 顶部多减
   `numSendRows * 14`，推子与电平表从**同一个** `getFaderRowBounds` 派生，所以一起下移一起变矮。
   文字是 `→ 5  -6.0` / `→ 6  -12.0 p`（尾巴 `p` = 推子前）/ `—`。
+
+### 侧链键（P100：喂探测器的发送）
+- **一句话**：键就是「一条发送，落点不是总线而是压缩器的探测器」。所以它**没有新概念**——
+  同一张图、同一张延迟表、同一个抽头位置（源的**成品**信号 = post-insert）。
+- **存在监听的那条通道上**：`MixerModel::channelKeys[listener] = donor`，`noKeySource = -1`。
+  谁需要信号谁声明依赖，这样「键也是一条边」在图里**从源指向听者**，与 `out`/`send` 同向。
+  **`-1` 不是 0**：0 是 1 号通道，一个 `int` 数组的默认值会让出厂工程把每条通道都压到 0 号的声音上
+  ——构造函数与 `resetToDefault()` 各 `fill(noKeySource)` 一次。
+- **`reaches()` 多遍历一类边**：`channelOutputs` 与 `channelSends` 是「我从这儿出去」，
+  键是「谁在听我」（`for (listener) if (channelKeys[listener] == channel)`）。这条**扫描**是
+  「链 vs 图」的第二个落点，漏了它 `wouldLoop` 就看不见 `0→3→4→0` 这种隔一条键的环。
+- **`edgeLatency()` 里唯一一处看的是「对端」**：`out`/`send` 都写在源身上，
+  所以那个 lambda 直接读 `channels[source]`；键写在**听者**身上，必须读
+  `channels[destination].keySource == source`，`offset = own[source]`（post 抽头）。
+  **键没有 pre-insert 版本**：让压缩器跟着「不在唱片上」的信号动作，是一个没人会要两次的控件。
+- **发布时过滤「有没有 COMP 在听」**（`ChannelMix::keySource` 只在有活着的 comp 时才写）。
+  于是**模型查环比发布严**：模型不看插入类型（宁可多拒一条将来加 COMP 才成环的接线），
+  发布只把「真的有人在听」的键算成边——一条空接线不能拖慢整条通道。
+- **DSP 只在一处分叉**：`applyComp` 的 `level` 从 `fx::KeySignal` 来还是从 buffer 来，
+  增益计算 / knee / attack / release / makeup 全部共用。`KeySignal::left == nullptr`
+  （没接）与「接了一条静音的线」是两件事：前者听自己，后者把包络放下来（压缩器松开）。
+- **引擎的读法**：`channelKeyBuffers[listener]`（只为有键的通道分配，127 条全分配是 500 kB 的零），
+  在**听者**这一轮、插入**之前**读，`delay = entry[听者] - (entry[源] + own[源])`
+  —— 与 `finishedDelayTo()` 是同一个减法，因为它是同一个抽头。行没有准备好且 `delay > 0` 时
+  **不交键**（不交静音）：交一个时刻不对的键比不交更坏，而 `continue` 会把整条通道也静音。
+- **面板**：右键菜单（类型菜单里的子菜单「侧链键」，成环的源灰掉，`199` = 无、`200+n` = 第 n 条），
+  类型格里印 **`K5`**（不是「键5」：8 px 下中文糊成一团，这一格其它四个词都是 ASCII）。
+  标记跟着**通道**走，所以同一条通道上两个 COMP 印同一个 `K5`。
+- **存盘 v34**：`<Channel key="2">`，**只在接了键时写**，缺省 = 听自己（v33 读者忽略它，一切照旧）。
+- **两条能咬住的验收**：① DSP 级——同一份 -46 dBFS 的安静信号（在门槛 -30 dB 之下），
+  接上 0.9 的键之后末样从 `0.005000` 掉到 `0.000208`；② 渲染级——把键换成一条**静音**的通道，
+  压缩器不再自压，rms 从 `0.02195` 涨到 `0.10243`（+13.4 dB）。前者管「探测器换了输入」，
+  后者管「引擎真的把键送到了链上」——咬测 M4 与 M5 分别只打中其中一条。
+- **已知盲区**：`delay` 那个减法在 headless 里恒为 0（没有 VST3 ⟹ `own` 恒 0），
+  把它改成 0（咬测 M9）**全绿存活**。表那一半咬住了（M1），「渲染器按表读」那一半没有。
 
 ## 曲线库（P82：一个形状 + 一个去处）
 - **`Model/CurveBank<CurveType>` 是唯一的曲线容器**：音符 / 采样 / 编组三个对象各持一份，

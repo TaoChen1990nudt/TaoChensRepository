@@ -646,6 +646,16 @@ public:
         is the same console, and a send left behind would show up in it. */
     juce::Image createSendSnapshot (int width = ui::px (1180), int height = ui::px (300));
 
+    /** Phase 100: the rack with one compressor keyed and one not.
+
+        The sidechain marker lives inside the type cell ("COMP 键3"), so it can
+        only be seen on the selected strip's rack — one image per state. This
+        frame puts both states in the SAME rack, two slots apart, which is also
+        what makes the marker readable as a marker: the row below it says COMP
+        and nothing else. Borrows the whole insert chain and the key, and gives
+        both back. */
+    juce::Image createSidechainSnapshot (int width = ui::px (1180), int height = ui::px (300));
+
     /** Phase 43: how tall the file tree's pane is, in device pixels, as the
         splitter currently has it. The self-test asks this instead of measuring
         components: the number IS the setting, and a component's height also

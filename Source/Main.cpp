@@ -180,6 +180,11 @@ namespace
         // own output, so the frame has to show it next to the output row.
         writePng ("-sends", component.createSendSnapshot());
 
+        // Phase 100: the rack, with one compressor keyed and one listening to
+        // itself. The marker sits inside the type cell, so it only exists on the
+        // selected strip — two slots in one rack is what makes it legible.
+        writePng ("-sidechain", component.createSidechainSnapshot());
+
         // Phase 28: the browser tree, taller than the shell's split can give it.
         writePng ("-browser", component.createFileBrowserSnapshot());
 

@@ -17067,8 +17067,8 @@ juce::String MainComponent::runSelfTest()
                                                     ? juce::String (utf8 ("元素还在"))
                                                     : juce::String (utf8 ("元素已去掉"))));
 
-            check (utf8 ("formatVersion 是 33（P99 的发送要能认出来）"),
-                   project::formatVersion == 33, juce::String (project::formatVersion));
+            check (utf8 ("formatVersion 是 34（P100 的侧链键要能认出来）"),
+                   project::formatVersion == 34, juce::String (project::formatVersion));
         }
 
         //-- E. 复制到后一小节 ------------------------------------------------
@@ -18595,8 +18595,8 @@ juce::String MainComponent::runSelfTest()
 
             const auto xml96 = project::toXmlText (io96, rack96, 120.0);
 
-            check (utf8 ("存盘版本 33，且只有 comp 写 takecomp"),
-                   project::formatVersion == 33 && xml96.contains ("version=\"33\"")
+            check (utf8 ("存盘版本 34，且只有 comp 写 takecomp"),
+                   project::formatVersion == 34 && xml96.contains ("version=\"34\"")
                      && xml96.contains ("takecomp=\"1\""),
                    juce::String (project::formatVersion));
 
@@ -18722,7 +18722,7 @@ juce::String MainComponent::runSelfTest()
                 quiet->velocity = 0.3f;
 
                 check (utf8 ("力度 lane 没有自己的文件字段（仍然只写 Note 的 velocity）"),
-                       project::formatVersion == 33,
+                       project::formatVersion == 34,
                        juce::String (project::formatVersion));
 
                 roll97b.setSelection ({ loudId, quietId });
@@ -19026,7 +19026,7 @@ juce::String MainComponent::runSelfTest()
                          && xml98.contains ("<CC number=\"64\"")
                          && ! xml98.contains ("<CC number=\"11\"")
                          && ccElements == 2
-                         && xml98.contains ("version=\"33\""),
+                         && xml98.contains ("version=\"34\""),
                        juce::String (ccElements) + " 个 / " + juce::String (xml98.length()) + " chars");
 
                 LayerStack back98;
@@ -19474,6 +19474,348 @@ juce::String MainComponent::runSelfTest()
                preReference > 0.01f && preResidualDb <= -60.0f,
                "ref " + juce::String (preReference, 4)
                  + " resid " + juce::String (preResidualDb, 1) + " dB");
+    }
+
+    //== Phase 100: sidechain key ==========================================
+    // A key is a send that feeds a DETECTOR: the donor's finished signal,
+    // aligned to the listener's entry, handed to the compressor instead of
+    // summed into a bus. The three things that can go wrong are below, in the
+    // order they hurt — the graph (a key is declared on the LISTENER, so the
+    // chain-walking loop test P99 replaced was still blind to it), the delay
+    // table (a late donor must hold the listener back or the compressor ducks
+    // to the wrong beat), and the detector itself (does the borrowed signal
+    // actually reach the gain computer).
+    {
+        //-- (1) Model rules --------------------------------------------------
+        {
+            MixerModel m;
+
+            check (utf8 ("出厂控制台上没有压缩器接着别人的信号"),
+                   m.getSidechainSource (0) == MixerModel::noKeySource,
+                   "src " + juce::String (m.getSidechainSource (0)));
+
+            const bool pointed = m.setSidechainSource (0, 2);
+
+            check (utf8 ("把 1 号条的探测接到 3 号条上"),
+                   pointed && m.getSidechainSource (0) == 2,
+                   "set " + juce::String ((int) pointed)
+                     + " src " + juce::String (m.getSidechainSource (0)));
+
+            // 自己听自己就是普通压缩器 —— `noKeySource` 已经是这个意思，所以
+            // 这不该是一条"合法的键"，否则同一件事有两种写法。
+            const bool selfKey = m.setSidechainSource (0, 0);
+
+            check (utf8 ("不能把探测接到自己身上（那就是普通压缩器）"),
+                   ! selfKey && m.getSidechainSource (0) == 2,
+                   "set " + juce::String ((int) selfKey)
+                     + " src " + juce::String (m.getSidechainSource (0)));
+
+            // 主输出在下游：通道跑插入的时候，它的成品信号还不存在。
+            const bool masterKey = m.setSidechainSource (0, MixerModel::masterChannel);
+
+            check (utf8 ("主输出不能当键源（它在下游，还没有成品信号）"),
+                   ! masterKey && m.getSidechainSource (0) == 2,
+                   "set " + juce::String ((int) masterKey)
+                     + " src " + juce::String (m.getSidechainSource (0)));
+
+            const bool deadKey = m.setSidechainSource (0, 99);
+
+            check (utf8 ("接不到一条不存在的通道上"),
+                   ! deadKey && m.getSidechainSource (0) == 2,
+                   "set " + juce::String ((int) deadKey)
+                     + " src " + juce::String (m.getSidechainSource (0)));
+
+            const bool cleared = m.setSidechainSource (0, MixerModel::noKeySource);
+
+            check (utf8 ("断掉键之后回到听自己"),
+                   cleared && m.getSidechainSource (0) == MixerModel::noKeySource,
+                   "set " + juce::String ((int) cleared)
+                     + " src " + juce::String (m.getSidechainSource (0)));
+        }
+
+        //-- (2) A key is a real edge, and it points the other way ------------
+        // The key is stored on the strip that LISTENS, so its edge runs donor →
+        // listener. A loop formed that way goes backwards through the field the
+        // user edited, which is exactly the shape a cursor-per-strip walk cannot
+        // see: it is the same lesson P99-A taught about sends, one level up.
+        {
+            MixerModel m;
+            m.setChannelOutput (0, 1);                        // 0 → 1
+
+            const bool cycle = m.setSidechainSource (0, 1);   // 1 → 0, closes it
+
+            check (utf8 ("0 的输出送到 1 之后，0 的键不能再从 1 取（会成环）"),
+                   ! cycle && m.getSidechainSource (0) == MixerModel::noKeySource,
+                   "set " + juce::String ((int) cycle)
+                     + " src " + juce::String (m.getSidechainSource (0)));
+
+            // …and the other order, which is the one that needs a SEARCH: an
+            // output three edges away from the key is still a loop.
+            MixerModel n;
+            n.setSidechainSource (3, 0);   // 0 → 3
+            n.setChannelOutput (3, 4);     // 3 → 4
+
+            const bool farCycle = n.setChannelOutput (4, 0);  // 4 → 0 closes 0→3→4→0
+
+            check (utf8 ("隔着一条键的远端成环也拦得住（BFS 走得到键那条边）"),
+                   ! farCycle && n.getChannelOutput (4) == MixerModel::masterChannel,
+                   "set " + juce::String ((int) farCycle)
+                     + " out4 " + juce::String (n.getChannelOutput (4)));
+        }
+
+        //-- (3) A key travels with its strip, and dies with its donor --------
+        {
+            MixerModel m;
+            m.addChannel();                   // 九条才删得动
+            m.setSidechainSource (0, 1);      // 1 → 0：这条要随 1 号消失而断
+            m.setSidechainSource (5, 6);      // 5 听 6
+            m.setSidechainSource (6, 8);      // 6 听 8
+
+            m.removeChannelAt (1);
+
+            check (utf8 ("删掉一条通道后：指向它的键断掉，跨过它的键跟着减一"),
+                   m.getSidechainSource (0) == MixerModel::noKeySource
+                     && m.getSidechainSource (4) == 5
+                     && m.getSidechainSource (5) == 7,
+                   "s0 " + juce::String (m.getSidechainSource (0))
+                     + " s4 " + juce::String (m.getSidechainSource (4))
+                     + " s5 " + juce::String (m.getSidechainSource (5)));
+        }
+
+        //-- (4) What the engine publishes, and what it costs ----------------
+        // Two claims about the same wiring. First: a key no compressor listens
+        // to is NOT an edge, so patching one changes nothing audible. Second:
+        // once a COMP is there, the donor's insert latency joins the ONE delay
+        // table — "the compressor should act 96 samples late because the key is
+        // 96 samples late" is a fact about `pdc::solve`, not a second path.
+        {
+            LayerStack st;
+            RackModel  rk;
+            MixerModel mx;
+
+            st.addLayer (utf8 ("键源"), palette::layer1);
+            st.setLayerOutputSlot (0, rk.getFirstSlotId());
+            st.getLayer (0)->addNote ({ 0, 60, 0.0, 1.0, 1.0f });
+
+            rk.setMixerChannel (rk.getFirstSlotId(), 0);
+
+            PlaybackEngine e;
+            e.setSampleRate (22050.0);
+            e.prepareToPlay (22050.0, 512);
+
+            mx.setSidechainSource (1, 0);
+
+            e.publishSchedule (st, rk, 120.0, 0.0, &mx);
+
+            {
+                auto sched = e.getScheduleRaw();
+
+                check (utf8 ("没有压缩器在听的时候，键不发布成一条边（也就不会拖慢别人）"),
+                       sched != nullptr
+                         && sched->channels.size() > 1
+                         && sched->channels[1].keySource == -1
+                         && sched->maxPdcLatency == 0,
+                       sched == nullptr ? juce::String ("no schedule")
+                                        : "key " + juce::String (sched->channels[1].keySource)
+                                          + " total " + juce::String (sched->maxPdcLatency));
+            }
+
+            mx.setInsertType (1, 0, fx::Type::comp);
+            e.setInsertLatencyForTest (0, 96);
+
+            e.publishSchedule (st, rk, 120.0, 0.0, &mx);
+
+            {
+                auto sched = e.getScheduleRaw();
+
+                check (utf8 ("键源的那 96 采样进了唯一那张延迟表：听键的通道整体后移"),
+                       sched != nullptr
+                         && sched->channels.size() > 1
+                         && sched->channels[1].keySource == 0
+                         && sched->channels[1].entryLatency == 96
+                         && sched->maxPdcLatency == 96,
+                       sched == nullptr
+                         ? juce::String ("no schedule")
+                         : "key " + juce::String (sched->channels[1].keySource)
+                           + " entry " + juce::String (sched->channels[1].entryLatency)
+                           + " total " + juce::String (sched->maxPdcLatency));
+            }
+        }
+
+        //-- (5) The detector itself -----------------------------------------
+        // Driven directly, with no console and no sound card: a quiet signal
+        // that is below the threshold must come out untouched, and the SAME
+        // quiet signal must be squashed once a loud key is patched in. If the
+        // borrowed pointer never reaches the envelope follower, the two renders
+        // are identical — which is why the two are measured against each other
+        // rather than each against a constant.
+        {
+            fx::ChainState chain;
+            chain.prepare (22050.0);
+
+            std::array<fx::Settings, fx::ChainState::maxSlots> settings {};
+
+            auto& comp = settings[0];
+            comp.type          = fx::Type::comp;
+            comp.params[(size_t) 0] = 0.25f;   // 门槛 -30 dB
+            comp.params[(size_t) 1] = 1.0f;    // 20 : 1
+            comp.params[(size_t) 2] = 0.0f;    // 无补偿增益
+            comp.params[(size_t) 3] = 0.0f;    // 1 ms attack
+            comp.params[(size_t) 4] = 0.1f;    // 约 32 ms release
+            comp.params[(size_t) 5] = 0.0f;    // 硬拐点
+
+            constexpr int len = 512;
+            constexpr float own = 0.005f;      // -46 dBFS，在门槛之下
+
+            juce::AudioBuffer<float> plain (2, len);
+            juce::AudioBuffer<float> keyed (2, len);
+
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                auto* a = plain.getWritePointer (ch);
+                auto* b = keyed.getWritePointer (ch);
+
+                for (int i = 0; i < len; ++i)
+                    a[i] = b[i] = own;
+            }
+
+            std::vector<float> keySamples ((size_t) len, 0.9f);
+
+            fx::KeySignal key;
+            key.left = keySamples.data();
+
+            chain.process (settings, plain, len, 22050.0, nullptr);
+            chain.process (settings, keyed, len, 22050.0, &key);
+
+            const float plainTail = std::abs (plain.getSample (0, len - 1));
+            const float keyedTail = std::abs (keyed.getSample (0, len - 1));
+
+            check (utf8 ("键没接上时探测听自己：低于门槛的信号原样出去"),
+                   std::abs (plainTail - own) < 1.0e-4f,
+                   "out " + juce::String (plainTail, 6) + " in " + juce::String (own, 6));
+
+            check (utf8 ("接上一条响的键之后，同一份安静信号被压下去（探测真的换了输入）"),
+                   keyedTail < plainTail * 0.2f,
+                   "keyed " + juce::String (keyedTail, 6)
+                     + " plain " + juce::String (plainTail, 6));
+        }
+
+        //-- (6) …and it reaches the strip through the console ---------------
+        // The DSP test above proves the compressor reads a key. This one proves
+        // the ENGINE hands it one: strip 1 carries the compressor and the only
+        // sound; strip 2 is silent and wired in as the key. A silent key means
+        // the detector hears nothing, so the compressor stops ducking — the
+        // render gets LOUDER when the key is patched in. If the key never
+        // arrives, the two renders are identical and the assertion fails.
+        {
+            LayerStack st;
+            RackModel  rk;
+            MixerModel mx;
+
+            st.addLayer (utf8 ("被压的"), palette::layer1);
+            st.setLayerOutputSlot (0, rk.getFirstSlotId());
+            st.getLayer (0)->addNote ({ 0, 60, 0.0, 2.0, 1.0f });
+
+            // 合成器槽必须指派到通道上，否则声音走"直连总线"，通道 1 的循环
+            // 整块被跳过，压缩器根本不在信号路上。P99-C 写过这一条。
+            rk.setMixerChannel (rk.getFirstSlotId(), 0);
+
+            mx.setInsertType (0, 0, fx::Type::comp);
+            mx.setInsertEnabled (0, 0, true);
+            mx.setInsertParam (0, 0, 0, 0.25f);   // -30 dB
+            mx.setInsertParam (0, 0, 1, 1.0f);    // 20 : 1
+            mx.setInsertParam (0, 0, 2, 0.0f);    // 不加补偿增益
+            mx.setInsertParam (0, 0, 3, 0.0f);    // 1 ms
+            mx.setInsertParam (0, 0, 4, 0.1f);    // 约 32 ms
+            mx.setInsertParam (0, 0, 5, 0.0f);    // 硬拐点
+
+            PlaybackEngine e;
+            e.setSampleRate (22050.0);
+            e.prepareToPlay (22050.0, 512);
+
+            constexpr int len = 8192;
+
+            const auto renderOnce = [&] (juce::AudioBuffer<float>& out)
+            {
+                out.setSize (2, len);
+                out.clear();
+
+                e.publishSchedule (st, rk, 120.0, 0.0, &mx);
+
+                // The compressor's envelope is memory: a second render that
+                // starts with the first one's settled gain would be comparing
+                // two different compressors.
+                e.resetMixState();
+                e.renderWindow (0.0, len, out, nullptr);
+            };
+
+            const auto rms = [len] (const juce::AudioBuffer<float>& buffer)
+            {
+                double sum = 0.0;
+                int    n   = 0;
+
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    const auto* data = buffer.getReadPointer (ch);
+
+                    for (int i = len / 2; i < len; ++i)
+                    {
+                        sum += (double) data[i] * (double) data[i];
+                        ++n;
+                    }
+                }
+
+                return n > 0 ? (float) std::sqrt (sum / (double) n) : 0.0f;
+            };
+
+            juce::AudioBuffer<float> selfKeyed (2, len);
+            juce::AudioBuffer<float> silentKey (2, len);
+
+            mx.setSidechainSource (0, MixerModel::noKeySource);
+            renderOnce (selfKeyed);
+
+            mx.setSidechainSource (0, 1);   // 2 号条没有任何声音，但它是一条真的键
+            renderOnce (silentKey);
+
+            const float a = rms (selfKeyed);
+            const float b = rms (silentKey);
+
+            check (utf8 ("键真的从通道送到了压缩器：换成静音的键之后不再自压，音量明显变大"),
+                   a > 0.001f && b > a * 4.0f,
+                   "self " + juce::String (a, 5) + " keyed " + juce::String (b, 5));
+        }
+
+        //-- (7) It survives a save ------------------------------------------
+        {
+            LayerStack st;
+            RackModel  rk;
+            MixerModel mx;
+
+            st.addLayer (utf8 ("存盘"), palette::layer1);
+            mx.setSidechainSource (1, 3);
+
+            const auto xml = project::toXmlText (st, rk, 120.0, &mx);
+
+            MixerModel empty;
+            const auto flatXml = project::toXmlText (st, rk, 120.0, &empty);
+
+            check (utf8 ("有键的时候写 <Channel key>，没键的时候一个 key 都不写"),
+                   xml.contains ("key=\"3\"") && ! flatXml.contains ("key="),
+                   "saved " + juce::String ((int) xml.contains ("key=\"3\""))
+                     + " flat " + juce::String ((int) flatXml.contains ("key=")));
+
+            LayerStack st2;
+            RackModel  rk2;
+            MixerModel mx2;
+            double bpm = 0.0;
+            juce::String error;
+
+            const bool loaded = project::fromXmlText (xml, st2, rk2, bpm, error, &mx2);
+
+            check (utf8 ("读回来还是接着 4 号条"),
+                   loaded && mx2.getSidechainSource (1) == 3,
+                   loaded ? "src " + juce::String (mx2.getSidechainSource (1)) : error);
+        }
     }
 
     // The summary MUST come after the last check. It used to sit mid-function

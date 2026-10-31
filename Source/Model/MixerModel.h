@@ -176,6 +176,34 @@ public:
         question about this console's wiring, not about the layer stack. */
     bool isSendTarget (int channel) const noexcept;
 
+    //-- Phase 100: the sidechain key -----------------------------------------
+    /** Which strip's signal feeds this strip's compressor DETECTOR, or
+        `noKeySource` (= -1) for "its own signal", which is what a compressor
+        does when nobody has patched anything into it.
+
+        A key is a SEND THAT FEEDS A DETECTOR instead of a bus: the donor keeps
+        reaching its own output (unlike an output route), the copy never reaches
+        the master, and what it drives is the compressor's level estimate rather
+        than a bus. That is why it is one more edge in the same routing graph
+        and not a new concept — `reaches`, `wouldLoop` and the engine's delay
+        table all see it as an edge and nothing else has to be told about it.
+
+        It lives on the LISTENING strip, not on the donor: the dependency is
+        declared by whoever needs the signal. One tap point, too — the donor's
+        FINISHED signal (post-insert, post-fader), because a key is "what you
+        hear from that strip". A pre-insert key would mean the compressor ducks
+        to material that is not on the record. */
+    static constexpr int noKeySource = -1;
+
+    int getSidechainSource (int channel) const noexcept;
+
+    /** Points a strip's detector at another strip's finished signal.
+        `noKeySource` clears it. Returns false — changing nothing — for a dead
+        strip either side, the strip itself, the master (it has no finished
+        signal: everything is upstream of it), or a donor the listener already
+        feeds, because that would close a loop the renderer cannot order. */
+    bool setSidechainSource (int channel, int source);
+
     //-- Phase 25: mono monitoring ---------------------------------------------
     /** Sums the strip's stereo bus to mono before it leaves for the next
         destination. A monitoring control, not a mix control: it is applied
@@ -308,6 +336,11 @@ private:
 
     /** Phase 99: the two parallel taps per strip. */
     std::array<std::array<Send, numSends>, numChannels> channelSends {};
+
+    /** Phase 100: the strip each strip's compressor detector listens to, or
+        `noKeySource`. Addressed by listener, so it travels with the strip when
+        the console renumbers. */
+    std::array<int, numChannels> channelKeys {};
 
     /** Phase 25: mono monitoring per strip. */
     std::array<bool, numChannels> channelMono {};

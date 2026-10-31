@@ -1233,7 +1233,31 @@ void MixerPanel::drawRack (juce::Graphics& g)
         g.setColour (active ? juce::Colours::white.withAlpha (on ? 0.9f : 0.45f)
                             : juce::Colours::white.withAlpha (0.30f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
-        g.drawText (fx::displayName (insert), type, juce::Justification::centred, true);
+
+        // Phase 100: a compressor whose detector is patched to another strip
+        // says which one, in the type cell. Right-aligned and inside the same
+        // cell, so the marker cannot be mistaken for a control — changing it
+        // goes through this row's menu, like every other insert property.
+        const int keySource = mixer.getSidechainSource (selectedChannel);
+        const bool keyed    = insert.type == fx::Type::comp && keySource >= 0;
+
+        g.drawText (fx::displayName (insert),
+                    keyed ? getInsertTypeBounds (slot).withTrimmedRight (ui::px (20))
+                          : getInsertTypeBounds (slot),
+                    juce::Justification::centred, true);
+
+        if (keyed)
+        {
+            // "K5", not "键5": the cell is a type cell, and at 8 px a Chinese
+            // glyph in it turns into a smudge next to four ASCII ones. The
+            // explanation lives in the menu (侧链键), the marker only has to be
+            // readable and countable.
+            g.setColour (theme::accent);
+            g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (8.5f))));
+            g.drawText ("K" + juce::String (keySource + 1),
+                        getInsertTypeBounds (slot).removeFromRight (ui::px (20)),
+                        juce::Justification::centred, false);
+        }
 
         // Parameter bar. A VST3 has its own parameter set, so the bar is
         // replaced by a neutral line rather than a control that does nothing.
@@ -2046,6 +2070,34 @@ void MixerPanel::showInsertMenu (int slot, juce::Point<int> screenAnchor)
     menu.addItem (104, utf8 ("下移一格"),
                   slot + 1 < MixerModel::numInserts && insert.type != fx::Type::none);
 
+    //-- Phase 100: the sidechain key ----------------------------------------
+    // Only on a COMP, because only a compressor has a detector. The donors are
+    // the strips this console actually has; one that would close a loop is
+    // greyed out, so a click never has to fail — the same courtesy the output
+    // and send menus extend.
+    const int keySource = mixer.getSidechainSource (selectedChannel);
+
+    if (insert.type == fx::Type::comp)
+    {
+        juce::PopupMenu keyMenu;
+
+        keyMenu.addItem (199, utf8 ("无（听自己）"), true, keySource == MixerModel::noKeySource);
+
+        for (int donor = 0; donor < mixer.getChannelCount(); ++donor)
+        {
+            if (donor == selectedChannel)
+                continue;
+
+            keyMenu.addItem (200 + donor,
+                             getChannelName (donor),
+                             ! mixer.wouldLoop (donor, selectedChannel),
+                             keySource == donor);
+        }
+
+        menu.addSeparator();
+        menu.addSubMenu (utf8 ("侧链键"), keyMenu, true);
+    }
+
     const int channel = selectedChannel;
     const auto screenPosition = getScreenBounds().getCentre();
 
@@ -2092,6 +2144,23 @@ void MixerPanel::showInsertMenu (int slot, juce::Point<int> screenAnchor)
                                 const int to = slot + (result == 103 ? -1 : 1);
 
                                 if (safe->mixer.moveInsert (channel, slot, to))
+                                    safe->repaint();
+
+                                return;
+                            }
+
+                            //-- Phase 100: the key ---------------------------
+                            if (result == 199)
+                            {
+                                if (safe->mixer.setSidechainSource (channel, MixerModel::noKeySource))
+                                    safe->repaint();
+
+                                return;
+                            }
+
+                            if (result >= 200)
+                            {
+                                if (safe->mixer.setSidechainSource (channel, result - 200))
                                     safe->repaint();
 
                                 return;

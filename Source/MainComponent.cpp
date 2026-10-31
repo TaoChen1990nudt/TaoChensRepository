@@ -1575,6 +1575,56 @@ juce::Image MainComponent::createSendSnapshot (int width, int height)
     return image;
 }
 
+juce::Image MainComponent::createSidechainSnapshot (int width, int height)
+{
+    // The whole chain and the selected strip are borrowed: this fixture types
+    // two comps into slots 2 and 3 of the strip the rack is showing, so putting
+    // back only the two slots it touched would be enough for the picture and
+    // not enough for the next frame — the params of whatever was there would be
+    // gone. One copy, one restore.
+    const int previousChannel = mixerPanel.getSelectedChannel();
+    const auto savedInserts   = mixer.getInserts (0);
+    const int  savedKey       = mixer.getSidechainSource (0);
+    const auto previousBounds = mixerPanel.getBounds();
+
+    mixerPanel.setSelectedChannel (0);
+
+    mixer.setInsertType (0, 1, fx::Type::comp);
+    mixer.setInsertType (0, 2, fx::Type::eq);
+    mixer.setInsertEnabled (0, 1, true);
+    mixer.setInsertEnabled (0, 2, true);
+
+    // The key belongs to the STRIP's detector bus, not to one slot — so every
+    // compressor on this strip would print the same "键5", and putting two
+    // comps side by side would prove nothing. An EQ next to it does: the marker
+    // is on the insert that has a detector, and the row below shows the same
+    // strip with nothing patched in.
+    //
+    // Strip 5 and not strip 3: the demo console is staged as 1 → 2 → 3 → 主输出
+    // (`showDemoConsoleRouting`), so 3 is DOWNSTREAM of this strip and a key
+    // taken from it is a loop — which the model refuses, correctly. The first
+    // version of this fixture asked for strip 3 and the frame came out with a
+    // bare "COMP": the refusal was right and the picture looked like a broken
+    // marker.
+    mixer.setSidechainSource (0, 4);
+
+    mixerPanel.setSize (width, height);
+    mixerPanel.resized();
+    mixerPanel.updateMeters();
+
+    auto image = mixerPanel.createComponentSnapshot (mixerPanel.getLocalBounds(), true);
+
+    mixer.getInserts (0) = savedInserts;
+    mixer.setSidechainSource (0, savedKey);
+    mixerPanel.setSelectedChannel (previousChannel);
+    mixer.notify();
+
+    mixerPanel.setBounds (previousBounds);
+    mixerPanel.resized();
+
+    return image;
+}
+
 juce::Image MainComponent::createFileBrowserSnapshot (int width, int height)
 {
     // The panel is laid out by the splitter, so it is grown for the shot and put
