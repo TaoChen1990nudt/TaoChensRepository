@@ -58,6 +58,12 @@ namespace
         on the stack of every block. */
     const std::array<fx::Settings, fx::ChainState::maxSlots> kNoInserts {};
 
+    /** Phase 99: what a strip that has no published mix reads as. The renderer
+        walks `channelOrder`, which is built from the published list, so this
+        should never be reached — it exists so a hand-built schedule answers
+        "nothing is routed" instead of reading past the end of an array. */
+    const ChannelMix kNoMix {};
+
     /** Phase 19: the preview envelope. Full level for the hold, then an
         exponential tail short enough to stay out of the way of the next click,
         long enough to hear the pitch. */
@@ -285,6 +291,23 @@ void PlaybackEngine::preparePdcLines (int count)
 
     pdcEntry[(size_t) MixerModel::numChannels].prepare();
     pdcExit[(size_t) MixerModel::numChannels].prepare();
+}
+
+void PlaybackEngine::preparePreInsertLines (const PublishedSchedule& published)
+{
+    const int count = juce::jmin ((int) published.channels.size(), (int) MixerModel::numChannels);
+
+    for (int channel = 0; channel < count; ++channel)
+    {
+        for (const auto& send : published.channels[(size_t) channel].sends)
+        {
+            if (send.destination < 0 || send.gain <= 0.0f || ! send.preInsert)
+                continue;
+
+            pdcPre[(size_t) channel].prepare();
+            break;
+        }
+    }
 }
 
 void PlaybackEngine::setSampleRate (double newSampleRate)
@@ -516,24 +539,118 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             mix.inserts = mixer->getInserts (channel);
             mix.output  = mixer->getChannelOutput (channel);
             mix.mono    = mixer->isChannelMono (channel);
+
+            //-- Phase 99: the strip's parallel taps --------------------------
+            // Resolved to a gain and a live strip index here, so the renderer
+            // asks the model nothing. A send whose destination has gone away is
+            // -1 with gain 0 and is skipped by the same `> 0` test the master
+            // path uses for its own level.
+            for (int index = 0; index < MixerModel::numSends; ++index)
+            {
+                const auto& send = mixer->getSend (channel, index);
+
+                if (! send.isLive() || ! juce::isPositiveAndBelow (send.destination, liveChannels))
+                    continue;
+
+                auto& slot = mix.sends[(size_t) index];
+                slot.destination = send.destination;
+                slot.gain        = send.getGainLinear();
+                slot.preInsert   = send.preInsert;
+            }
         }
 
         fresh->channels.push_back (std::move (mix));
     }
 
-    //-- Phase 23: the summing order ----------------------------------------
+    //-- Phase 83/99: what each strip's inserts cost --------------------------
+    // Only a hosted VST3 can be late. Every built-in is zero-latency by
+    // construction (a delay line that reports latency, a filter with no
+    // lookahead), so asking the host about them would be a lock for an answer
+    // of 0.
+    //
+    // Worked out BEFORE the topology is read, because the topology's arithmetic
+    // is made of it: an edge's latency is this strip's own latency or zero, and
+    // a table built from a half-filled array would be wrong in a way no
+    // assertion about `solve` could see.
+    {
+        const int count = (int) fresh->channels.size();
+
+        for (int i = 0; i < count; ++i)
+        {
+            auto& mix = fresh->channels[(size_t) i];
+
+            int sum = 0;
+
+            for (const auto& insert : mix.inserts)
+                if (insert.active() && insert.type == fx::Type::vst)
+                    sum += pluginHost != nullptr ? pluginHost->getLatencySamples (insert.pluginId) : 0;
+
+            mix.insertLatency = juce::jmin (pdc::maxSamples,
+                                            sum + testInsertLatency[(size_t) juce::jlimit (0, (int) MixerModel::numChannels - 1, i)]);
+        }
+    }
+
+    //-- The console's edges, as one answer ------------------------------------
+    // Phase 99. A strip has TWO kinds of way out — its output, and up to two
+    // sends — and both the summing order and the delay table have to agree
+    // about which of them exist. They agree by asking this one function, which
+    // is the only place that knows a send can leave BEFORE the inserts and
+    // therefore arrive `own` samples earlier than the output tap would.
+    //
+    // Returns false for "no edge"; on true, `offset` is how much later than
+    // `source`'s input the copy arrives.
+    const auto edgeLatency = [&fresh] (int source, int destination, int& offset)
+    {
+        offset = 0;
+
+        if (source == destination
+              || ! juce::isPositiveAndBelow (source, (int) fresh->channels.size()))
+            return false;
+
+        const auto& mix = fresh->channels[(size_t) source];
+
+        bool feeds = false;
+
+        if (mix.output == destination)
+        {
+            feeds  = true;
+            offset = mix.insertLatency;
+        }
+
+        for (const auto& send : mix.sends)
+        {
+            // A silenced send is not an edge: it carries no signal, so nothing
+            // has to wait for it. Making it one would delay the destination for
+            // a copy at -48 dB, which is a change to the sound nobody asked for.
+            if (send.destination != destination || send.gain <= 0.0f)
+                continue;
+
+            feeds = true;
+
+            if (! send.preInsert)
+                offset = juce::jmax (offset, mix.insertLatency);
+        }
+
+        return feeds;
+    };
+
+    //-- Phase 23: the summing order ------------------------------------------
     // A strip that feeds another strip has to be summed BEFORE its destination
     // runs its own inserts, otherwise the signal would land in a bus that has
     // already been read. Sorting here (message thread, once per edit) keeps the
     // audio thread to a flat loop over a list it does not have to understand.
+    //
+    // Phase 99: "feeds" now means the graph, so a send that lands on a later
+    // strip is ordered the same way its output would be. Without this the copy
+    // would be written into a bus that had already been read — silence, and a
+    // silent return is the bug that reads as "sends do not work".
     {
         std::array<bool, MixerModel::numChannels> placed {};
 
-        const auto feeds = [&fresh] (int source, int destination)
+        const auto feeds = [&edgeLatency] (int source, int destination)
         {
-            return source != destination
-                     && juce::isPositiveAndBelow (source, (int) fresh->channels.size())
-                     && fresh->channels[(size_t) source].output == destination;
+            int ignored = 0;
+            return edgeLatency (source, destination, ignored);
         };
 
         for (int step = 0; step < liveChannels; ++step)
@@ -581,51 +698,46 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
         const int count = (int) fresh->channels.size();
 
         std::vector<int> order ((size_t) count);
-        std::vector<int> output ((size_t) count, MixerModel::masterChannel);
         std::vector<int> own ((size_t) count, 0);
         std::vector<int> entry ((size_t) count, 0);
         std::vector<int> slide ((size_t) count, 0);
 
         for (int i = 0; i < count; ++i)
         {
-            const auto& mix = fresh->channels[(size_t) i];
-
-            order[(size_t) i]  = fresh->channelOrder.empty() ? i
-                                                            : fresh->channelOrder[(size_t) i];
-            output[(size_t) i] = mix.output;
-
-            // Only a hosted VST3 can be late. Every built-in is zero-latency by
-            // construction (a delay line that reports latency, a filter with no
-            // lookahead), so asking the host about them would be a lock for an
-            // answer of 0.
-            int sum = 0;
-
-            for (const auto& insert : mix.inserts)
-                if (insert.active() && insert.type == fx::Type::vst)
-                    sum += pluginHost != nullptr ? pluginHost->getLatencySamples (insert.pluginId) : 0;
-
-            own[(size_t) i] = juce::jmin (pdc::maxSamples,
-                                          sum + testInsertLatency[(size_t) juce::jlimit (0, (int) MixerModel::numChannels - 1, i)]);
+            order[(size_t) i] = fresh->channelOrder.empty() ? i
+                                                           : fresh->channelOrder[(size_t) i];
+            own[(size_t) i]   = fresh->channels[(size_t) i].insertLatency;
         }
 
-        const int total = pdc::solve (count, order.data(), output.data(), own.data(),
+        const int total = pdc::solve (count, order.data(), edgeLatency, own.data(),
                                       entry.data(), slide.data());
 
         for (int i = 0; i < count; ++i)
         {
-            fresh->channels[(size_t) i].insertLatency = own[(size_t) i];
-            fresh->channels[(size_t) i].entryLatency  = entry[(size_t) i];
+            fresh->channels[(size_t) i].entryLatency = entry[(size_t) i];
+
+            // `slide` is not stored: the renderer already gets the same number
+            // from `target - end` (target is the master's total for a root, the
+            // destination's entry for a feed), and keeping a second copy of it
+            // on the strip would be the "two answers to one question" this file
+            // spends most of its comments avoiding.
         }
+
+        (void) slide;
 
         fresh->maxPdcLatency = total;
 
-        // Nothing to compensate for: free the delay lines' work for this block
-        // and keep the pre-83 code path exactly. This is the case for every
-        // session that has no VST3 insert, i.e. almost all of them.
+        // Nothing to compensate for: this keeps the pre-83 code path exactly —
+        // no line is pushed, no line is read. That is nearly every session.
         if (total > 0)
             preparePdcLines (count);
-    }
 
+        // Phase 99: a PRE-INSERT send needs a buffer even when nothing is late,
+        // because the copy has to be taken out of the bus before the inserts
+        // overwrite it. That is a buffering question, not a delay question, and
+        // it is the only thing here that allocates for a console with no VST3.
+        preparePreInsertLines (*fresh);
+    }
     //-- Synth slots ----------------------------------------------------------
     for (int i = 0; i < rack.getNumSlots(); ++i)
     {
@@ -1776,21 +1888,34 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
         auto& bus   = channelBuses[(size_t) channel];
         auto& chain = channelChains[(size_t) channel];
 
-        const auto& inserts = juce::isPositiveAndBelow (channel, (int) current.channels.size())
-                                ? current.channels[(size_t) channel].inserts
-                                : kNoInserts;
+        const auto& mix = juce::isPositiveAndBelow (channel, (int) current.channels.size())
+                            ? current.channels[(size_t) channel]
+                            : kNoMix;
+
+        //-- Phase 99: the pre-insert tap -------------------------------------
+        // Taken BEFORE the inserts run, and into its own line: the inserts are
+        // about to overwrite `bus` in place, so a copy that is only "read
+        // later" would already be the processed signal. This is the difference
+        // between a monitor send and a send off the squashed output.
+        bool hasPreSend = false;
+
+        for (const auto& send : mix.sends)
+            if (send.destination >= 0 && send.gain > 0.0f && send.preInsert)
+                hasPreSend = true;
+
+        if (hasPreSend && pdcPre[(size_t) channel].isReady())
+            pdcPre[(size_t) channel].push (bus, numSamples);
 
         if (pluginsLive)
-            processInsertChain (inserts, bus, numSamples, chain);
+            processInsertChain (mix.inserts, bus, numSamples, chain);
         else
-            chain.process (inserts, bus, numSamples, sampleRate);
+            chain.process (mix.inserts, bus, numSamples, sampleRate);
 
         // Phase 25: mono monitoring, straight after the inserts. Here and not
         // before them because the chain is set up for a stereo signal — summing
         // first would feed every reverb and delay a mono source, which is a
         // different sound, not a different way of listening to this one.
-        if (juce::isPositiveAndBelow (channel, (int) current.channels.size())
-              && current.channels[(size_t) channel].mono)
+        if (mix.mono)
         {
             auto* left  = bus.getWritePointer (0);
             auto* right = bus.getNumChannels() > 1 ? bus.getWritePointer (1) : left;
@@ -1803,36 +1928,37 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
             }
         }
 
-        const int destination = juce::isPositiveAndBelow (channel, (int) current.channels.size())
-                                  ? current.channels[(size_t) channel].output
-                                  : MixerModel::masterChannel;
-
         //-- Phase 83: the strip is finished, decide when it may join ---------
         // A strip that feeds another strip has to land on THAT strip's entry;
         // one that goes straight out has to land on the console's slowest path.
         // The difference is taken at the join, never at the source: a signal
         // held back before its own inserts would be waiting in front of work it
         // has not done yet.
-        int joinDelay = 0;
+        //
+        // Phase 99: pushed ONCE, read by every consumer below. A send is the
+        // same finished signal with a different gain and a different instant —
+        // pushing per consumer would advance the ring several times a block and
+        // hand every copy the wrong history.
+        const int finishedEnd = juce::jmin (pdc::maxSamples, mix.entryLatency + mix.insertLatency);
+        const bool exitLineLive = current.maxPdcLatency > 0 && pdcExit[(size_t) channel].isReady();
 
-        if (current.maxPdcLatency > 0 && juce::isPositiveAndBelow (channel, (int) current.channels.size()))
+        if (exitLineLive)
+            pdcExit[(size_t) channel].push (bus, numSamples);
+
+        /** How far this strip's FINISHED signal is held back on its way to a
+            given strip (or to the master, as `MixerModel::masterChannel`). */
+        const auto finishedDelayTo = [&] (int toChannel)
         {
-            auto& line = pdcExit[(size_t) channel];
+            const int target = juce::isPositiveAndBelow (toChannel, (int) current.channels.size())
+                                 ? current.channels[(size_t) toChannel].entryLatency
+                                 : current.maxPdcLatency;
 
-            if (line.isReady())
-            {
-                const auto& mix = current.channels[(size_t) channel];
+            return juce::jmax (0, target - finishedEnd);
+        };
 
-                line.push (bus, numSamples);
+        const int destination = mix.output;
 
-                const int end = juce::jmin (pdc::maxSamples, mix.entryLatency + mix.insertLatency);
-                const int target = juce::isPositiveAndBelow (destination, MixerModel::numChannels)
-                                     ? current.channels[(size_t) destination].entryLatency
-                                     : current.maxPdcLatency;
-
-                joinDelay = juce::jmax (0, target - end);
-            }
-        }
+        const int joinDelay = exitLineLive ? finishedDelayTo (destination) : 0;
 
         if (juce::isPositiveAndBelow (destination, MixerModel::numChannels))
         {
@@ -1855,6 +1981,60 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
             else
                 for (int ch = 0; ch < numChannels; ++ch)
                     output.addFrom (ch, 0, bus, juce::jmin (ch, 1), 0, numSamples);
+        }
+
+        //-- Phase 99: the sends ----------------------------------------------
+        // Each of them is one more read of the same block, at its own gain and
+        // its own instant. A send never reaches the master: it lands on a strip,
+        // which is what makes the strip it lands on a return.
+        for (const auto& send : mix.sends)
+        {
+            if (send.destination < 0 || send.gain <= 0.0f)
+                continue;
+
+            if (! juce::isPositiveAndBelow (send.destination, (int) current.channels.size()))
+                continue;
+
+            auto& target = channelBuses[(size_t) send.destination];
+
+            // The strip it lands on is now a live bus even if no voice of its
+            // own played a note — that is exactly what a return channel is.
+            busUsed[(size_t) send.destination] = true;
+
+            if (send.preInsert)
+            {
+                // The copy was taken before the inserts, so it arrives at this
+                // strip's ENTRY, not its end. Its line is bought by
+                // preparePreInsertLines; without one there is nothing honest to
+                // send, and silence is better than the post-insert signal
+                // labelled as the pre-insert one.
+                auto& line = pdcPre[(size_t) channel];
+
+                if (! line.isReady())
+                    continue;
+
+                const int target2 = juce::isPositiveAndBelow (send.destination, (int) current.channels.size())
+                                      ? current.channels[(size_t) send.destination].entryLatency
+                                      : current.maxPdcLatency;
+                const int delay = juce::jmax (0, target2 - juce::jmin (pdc::maxSamples, mix.entryLatency));
+
+                line.readInto (target, delay, numSamples, true, send.gain);
+            }
+            else
+            {
+                const int delay = exitLineLive ? finishedDelayTo (send.destination) : 0;
+
+                if (exitLineLive && delay > 0)
+                {
+                    pdcExit[(size_t) channel].readInto (target, delay, numSamples, true, send.gain);
+                }
+                else
+                {
+                    for (int ch = 0; ch < 2; ++ch)
+                        target.addFrom (ch, 0, bus, ch, 0, numSamples, send.gain);
+
+                }
+            }
         }
 
         if (stats != nullptr)

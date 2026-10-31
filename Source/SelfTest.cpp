@@ -17067,8 +17067,8 @@ juce::String MainComponent::runSelfTest()
                                                     ? juce::String (utf8 ("元素还在"))
                                                     : juce::String (utf8 ("元素已去掉"))));
 
-            check (utf8 ("formatVersion 是 32（P98 的 CC lane 要能认出来）"),
-                   project::formatVersion == 32, juce::String (project::formatVersion));
+            check (utf8 ("formatVersion 是 33（P99 的发送要能认出来）"),
+                   project::formatVersion == 33, juce::String (project::formatVersion));
         }
 
         //-- E. 复制到后一小节 ------------------------------------------------
@@ -18595,8 +18595,8 @@ juce::String MainComponent::runSelfTest()
 
             const auto xml96 = project::toXmlText (io96, rack96, 120.0);
 
-            check (utf8 ("存盘版本 32，且只有 comp 写 takecomp"),
-                   project::formatVersion == 32 && xml96.contains ("version=\"32\"")
+            check (utf8 ("存盘版本 33，且只有 comp 写 takecomp"),
+                   project::formatVersion == 33 && xml96.contains ("version=\"33\"")
                      && xml96.contains ("takecomp=\"1\""),
                    juce::String (project::formatVersion));
 
@@ -18722,7 +18722,7 @@ juce::String MainComponent::runSelfTest()
                 quiet->velocity = 0.3f;
 
                 check (utf8 ("力度 lane 没有自己的文件字段（仍然只写 Note 的 velocity）"),
-                       project::formatVersion == 32,
+                       project::formatVersion == 33,
                        juce::String (project::formatVersion));
 
                 roll97b.setSelection ({ loudId, quietId });
@@ -19026,7 +19026,7 @@ juce::String MainComponent::runSelfTest()
                          && xml98.contains ("<CC number=\"64\"")
                          && ! xml98.contains ("<CC number=\"11\"")
                          && ccElements == 2
-                         && xml98.contains ("version=\"32\""),
+                         && xml98.contains ("version=\"33\""),
                        juce::String (ccElements) + " 个 / " + juce::String (xml98.length()) + " chars");
 
                 LayerStack back98;
@@ -19161,6 +19161,320 @@ juce::String MainComponent::runSelfTest()
                    wrong == 0,
                    juce::String (wrong));
         }
+
+
+    //== Phase 99: send / return ============================================
+    // A send is a PARALLEL copy, and that is the whole reason it is not just an
+    // output route: the strip still reaches its own destination, so the same
+    // signal now arrives at the master by two paths of different lengths. The
+    // assertions below are about the two things that can go wrong — the copy
+    // taken at the wrong instant, and the graph that stops being a chain.
+    {
+        //-- (1) A post-insert send lands when the strip finishes -------------
+        {
+            const int order[3] = { 0, 1, 2 };
+            const int own[3]   = { 96, 0, 0 };
+            int entry[3] = {};
+            int slide[3] = {};
+
+            const auto edges = [] (int from, int to, int& offset)
+            {
+                offset = 0;
+
+                if (from == 0 && to == 1)
+                {
+                    offset = 96;       // taken AFTER this strip's own latency
+                    return true;
+                }
+
+                return false;
+            };
+
+            const int total = pdc::solve (3, order, edges, own, entry, slide);
+
+            check (utf8 ("post 发送的副本与直连在同一刻到达"),
+                   entry[1] == 96 && slide[0] == 0,
+                   "entry1 " + juce::String (entry[1]) + " slide0 " + juce::String (slide[0]));
+
+            check (utf8 ("没人喂的通道仍然等最慢的那条路径"),
+                   slide[2] == 96 && total == 96,
+                   "slide2 " + juce::String (slide[2]) + " total " + juce::String (total));
+        }
+
+        //-- (2) A pre-insert send arrives EARLIER, and that is not a bug -----
+        // The copy was taken before this strip's inserts, so it is 96 samples
+        // ahead of the output tap. The destination has to be held back to meet
+        // it — which is the opposite of what a "bool feeds" table could say.
+        {
+            const int order[2] = { 0, 1 };
+            const int own[2]   = { 96, 0 };
+            int entry[2] = {};
+            int slide[2] = {};
+
+            const auto edges = [] (int from, int to, int& offset)
+            {
+                offset = 0;
+                return from == 0 && to == 1;    // pre-insert: offset 0
+            };
+
+            const int total = pdc::solve (2, order, edges, own, entry, slide);
+
+            check (utf8 ("推子前的副本不含这一条的插入延迟"),
+                   entry[1] == 0 && total == 96,
+                   "entry1 " + juce::String (entry[1]) + " total " + juce::String (total));
+
+            check (utf8 ("推子前的目的地被压后到汇合点，而不是被拉快"),
+                   slide[1] == 96 && slide[0] == 0,
+                   "slide1 " + juce::String (slide[1]) + " slide0 " + juce::String (slide[0]));
+        }
+
+        //-- (3) The model: what a send may and may not do --------------------
+        {
+            MixerModel m;
+
+            check (utf8 ("新控制台没有发送"),
+                   ! m.getSend (0, 0).isLive() && m.getSend (0, 0).destination == MixerModel::noSendDestination
+                     && juce::approximatelyEqual (m.getSend (0, 0).getGainLinear(), 0.0f),
+                   juce::String ((int) m.getSend (0, 0).destination));
+
+            check (utf8 ("发送不能指向主输出（那是 out 的活，两条一起会把信号叠两遍）"),
+                   ! m.setSendDestination (0, 0, MixerModel::masterChannel)
+                     && ! m.getSend (0, 0).isLive(),
+                   juce::String ((int) m.getSend (0, 0).destination));
+
+            check (utf8 ("发送不能指向自己"),
+                   ! m.setSendDestination (0, 0, 0),
+                   juce::String ((int) m.getSend (0, 0).destination));
+
+            check (utf8 ("指定目的地本身不把发送打开"),
+                   m.setSendDestination (0, 0, 1) && ! m.getSend (0, 0).isLive(),
+                   juce::String ((int) m.getSend (0, 0).isLive()));
+
+            check (utf8 ("没有目的地的发送打不开"),
+                   ! m.setSendEnabled (0, 1, true),
+                   juce::String ((int) m.getSend (0, 1).isLive()));
+
+            m.setSendEnabled (0, 0, true);
+            m.setSendLevelDb (0, 0, -6.0f);
+
+            check (utf8 ("-6 dB 是一条真的 0.501 倍副本"),
+                   m.getSend (0, 0).isLive()
+                     && std::abs (m.getSend (0, 0).getGainLinear() - 0.501187f) < 1.0e-5f,
+                   juce::String (m.getSend (0, 0).getGainLinear(), 6));
+
+            // The loop tests. Both kinds of edge, because a send and an output
+            // are two ways for a signal to leave a strip and either one can
+            // close the circle.
+            check (utf8 ("发送成环被拒：0 送 1 之后，1 不能再送 0"),
+                   ! m.setSendDestination (1, 0, 0)
+                     && m.wouldLoop (1, 0)
+                     && m.getSend (1, 0).destination == MixerModel::noSendDestination,
+                   juce::String ((int) m.getSend (1, 0).destination)
+                     + " loop " + juce::String ((int) m.wouldLoop (1, 0)));
+
+            check (utf8 ("跨种类的环也被拒：0 送 1 之后，1 的输出不能再指回 0"),
+                   ! m.setChannelOutput (1, 0)
+                     && m.getChannelOutput (1) == MixerModel::masterChannel,
+                   juce::String (m.getChannelOutput (1)));
+
+            m.setSendEnabled (0, 0, false);
+
+            check (utf8 ("关掉发送不会忘记目的地"),
+                   m.getSend (0, 0).destination == 1 && ! m.getSend (0, 0).isLive(),
+                   juce::String ((int) m.getSend (0, 0).destination));
+
+            m.setSendLevelDb (0, 0, -48.0f);
+            m.setSendEnabled (0, 0, true);
+
+            check (utf8 ("-48 dB 的发送是零增益，不是极小增益"),
+                   juce::approximatelyEqual (m.getSend (0, 0).getGainLinear(), 0.0f),
+                   juce::String (m.getSend (0, 0).getGainLinear(), 6));
+
+            check (utf8 ("被发送指向的通道能被认出来（return 就是这么标记的）"),
+                   m.isSendTarget (1) && ! m.isSendTarget (2),
+                   juce::String ((int) m.isSendTarget (1)) + "/"
+                     + juce::String ((int) m.isSendTarget (2)));
+        }
+
+        //-- (4) Deleting a strip renumbers the sends, like every other route -
+        {
+            MixerModel m;
+
+            // The console opens at `deletionFloor`, so a strip can only leave
+            // once it has grown. Without this the whole test is a no-op that
+            // passes for the wrong reason.
+            m.addChannel();
+
+            m.setSendDestination (0, 0, 3);
+            m.setSendEnabled (0, 0, true);
+            m.setSendDestination (0, 1, 2);
+            m.setSendEnabled (0, 1, true);
+
+            // Remove strip 2: the send that pointed AT it has nowhere to go,
+            // the one that pointed past it follows the strip it meant.
+            const bool removed = m.removeChannelAt (2);
+
+            check (utf8 ("删掉一条通道：指向它的发送关掉，指向它上面的跟着减一"),
+                   removed
+                     && m.getSend (0, 1).destination == MixerModel::noSendDestination
+                     && ! m.getSend (0, 1).isLive()
+                     && m.getSend (0, 0).destination == 2
+                     && m.getSend (0, 0).isLive(),
+                   "s0 " + juce::String ((int) m.getSend (0, 0).destination)
+                     + "/" + juce::String ((int) m.getSend (0, 0).isLive())
+                     + " s1 " + juce::String ((int) m.getSend (0, 1).destination));
+        }
+
+        //-- (5) Round trip ---------------------------------------------------
+        {
+            MixerModel m;
+            m.setChannelOutput (0, MixerModel::masterChannel);
+            m.setSendDestination (0, 0, 1);
+            m.setSendLevelDb (0, 0, -9.0f);
+            m.setSendPreInsert (0, 0, true);
+            m.setSendEnabled (0, 0, true);
+            m.setSendDestination (2, 0, 1);
+            m.setSendLevelDb (2, 0, 0.0f);
+            m.setSendEnabled (2, 0, true);
+
+            LayerStack sendStack;
+            RackModel  sendRack;
+            sendStack.addLayer (utf8 ("测试"), palette::layer1);
+
+            const auto xml = project::toXmlText (sendStack, sendRack, 120.0, &m);
+
+            check (utf8 ("两条发送都写进文件，编号带编号属性"),
+                   xml.contains ("<Send ") && xml.contains ("index=\"0\"")
+                     && xml.contains ("pre=\"1\""),
+                   xml.contains ("<Send ") ? juce::String ("has send")
+                                           : juce::String ("no <Send>"));
+
+            LayerStack back;
+            RackModel  backRack;
+            MixerModel backMixer;
+            double     backBpm = 0.0;
+            juce::String error;
+            const bool ok = project::fromXmlText (xml, back, backRack, backBpm, error, &backMixer);
+
+            check (utf8 ("发送存得下、读得回：目的地 / 电平 / 推子前都还在"),
+                   ok
+                     && backMixer.getSend (0, 0).isLive()
+                     && backMixer.getSend (0, 0).destination == 1
+                     && std::abs (backMixer.getSend (0, 0).levelDb + 9.0f) < 0.05f
+                     && backMixer.getSend (0, 0).preInsert
+                     && backMixer.getSend (2, 0).isLive()
+                     && ! backMixer.getSend (2, 0).preInsert
+                     && ! backMixer.getSend (0, 1).isLive(),
+                   ok ? "d " + juce::String ((int) backMixer.getSend (0, 0).destination)
+                          + " db " + juce::String (backMixer.getSend (0, 0).levelDb, 2)
+                          + " pre " + juce::String ((int) backMixer.getSend (0, 0).preInsert)
+                          + " s1 " + juce::String ((int) backMixer.getSend (0, 1).isLive())
+
+                      : error);
+        }
+    }
+
+    //-- (6) 两条路真的重合：一遍是 A，一遍是 A + A ----------------------
+    // The review asks for a null test against an inverted copy, 60 dBFS.
+    // This is stricter and needs no inverter: the copy is added to the
+    // direct signal at unity, so the result must be exactly twice the
+    // single-path render. A one-sample timing error splits the waveform and
+    // shows up at -20 dB; a level error shows up as a constant residual; and
+    // anything that only aligns "on average" fails outright. It also covers
+    // the return strip, which has no voice of its own — the send is the only
+    // thing that makes it a live bus.
+    {
+        LayerStack st;
+        RackModel  rk;
+        MixerModel mx;
+
+        st.addLayer (utf8 ("发送"), palette::layer1);
+        st.setLayerOutputSlot (0, rk.getFirstSlotId());
+        st.getLayer (0)->addNote ({ 0, 60, 0.0, 1.0, 1.0f });
+
+        // The send has to hang off a CONSOLE channel, and a synth reaches one
+        // only when a slot is pointed at it. Without this the voice goes to the
+        // bypass bus, channel 0 never runs, and the test would be asserting
+        // that silence plus silence equals silence.
+        rk.setMixerChannel (rk.getFirstSlotId(), 0);
+
+        mx.setChannelOutput (0, MixerModel::masterChannel);
+        mx.setChannelOutput (1, MixerModel::masterChannel);
+
+        PlaybackEngine e;
+        e.setSampleRate (22050.0);
+        e.prepareToPlay (22050.0, 512);
+
+        constexpr int len = 2048;
+
+        const auto renderOnce = [&] (juce::AudioBuffer<float>& out)
+        {
+            out.setSize (2, len);
+            out.clear();
+
+            e.publishSchedule (st, rk, 120.0, 0.0, &mx);
+            e.renderWindow (0.0, len, out, nullptr);
+        };
+
+        juce::AudioBuffer<float> single (2, len);
+        juce::AudioBuffer<float> doubled (2, len);
+
+        renderOnce (single);
+
+        mx.setSendDestination (0, 0, 1);
+        mx.setSendLevelDb (0, 0, 0.0f);
+        mx.setSendEnabled (0, 0, true);
+
+        renderOnce (doubled);
+
+        // One measurement, two taps: `other` must be exactly twice `single`.
+        const auto measure = [&] (const juce::AudioBuffer<float>& other)
+        {
+            float residual  = 0.0f;
+            float reference = 0.0f;
+
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < len; ++i)
+                {
+                    residual  = juce::jmax (residual,
+                                            std::abs (other.getSample (ch, i)
+                                                        - 2.0f * single.getSample (ch, i)));
+                    reference = juce::jmax (reference, std::abs (single.getSample (ch, i)));
+                }
+
+            const float db = reference > 0.0f
+                               ? 20.0f * std::log10 (juce::jmax (1.0e-9f, residual / reference))
+                               : -120.0f;
+
+            return std::pair<float, float> { reference, db };
+        };
+
+        const auto [reference, residualDb] = measure (doubled);
+
+        check (utf8 ("副本与直连逐样本重合：两份是单份的 2 倍，残余 ≤ -60 dBFS"),
+               reference > 0.01f && residualDb <= -60.0f,
+               "ref " + juce::String (reference, 4)
+                 + " resid " + juce::String (residualDb, 1) + " dB");
+
+        //-- (7) The same null test, through the PRE-insert tap ----------------
+        // With no plugins in the session the two taps carry the same signal, so
+        // "still exactly twice" is what says the OTHER line was bought, pushed
+        // and read. A pre send whose buffer was never prepared takes the
+        // `! line.isReady() -> continue` door and drops the copy silently, and
+        // that failure reads as the console's `2x` becoming `1x` — 0 dB of
+        // residual, not a subtle one.
+        mx.setSendPreInsert (0, 0, true);
+
+        juce::AudioBuffer<float> preDoubled (2, len);
+        renderOnce (preDoubled);
+
+        const auto [preReference, preResidualDb] = measure (preDoubled);
+
+        check (utf8 ("推子前的副本也走在一条真的通路上（无插件时两条抽头是同一份信号）"),
+               preReference > 0.01f && preResidualDb <= -60.0f,
+               "ref " + juce::String (preReference, 4)
+                 + " resid " + juce::String (preResidualDb, 1) + " dB");
+    }
 
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after

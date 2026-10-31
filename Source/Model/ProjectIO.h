@@ -304,8 +304,23 @@ namespace project
         place this file departs from its own convention — deliberately. A
         reader can check `number="11"` against the MIDI specification without
         this source tree, whereas `target="expression"` would only mean
-        something to us. */
-inline constexpr int formatVersion = 32;
+        something to us.
+
+    v33 (Phase 99): a strip can send a copy of itself to another strip.
+
+      * `<Send to="3" db="-6" pre="1" on="1"/>`, up to two per `<Channel>`, and
+        only the ones that are switched on are written. A song with no sends
+        re-saves to the bytes it came from.
+
+      * `to` is a channel index and is REQUIRED to be one; a send cannot reach
+        the master (`-1` / missing means "not assigned"), because that is what
+        the strip's own `out` already does and the two together would double the
+        signal.
+
+      * `pre` means the copy is taken BEFORE the strip's insert chain. Absent =
+        after, which is the overwhelmingly common case and the one a v32 reader
+        would draw if it ignored the attribute entirely. */
+inline constexpr int formatVersion = 33;
 
 /** Including the dot, for FileChooser filters. */
 inline constexpr const char* fileExtension = ".atomic";

@@ -44,28 +44,73 @@ int MixerModel::getChannelOutput (int channel) const noexcept
     return destination;
 }
 
+bool MixerModel::reaches (int from, int to) const noexcept
+{
+    if (from == to)
+        return true;
+
+    // Breadth-first over the console graph. `visited` is the bound: a chain
+    // that is already circular (a hand-edited file) terminates instead of
+    // hanging the menu that is asking the question.
+    std::array<bool, numChannels> visited {};
+
+    if (! juce::isPositiveAndBelow (from, numChannels))
+        return false;
+
+    std::array<int, numChannels> queue {};
+    int head = 0;
+    int tail = 0;
+
+    queue[(size_t) tail++] = from;
+    visited[(size_t) from]    = true;
+
+    while (head < tail)
+    {
+        const int channel = queue[(size_t) head++];
+
+        if (channel == to)
+            return true;
+
+        // Both kinds of edge, and both of them are "signal leaves this strip":
+        // the output is the one that goes on to the master, the sends are the
+        // copies that do not.
+        const auto visit = [&] (int next)
+        {
+            if (next == to)
+                return true;
+
+            if (juce::isPositiveAndBelow (next, numChannels) && ! visited[(size_t) next])
+            {
+                visited[(size_t) next] = true;
+                queue[(size_t) tail++] = next;
+            }
+
+            return false;
+        };
+
+        if (visit (channelOutputs[(size_t) channel]))
+            return true;
+
+        for (const auto& send : channelSends[(size_t) channel])
+            if (send.isLive() && visit (send.destination))
+                return true;
+    }
+
+    return false;
+}
+
 bool MixerModel::wouldLoop (int channel, int destination) const noexcept
 {
     if (channel == destination)
         return true;
 
-    int cursor = destination;
+    if (destination == masterChannel || ! juce::isPositiveAndBelow (destination, numChannels))
+        return false;
 
-    // Walk the destination's own chain. Eight strips means eight steps is
-    // already more than any acyclic chain can be; the counter is there so a
-    // chain that is somehow already circular terminates instead of hanging.
-    for (int guard = 0; guard <= numChannels; ++guard)
-    {
-        if (cursor == channel)
-            return true;
-
-        if (cursor == masterChannel || ! juce::isPositiveAndBelow (cursor, numChannels))
-            return false;
-
-        cursor = getChannelOutput (cursor);
-    }
-
-    return true;
+    // Phase 99: the console is a graph now — a strip can reach another one by
+    // an output AND by a send, so asking "does the destination already lead
+    // back here" is a search, not a walk down one chain.
+    return reaches (destination, channel);
 }
 
 void MixerModel::restoreRouting (const std::array<int, numChannels>& outputs)
@@ -93,6 +138,140 @@ void MixerModel::restoreRouting (const std::array<int, numChannels>& outputs)
     }
 
     notify();
+}
+
+//==============================================================================
+const MixerModel::Send& MixerModel::getSend (int channel, int index) const noexcept
+{
+    // A dead index reads as a dead SEND, not as one pointing at the master:
+    // `getInserts` hands out the master's chain because writing into it is
+    // harmless, but a send that quietly fed a bus would be making sound on
+    // behalf of a strip that no longer exists.
+    static const Send idle;
+
+    if (! juce::isPositiveAndBelow (channel, numChannels) || ! juce::isPositiveAndBelow (index, numSends))
+        return idle;
+
+    const auto& send = channelSends[(size_t) channel][(size_t) index];
+
+    // Read-side safety net, the same one getChannelOutput applies: a strip that
+    // shrank away from under a saved send reads as unassigned.
+    if (send.destination != noSendDestination
+          && ! juce::isPositiveAndBelow (send.destination, channelCount))
+        return idle;
+
+    return send;
+}
+
+bool MixerModel::setSendDestination (int channel, int index, int destination)
+{
+    if (! juce::isPositiveAndBelow (channel, channelCount) || ! juce::isPositiveAndBelow (index, numSends))
+        return false;
+
+    auto& send = channelSends[(size_t) channel][(size_t) index];
+
+    if (destination == noSendDestination)
+    {
+        if (send.destination == noSendDestination && ! send.enabled)
+            return true;
+
+        send.destination = noSendDestination;
+        send.enabled     = false;
+        notify();
+        return true;
+    }
+
+    if (! juce::isPositiveAndBelow (destination, channelCount) || destination == channel)
+        return false;
+
+    // Judge against the graph as it WOULD be: this send is being re-pointed, so
+    // the edge it has now must not count as the way back to this strip. Clearing
+    // it first and putting it back on refusal is the only way to ask the
+    // question about the new edge alone.
+    const int previous = send.destination;
+    send.destination   = noSendDestination;
+
+    const bool loops = reaches (destination, channel);
+
+    if (loops)
+    {
+        send.destination = previous;
+        return false;
+    }
+
+    if (previous == destination)
+        return true;
+
+    send.destination = destination;
+
+    // A send that has been given a destination but was never switched on stays
+    // off: "where would this go" and "is this on" are two decisions, and the
+    // second one is the user's.
+    notify();
+    return true;
+}
+
+void MixerModel::setSendLevelDb (int channel, int index, float db)
+{
+    if (! juce::isPositiveAndBelow (channel, numChannels) || ! juce::isPositiveAndBelow (index, numSends))
+        return;
+
+    auto& send = channelSends[(size_t) channel][(size_t) index];
+    const float clamped = juce::jlimit (-48.0f, 6.0f, db);
+
+    if (juce::approximatelyEqual (send.levelDb, clamped))
+        return;
+
+    send.levelDb = clamped;
+    notify();
+}
+
+void MixerModel::setSendPreInsert (int channel, int index, bool shouldBePreInsert)
+{
+    if (! juce::isPositiveAndBelow (channel, numChannels) || ! juce::isPositiveAndBelow (index, numSends))
+        return;
+
+    auto& send = channelSends[(size_t) channel][(size_t) index];
+
+    if (send.preInsert == shouldBePreInsert)
+        return;
+
+    send.preInsert = shouldBePreInsert;
+    notify();
+}
+
+bool MixerModel::setSendEnabled (int channel, int index, bool shouldBeEnabled)
+{
+    if (! juce::isPositiveAndBelow (channel, channelCount) || ! juce::isPositiveAndBelow (index, numSends))
+        return false;
+
+    auto& send = channelSends[(size_t) channel][(size_t) index];
+
+    // Refused, not silently ignored: the panel greys the switch on a send with
+    // nowhere to go, and this is the same rule, stated where it cannot be
+    // skipped.
+    if (shouldBeEnabled && send.destination == noSendDestination)
+        return false;
+
+    if (send.enabled == shouldBeEnabled)
+        return true;
+
+    send.enabled = shouldBeEnabled;
+    notify();
+    return true;
+}
+
+bool MixerModel::isSendTarget (int channel) const noexcept
+{
+    if (! juce::isPositiveAndBelow (channel, numChannels))
+        return false;
+
+    for (int src = 0; src < channelCount; ++src)
+        for (int index = 0; index < numSends; ++index)
+            if (getSend (src, index).isLive() && getSend (src, index).destination == channel)
+                return true;
+
+    return false;
 }
 
 bool MixerModel::setChannelOutput (int channel, int destination)
@@ -144,17 +323,32 @@ void MixerModel::setMasterMono (bool shouldBeMono)
     notify();
 }
 
-void MixerModel::sanitiseOutputs()
+void MixerModel::sanitiseRouting()
 {
     for (int channel = 0; channel < numChannels; ++channel)
     {
         const int destination = channelOutputs[(size_t) channel];
 
-        if (destination == masterChannel)
-            continue;
-
-        if (destination == channel || ! juce::isPositiveAndBelow (destination, channelCount))
+        if (destination != masterChannel
+              && (destination == channel || ! juce::isPositiveAndBelow (destination, channelCount)))
             channelOutputs[(size_t) channel] = masterChannel;
+
+        // Phase 99: a send that points at a strip which no longer exists is
+        // switched OFF rather than re-pointed. There is no strip it obviously
+        // should have meant, and picking one would be this model inventing an
+        // intention the user never had.
+        for (auto& send : channelSends[(size_t) channel])
+        {
+            if (send.destination == noSendDestination)
+                continue;
+
+            if (send.destination == channel
+                  || ! juce::isPositiveAndBelow (send.destination, channelCount))
+            {
+                send.destination = noSendDestination;
+                send.enabled     = false;
+            }
+        }
     }
 }
 
@@ -306,7 +500,7 @@ bool MixerModel::removeChannel()
         return false;
 
     --channelCount;
-    sanitiseOutputs();
+    sanitiseRouting();
     notify();
     return true;
 }
@@ -330,11 +524,13 @@ bool MixerModel::removeChannelAt (int channel)
         inserts[(size_t) i]        = inserts[(size_t) i + 1];
         channelMono[(size_t) i]    = channelMono[(size_t) i + 1];
         channelOutputs[(size_t) i] = channelOutputs[(size_t) i + 1];
+        channelSends[(size_t) i]   = channelSends[(size_t) i + 1];   // Phase 99
     }
 
     inserts[(size_t) last]        = {};
     channelMono[(size_t) last]    = false;
     channelOutputs[(size_t) last] = masterChannel;
+    channelSends[(size_t) last]   = {};
 
     // 2. Routes, now that every strip sits at its final index: a destination
     //    above the hole is the same physical strip one number lower, and a
@@ -351,11 +547,30 @@ bool MixerModel::removeChannelAt (int channel)
 
         if (out == src)
             out = masterChannel;
+
+        // Phase 99: a send needs BOTH halves of the same renumber. A send whose
+        // destination was the removed strip loses its destination (and goes
+        // off); one pointing past the hole follows the strip it meant.
+        for (auto& send : channelSends[(size_t) src])
+        {
+            if (send.destination == noSendDestination)
+                continue;
+
+            if (send.destination == channel)
+            {
+                send.destination = noSendDestination;
+                send.enabled     = false;
+            }
+            else if (send.destination > channel)
+            {
+                --send.destination;
+            }
+        }
     }
 
     --channelCount;
 
-    sanitiseOutputs();
+    sanitiseRouting();
     notify();
     return true;
 }
@@ -368,7 +583,7 @@ void MixerModel::setChannelCount (int count)
         return;
 
     channelCount = clamped;
-    sanitiseOutputs();
+    sanitiseRouting();
     notify();
 }
 
@@ -397,6 +612,14 @@ void MixerModel::resetToDefault()
     // Phase 23: "reset" also puts every strip back on the master. A factory
     // console has no strip feeding another strip.
     channelOutputs.fill (masterChannel);
+
+    // Phase 99: and no sends. Not "sends off with their destinations kept" —
+    // a factory console has not been patched yet, so the destinations go too.
+    // (Loading a project uses restoreRouting + the file's sends; this function
+    // is the "new empty console" path.)
+    for (auto& strip : channelSends)
+        for (auto& send : strip)
+            send = Send {};
 
     // Phase 25: and no strip is monitoring in mono.
     channelMono.fill (false);

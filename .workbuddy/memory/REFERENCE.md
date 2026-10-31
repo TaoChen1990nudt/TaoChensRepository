@@ -170,7 +170,7 @@ build Release → `--snapshot selftest.png`。
   于是 3/4 的歌按 4/4 数小节——P91 把拍号变成值的时候漏的就是这里。字串化留在
   `MainComponent::formatBarBeat (beats, beatsPerBar)`（静态，两个输入都显式），测试才不必造一个窗口。
 
-## 工程文件（`.atomic`，`formatVersion` = 31）
+## 工程文件（`.atomic`，`formatVersion` = 33）
 - **先解析到临时对象、末尾一次性提交**，坏文件绝不破坏当前会话。载入后重置
   `nextNoteId`/`nextSlotId`/组 id（max+1）。
 - 老文件必须仍能开：v3 `mod=`、v4 插件（标签 **"PLUGIN"** 全大写）、v5 `mixer=`、
@@ -207,6 +207,12 @@ build Release → `--snapshot selftest.png`。
   v30（P95）给 `<Group>` 加 **`takeset=` / `take=` / `takeactive="0"`**，三者都只在属于 take 集合时写，
   缺省 = 普通组 / 当前，所以单遍录音的工程与 P92 逐字节相同。v31（P96）再加 **`takecomp="1"`**，
   只在"是 take 且是 comp"时写；读侧要求 `takeset > 0` 才认它（普通组不可能是拼出来的）。
+  v32（P98）给 `<Layer>` 加 **`<CC number="1" enabled="1">`**，**只写画过的 lane**，
+  所以没碰过控制器的工程与 v31 逐字节相同。
+  v33（P99）给 `<Channel>` 加 **`<Send index to db [pre]>`**：**只写活着的**（`isLive()`），
+  `index` 必须写（活的不连续，读侧猜就会把 send 1 的目的地装到 send 0 上），
+  `to` 必须是通道号（写 master 是坏文件），**缺 `pre` = 推子后**。
+  读侧先 `setSendDestination`（被拒即清空）再电平/pre/开关——**顺序不能反**，没目的地打不开。
 - **选中哪条 lane 显式写 `autotarget`，不靠元素顺序推断**：三条 lane 都写出来之后，
   "最后读到的那条算选中"恒把 target 变成 `plugin`。回退规则只在 `autotarget` **缺失**时启用。
 - **P70：`<Layer autotarget>` 同理**。图层只有 volume/pan 两条 lane，所以后果不是
@@ -451,6 +457,48 @@ build Release → `--snapshot selftest.png`。
 - **自检的边界**：无头自检加载不了 VST3，所以 `setInsertLatencyForTest(channel, samples)` 是
   唯一让补偿路径真的被渲染的手段。端到端断言两条：给一条**静默**通道强加 32 采样延迟，
   「bypass 总线」与「过通道」两条路径都必须整个混音逐样本后移 32。
+
+## 发送与返回（P99：并行的一份，同一刻到）
+- **`send` 不是 `out`**：`out` 是「信号改去别处」，`send` 是「并行多送一份，自己仍到原输出」。
+  所以 **send 不许指向主输出**——那条路 `out` 已经在做，两条一起会把同一份信号叠两遍。
+  `noSendDestination = -1`，**不是 master**（主输出不是「一个可以送进去的地方」）。
+- **每条通道 2 条**：`MixerModel::numSends`，`channelSends[numChannels][numSends]`。
+  `Send { destination, levelDb, preInsert, enabled }`，**`isLive()` = 开着且有目的地**，
+  `getGainLinear()` 里 `<= -48 dB` **就是 0**（-48 dB 是「关掉」的语义，不是「很小」）。
+- **return 不是新概念**：被 send 指到的通道**就是** return，判据是 `isSendTarget(channel)`。
+  它没有自己的声部，`busUsed[]` 由 send 置真——这就是「一条发送让它活起来」。
+- **控制台从链变成图**：`wouldLoop` 原来是单游标走链，send 之后必须 BFS。唯一的图查询是
+  `MixerModel::reaches(from, to)`（跑 `channelOutputs` + `channelSends`），
+  `wouldLoop(destination, channel)` = `reaches(destination, channel)`。
+  `setSendDestination` 先把自己的边临时清空再问——**只对新边问问题**，问完不通过就还原。
+- **`sanitiseRouting()`（P99 由 `sanitiseOutputs` 改名）**：悬空 send **直接关掉，不重定向**
+  （没有一条「明显该指」的路；挑一条就是替用户编造意图）。`removeChannelAt` 里 send **两半都要
+  重编号**：指向被删条的清空并关掉，指向它上面的减一。
+- **PDC 的边必须带延迟，不能只带 bool**：post 边 = `own[from]`，pre 边 = **0**（副本在插入之前
+  就取走了）。所以 `pdc::solve` 的接口是 `edgeLatency(from, to, int& offset)`，
+  **排序与延迟表都问同一个函数**（`PlaybackEngine` 里那个 lambda 是唯一实现；
+  `pdc::solve` 保留一个 `output[]` 薄封装，Phase 83 的调用形状与老断言一行没改）。
+- **推子前要有第三条延迟线 `pdcPre[c]`**：插入是**就地改写 bus** 的，「稍后读」拿到的是处理过的
+  信号。这条线由 `preparePreInsertLines()` 按「有没有 pre send」惰性分配——
+  它是**缓冲问题不是延迟问题**，所以 `maxPdcLatency == 0` 时它照样要存在。
+- **`pdcExit[c]` 一块只 push 一次、多处读**：send 是同一份完成信号的另一次读出，
+  按消费者各 push 一次会让 ring 一块内前进多次，每个副本拿到错误历史。延迟量由
+  `finishedDelayTo(to)` 一处给出（`entry[to] - (entry[self] + own[self])`，夹到 0）。
+- **抽头位置没有断言（已知盲区）**：`pdcPre` 的 push 必须在 `processInsertChain` 之前，
+  但 headless 会话里没有 VST3 ⟹ 插入链是空操作 ⟹ 把 push 挪到插入之后（咬测 M6）**全绿存活**。
+  能咬住这件事的只有真插件，或者一个故意改信号的测试用插入。
+- **渲染级验收（比反相测试更严）**：副本按单位增益混进直连，结果必须**逐样本**等于单份的 2 倍
+  （诊断要求 ≤ -60 dBFS，实测 **-180 dB**）。一条对**推子后**、一条对**推子前**：后者在没有插件的
+  工程里是同一份信号，所以它管的是「这条通路真的被买了、推了、读了」——上一条反例是
+  `! line.isReady() -> continue` 静默丢副本，读数从 `2x` 变 `1x`。
+- **存盘 v33**：`<Send index to db [pre]>`，**只写活着的**，`to` 必须是通道号，
+  **缺 `pre` = 推子后**。读侧先 `setSendDestination`（失败即清空）再
+  `setSendLevelDb` / `setSendPreInsert` / `setSendEnabled`，顺序不能反（没目的地打不开）。
+  `carriesState()` 加了两条：自己是 `isSendTarget` 或自己有一条活着的 send。
+- **面板**：`numSendRows = numSends`，行高 `ui::px(14)`，**两行常驻**（主输出上也画，读 `—`）——
+  一行只在接上时才出现，会让通道条高度在鼠标底下变。`getFaderRowBounds()` 顶部多减
+  `numSendRows * 14`，推子与电平表从**同一个** `getFaderRowBounds` 派生，所以一起下移一起变矮。
+  文字是 `→ 5  -6.0` / `→ 6  -12.0 p`（尾巴 `p` = 推子前）/ `—`。
 
 ## 曲线库（P82：一个形状 + 一个去处）
 - **`Model/CurveBank<CurveType>` 是唯一的曲线容器**：音符 / 采样 / 编组三个对象各持一份，
@@ -782,6 +830,10 @@ build Release → `--snapshot selftest.png`。
 - **立体声电平表**：`channelMetersL/R` + `getChannelPeakSide(ch,side)`；`stereoMeterHasOwnPixels()`。
 - **推子/表共用一行**：`getFaderRowBounds()` 切左半给推子（下限 16 px）、右边全给表（约 37 px）。
   两者必须同源派生；`faderYieldedHalfTheRow()` 一个断言钉两件事。
+- **两条发送行在推子上方**（P99）：`getSendRowBounds(ch, i)`，行高 14，**两行常驻**；
+  `getFaderRowBounds()` 顶部先减 `numSends * 14` 再算推子行，所以推子与表一起下移。
+  命中顺序是 name → output → **send 0** → **send 1** → pan → 推子/表，`hoveredSend` 与
+  `Part::sendTarget` 一起决定高亮，右键菜单在 output 之后也走同一段分派。
 - `SynthSlot::maxMixerChannels` 必须等于 `MixerModel::numChannels`（`static_assert`）。
 - 机架卡片发送子菜单 id 基址 `kSendToChannelBase = 1000`（`21 + ch` 会撞 30–40）。
 - **效果器机架可换位置**（P43）：`MixerModel::moveInsert(channel, from, to)` **轮转不是交换**

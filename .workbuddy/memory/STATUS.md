@@ -1,6 +1,6 @@
 # AtomicDAW — 当前状态索引
 
-> 最后更新：2026-10-31 · **Phase 98**（CC 可以画了，而且真的发得出去）
+> 最后更新：2026-10-31 · **Phase 99**（发送与返回：一条信号走两条路，还在同一刻到）
 > 本文件只回答三件事：**现在在哪、下一步、怎么验**，约 6 千字。
 > 规则 `MEMORY.md` · 制度 `REFERENCE.md` · 坑 `PITFALLS.md` · 逐阶段实现记录 `memory/<日期>.md`
 > · 被压掉的历史叙述（阶段全文 / 咬测流水 / 逐版沿革 / P62–P82 经验）在 **`STATUS-archive.md`**。
@@ -8,7 +8,7 @@
 ## 新会话读文档的顺序
 
 1. **本文件**（1 分钟）
-2. **`MEMORY.md`** — 三十条跨主题硬规则 + 目录/构建/工程文件约定（必须全文读）
+2. **`MEMORY.md`** — 三十二条跨主题硬规则 + 目录/构建/工程文件约定（必须全文读）
 3. **`REFERENCE.md`** — 按主题查制度（构建/路由/音频/工程文件/混音台/编辑手势/编组/采样/走带/波形/伸缩…）
 4. **`PITFALLS.md`** — 卡住了再查对应阶段
 5. **`memory/<日期>.md`** — 想知道「为什么这么写」才翻
@@ -19,7 +19,7 @@
 
 | 项 | 值 |
 |---|---|
-| 已完成阶段 | **Phase 98** — CC 可以画了，而且是**发得出去**的。诊断第 3 条的后半：lane 那条子现在有四个页签（力度 / CC1 / CC11 / CC64），控制器那三页画折线加圆点，点可抓、可拖、空白处按一下加点。但**这一轮真正的工作不在画面**——开工前先查了一件事，结果是坏消息：`Source/Audio/` 里除了实时输入**没有任何 `MidiBuffer` 的生产者**，音符是靠 `pluginMidi.addEvent (noteOn/noteOff)` 一条条塞进去的，CC 从来没有通路。所以主体是 `Model/MidiCc.h` 加 `PlaybackEngine` 的两处：`publishSchedule` 把开着的 lane 折成 `ScheduledCc`（**slotId 用 `routing::layerSlotId` 解析好**，内置音源发布成 -1，面板据此在 lane 上直说「内置音源，收不到 CC」），渲染时在**同一个 MidiBuffer** 里、音符之后发，**只在值变化时发**。后者是纯函数 `midicc::valueToSend`，所以「一条平线只发一条消息、不是每块一条」这条在**没有声卡的环境里也能咬**。三条决定写在 `MidiCc.h` 的注释里：**曲线复用 `AutomationLane`**（CC 就是绝对拍的 0..1 折线，没有第二种插值，也没有第二个 `addPoint`）、**量化只在发送那一步做**（模型连续，128 级是线的事）、**哨兵是 -1 不是 0**（零是一个真值：曲线的第一个点恰好为零时也必须发一次，否则插件永远不知道要归零）。v32 加 `<CC number="1" enabled="1">`，**没画过的 lane 一条都不写**，老工程存出来逐字节不变。**P97** — 力度可以画了。钢琴窗底部多一条可开合的 lane（工具栏第 10 个按钮「力度」，`PianoRollVelocity.cpp` 是第十三个 TU）：**一根柱子是一个矩形**，`velocityBarFor` 是唯一几何，paint / 命中测试 / 框选都问它，所以「画出来的 == 抓得到的 == 框得到的」。三个决定写在 `Model/VelocityLane.h` 的注释里：**轴是线性的**（dB 或 MIDI 平方律会把半屏分给听不出差的 0.9–1.0）、**地板 0.02 不是 0**（0 是「听不见」，那是静音与删除的语义）、**一次拖动记 delta 不记绝对值**（否则框选一排后第一个像素就把重音削平）。改动只是 `NoteEvent::velocity` 的视图——撤销走既有 `beginUndoGesture` 会话、编组走既有 `expandToWholeOccurrences`、存盘**不升版本**（仍 31，`[PASS] 改过的力度存得下、读得回` 就是这条的断言）。空手按下是 lane 内框选（`marqueeInLane`），带子只抓柱子不抓块。**P96** — 拼接。诊断第 2 条的后半：以前只能整遍选，现在可以「第 1 遍的第 1–4 小节 + 第 2 遍的其余」。`Model/Comp.h`（`namespace comping`）是唯一规则，**接缝是重叠不是首尾相接**——进来那一段比接缝早 4 ms 开始、比结尾晚 4 ms 结束，两侧邻居各在自己那一端淡到 0，四毫秒里两遍同时在场。操作是**「把这段换成那一遍的材料」**而不是记一张分段表：后者要一份 provenance 活过存盘，而 take 集合是派生的、没有实体能挂它；写成替换之后三处接缝是三次独立编辑，顺序无关、重复无害。**第一次拼接先分一份**（`NoteGroup::comp` / v31 `takecomp`，从当前那一遍复制成一个新 take 并设为当前），第二处接缝改的是同一份，所以三处接缝只多一遍。切块复用 P50 的刀（`splitSampleBlocksRaw` 是 `splitSamplesAt` 的算术半边），源窗口/变速/倒放的换算一行没重写。手势在编组栏 take 菜单里：「用这一遍接上 1.0 - 3.0 拍」，区间取循环区间（不看开关）。**P95** — 多遍录音终于是一个容器。以前录第二遍只是往同一图层再叠一个
+| 已完成阶段 | **Phase 99** — 发送与返回。诊断最后一条的前半：混音台每条通道多**两行发送**（推子前/后可选），落点是一条**通道**（`isSendTarget` 就是「这条是 return」的判据——不需要第二个概念）。它和 `out` 的区别只有一句话：**`out` 是信号改去别处，send 是并行多送一份，自己仍到原输出**，所以 send 不许指向主输出（两条一起会把信号叠两遍）。这一轮的技术内容全在「同一条信号现在有两条长度不同的路」上：① **控制台从链变成图**，`wouldLoop` 原来是单游标走链，send 之后必须 BFS（`reaches`）；② **PDC 的边必须带延迟，不能只带 bool**——post 边是 `own[from]`，pre 边是 0，所以 `pdc::solve` 的接口从 `feeds(from,to)` 升级成 `edgeLatency(from,to,offset)`，排序与延迟表都问**同一个**函数（Phase 23 的薄封装留在原地，老调用形状不变）；③ **推子前要有第三条延迟线 `pdcPre`**——插入是就地改写 bus 的，「稍后读」拿到的是处理后的信号；④ `pdcExit` 一块**只 push 一次**、多处读（按消费者各 push 一次会让 ring 一帧前进多次，每个副本拿到错误历史）。渲染级验收不是诊断要求的反相测试（headless 没有逆变器），而是更严格的一条：**副本按单位增益混进直连，结果必须逐样本等于单份的 2 倍**，实测残余 **-180 dB**（判据 -60）。v33 加 `<Send index to db pre>`，**只写活着的**，没发送的工程存出来逐字节不变。**P98** — CC 可以画了，而且是**发得出去**的。诊断第 3 条的后半：lane 那条子现在有四个页签（力度 / CC1 / CC11 / CC64），控制器那三页画折线加圆点，点可抓、可拖、空白处按一下加点。但**这一轮真正的工作不在画面**——开工前先查了一件事，结果是坏消息：`Source/Audio/` 里除了实时输入**没有任何 `MidiBuffer` 的生产者**，音符是靠 `pluginMidi.addEvent (noteOn/noteOff)` 一条条塞进去的，CC 从来没有通路。所以主体是 `Model/MidiCc.h` 加 `PlaybackEngine` 的两处：`publishSchedule` 把开着的 lane 折成 `ScheduledCc`（**slotId 用 `routing::layerSlotId` 解析好**，内置音源发布成 -1，面板据此在 lane 上直说「内置音源，收不到 CC」），渲染时在**同一个 MidiBuffer** 里、音符之后发，**只在值变化时发**。后者是纯函数 `midicc::valueToSend`，所以「一条平线只发一条消息、不是每块一条」这条在**没有声卡的环境里也能咬**。三条决定写在 `MidiCc.h` 的注释里：**曲线复用 `AutomationLane`**（CC 就是绝对拍的 0..1 折线，没有第二种插值，也没有第二个 `addPoint`）、**量化只在发送那一步做**（模型连续，128 级是线的事）、**哨兵是 -1 不是 0**（零是一个真值：曲线的第一个点恰好为零时也必须发一次，否则插件永远不知道要归零）。v32 加 `<CC number="1" enabled="1">`，**没画过的 lane 一条都不写**，老工程存出来逐字节不变。**P97** — 力度可以画了。钢琴窗底部多一条可开合的 lane（工具栏第 10 个按钮「力度」，`PianoRollVelocity.cpp` 是第十三个 TU）：**一根柱子是一个矩形**，`velocityBarFor` 是唯一几何，paint / 命中测试 / 框选都问它，所以「画出来的 == 抓得到的 == 框得到的」。三个决定写在 `Model/VelocityLane.h` 的注释里：**轴是线性的**（dB 或 MIDI 平方律会把半屏分给听不出差的 0.9–1.0）、**地板 0.02 不是 0**（0 是「听不见」，那是静音与删除的语义）、**一次拖动记 delta 不记绝对值**（否则框选一排后第一个像素就把重音削平）。改动只是 `NoteEvent::velocity` 的视图——撤销走既有 `beginUndoGesture` 会话、编组走既有 `expandToWholeOccurrences`、存盘**不升版本**（仍 31，`[PASS] 改过的力度存得下、读得回` 就是这条的断言）。空手按下是 lane 内框选（`marqueeInLane`），带子只抓柱子不抓块。**P96** — 拼接。诊断第 2 条的后半：以前只能整遍选，现在可以「第 1 遍的第 1–4 小节 + 第 2 遍的其余」。`Model/Comp.h`（`namespace comping`）是唯一规则，**接缝是重叠不是首尾相接**——进来那一段比接缝早 4 ms 开始、比结尾晚 4 ms 结束，两侧邻居各在自己那一端淡到 0，四毫秒里两遍同时在场。操作是**「把这段换成那一遍的材料」**而不是记一张分段表：后者要一份 provenance 活过存盘，而 take 集合是派生的、没有实体能挂它；写成替换之后三处接缝是三次独立编辑，顺序无关、重复无害。**第一次拼接先分一份**（`NoteGroup::comp` / v31 `takecomp`，从当前那一遍复制成一个新 take 并设为当前），第二处接缝改的是同一份，所以三处接缝只多一遍。切块复用 P50 的刀（`splitSampleBlocksRaw` 是 `splitSamplesAt` 的算术半边），源窗口/变速/倒放的换算一行没重写。手势在编组栏 take 菜单里：「用这一遍接上 1.0 - 3.0 拍」，区间取循环区间（不看开关）。**P95** — 多遍录音终于是一个容器。以前录第二遍只是往同一图层再叠一个
 「录音 N」组，两遍一起发声（一个和弦）。现在一组 take 共用一个 `takeSetId`，**恰好一遍出声**：
 入组只有一个判据 `Layer::joinTakeSet`（`Model/TakeSet.h` 纯函数，覆盖率按**长**的那段量，0.9 起——
 按短的量会让「8 小节里补 2 小节」拿 100%，正好把要防的事放进来），普通组被第二遍撞上时**当场提升**
@@ -29,12 +29,12 @@
 编组栏行内多一个 `2/4` 徽标、非当前那遍整行变淡；右键「当前 take」子菜单切换；钢琴窗里非当前的
 take 音符/块/组框按 0.45 变淡。存盘 v30（`takeset` / `take` / `takeactive`，缺省 = 普通组 / 当前），
 加载后 `normaliseTakeSets()` 按最大序号修好坏文档。**P94** — 听得见自己，且弹的落在拍上。录音键顺手开监听（`setMonitoringEnabled`，默认关；单声道话筒按 `RecordBuffer` 同一条规矩复制到两耳，混在走带淡变**之后**，所以走带停着也听得见），松键就关——不询问就活的输入是啸叫。补偿是**两条链两个数**：`getRecordOffsetSamples`（输出+输入+监听链）给话筒，`getMidiRecordOffsetSamples`（输出+监听链）给键盘——键盘没走过采集缓冲，摊给它输入项就是让每个音符提前。二者都**不看监听开关**（`finishRecording` 在 `commitTake` 之前就关了监听），换算走秒不走拍分数。校正只在 `commitTake` 门口做一次：音符、CC 曲线、音频块各自挪到该在的拍上，下游全部读已经对的数。**P93** — **Phase 93** — 引擎负载与丢帧看得见。顶栏右上角多了一块读数：一根负载条（平滑负载 + 峰值刻度）和一行字 `CPU 12% · 峰 41% · 丢音 2`。负载与峰值是 `Audio/LoadMeter.h` 的 `perf::advance`（纯函数：指数平均 + 1.5 s 峰值保持 + 线性回落，**不夹到 100%**，因为 JUCE 夹掉的那个数正是「这一块用了 250% 预算」）；丢帧直接用 `AudioDeviceManager::getXRunCount()`（设备原生计数 + JUCE 的估算），**不自己再数一遍**。计时是回调开头的 RAII scope guard，四个出口都算一块。顺手修了顶栏的 `bar.beat.tick`：它当时自己写着 4.0，3/4 的歌按 4/4 数小节（P91 漏掉的第四个读者）。P92 拖组到组上＝替换。P92 补上「从编组栏拖一行出来」的另一半：落在空网格上仍是「再放一处」，落在**已经在那儿的组**上则是**替换那一处**——目标那一处的成员（音符与采样块）被拿掉，拖来的组按**目标的出现原点**站过去，目标没有别的出现就整行离开列表；只认同图层，命中顺序照按下的顺序（成员优先，框在后）。P91 把拍号变成工程属性。P86 把工程文件里的 `path` 从绝对改成**相对工程目录**（解不回来才退回绝对），模型里仍是绝对；找不到时能按用户挑的目录按文件名重定位。P87 让走带能循环任意一段：`Model/LoopRegion` 是唯一的区间规则，标尺底部一条 7px 窄带画它、拖它，关掉不忘记位置。P88 加了点击轨与数拍：`Audio/Metronome` 只混进走带的块（导出结构性拿不到），录音前可数一小节。P89 给自检的退出码装了个听众：GitHub Actions 跑 configure → build → `--snapshot`，四条门禁全判在 ASCII 上。P90 让已弹的东西回到网格：`Model/Quantize.h` 一个纯函数（就近 + 0..1 强度），右键菜单五档网格 × 四档强度，音符与采样块都动，编组先重锚定出现原点再同步形状。P91 把写了八十八个阶段的 `constexpr double beatsPerBar = 4.0` 变成值：`Model/Meter.h` 是唯一的拍号规则，写进 `<Transport beatsPerBar>`，四个读者（标尺/复制到后一小节/节拍器重音/量化菜单）读同一份 |
-| 自检 | **988 ALL PASSED / 0 FAIL**，失败退出码 1 |
+| 自检 | **1008 ALL PASSED / 0 FAIL**，失败退出码 1 |
 | 编译 | 零 error 零 warning |
-| `formatVersion` | **32**（P98 = 32 给 `<Layer>` 加 `<CC number enabled>`，没画过的 lane 不写，所以没碰过控制器的工程与 v31 逐字节相同；**31**（P86 = 27 只改值不改标签；P87 = 28 加 `<Transport loop loopStart loopEnd>`；**P88 不升**——节拍器开关/音量/预备拍长度还没进工程文件；**P91 = 29** 加 `<Transport beatsPerBar>`，且 `<Transport>` 改成**永远写**；**P95 = 30** 给 `<Group>` 加 `takeset` / `take` / `takeactive`，三者**缺省即「普通组 / 当前」**，所以单遍录音写出来与 P92 逐字节相同；**P96 = 31** 加 `takecomp="1"`，只在「是 take 且是 comp」时写，没拼过的工程与 v30 逐字节相同）— 另含 `<Curve id name target pluginparam enabled>` + `<CurveState active/>`。**v30 及更老的文件照常打开**，加载后 `normaliseTakeSets()` 按最大序号修好坏文档，只有重新保存才写新形状 |
+| `formatVersion` | **33**（P99 = 33 给 `<Channel>` 加 `<Send index to db pre>`，**只写活着的发送**，`to` 必须是通道号，缺 `pre` = 推子后，所以没碰过发送的工程与 v32 逐字节相同；32（P98 = 32 给 `<Layer>` 加 `<CC number enabled>`，没画过的 lane 不写，所以没碰过控制器的工程与 v31 逐字节相同；**31**（P86 = 27 只改值不改标签；P87 = 28 加 `<Transport loop loopStart loopEnd>`；**P88 不升**——节拍器开关/音量/预备拍长度还没进工程文件；**P91 = 29** 加 `<Transport beatsPerBar>`，且 `<Transport>` 改成**永远写**；**P95 = 30** 给 `<Group>` 加 `takeset` / `take` / `takeactive`，三者**缺省即「普通组 / 当前」**，所以单遍录音写出来与 P92 逐字节相同；**P96 = 31** 加 `takecomp="1"`，只在「是 take 且是 comp」时写，没拼过的工程与 v30 逐字节相同））— 另含 `<Curve id name target pluginparam enabled>` + `<CurveState active/>`。**v30 及更老的文件照常打开**，加载后 `normaliseTakeSets()` 按最大序号修好坏文档，只有重新保存才写新形状 |
 | 可执行 | `build/AtomicDAW_artefacts/Release/AtomicDAW.exe` |
 | 技术栈 | JUCE 8.0.4（FetchContent）+ VS2022 + MSVC 14.38 + Win SDK 10.0.22621 + C++17 |
-| 源码规模 | `Source/` 下 **117 个** .cpp/.h，共 **87,609 行**，分 Model / Audio / UI / Util / Media。最大的三个是 `SelfTest.cpp` 19,176 / `MainComponent.cpp` 9,276 / `PlaybackEngine.cpp` 3,7xx |
+| 源码规模 | `Source/` 下 **117 个** .cpp/.h，共 **88,929 行**，分 Model / Audio / UI / Util / Media。最大的三个是 `SelfTest.cpp` 19,490 / `MainComponent.cpp` 9,344 / `PlaybackEngine.cpp` 4,039 |
 
 ## 下一步
 
@@ -42,10 +42,24 @@ take 音符/块/组框按 0.45 变淡。存盘 v30（`takeset` / `take` / `takea
 
 体验官诊断（`docs/review-p92/`）给了五条按 impact×confidence÷cost 排的候选。第 5 条
 「引擎可观测」在 P93 落地，第 1 条「监听 + 录音侧延迟补偿」在 P94 落地，第 2 条在 P95（容器）
-与 P96（拼接）两轮落地，第 3 条在 P97（力度）与 P98（CC）两轮落地。**只剩一条**：
+与 P96（拼接）两轮落地，第 3 条在 P97（力度）与 P98（CC）两轮落地，第 4 条的前半在 P99
+（2 条 send + 推子前/后抽头 + return）。**只剩一条的后半**：
 
-1. **send/return + 侧链**（4×4÷4）— 0 条 aux；侧链延迟要并进既有的 `pdc::solve`，别新开一条
-   补偿路径。
+1. **侧链**（COMP 加外部键输入，源从「任一通道/总线」选）— 延迟要并进 P99 的同一张表
+   （`edgeLatency`），别新开一条补偿路径。现在那条表的边是「通道 → 通道」，而键输入是一条
+   **横向的、只带信号不带声音**的边：它影响压缩器的行为，不影响这个通道的输出。落点大概是
+   `ScheduledKey { destination, source, preInsert }` + `edgeLatency` 里认它（**键也是延迟的来源**：
+   一个延迟 96 采样的通道当键，压缩器就该晚 96 采样动作，而这正是「同一张表」的意思）。
+
+P99 留下的几件小事，谁接手谁看：
+- **推子前抽头的位置没有断言**。`pdcPre` 的 push 必须在 `processInsertChain` **之前**，
+  但 headless 的会话里没有 VST3 ⇒ 插入链是空操作 ⇒ 把 push 挪到插入之后（咬测 M6）
+  **全绿存活**。能咬住这件事的只有真插件，或者一个故意改信号的测试用插入。
+- **send 不能指向主输出**，这是设计不是缺口：主输出那条路由 `out` 已经在做，两条一起
+  会把同一份信号叠两遍。要「发送到主输出」应该用 `out`。
+- **send 的数量是 2，写死**（`MixerModel::numSends`）。面板按这个常量排两行，存盘按它写
+  `<Send index>`，改成 4 是三处一起改（模型 / 面板行数 / 存盘循环），不是改架构。
+- **没有「发送到新通道」这条捷径**。要给某条通道加一个 return，得先 `+` 加一条通道再选它。
 
 P98 留下的几件小事，谁接手谁看：
 - **内置音源收不到 CC**。这是**结构性的**，不是没做完：内置振荡器没有 MIDI 输入的概念，
@@ -265,6 +279,7 @@ P94 留下的两件小事，谁接手谁看：
 | P96 | comping：`Model/Comp.h`（4 ms 交叉淡化 / 选区与块的重叠判据 / 肩点淡化）+ `PianoRollComponent::compTakeRange`（先分一份 comp，再「替换这个区间」）+ `splitSampleBlocksRaw`（从 P50 的刀里拆出算术半边）+ v31 `takecomp` + 编组栏「用这一遍接上 a - b 拍」 | `memory/2026-10-31.md` |
 | P98 | CC lane：`Model/MidiCc.h`（复用 `AutomationLane` / 量化只在发送那步 / 哨兵 -1 不是 0）+ `ScheduledCc` → `publishSchedule` 解析 slotId → 渲染时同一 MidiBuffer 里**只在值变化时发**（`midicc::valueToSend` 是纯函数，所以 headless 咬得住）+ `UI/PianoRollCcLane.cpp`（四页签 / `ccPointFor` 唯一几何 / 空白加点、拖点、点一下即点亮）+ v32 `<CC number enabled>` + `-cc` 快照 + 定位记忆 `lastCcValue` 与 locate 时的 epoch 遗忘 | `memory/2026-10-31.md` |
 | P97 | 力度 lane：`Model/VelocityLane.h`（线性轴 / 地板 0.02 / delta 不是绝对值）+ `UI/PianoRollVelocity.cpp`（`velocityBarFor` 唯一几何，paint/命中/框选共用）+ `velocityDrag` 模式与 lane 内框选 + 工具栏第 10 个按钮 + `-velocity` 快照 + `setTopPitch`（纵向终于能从外面定位） | `memory/2026-10-31.md` |
+| P99 | send / return：`MixerModel` 的 `Send`（每条通道 2 条，`noSendDestination = -1`）+ `reaches` 把控制台从链变成图（`wouldLoop` 走 BFS）+ `pdc::solve` 的边从 bool 升级成 `edgeLatency(from,to,offset)`（post = `own`，pre = 0）+ 第三条延迟线 `pdcPre`（推子前抽头必须在插入之前）+ `pdcExit` 一块只 push 一次 + `buses` 里 send 与 out 各读一次 + v33 `<Send index to db pre>` + `-sends` 快照 | `memory/2026-10-31.md` |
 | 踩坑索引 | 各阶段的不变量与咬测 | `PITFALLS.md` |
 
 ## 构建
@@ -292,10 +307,26 @@ build/AtomicDAW_artefacts/Release/AtomicDAW.exe --snapshot docs/phaseNN.png > do
 tail -3 docs/phaseNN.log   # 要看到 "ALL CHECKS PASSED"
 ```
 
-断言总数只增不减。**新增功能要加断言并报出新的总数**（当前基准 **988**），退回去说明有东西坏了。
+断言总数只增不减。**新增功能要加断言并报出新的总数**（当前基准 **1008**），退回去说明有东西坏了。
 
-视觉回归：每轮入库 **36 张** `docs/pNN-*.png`（`--snapshot p98.png` 会顺带写出 35 张后缀图 + 主图；`-perf` 是 P93 新加的，`-takes` 是 P95 新加的，`-velocity` 是 P97 新加的（八根柱子的高低就是那张图的唯一判据），`-cc` 是 P98 新加的——四页签、折线、以及 HUD 里那句「内置音源，收不到 CC」；那句话只在图上，任何断言都读不回来）。
-与上一轮逐字节比，**P98 是 23/35 相同**，12 张不同里 **11 张是抖动集**（同一份二进制跑两遍，两遍的集合每轮都略有出入）。`-velocity` 与 `-cc` 都在抖动集里，所以它们**只能人工看图**——两张都看过了：页签四格、柱子八根（第一根带选中描边）、HUD 里的 `0.30`、CC 折线的五个圆点与两端的平直尾部、以及那句青色的「→ 内置音源，收不到 CC」。**唯一一张真差异是 `-recovery`**，bbox `(201,93,228,102)`，就是恢复副本那一行的时间戳分钟（`17:23` vs 上一轮的 `11:06`）——它落在抖动集外面，因为两遍跑在同一分钟里。
+视觉回归：每轮入库 **36 张** `docs/pNN-*.png`（`--snapshot p99.png` 会顺带写出 35 张后缀图 + 主图；`-perf` 是 P93 新加的，`-takes` 是 P95 新加的，`-velocity` 是 P97 新加的（八根柱子的高低就是那张图的唯一判据），`-cc` 是 P98 新加的——四页签、折线、以及 HUD 里那句「内置音源，收不到 CC」；那句话只在图上，任何断言都读不回来；`-sends` 是 P99 新加的——同一条通道上两行发送（`→ 6  -6.0` 与 `→ 7  -12.0 p`，末尾那个 `p` 是推子前），第三行 `—` 是没接的）。
+与上一轮逐字节比，**P99 是 21/35 相同**（P98 那轮 35 张，这轮 36 张，多出来的是 `-sends`）。
+14 张不同里 **12 张在抖动集里**（同一份二进制跑两遍，两遍的集合每轮都略有出入：`-cc`
+`-groupauto` `-metronome` `-perf` `-recovery` `-sampler` `-selectmark` `-selectmark-focus`
+`-selectmark-shell` `-takes` `-velocity`，这一轮 `-mixer` / `-mixer-narrow` / `-sends` 三张也
+落进去了，但它们的抖动只在读数那几十个像素里）。**真改动是 `-mixer` 与 `-mixer-narrow`**：
+整条通道条多了两行发送，推子与电平表整体下移 28 px 并变矮——两者都从同一个
+`getFaderRowBounds` 派生，所以不会各自漂。
+**唯一一条查过、结论是「不是回归」的**：`-clipauto` 差**一个抗锯齿像素**，bbox `(210,224,211,225)`，
+RGB `(126,111,159)` → `(135,119,171)`，即覆盖 0.49 → 0.53。几何没有位移——邻列的加权纵坐标
+逐列相同（差 `0.00000`），只有这一列差 `0.03` px。证过两次：**同一份二进制跑两遍这一像素逐字节
+相同**（不是抖动），**把 `-sends` 那一帧整个跳过后仍然只差这一像素**（不是新快照函数留下的状态）。
+P99 没有一行代码画这条曲线，所以它只能是编译单元变化带来的浮点合并差异在 AA 上的取整平局。
+
+P98 那次是 23 同 / 12 异，11 张落在抖动集。`-velocity` 与 `-cc` 都在抖动集里，所以它们
+**只能人工看图**——两张都看过了：页签四格、柱子八根（第一根带选中描边）、HUD 里的 `0.30`、
+CC 折线的五个圆点与两端的平直尾部、以及那句青色的「→ 内置音源，收不到 CC」。那轮唯一一张
+真差异是 `-recovery`，bbox `(201,93,228,102)`，就是恢复副本那一行的时间戳分钟（`17:23` vs `11:06`）。
 P96 那次是 25 同 / 8 异，8 张全部落在抖动集（同一份二进制跑两遍，同样这 8 张不同）：
 拼接在画面上只有「编组栏多一行名字带『拼接』的 take」和一块被切成三段的块，
 4 ms 的接缝在任何缩放下都是同一条边，而那个菜单项 headless 拍不到。
@@ -319,7 +350,7 @@ P94 的补偿按这台声卡报的延迟把它挪到了该在的拍上。**这 6
 
 **CI（P89）**：推上去就跑 `.github/workflows/selftest.yml`（也可以手动 dispatch）。
 门禁只有四条，全判在 ASCII 上：退出码 0 / `[FAIL]` 数为 0 / 日志含 `ALL CHECKS PASSED` /
-PASS 数 ≥ `env.MIN_CHECKS`（988）。**加断言的那一轮要在同一个提交里把 `MIN_CHECKS` 调大**，
+PASS 数 ≥ `env.MIN_CHECKS`（1008）。**加断言的那一轮要在同一个提交里把 `MIN_CHECKS` 调大**，
 它是"只增不减"唯一执法的地方。CI 跑在**仓库根**（cwd ≠ exe 目录），本地一样能这么跑，
 出图与 `demo.atomic` 会落在根上——`.gitignore` 里已忽略。
 

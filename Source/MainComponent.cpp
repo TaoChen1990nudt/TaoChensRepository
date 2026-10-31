@@ -1507,6 +1507,74 @@ juce::Image MainComponent::createMixerSnapshot (int width, int height)
     return mixerPanel.createComponentSnapshot (mixerPanel.getLocalBounds(), true);
 }
 
+juce::Image MainComponent::createSendSnapshot (int width, int height)
+{
+    struct SavedSend
+    {
+        int   destination = MixerModel::noSendDestination;
+        float levelDb     = -6.0f;
+        bool  preInsert   = false;
+        bool  enabled     = false;
+    };
+
+    static constexpr int strips[] = { 0, 2 };
+
+    std::array<SavedSend, 6> saved {};
+    int next = 0;
+
+    for (int strip : strips)
+    {
+        for (int index = 0; index < MixerModel::numSends; ++index)
+        {
+            const auto& send = mixer.getSend (strip, index);
+            saved[(size_t) next++] = { send.destination, send.levelDb, send.preInsert, send.enabled };
+        }
+    }
+
+    // Strip 1: both taps live — one after the inserts, one before them, which is
+    // the whole reason the row carries a "p".
+    mixer.setSendDestination (0, 0, 5);
+    mixer.setSendLevelDb (0, 0, -6.0f);
+    mixer.setSendEnabled (0, 0, true);
+
+    mixer.setSendDestination (0, 1, 6);
+    mixer.setSendLevelDb (0, 1, -12.0f);
+    mixer.setSendPreInsert (0, 1, true);
+    mixer.setSendEnabled (0, 1, true);
+
+    // Strip 3: one tap at unity, still switched on, and its other row left off —
+    // so the frame shows a live send next to a dead one on the same strip.
+    mixer.setSendDestination (2, 0, 7);
+    mixer.setSendLevelDb (2, 0, 0.0f);
+    mixer.setSendEnabled (2, 0, true);
+
+    mixerPanel.setSize (width, height);
+    mixerPanel.resized();
+    mixerPanel.updateMeters();
+
+    auto image = mixerPanel.createComponentSnapshot (mixerPanel.getLocalBounds(), true);
+
+    // Give the console back. Reversed order is not required — every field of
+    // every borrowed send is restored — but leaving one behind is the bug this
+    // block exists to not have.
+    next = 0;
+
+    for (int strip : strips)
+    {
+        for (int index = 0; index < MixerModel::numSends; ++index)
+        {
+            const auto& value = saved[(size_t) next++];
+
+            mixer.setSendDestination (strip, index, value.destination);
+            mixer.setSendLevelDb (strip, index, value.levelDb);
+            mixer.setSendPreInsert (strip, index, value.preInsert);
+            mixer.setSendEnabled (strip, index, value.enabled);
+        }
+    }
+
+    return image;
+}
+
 juce::Image MainComponent::createFileBrowserSnapshot (int width, int height)
 {
     // The panel is laid out by the splitter, so it is grown for the shot and put

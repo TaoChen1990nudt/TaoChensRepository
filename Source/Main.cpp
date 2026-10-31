@@ -174,6 +174,12 @@ namespace
         writePng ("-mixer-narrow", component.createMixerSnapshot (atomic::ui::px (700),
                                                                  atomic::ui::px (300)));
 
+        // Phase 99: the same console with sends patched — two rows on a strip,
+        // one taken after the inserts and one before them ("p"). The send is the
+        // only thing on a strip that feeds a DIFFERENT strip without leaving its
+        // own output, so the frame has to show it next to the output row.
+        writePng ("-sends", component.createSendSnapshot());
+
         // Phase 28: the browser tree, taller than the shell's split can give it.
         writePng ("-browser", component.createFileBrowserSnapshot());
 

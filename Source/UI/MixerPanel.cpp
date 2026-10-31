@@ -293,10 +293,22 @@ juce::Rectangle<int> MixerPanel::getFaderRowBounds (int channel) const
     r.removeFromTop (ui::px (16));       // name
     r.removeFromTop (ui::px (15));       // output
     r.removeFromTop (ui::px (15));       // pan
+    r.removeFromTop (ui::px (numSendRows * 14));   // Phase 99: the sends
     r.removeFromBottom (ui::px (18));    // mute / solo
     r.removeFromBottom (ui::px (13));    // dB readout
 
     return r;
+}
+
+juce::Rectangle<int> MixerPanel::getSendRowBounds (int channel, int index) const
+{
+    auto r = getStripBounds (channel).reduced (ui::px (6), ui::px (2));
+    r.removeFromTop (ui::px (16));       // name
+    r.removeFromTop (ui::px (15));       // output
+    r.removeFromTop (ui::px (15));       // pan
+    r.removeFromTop (juce::jlimit (0, numSendRows - 1, index) * ui::px (14));
+
+    return r.removeFromTop (ui::px (14));
 }
 
 int MixerPanel::faderWidthFor (int rowWidth)
@@ -950,6 +962,29 @@ void MixerPanel::drawStrip (juce::Graphics& g, int channel)
                     juce::Justification::centredLeft, true);
     }
 
+    //-- Sends (Phase 99) -----------------------------------------------------
+    // Two rows, always drawn — even on the master, where they read "—". A row
+    // that appears only once it is patched is a row that changes the strip's
+    // height under the mouse, and the master has to keep the same fader height
+    // as everything else or the console stops lining up.
+    for (int index = 0; index < numSendRows; ++index)
+    {
+        const auto box = getSendRowBounds (channel, index);
+        const bool sendLive = isSendRowLive (channel, index);
+        const bool hot      = hoveredPart == Part::sendTarget
+                                && hoveredChannel == channel && hoveredSend == index;
+
+        g.setColour (juce::Colours::white.withAlpha (sendLive ? (hot ? 0.13f : 0.06f)
+                                                             : (hot ? 0.09f : 0.025f)));
+        g.fillRoundedRectangle (box.toFloat(), ui::pf (3));
+
+        g.setColour (juce::Colours::white.withAlpha (sendLive ? (hot ? 0.92f : 0.70f) : 0.26f));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (8.5f))));
+        g.drawText (getSendText (channel, index),
+                    box.withTrimmedLeft (ui::px (5)).withTrimmedRight (ui::px (3)),
+                    juce::Justification::centredLeft, false);
+    }
+
     //-- Pan ------------------------------------------------------------------
     {
         auto pan = getPanBounds (channel).toFloat();
@@ -1324,6 +1359,21 @@ void MixerPanel::mouseDown (const juce::MouseEvent& e)
                 return;
             }
 
+            // Phase 99: right-click means the same thing on a send row as
+            // left-click does — a value's menu. It is the only gesture a row
+            // this short can offer, so both buttons offer it.
+            if (! isMaster (channel))
+            {
+                for (int index = 0; index < numSendRows; ++index)
+                {
+                    if (getSendRowBounds (channel, index).contains (pos))
+                    {
+                        showSendMenu (channel, index, e.getScreenPosition());
+                        return;
+                    }
+                }
+            }
+
             // Phase 43: the four CONTROLS answer with their own menu. It used to
             // be "复位 + a 通道 submenu" on the fader and pan, and nothing at all
             // on mute/solo (they fell through to the channel menu, so a
@@ -1426,6 +1476,21 @@ void MixerPanel::mouseDown (const juce::MouseEvent& e)
     {
         showOutputMenu (channel, e.getScreenPosition());
         return;
+    }
+
+    // Phase 99: a send row is one control with three parts (destination, level,
+    // tap point), so it opens one menu rather than exposing a fader that a
+    // 14 px row could not hold anyway.
+    if (! isMaster (channel))
+    {
+        for (int index = 0; index < numSendRows; ++index)
+        {
+            if (getSendRowBounds (channel, index).contains (pos))
+            {
+                showSendMenu (channel, index, e.getScreenPosition());
+                return;
+            }
+        }
     }
 
     if (getMuteBounds (channel).contains (pos))
@@ -1562,6 +1627,7 @@ void MixerPanel::mouseMove (const juce::MouseEvent& e)
     Part part = Part::none;
     int channel = -1;
     int slot = -1;
+    int send = -1;
 
     const bool overScroll = isStripScrollNeeded()
                               && getScrollBarBounds().expanded (0, ui::px (3)).contains (pos);
@@ -1596,8 +1662,26 @@ void MixerPanel::mouseMove (const juce::MouseEvent& e)
 
         if (channel >= 0)
         {
+            // Phase 99: which send row, if any. Worked out first because the
+            // chain below is an if/else and a row has to be able to answer
+            // "me, the second one" rather than just "a send".
+            int sendRow = -1;
+
+            if (! isMaster (channel))
+                for (int i = 0; i < numSendRows; ++i)
+                    if (getSendRowBounds (channel, i).contains (pos))
+                    {
+                        sendRow = i;
+                        break;
+                    }
+
             if (getOutputBounds (channel).contains (pos)
                  && ! isMaster (channel))                     part = Part::output;
+            else if (sendRow >= 0)
+            {
+                part = Part::sendTarget;
+                send = sendRow;
+            }
             else if (! isMaster (channel) && getStripCloseBounds (channel).contains (pos))
                                                                   part = Part::stripClose;
             else if (getMuteBounds (channel).contains (pos))      part = Part::mute;
@@ -1617,11 +1701,12 @@ void MixerPanel::mouseMove (const juce::MouseEvent& e)
                                               : juce::MouseCursor::PointingHandCursor));
 
     if (part != hoveredPart || channel != hoveredChannel || slot != hoveredSlot
-         || overScroll != hoveredScroll)
+         || send != hoveredSend || overScroll != hoveredScroll)
     {
         hoveredPart = part;
         hoveredChannel = channel;
         hoveredSlot = slot;
+        hoveredSend = send;
         hoveredScroll = overScroll;
         repaint();
     }
@@ -1705,6 +1790,133 @@ void MixerPanel::showOutputMenu (int channel, juce::Point<int> screenPos)
                             if (safe->mixer.setChannelOutput (channel, result - 1))
                                 safe->repaint();
                         });
+}
+
+//==============================================================================
+void MixerPanel::showSendMenu (int channel, int index, juce::Point<int> screenPos)
+{
+    if (isMaster (channel) || ! juce::isPositiveAndBelow (channel, mixer.getChannelCount())
+          || ! juce::isPositiveAndBelow (index, MixerModel::numSends))
+        return;
+
+    const auto& send = mixer.getSend (channel, index);
+
+    juce::PopupMenu menu;
+    menu.addSectionHeader (getChannelName (channel) + utf8 (" · 发送 ") + juce::String (index + 1));
+
+    // Destinations first: a send with nowhere to go is the reason the row looks
+    // dead, so that is the question the menu opens with.
+    {
+        juce::PopupMenu targets;
+        targets.addItem (1, utf8 ("关闭"), true, ! send.isLive());
+
+        for (int destination = 0; destination < mixer.getChannelCount(); ++destination)
+        {
+            if (destination == channel)
+                continue;
+
+            // A strip that already feeds this one would close a loop. Listed but
+            // greyed, like the output menu: "you cannot, and here is why".
+            targets.addItem (destination + 2, getChannelName (destination),
+                             ! mixer.wouldLoop (channel, destination),
+                             send.isLive() && send.destination == destination);
+        }
+
+        menu.addSubMenu (utf8 ("发送到"), targets);
+    }
+
+    // Levels as steps. A send level is set once and then left alone; eight
+    // steps cover the whole useful range and every one of them is one click,
+    // which a drag on a 30 px number is not.
+    {
+        static constexpr float levels[] = { 0.0f, -3.0f, -6.0f, -9.0f, -12.0f, -18.0f, -24.0f, -48.0f };
+
+        juce::PopupMenu amounts;
+
+        for (int i = 0; i < (int) std::size (levels); ++i)
+        {
+            const float db = levels[i];
+            const juce::String text = db <= -48.0f ? juce::String::fromUTF8 ("-\xe2\x88\x9e dB")
+                                                  : mixerlook::dbText (db) + " dB";
+
+            amounts.addItem (100 + i, text, send.isLive(),
+                             send.isLive() && send.levelDb <= db + 0.05f
+                                            && send.levelDb >= db - 0.05f);
+        }
+
+        menu.addSubMenu (utf8 ("电平"), amounts, send.isLive());
+    }
+
+    menu.addSeparator();
+
+    // The tap point. Only meaningful once the send has somewhere to go, so it
+    // is greyed until then rather than lying about which signal it would copy.
+    menu.addItem (2, utf8 ("推子前（插入之前取信号）"), send.isLive(), send.preInsert);
+
+    juce::Component::SafePointer<MixerPanel> safe (this);
+
+    menu.showMenuAsync (juce::PopupMenu::Options()
+                            .withTargetScreenArea (juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1))
+                            .withMinimumWidth (ui::px (170)),
+                        [safe, channel, index] (int result)
+                        {
+                            if (safe == nullptr || result <= 0)
+                                return;
+
+                            auto& model = safe->mixer;
+
+                            if (result == 1)
+                            {
+                                model.setSendDestination (channel, index, MixerModel::noSendDestination);
+                            }
+                            else if (result == 2)
+                            {
+                                const auto& send = model.getSend (channel, index);
+                                model.setSendPreInsert (channel, index, ! send.preInsert);
+                            }
+                            else if (result >= 100)
+                            {
+                                static constexpr float levels[] = { 0.0f, -3.0f, -6.0f, -9.0f,
+                                                                    -12.0f, -18.0f, -24.0f, -48.0f };
+                                const int which = result - 100;
+
+                                if (juce::isPositiveAndBelow (which, (int) std::size (levels)))
+                                    model.setSendLevelDb (channel, index, levels[(size_t) which]);
+                            }
+                            else if (result >= 3)
+                            {
+                                // Choosing a destination also switches the send
+                                // on. Patching a cable that then does nothing is
+                                // the single most confusing thing a send can do.
+                                const int destination = result - 2;
+
+                                if (model.setSendDestination (channel, index, destination))
+                                    model.setSendEnabled (channel, index, true);
+                            }
+
+                            safe->repaint();
+                        });
+}
+
+bool MixerPanel::isSendRowLive (int channel, int index) const
+{
+    return mixer.getSend (channel, index).isLive();
+}
+
+juce::String MixerPanel::getSendText (int channel, int index) const
+{
+    const auto& send = mixer.getSend (channel, index);
+
+    if (! send.isLive())
+        return juce::String::fromUTF8 ("\xe2\x80\x94");   // em dash: "nothing here"
+
+    // "p" for pre-insert, at the end where it costs a letter rather than a word.
+    // The star of the whole feature is that a send has two tap points, and a
+    // row that cannot say which one it is showing is a row the user has to open
+    // the menu to read.
+    return juce::String::fromUTF8 ("\xe2\x86\x92") + juce::String (send.destination + 1)
+             + "  " + mixerlook::dbText (send.levelDb)
+             + (send.preInsert ? " p" : "");
 }
 
 //==============================================================================

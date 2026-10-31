@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<AtomicDAW version="31" tempo="120.0000" timelineBeats="64.00">
+<AtomicDAW version="33" tempo="120.0000" timelineBeats="64.00">
   <Transport beatsPerBar="4" loop="0" loopStart="0.00000000" loopEnd="4.00000000"/>
   <Rack>
     <Synth id="1" name="Synth A" colour="ff7c96f5" waveform="sine" levelDb="-4.000000" pan="-0.080000" muted="0" soloed="0" mixer="0" autotarget="filter">

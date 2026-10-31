@@ -234,6 +234,23 @@ struct ChannelMix
         also the instant this strip's own voices have to be held back to, since
         a direct voice arrives at 0. */
     int entryLatency = 0;
+
+    /** Phase 99: the strip's parallel taps, resolved at publish time.
+
+        `destination` is a live strip index or -1 (this send is off). Kept as a
+        plain int, and not as the model's `Send`, so the audio thread never
+        re-asks a model question — "is that destination still a live strip" was
+        answered once, on the message thread, and a strip that vanished between
+        blocks shows up here as -1 rather than as a bus index that reads off the
+        end of the array. */
+    struct ScheduledSend
+    {
+        int   destination = -1;
+        float gain        = 0.0f;
+        bool  preInsert   = false;
+    };
+
+    std::array<ScheduledSend, MixerModel::numSends> sends {};
 };
 
 //==============================================================================
@@ -1196,6 +1213,16 @@ private:
     mutable std::array<pdc::Line, MixerModel::numChannels + 1> pdcEntry;
     mutable std::array<pdc::Line, MixerModel::numChannels + 1> pdcExit;
 
+    /** Phase 99: the PRE-INSERT tap.
+
+        A third line, bought only for strips that actually send from before
+        their inserts. It cannot be shared with `pdcExit`: one holds the bus as
+        it arrived, the other holds it after the inserts, and both are read in
+        the same block. A console that never uses a pre-insert send pays nothing
+        for it — no strip calls `prepare`, so the line stays empty and every
+        read from it is a no-op. */
+    mutable std::array<pdc::Line, MixerModel::numChannels> pdcPre;
+
     /** Phase 83: what the self-test asks a strip to cost. Message thread only,
         and folded into the published figures at publish time — the renderer
         never reads it. */
@@ -1204,6 +1231,12 @@ private:
     /** Message thread. Buys the delay memory for strips 0..count-1 (and the
         bypass bus). Idempotent; a strip that already has memory keeps it. */
     void preparePdcLines (int count);
+
+    /** Message thread. Buys the pre-insert tap for every strip whose published
+        sends include a pre-insert one. Called on every publish: a send that is
+        switched to pre mid-session must find its buffer before the next block
+        reads it, and `prepare` is a no-op for a line that already exists. */
+    void preparePreInsertLines (const PublishedSchedule& published);
 
     /** Message thread. Guarantees chains 0..count-1 plus the master chain exist.
         Called from publish (a growing console must have memory before it

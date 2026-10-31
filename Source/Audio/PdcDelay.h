@@ -3,6 +3,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 
 #include <array>
+#include <type_traits>
 #include <vector>
 
 //==============================================================================
@@ -118,9 +119,14 @@ struct Line
 
         `add == false` replaces the destination (used for the input alignment,
         which happens in place); `add == true` sums it into a bus that already
-        holds the faster siblings. */
+        holds the faster siblings.
+
+        `gain` scales on the way out, which is what a send level is: a copy of
+        this strip at a different level, held back to the same instant. Doing it
+        here rather than reading into a scratch buffer and scaling it keeps one
+        multiply per sample and no second buffer to size. */
     void readInto (juce::AudioBuffer<float>& destination, int delaySamples,
-                   int numSamples, bool add) const noexcept
+                   int numSamples, bool add, float gain = 1.0f) const noexcept
     {
         if (size <= 0)
             return;
@@ -145,7 +151,7 @@ struct Line
 
             for (int i = 0; i < count; ++i)
             {
-                const float value = ring[(size_t) ((start + i) & mask)];
+                const float value = ring[(size_t) ((start + i) & mask)] * gain;
 
                 if (add)
                     out[i] += value;
@@ -163,12 +169,21 @@ struct Line
 //==============================================================================
 /** The whole latency rule, as a pure function — `SelfTest.cpp` states it.
 
+    - `edgeLatency(from, to)` is the console's topology AND its arithmetic in
+                 one answer: `-1` when no signal goes from `from` to `to`,
+                 otherwise how much later than `from`'s INPUT that signal
+                 arrives. A post-insert output is `own[from]`; a pre-insert send
+                 is `0`, because its copy was taken before the strip did any
+                 work. Phase 99 made both exist at once, and they do not arrive
+                 at the same instant — which is exactly why this is a number and
+                 not a bool.
     - `order`    walks the console sources-first (the order the renderer already
                  sums in), so a channel is always solved after everything that
                  feeds it.
-    - `own[i]`   is channel i's insert latency, in samples.
-    - `output[i]` is the strip it sums into; anything outside 0..count-1 means
-                 "straight to the master", i.e. a root.
+    - `own[i]`   is channel i's insert latency, in samples. Still needed beside
+                 `edgeLatency` because the OUTPUT edge is not the caller's to
+                 describe: every strip's route to the master is post-insert by
+                 definition, and `slide` is about that route.
     - `entry[i]` comes back as the latency of everything arriving at channel i's
                  input: 0 when nothing feeds it, otherwise the slowest child's
                  end. This is also the instant that channel's own voices have to
@@ -176,10 +191,17 @@ struct Line
     - `slide[i]` comes back as how far channel i's *finished* signal is held
                  back on its way to the MASTER (roots). A channel that feeds
                  another strip does not use this number: the delay there is
-                 `entry[destination] - (entry[i] + own[i])`, one subtraction the
-                 renderer makes when it knows which bus it is summing into —
-                 keeping it out of this table is what stops two answers to the
-                 same question existing.
+                 `entry[destination] - (entry[i] + edgeLatency(i, destination))`,
+                 one subtraction the renderer makes when it knows which bus it is
+                 summing into — keeping it out of this table is what stops two
+                 answers to the same question existing.
+
+    A send needs no term of its own here. Its edge is in `edgeLatency`, so the
+    strip it lands on already knows it has to wait for this strip — and the copy
+    that goes straight to the master is held back by `slide`, which covers the
+    slowest path through that same destination. Adding a send term would be a
+    second answer to the alignment question, and the two would disagree the day
+    a send chain gets three strips deep.
 
     Returns the console's total latency: how late the slowest path is, and
     therefore how late the mix is. Nothing compensates for that (it is the same
@@ -187,10 +209,12 @@ struct Line
 
     Degenerate case, and the reason this can be shipped at all: no insert
     reports latency ⟹ every `entry` and `slide` is 0 ⟹ the renderer takes the
-    exact code path it took before this phase existed.
+    exact code path it took before Phase 83 existed.
 */
-inline int solve (int count, const int* order, const int* output, const int* own,
-                  int* entry, int* slide) noexcept
+template <typename EdgeLatency>
+inline std::enable_if_t<std::is_invocable_v<EdgeLatency&, int, int, int&>, int>
+solve (int count, const int* order, EdgeLatency&& edgeLatency, const int* own,
+       int* entry, int* slide) noexcept
 {
     if (count <= 0)
         return 0;
@@ -208,8 +232,17 @@ inline int solve (int count, const int* order, const int* output, const int* own
         int pre = 0;
 
         for (int other = 0; other < count; ++other)
-            if (other != channel && output[other] == channel)
-                pre = juce::jmax (pre, entry[other] + own[other]);
+        {
+            if (other == channel)
+                continue;
+
+            int offset = -1;
+
+            if (! edgeLatency (other, channel, offset) || offset < 0)
+                continue;
+
+            pre = juce::jmax (pre, entry[other] + offset);
+        }
 
         entry[channel] = juce::jmin (pre, maxSamples);
     }
@@ -225,6 +258,30 @@ inline int solve (int count, const int* order, const int* output, const int* own
         slide[i] = juce::jmax (0, total - (entry[i] + own[i]));
 
     return total;
+}
+
+/** The Phase 83 shape, kept because every caller that has one destination per
+    strip reads better this way — and every assertion written before sends
+    existed uses it. A thin view over the graph version, so there is still
+    exactly one copy of the arithmetic.
+
+    `output[from] == to` is the edge, `own[from]` is its latency: everything
+    that lands on a strip does so after that strip's own inserts finished.
+*/
+inline int solve (int count, const int* order, const int* output, const int* own,
+                  int* entry, int* slide) noexcept
+{
+    return solve (count, order,
+                  [output, own] (int from, int to, int& offset)
+                  {
+                      const bool feeds = output[from] == to;
+
+                      if (feeds)
+                          offset = own[from];
+
+                      return feeds;
+                  },
+                  own, entry, slide);
 }
 
 } // namespace pdc

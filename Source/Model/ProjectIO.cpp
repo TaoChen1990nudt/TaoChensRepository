@@ -729,6 +729,18 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                 if (insert.type != fx::Type::none)
                     return true;
 
+            // Phase 99: a hidden strip that is somebody's return holds a send
+            // that points AT it, and dropping the strip would drop that send on
+            // the next load. The send itself lives on the source strip, so only
+            // the destination needs this test — but a strip whose own sends are
+            // live also has state worth keeping.
+            if (mixer->isSendTarget (channel))
+                return true;
+
+            for (int index = 0; index < MixerModel::numSends; ++index)
+                if (mixer->getSend (channel, index).isLive())
+                    return true;
+
             return false;
         };
 
@@ -754,6 +766,26 @@ juce::String toXmlText (const LayerStack& stack, const RackModel& rack, double b
                 channelXml->setAttribute ("mono", 1);
 
             writeInserts (*channelXml, mixer->getInserts (channel));
+
+            //-- Phase 99: the parallel taps ----------------------------------
+            // Only the live ones. `index` is written because the live ones are
+            // not contiguous in general, and a reader that guessed would put
+            // send 1's destination on send 0.
+            for (int index = 0; index < MixerModel::numSends; ++index)
+            {
+                const auto& send = mixer->getSend (channel, index);
+
+                if (! send.isLive())
+                    continue;
+
+                auto* sendXml = channelXml->createNewChildElement ("Send");
+                sendXml->setAttribute ("index", index);
+                sendXml->setAttribute ("to", send.destination);
+                sendXml->setAttribute ("db", number (send.levelDb));
+
+                if (send.preInsert)
+                    sendXml->setAttribute ("pre", 1);
+            }
         }
 
         auto* masterXml = mixXml->createNewChildElement ("MasterInserts");
@@ -1150,6 +1182,12 @@ bool fromXmlText (const juce::String& xmlText,
 
     // Phase 25: mono monitoring, staged with the rest of the console.
     std::array<bool, MixerModel::numChannels> parsedMono {};
+
+    // Phase 99: the parallel taps, staged the same way. A file that has none
+    // leaves every entry at `Send {}`, which is "off, nowhere" — the same thing
+    // a factory console has, so a v32 project reopens flat.
+    std::array<std::array<MixerModel::Send, MixerModel::numSends>,
+               MixerModel::numChannels> parsedSends {};
 
     /** v11 and older used 8 as the master sentinel because the ceiling was eight
         strips; from v12 the sentinel is the ceiling itself. An old `out="8"`
@@ -1637,6 +1675,40 @@ bool fromXmlText (const juce::String& xmlText,
                       : MixerModel::masterChannel;
 
                 parsedMono[(size_t) channel] = child->getIntAttribute ("mono", 0) != 0;
+
+                //-- Phase 99: sends ------------------------------------------
+                // `index` is written explicitly rather than inferred from the
+                // order of the elements, because only the live ones are saved:
+                // a console whose first send is off and second is on would
+                // otherwise read back with the wrong one on.
+                for (auto* sendXml = child->getFirstChildElement(); sendXml != nullptr;
+                     sendXml = sendXml->getNextElement())
+                {
+                    if (! sendXml->hasTagName ("Send"))
+                        continue;
+
+                    const int index = sendXml->getIntAttribute ("index", -1);
+
+                    if (! juce::isPositiveAndBelow (index, MixerModel::numSends))
+                        continue;
+
+                    const int to = sendXml->getIntAttribute ("to", MixerModel::noSendDestination);
+
+                    // A destination that is not a live strip, or is the strip
+                    // itself, is dropped here rather than refused later: the
+                    // staged value is what the commit loop believes, and a bad
+                    // one would silently fall back to "off" a second time.
+                    if (! juce::isPositiveAndBelow (to, MixerModel::numChannels) || to == channel)
+                        continue;
+
+                    auto& send = parsedSends[(size_t) channel][(size_t) index];
+
+                    send.destination = to;
+                    send.levelDb     = juce::jlimit (-48.0f, 6.0f,
+                                                     (float) sendXml->getDoubleAttribute ("db", -6.0));
+                    send.preInsert   = sendXml->getBoolAttribute ("pre", false);
+                    send.enabled     = sendXml->getBoolAttribute ("on", true);
+                }
             }
             else if (child->hasTagName ("MasterInserts"))
             {
@@ -1754,6 +1826,30 @@ bool fromXmlText (const juce::String& xmlText,
         // map before applying, so `wouldLoop` judges each route against a clean
         // console instead of against the leftovers.
         mixer->restoreRouting (parsedOutputs);
+
+        // Phase 99: sends, AFTER the outputs — a send's loop test walks the
+        // graph the outputs have just established, and judging it against the
+        // previous project's wiring is how a correct route gets refused. Every
+        // strip is visited, not just the live ones: a load replaces the console,
+        // so a send left over from the previous session must go.
+        for (int channel = 0; channel < MixerModel::numChannels; ++channel)
+        {
+            for (int index = 0; index < MixerModel::numSends; ++index)
+            {
+                const auto& staged = parsedSends[(size_t) channel][(size_t) index];
+
+                if (staged.destination == MixerModel::noSendDestination
+                      || ! mixer->setSendDestination (channel, index, staged.destination))
+                {
+                    mixer->setSendDestination (channel, index, MixerModel::noSendDestination);
+                    continue;
+                }
+
+                mixer->setSendLevelDb (channel, index, staged.levelDb);
+                mixer->setSendPreInsert (channel, index, staged.preInsert);
+                mixer->setSendEnabled (channel, index, staged.enabled);
+            }
+        }
 
         // Mono is set both ways, not just when true: a load replaces the
         // console, and a strip that was listening in mono before must not keep

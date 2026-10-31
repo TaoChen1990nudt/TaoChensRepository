@@ -108,6 +108,74 @@ public:
         leftover from the old project was still there. */
     void restoreRouting (const std::array<int, numChannels>& outputs);
 
+    //-- Phase 99: sends ------------------------------------------------------
+    /** Two taps per strip, each with its own destination and level.
+
+        A send is a PARALLEL copy, and that is the whole difference between it
+        and `getChannelOutput`: the strip still reaches its own output too. A
+        reverb on strip 8 that only the drums feed is an output route; the same
+        reverb fed by three strips that ALSO reach the master is three sends.
+        One is a group, the other is a blend, and a console needs both.
+
+        `noSendDestination` is `-1`, NOT the master. "Send to the master" is
+        exactly what the output already does, so allowing it here would be a
+        control that doubles the signal and looks like a bug the moment the
+        user finds it.
+
+        `preInsert` taps the strip before its own insert chain (a monitor send
+        that must not be squashed by the compressor it is being sent to), which
+        costs a second delay line per strip — so it is opt-in per send, and a
+        session that never uses it allocates nothing extra. */
+    static constexpr int numSends = 2;
+    static constexpr int noSendDestination = -1;
+
+    struct Send
+    {
+        int   destination = noSendDestination;
+        float levelDb     = -6.0f;
+        bool  preInsert   = false;
+        bool  enabled     = false;
+
+        /** "Will this put a signal somewhere?" — the single question the
+            renderer and the panel both need answered. */
+        bool isLive() const noexcept { return enabled && destination != noSendDestination; }
+
+        float getGainLinear() const noexcept
+        {
+            if (! isLive())
+                return 0.0f;
+
+            return levelDb <= -48.0f ? 0.0f : std::pow (10.0f, levelDb / 20.0f);
+        }
+    };
+
+    /** Out-of-range channels and indices read back as a dead send rather than
+        as the master's, which is the opposite of what `getInserts` does — a
+        stale index into a send list must not start feeding a bus. */
+    const Send& getSend (int channel, int index) const noexcept;
+
+    /** Points one send at a strip. `noSendDestination` clears it (and switches
+        it off). Returns false — changing nothing — for a dead channel, a
+        destination that is not a live strip, the strip itself, or one that
+        would close a loop; a loop has no render order and this model makes
+        those unreachable instead of resolving them at render time. */
+    bool setSendDestination (int channel, int index, int destination);
+
+    void setSendLevelDb (int channel, int index, float db);
+
+    /** Pre-insert taps are a different point on the same strip, so switching
+        one is a routing change and goes through the same notify. */
+    void setSendPreInsert (int channel, int index, bool shouldBePreInsert);
+
+    /** A send with no destination cannot be switched on: the switch would
+        produce silence and read as broken. Turning one off always works. */
+    bool setSendEnabled (int channel, int index, bool shouldBeEnabled);
+
+    /** True when any strip's send lands on `channel` — the panel prints
+        "效果返回" on a strip that nothing of its own plays into, and that is a
+        question about this console's wiring, not about the layer stack. */
+    bool isSendTarget (int channel) const noexcept;
+
     //-- Phase 25: mono monitoring ---------------------------------------------
     /** Sums the strip's stereo bus to mono before it leaves for the next
         destination. A monitoring control, not a mix control: it is applied
@@ -216,14 +284,30 @@ private:
     /** Drops any route that points at a strip which no longer exists (or at
         the strip itself). Shrinking the console must never leave a dangling
         destination behind: the renderer would then sum into a bus nobody reads
-        and the channel would simply go silent. */
-    void sanitiseOutputs();
+        and the channel would simply go silent.
+
+        Phase 99: "route" now includes sends, so this covers both. A send that
+        dangles is switched off rather than re-pointed — there is no obvious
+        strip it should have meant. */
+    void sanitiseRouting();
+
+    /** Phase 99: can `from` reach `to` by following outputs AND sends?
+
+        `wouldLoop` used to walk a chain — eight strips, each with one
+        destination, so one cursor was enough. A send makes the console a graph:
+        A can send to B while B outputs to A, and a single cursor cannot see
+        that. Breadth-first over a `visited` set, bounded by the strip count so
+        a file that already contains a loop cannot hang the menu. */
+    bool reaches (int from, int to) const noexcept;
 
     std::array<std::array<fx::Settings, numInserts>, numChannels + 1> inserts;
     std::array<AutomationLane, numMasterParameters> masterAutomation;
 
     /** Phase 23: destination strip per channel. `masterChannel` = "主输出". */
     std::array<int, numChannels> channelOutputs {};
+
+    /** Phase 99: the two parallel taps per strip. */
+    std::array<std::array<Send, numSends>, numChannels> channelSends {};
 
     /** Phase 25: mono monitoring per strip. */
     std::array<bool, numChannels> channelMono {};

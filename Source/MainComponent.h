@@ -638,6 +638,14 @@ public:
         harness cannot photograph a desktop window. */
     juce::Image createMixerSnapshot (int width = ui::px (1180), int height = ui::px (300));
 
+    /** Phase 99: the console with sends patched.
+
+        Two strips carry them so the frame shows both forms at once: a plain
+        "→ 5 -6.0" and a pre-insert "... p". Borrows the model the same way the
+        other fixtures do, and gives every send back — the frame after this one
+        is the same console, and a send left behind would show up in it. */
+    juce::Image createSendSnapshot (int width = ui::px (1180), int height = ui::px (300));
+
     /** Phase 43: how tall the file tree's pane is, in device pixels, as the
         splitter currently has it. The self-test asks this instead of measuring
         components: the number IS the setting, and a component's height also

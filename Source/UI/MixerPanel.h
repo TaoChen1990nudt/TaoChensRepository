@@ -236,7 +236,7 @@ public:
 
 private:
     enum class Part { none, strip, fader, pan, mute, solo, mono, output, stripClose,
-                      insertType, insertParam, insertPower };
+                      insertType, insertParam, insertPower, sendTarget };
 
     juce::Rectangle<int> getHeaderArea() const;
 
@@ -274,6 +274,15 @@ private:
     juce::Rectangle<int> getFaderHitBounds (int channel) const;
     juce::Rectangle<int> getPanBounds (int channel) const;
     juce::Rectangle<int> getOutputBounds (int channel) const;
+
+    /** Phase 99: one row per send, stacked under the output row.
+
+        Both are always drawn, even when the strip has nowhere to send: a
+        console where the rows appear and disappear as you patch it is a console
+        whose strip height changes under the mouse. An unused row reads as "—".
+    */
+    static constexpr int numSendRows = MixerModel::numSends;
+    juce::Rectangle<int> getSendRowBounds (int channel, int index) const;
     juce::Rectangle<int> getMuteBounds (int channel) const;
     juce::Rectangle<int> getSoloBounds (int channel) const;
 
@@ -333,6 +342,16 @@ private:
     /** The strip's destination as it should read on the button. */
     juce::String getOutputName (int channel) const;
 
+    /** Phase 99: "this strip also feeds…" — destination, level and tap point in
+        one menu, because a send is one decision with three parts and splitting
+        it across three gestures is how a console ends up with sends nobody can
+        find. */
+    void showSendMenu (int channel, int index, juce::Point<int> screenPos);
+
+    /** "→ 3  -6.0" as it reads on the row, or "—" for a send that is off. */
+    juce::String getSendText (int channel, int index) const;
+    bool isSendRowLive (int channel, int index) const;
+
     void drawStrip (juce::Graphics&, int channel);
     void drawRack (juce::Graphics&);
 
@@ -365,6 +384,11 @@ private:
     Part hoveredPart = Part::none;
     int  hoveredChannel = -1;
     int  hoveredSlot = -1;
+
+    /** Phase 99: which send row the mouse is over (0..numSendRows-1, -1 = none).
+        `hoveredPart` says "a send row"; this says which one, the same way
+        `hoveredSlot` does for the rack. */
+    int  hoveredSend = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MixerPanel)
 };
