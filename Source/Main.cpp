@@ -265,6 +265,12 @@ namespace
         // one frame — the panel half is what no assertion can read back.
         writePng ("-takes", component.createTakeSetSnapshot());
 
+        // P97: the velocity lane, on a phrase with a shape. One bar is selected,
+        // so the gutter readout has a number in it. Last of the main-window
+        // frames because it adds a layer, and every frame above is a session
+        // without that layer in the list.
+        writePng ("-velocity", component.createVelocityLaneSnapshot());
+
         // The audio page lists device, sample rate and buffer size — none of
         // which exist until something is open. Opening a device here only fills
         // that page in; the main window's pixels are already on disk.

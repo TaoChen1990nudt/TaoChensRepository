@@ -48,6 +48,7 @@ void PianoRollComponent::paint (juce::Graphics& g)
     drawToolbar (g);
     drawRuler (g);
     drawKeyboard (g);
+    drawVelocityLane (g);      // Phase 97: the strip between the keys and the bar
     drawScrollBar (g);
 
     // The inline note automation box floats above the notes and is clipped to
@@ -202,12 +203,41 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
 
         // Phase 20: a magnet instead of the 3x3 dot grid. "Snap" is a thing
         // every DAW draws as a magnet, and a dot grid reads as "grid view".
-        drawToolIcon (g, 7, bounds.withTrimmedLeft (ui::pf (7)).withWidth (ui::pf (18)),
+        // Phase 97: this said 7 — the ungroup mark — so the magnet below was
+        // dead code and 解组/吸附 wore the same icon. The button index is the
+        // icon index; they are allowed to differ, but not by accident.
+        drawToolIcon (g, 8, bounds.withTrimmedLeft (ui::pf (7)).withWidth (ui::pf (18)),
                       on ? juce::Colours::white : kText.withAlpha (0.75f));
 
         g.setColour (on ? juce::Colours::white : kText.withAlpha (0.75f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
         g.drawText (utf8 ("吸附"),
+                    bounds.withTrimmedLeft (ui::pf (26)), juce::Justification::centredLeft, false);
+    }
+
+    //-- Phase 97: the velocity lane toggle ----------------------------------
+    // A view toggle, drawn like the magnet's neighbour: lit while the lane is
+    // showing. The lane itself explains what it is the moment it appears, so the
+    // button does not have to.
+    {
+        const auto bounds  = getToolButtonBounds (9).toFloat();
+        const bool hovered = hoveredTool == 9;
+        const bool on      = showVelocityLane;
+
+        g.setColour (on ? tint.withAlpha (0.22f)
+                        : juce::Colours::white.withAlpha (hovered ? 0.12f : 0.05f));
+        g.fillRoundedRectangle (bounds, ui::pf (4));
+
+        g.setColour (on ? tint.withAlpha (0.85f)
+                        : juce::Colours::white.withAlpha (0.20f));
+        g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (4), 1.0f);
+
+        drawToolIcon (g, 9, bounds.withTrimmedLeft (ui::pf (7)).withWidth (ui::pf (18)),
+                      on ? juce::Colours::white : kText.withAlpha (0.75f));
+
+        g.setColour (on ? juce::Colours::white : kText.withAlpha (0.75f));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
+        g.drawText (utf8 ("力度"),
                     bounds.withTrimmedLeft (ui::pf (26)), juce::Justification::centredLeft, false);
     }
 
@@ -1533,6 +1563,25 @@ void PianoRollComponent::drawToolIcon (juce::Graphics& g, int toolIndex,
 
             g.fillRoundedRectangle (juce::Rectangle<float> (leftLeg - 2.6f, poleTop, 5.2f, poleH), 0.8f);
             g.fillRoundedRectangle (juce::Rectangle<float> (rightLeg - 2.6f, poleTop, 5.2f, poleH), 0.8f);
+            break;
+        }
+
+        case 9:     // Phase 97: velocity — three bars of different heights
+        {
+            // The lane's own picture in 16 px: bars standing on a common floor,
+            // short-tall-medium so it does not read as a bar chart with a
+            // pattern. Drawn from the baseline up, which is the same orientation
+            // the lane uses.
+            const float floorY = box.getY() + 13.0f;
+            const float xs[3]  { box.getX() + 3.0f, box.getX() + 7.0f, box.getX() + 11.0f };
+            const float hs[3]  { 4.5f, 10.0f, 7.0f };
+
+            for (int i = 0; i < 3; ++i)
+                g.fillRoundedRectangle (juce::Rectangle<float> (xs[i], floorY - hs[i],
+                                                                2.6f, hs[i]), 0.8f);
+
+            g.fillRect (juce::Rectangle<float> (box.getX() + 1.5f, floorY,
+                                                box.getWidth() - 3.0f, 1.0f));
             break;
         }
 

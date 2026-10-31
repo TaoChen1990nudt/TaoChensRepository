@@ -140,6 +140,17 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
     边沿就有包络，把 fade 改成 0 渲染跳变只从 0.00040 变 0.00046；判据要看**块本身**（提前量
     与两端曲线值 0）。
 
+30. **一根柱子只有一个矩形，一次拖动只算一个 delta**（P97）：`Model/VelocityLane.h` 是唯一的
+    数值规则（**线性轴**不是 dB / 不是平方律、**地板 0.02 不是 0**——0 是「听不见」，那是静音与
+    删除的语义）。`velocityBarFor` 是唯一的几何：paint / `velocityBarAt` / `marqueeInLane` 的命中
+    都问它，别处不许再算一遍宽度或高度。**按下记的是 delta**（`velocityOriginals` 存下每根的
+    原值，拖动逐根 `shifted`），绝对值会让框选一排后的第一个像素把重音削平。**lane 里的空白是
+    框选区**：`marqueeInLane` 一旦为真的，`hitsInMarquee` 只收柱子**并直接返回**，带子不该抓到
+    网格里的块。力度**没有新数据通路**——改的是 `NoteEvent::velocity`，走 `notesChanged()` 与
+    鼠标手势的撤销，`formatVersion` 不动。**快照夹具必须把它改过的状态还回去**（活动层 / 混合
+    选区 / 滚动 / lane 开关）：`setSelection` 与 `setSampleSelection` 各清另一半，还原要用
+    `setMixedSelection` 一次给。
+
 ## 索引
 - 目录结构、构建命令（含 `unset *proxy*`）、CI 四条门禁、`formatVersion` 逐版字段、自检夹具
   —— 全在 `STATUS.md` 与 `REFERENCE.md`，本文件不重复。

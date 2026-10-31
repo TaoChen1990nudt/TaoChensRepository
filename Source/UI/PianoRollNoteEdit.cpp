@@ -741,6 +741,20 @@ PianoRollComponent::hitsInMarquee (juce::Rectangle<float> marquee) const
     // once for blocks — was the marquee answering a question nobody asked.
     const int index = stack.getActiveLayerIndex();
 
+    // Phase 97: a band that started in the velocity lane sweeps BARS, not
+    // rectangles — and therefore catches no blocks, because a block has no
+    // velocity to show. The y of the band is still meaningful there: the bars
+    // stand at different heights, so "the loud half of this bar" is a sweep
+    // somebody may actually want.
+    if (marqueeInLane)
+    {
+        for (const auto& note : active->getNotes())
+            if (velocityBarFor (note).intersects (marquee))
+                hits.first.push_back (note.id);
+
+        return hits;
+    }
+
     for (const auto& note : active->getNotes())
         if (getNoteBounds (note).intersects (marquee))
             hits.first.push_back (note.id);

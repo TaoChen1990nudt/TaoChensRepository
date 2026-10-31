@@ -477,8 +477,43 @@ juce::Rectangle<float> PianoRollComponent::getGridArea() const
     return getLocalBounds()
              .withTrimmedLeft (keyboardWidth)
              .withTrimmedTop (toolbarHeight + rulerHeight)
-             .withTrimmedBottom (scrollbarHeight)
+             .withTrimmedBottom (scrollbarHeight + getVelocityLaneArea().getHeight())
              .toFloat();
+}
+
+
+juce::Rectangle<int> PianoRollComponent::getVelocityLaneArea() const
+{
+    if (! showVelocityLane)
+        return {};
+
+    // Never more than a third of the component: the lane is a tool, and a tool
+    // that can eat the sheet it edits is worse than a tool that gets shorter.
+    const int height = juce::jmin (velocityLaneHeight,
+                                   juce::jmax (0, getHeight() / 3));
+
+    if (height <= 0)
+        return {};
+
+    auto strip = getLocalBounds().withTrimmedBottom (scrollbarHeight);
+
+    return strip.removeFromBottom (height);
+}
+
+
+void PianoRollComponent::setVelocityLaneVisible (bool shouldShow)
+{
+    if (showVelocityLane == shouldShow)
+        return;
+
+    showVelocityLane = shouldShow;
+
+    // Every y in this view is derived from the grid area, so growing the lane
+    // moves the music up. The vertical scroll has to be re-clamped or the pitch
+    // the view was showing slides under the ruler.
+    clampScroll();
+    updateCursor();
+    repaint();
 }
 
 
@@ -551,8 +586,12 @@ void PianoRollComponent::setBeatsPerBar (int beats)
 
 juce::Rectangle<int> PianoRollComponent::getKeyboardArea() const
 {
+    // Phase 97: the keys stop above the velocity lane's gutter. They used to
+    // run to the scrollbar, which was the same pixels until the lane existed —
+    // and a keyboard painted over the lane's label is a "力度" you can play.
     return getLocalBounds().withTrimmedTop (toolbarHeight + rulerHeight)
-                           .withTrimmedBottom (scrollbarHeight)
+                           .withTrimmedBottom (scrollbarHeight
+                                                 + getVelocityLaneArea().getHeight())
                            .withWidth (keyboardWidth);
 }
 
@@ -886,6 +925,28 @@ void PianoRollComponent::setScrollBeats (double beats)
     // grow above is the other half of the same sentence — the roll extends when
     // you push into nowhere, and it stops being long once you leave.
     trimTimelineToView();
+
+    repaint();
+
+    if (onScrollChanged != nullptr)
+        onScrollChanged();
+}
+
+
+void PianoRollComponent::setTopPitch (int pitch)
+{
+    // The vertical twin of `setScrollBeats`, and for the same reason: without it
+    // nothing outside could say "make sure THIS pitch is on screen". `resized()`
+    // and the mouse wheel both write `scrollY`, so a caller that had to point a
+    // camera at a note could only hope the roll happened to be somewhere useful.
+    const float contentHeight = (float) numPitches * keyHeight;
+    const float maxScrollY = juce::jmax (0.0f, contentHeight - getGridArea().getHeight());
+    const float wanted = juce::jlimit (0.0f, maxScrollY, pitchToContentY (pitch));
+
+    if (juce::approximatelyEqual (wanted, scrollY))
+        return;
+
+    scrollY = wanted;
 
     repaint();
 

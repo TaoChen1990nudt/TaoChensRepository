@@ -47,6 +47,12 @@ public:
     static constexpr int    rulerHeight   = ui::px (32);
     static constexpr int    toolbarHeight = ui::px (28);
     static constexpr int    scrollbarHeight = ui::px (14);
+
+    /** Phase 97: the velocity lane, when it is shown, sits between the grid and
+        the scrollbar and takes this much of the height. A UI length, so it
+        grows with `ui::scale` like every other row; the MUSIC above it does not
+        — the lane steals pixels from the note area, never from the scale. */
+    static constexpr int    velocityLaneHeight = ui::px (56);
     /** A pitch row. Grows with the UI scale: the notes get thicker, the music
         does not get wider — `beatWidth` below is deliberately left alone. */
     static constexpr float  keyHeight     = ui::sp (14.0f);
@@ -145,7 +151,7 @@ public:
         hours at 120 BPM — "unlimited" in any practical sense. */
     static constexpr double maxTimelineBeats = 10000.0;
 
-    static constexpr int    numToolButtons = 9;      // 5 tools + copy-state + group + ungroup + snap
+    static constexpr int    numToolButtons = 10;     // 5 tools + copy-state + group + ungroup + snap + velocity lane
 
     //-- Phase 7: tools -------------------------------------------------------
     enum class Tool
@@ -282,6 +288,19 @@ public:
 
     double getScrollBeats() const noexcept { return scrollBeats; }
     void   setScrollBeats (double beats);
+
+    /** Phase 97: the vertical twin of `setScrollBeats`.
+
+        The roll has two axes and only one of them could be addressed from
+        outside, so anything that had to GUARANTEE a pitch was on screen —
+        a fixture that photographs the lane, a window that opens on a note the
+        user just recorded — had to hope the view had not been scrolled
+        somewhere else first. `pitch` lands at the top of the grid. */
+    void setTopPitch (int pitch);
+
+    /** The pitch on the top row — the read side of `setTopPitch`, and the only
+        way to put the view back where you found it. */
+    int getTopPitch() const noexcept { return contentYToPitch (scrollY); }
 
     /** How many beats fit in the grid at the current width. */
     double getVisibleBeats() const;
@@ -1439,6 +1458,47 @@ public:
 
     std::function<void (const LoopRegion&)> onLoopRegionChanged;
 
+    //-- Phase 97: the velocity lane -----------------------------------------
+    /** A bar per note along the bottom of the sheet: x is where the note
+        starts, height is how hard it was struck.
+
+        It is a VIEW of `NoteEvent::velocity`, not a second copy of it. Editing
+        here writes the note and fires `notesChanged`, which is the data path
+        the grid and the engine already use — so nothing new to save, nothing
+        to reconcile on load, and undo works because the press-release bracket
+        already makes one step out of one gesture.
+
+        Hidden until asked for. The note area is what is being read, and a lane
+        that announces itself by taking 56 pixels off every session had better
+        be a choice; the toolbar's 力度 button is the way in.
+
+        Only the ACTIVE layer gets bars. The lane is about the sheet you are
+        editing — a bar you cannot drag is a bar that lies about being one. */
+    bool isVelocityLaneVisible() const noexcept { return showVelocityLane; }
+    void setVelocityLaneVisible (bool shouldShow);
+
+    /** The whole strip, gutter included. Empty when the lane is hidden. */
+    juce::Rectangle<int> getVelocityLaneArea() const;
+
+    /** Where a note's bar is, in local coordinates. Empty when the lane is
+        hidden, the note does not exist, or it is not on the active layer.
+
+        Paint, hit test and marquee all ask THIS. A bar you can see and a bar
+        you can grab are one rectangle or they are two bugs. */
+    juce::Rectangle<float> getVelocityBarBounds (int noteId) const;
+
+    /** Phase 97: the velocity drag without a MouseEvent, the same shape as the
+        loop's test hook — press decides which gesture it is, the drag applies
+        it, and here that is the whole story (a velocity edit reports itself as
+        it goes, not on release).
+
+        Named by NOTE and given both ends of the drag, because the press point
+        IS the reference the delta is measured from: "press here and let go at
+        the same pixel" has to be expressible, or "a drag that goes nowhere
+        changes nothing" cannot be tested at all. The press still goes through
+        the real handler, so the bar under it is found by the real hit test. */
+    void simulateVelocityDragForTest (int noteId, float fromY, float toY);
+
     double snapBeatForTest (double beats) const { return snapBeat (beats); }
 
     /** Phase 68: one line's weight, asked from outside. Deciding "bar or beat"
@@ -1659,7 +1719,8 @@ private:
                           scrollThumb, automationPoint, resizeSample, resizeSampleLeft,
                           resizeSampleTop, resizeSampleBottom,
                           rulerScrub, rulerZoom, groupAutomationPoint, sampleCurvePoint,
-                          loopStart, loopEnd, loopMove, loopNew };
+                          loopStart, loopEnd, loopMove, loopNew,
+                          velocityDrag };
 
     /** Phase 72: which edge of a block the pointer is on. Two of them trim the
         LENGTH (head / tail) and two change how many pitch lanes the block
@@ -1701,6 +1762,23 @@ private:
     int    pitchAtScreenY (float y) const noexcept;
     float  screenXForBeat (double beat) const noexcept;
     double beatAtScreenX (float x) const noexcept;
+
+    //-- Phase 97: the velocity lane -----------------------------------------
+    /** The part of the strip the bars live in: the grid's x range, with a pixel
+        of air above and below so a bar at 1.0 is not welded to the border and a
+        bar at the floor still has something to grab. */
+    juce::Rectangle<float> velocityTrackArea() const;
+
+    juce::Rectangle<float> velocityBarFor (const NoteEvent&) const;
+
+    /** The bar under the pointer, or -1. Walks the paint order BACKWARDS, so
+        the bar you grab is the bar you can see — bars at the same beat on
+        different pitches sit exactly on top of each other. */
+    int  velocityBarAt (juce::Point<float> position) const;
+
+    void handleVelocityPress (juce::Point<float> position, juce::ModifierKeys mods);
+    void applyVelocityDragToScreenY (float screenY);
+    void drawVelocityLane (juce::Graphics&);
 
     /** Phase 67: one ruler-scrub step, in screen pixels.
 
@@ -2264,6 +2342,27 @@ private:
         to the selection instead of replacing it. Captured at the press because
         the modifier is already back up by the time the release reads it. */
     bool     marqueeAdditive = false;
+
+    //-- Phase 97: the velocity lane -----------------------------------------
+    bool showVelocityLane = false;
+
+    /** The velocities this gesture is moving, captured at the press.
+
+        Captured as VALUES rather than accumulated as a delta: the drag then
+        asks "where was this bar when I grabbed it, plus how far has the pointer
+        travelled", so sixty mouse moves produce the same number as one and a
+        drag that returns to its starting height restores the exact velocities
+        it started with.
+
+        The grabbed note is FIRST — the readout in the gutter names it. */
+    struct VelocityOriginal { int id; float velocity; };
+    std::vector<VelocityOriginal> velocityOriginals;
+    float velocityDragAnchorY = 0.0f;
+
+    /** The band started in the lane, so it selects bars instead of rectangles.
+        Captured at the press for the same reason `marqueeAdditive` is: by the
+        time the release runs, the origin is gone. */
+    bool  marqueeInLane = false;
 
     float  scrollY     = 0.0f;
     double scrollBeats = 0.0;

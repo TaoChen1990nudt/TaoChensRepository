@@ -10,6 +10,7 @@
 
 #include "MainComponent.h"
 #include "Model/Comp.h"
+#include "Model/VelocityLane.h"
 #include "Model/Quantize.h"
 #include "Model/SamplePath.h"
 #include "Util/SharedRules.h"
@@ -3256,7 +3257,7 @@ juce::String MainComponent::runSelfTest()
                      : juce::String ("no note"));
         }
 
-        //-- Phase 20: the toolbar has to fit its buttons (9 since Phase 51) ---
+        //-- Phase 20: the toolbar has to fit its buttons (10 since Phase 97) ---
         {
             LayerStack t;
             RackModel  r;
@@ -3271,12 +3272,14 @@ juce::String MainComponent::runSelfTest()
                 if (roll.getToolButtonBounds (i).getRight() > roll.getToolButtonBounds (i + 1).getX())
                     overlap = true;
 
-            check ("Every toolbar button owns its own pixels (knife included now)",
+            check ("Every toolbar button owns its own pixels (the velocity toggle included)",
                    ! overlap
-                     && PianoRollComponent::numToolButtons == 9
-                     && roll.getToolbarArea().contains (roll.getToolButtonBounds (8)),
+                     && PianoRollComponent::numToolButtons == 10
+                     && roll.getToolbarArea().contains (
+                              roll.getToolButtonBounds (PianoRollComponent::numToolButtons - 1)),
                    juce::String (PianoRollComponent::numToolButtons) + utf8 (" 个按钮，右端 ")
-                     + juce::String (roll.getToolButtonBounds (8).getRight())
+                     + juce::String (roll.getToolButtonBounds (
+                                       PianoRollComponent::numToolButtons - 1).getRight())
                      + " / 栏宽 " + juce::String (roll.getToolbarArea().getWidth()));
 
             // Phase 21: 编组 / 解组 are one pair, so the magnet moved past
@@ -9921,7 +9924,7 @@ juce::String MainComponent::runSelfTest()
         pianoRoll.setTool (PianoRollComponent::Tool::knife);
 
         check ("The knife is the toolbar's fifth tool button",
-               PianoRollComponent::numToolButtons == 9
+               PianoRollComponent::numToolButtons == 10
                  && pianoRoll.getToolButtonBounds (4).getX()
                       > pianoRoll.getToolButtonBounds (3).getRight()
                  && pianoRoll.getToolButtonBounds (5).getX()
@@ -18615,6 +18618,280 @@ juce::String MainComponent::runSelfTest()
                                         : juce::String ((int) (bc != nullptr && bc->isComp())));
         }
     }
+
+        //== Phase 97: 力度 lane ==============================================
+        // 三段，各一个夹具：lane 占多少像素、拖动改的是什么数、以及它是不是
+        // 只是「把同一个数换个地方看」——没有新数据通路，没有新文件字段。
+        {
+            LayerStack t97;
+            RackModel  rack97;
+            PianoRollComponent roll97 (t97, rack97);
+            roll97.setSize (1400, 520);
+            t97.addLayer (utf8 ("力度"), palette::layer1);
+
+            auto* layer97 = t97.getActiveLayer();
+
+            const float closedHeight = roll97.getGridBounds().getHeight();
+            const float wantClosed   = (float) (520 - PianoRollComponent::toolbarHeight
+                                                    - PianoRollComponent::rulerHeight
+                                                    - PianoRollComponent::scrollbarHeight);
+
+            check (utf8 ("力度 lane 默认不出现：网格一格不少，lane 也没有地方"),
+                   ! roll97.isVelocityLaneVisible()
+                     && roll97.getVelocityLaneArea().isEmpty()
+                     && std::abs (closedHeight - wantClosed) < 0.5f,
+                   juce::String (closedHeight, 1) + " / " + juce::String (wantClosed, 1));
+
+            roll97.setVelocityLaneVisible (true);
+
+            const auto lane97 = roll97.getVelocityLaneArea();
+            const auto grid97 = roll97.getGridBounds();
+
+            check (utf8 ("打开后网格正好让出一条 lane，而且它就在滚动条上面"),
+                   lane97.getHeight() == PianoRollComponent::velocityLaneHeight
+                     && std::abs ((closedHeight - grid97.getHeight())
+                                    - (float) lane97.getHeight()) < 0.5f
+                     && lane97.getBottom() == 520 - PianoRollComponent::scrollbarHeight
+                     && std::abs (grid97.getBottom() - (float) lane97.getY()) < 0.5f,
+                   juce::String (lane97.getHeight()) + " px / "
+                     + juce::String (grid97.getBottom(), 1) + " → "
+                     + juce::String (lane97.getY()));
+
+            const int note97 = roll97.addNoteAt (4.0, 60);
+            auto* noteA97 = layer97 != nullptr ? layer97->findNote (note97) : nullptr;
+
+            if (noteA97 != nullptr)
+            {
+                noteA97->velocity = 1.0f;
+                const auto fullBar = roll97.getVelocityBarBounds (note97);
+
+                noteA97->velocity = velocitylane::floor;
+                const auto floorBar = roll97.getVelocityBarBounds (note97);
+
+                check (utf8 ("满力度顶到 lane 上沿；最轻的那根还留 2 px 的脚"),
+                       std::abs (fullBar.getY() - (float) lane97.getY()) < 5.0f
+                         && std::abs (floorBar.getBottom() - (float) lane97.getBottom()) < 5.0f
+                         && floorBar.getHeight() >= 2.0f,
+                       juce::String (fullBar.getY(), 1) + " / "
+                         + juce::String (floorBar.getHeight(), 1));
+
+                noteA97->velocity    = 0.8f;
+                noteA97->lengthBeats = 0.05;
+                const float narrow = roll97.getVelocityBarBounds (note97).getWidth();
+
+                noteA97->lengthBeats = 8.0;
+                const float wide = roll97.getVelocityBarBounds (note97).getWidth();
+
+                check (utf8 ("柱子最窄 3 px、最宽 16 px：短音符点得到，长音符不占满一条"),
+                       std::abs (narrow - ui::pf (3.0f)) < 0.01f
+                         && std::abs (wide - ui::pf (16.0f)) < 0.01f,
+                       juce::String (narrow, 2) + " / " + juce::String (wide, 2));
+
+                roll97.setVelocityLaneVisible (false);
+
+                check (utf8 ("关掉 lane：网格长回去，柱子也答不出坐标了"),
+                       std::abs (roll97.getGridBounds().getHeight() - closedHeight) < 0.5f
+                         && roll97.getVelocityBarBounds (note97).isEmpty()
+                         && roll97.getVelocityLaneArea().isEmpty(),
+                       juce::String (roll97.getGridBounds().getHeight(), 1));
+            }
+        }
+
+        //-- 拖动：一根带一排，差不动；到头逐根夹紧 --------------------------
+        {
+            LayerStack t97b;
+            RackModel  rack97b;
+            PianoRollComponent roll97b (t97b, rack97b);
+            roll97b.setSize (1400, 520);
+            t97b.addLayer (utf8 ("力度"), palette::layer1);
+            roll97b.setVelocityLaneVisible (true);
+
+            auto* layer97b = t97b.getActiveLayer();
+            const auto lane97b = roll97b.getVelocityLaneArea();
+
+            const int loudId  = roll97b.addNoteAt (4.0, 60);
+            const int quietId = roll97b.addNoteAt (6.0, 64);
+
+            auto* loud  = layer97b != nullptr ? layer97b->findNote (loudId)  : nullptr;
+            auto* quiet = layer97b != nullptr ? layer97b->findNote (quietId) : nullptr;
+
+            if (loud != nullptr && quiet != nullptr)
+            {
+                loud->velocity  = 0.7f;
+                quiet->velocity = 0.3f;
+
+                check (utf8 ("力度 lane 不改工程格式：还是 v31（力度本来就在文件里）"),
+                       project::formatVersion == 31,
+                       juce::String (project::formatVersion));
+
+                roll97b.setSelection ({ loudId, quietId });
+
+                const float grabA = roll97b.getVelocityBarBounds (loudId).getCentreY();
+
+                roll97b.simulateVelocityDragForTest (loudId, grabA, grabA - 10.0f);
+
+                check (utf8 ("选中两根拖一根：两根一起变响，0.4 的差一点没动"),
+                       loud->velocity > 0.7f && quiet->velocity > 0.3f
+                         && std::abs ((loud->velocity - quiet->velocity) - 0.4f) < 1.0e-5f,
+                       juce::String (loud->velocity, 4) + " / "
+                         + juce::String (quiet->velocity, 4));
+
+                check (utf8 ("按在已选中的柱子上不重写选区（否则一根就带不动一排）"),
+                       roll97b.getSelection().size() == 2,
+                       juce::String ((int) roll97b.getSelection().size()));
+
+                // 按下点和松手点同一个像素 = 一个数都不变。这条咬死「按指针高度
+                // 直接赋值」的实现：那会把 0.9 改成柱心对应的 0.45。
+                const float heldLoud  = loud->velocity;
+                const float heldQuiet = quiet->velocity;
+                const float grabB     = roll97b.getVelocityBarBounds (loudId).getCentreY();
+
+                roll97b.simulateVelocityDragForTest (loudId, grabB, grabB);
+
+                check (utf8 ("原地按下再松手：力度一位都不变（拖动是差，不是赋值）"),
+                       loud->velocity == heldLoud && quiet->velocity == heldQuiet,
+                       juce::String (loud->velocity, 6) + " / " + juce::String (heldLoud, 6));
+
+                const float grabC = roll97b.getVelocityBarBounds (loudId).getCentreY();
+
+                roll97b.simulateVelocityDragForTest (loudId, grabC, (float) lane97b.getY() - 40.0f);
+
+                check (utf8 ("拖出上沿：两根都到 1.0（夹紧是逐根的，差被压平）"),
+                       loud->velocity == 1.0f && quiet->velocity == 1.0f,
+                       juce::String (loud->velocity, 4) + " / "
+                         + juce::String (quiet->velocity, 4));
+
+                const float grabD = roll97b.getVelocityBarBounds (loudId).getCentreY();
+
+                roll97b.simulateVelocityDragForTest (loudId, grabD,
+                                                     (float) lane97b.getBottom() + 40.0f);
+
+                // 「地板」不是 0：0 是「听不见」，那该用静音或删除表达。所以这条
+                // 断言两头都要：落在最底下，而且那个最底下不是无声。
+                check (utf8 ("拖出下沿：落到地板，而且地板不是 0（0 是听不见，那是静音的事）"),
+                       loud->velocity == velocitylane::floor
+                         && quiet->velocity == velocitylane::floor
+                         && velocitylane::floor > 0.0f,
+                       juce::String (loud->velocity, 4) + " / floor "
+                         + juce::String (velocitylane::floor, 4));
+
+                roll97b.setSelection ({ loudId });
+
+                const float grabE = roll97b.getVelocityBarBounds (loudId).getCentreY();
+
+                roll97b.simulateVelocityDragForTest (loudId, grabE, grabE - 12.0f);
+
+                check (utf8 ("只选一根的时候另一根留在原地"),
+                       loud->velocity > velocitylane::floor
+                         && quiet->velocity == velocitylane::floor,
+                       juce::String (loud->velocity, 4) + " / "
+                         + juce::String (quiet->velocity, 4));
+
+                //-- 框选：lane 里的带子按柱子选 -------------------------
+                roll97b.setSelection ({});
+                const float bandX = roll97b.screenXForBeatForTest (3.0);   // 3 拍上没有柱子
+                const float bandR = roll97b.screenXForBeatForTest (5.0);
+
+                roll97b.simulatePressForTest ({ bandX, (float) lane97b.getCentreY() }, {}, 1);
+                roll97b.simulateMarquee ({ bandX, (float) lane97b.getY() + 2.0f,
+                                           bandR - bandX, (float) lane97b.getHeight() - 4.0f });
+
+                const auto swept = roll97b.getSelection();
+
+                check (utf8 ("lane 里的框选按柱子选：3–5 拍只抓到拍 4 那一个"),
+                       swept.size() == 1 && swept.front() == loudId,
+                       juce::String ((int) swept.size())
+                         + " / " + juce::String (swept.empty() ? -1 : swept.front()));
+            }
+        }
+
+        //-- 编组：按一个组员的柱子 = 整次出现一起动 --------------------------
+        {
+            LayerStack t97c;
+            RackModel  rack97c;
+            PianoRollComponent roll97c (t97c, rack97c);
+            roll97c.setSize (1400, 520);
+            t97c.addLayer (utf8 ("力度"), palette::layer1);
+            roll97c.setVelocityLaneVisible (true);
+
+            auto* layer97c = t97c.getActiveLayer();
+
+            const int aId = roll97c.addNoteAt (4.0, 60);
+            const int bId = roll97c.addNoteAt (4.5, 64);
+            const int cId = roll97c.addNoteAt (8.0, 67);       // 组外的旁观者
+
+            if (layer97c != nullptr)
+            {
+                const int gid = layer97c->addGroup (utf8 ("组"), groupPalette::group1);
+                layer97c->assignNotesToGroup ({ aId, bId }, gid);
+
+                auto* an = layer97c->findNote (aId);
+                auto* bn = layer97c->findNote (bId);
+                auto* cn = layer97c->findNote (cId);
+
+                if (an != nullptr && bn != nullptr && cn != nullptr)
+                {
+                    an->velocity = 0.6f;
+                    bn->velocity = 0.6f;
+                    cn->velocity = 0.6f;
+
+                    roll97c.setSelection ({ aId });
+
+                    // 按的是 b（组员），选区只有 a：整次出现仍然要一起动。
+                    const float grabG = roll97c.getVelocityBarBounds (bId).getCentreY();
+
+                    roll97c.simulateVelocityDragForTest (bId, grabG, grabG - 14.0f);
+
+                    check (utf8 ("按组员的柱子：整次出现一起动，组外那个一点不动"),
+                           an->velocity > 0.6f && bn->velocity > 0.6f
+                             && cn->velocity == 0.6f
+                             && std::abs (an->velocity - bn->velocity) < 1.0e-6f,
+                           juce::String (an->velocity, 4) + " / " + juce::String (bn->velocity, 4)
+                             + " / " + juce::String (cn->velocity, 4));
+
+                    check (utf8 ("而且选区就是整个出现（两个组员）"),
+                           roll97c.getSelection().size() == 2,
+                           juce::String ((int) roll97c.getSelection().size()));
+                }
+            }
+        }
+
+        //-- 存盘：力度本来就是音符的字段，这一轮没有新数据通路 -------------
+        // 这条也在替 lane 说话：它能改的数就是文件里那个数，改完存得下、读得回，
+        // 所以「加一条力度 lane」不需要 v32。
+        {
+            LayerStack t97e;
+            RackModel  rack97e;
+            t97e.addLayer (utf8 ("力度"), palette::layer1);
+
+            auto* layer97e = t97e.getLayer (0);
+
+            NoteEvent n97e;
+            n97e.startBeat = 4.0;
+            n97e.lengthBeats = 1.0;
+            n97e.pitch = 60;
+            n97e.velocity = 0.42f;
+
+            const int id97e = layer97e->addNote (n97e);
+
+            const auto xml97e = project::toXmlText (t97e, rack97e, 120.0);
+
+            LayerStack back97e;
+            RackModel  backRack97e;
+            double     bpm97e = 0.0;
+            juce::String err97e;
+
+            const bool ok97e = project::fromXmlText (xml97e, back97e, backRack97e, bpm97e, err97e);
+
+            const auto* backLayer97e = back97e.getLayer (0);
+            const auto* backNote97e  = backLayer97e != nullptr ? backLayer97e->findNote (id97e) : nullptr;
+
+            check (utf8 ("改过的力度存得下、读得回（lane 没有新数据通路）"),
+                   ok97e && backNote97e != nullptr
+                     && std::abs (backNote97e->velocity - 0.42f) < 1.0e-6f,
+                   err97e.isNotEmpty() ? err97e
+                                       : juce::String (backNote97e != nullptr ? backNote97e->velocity : -1.0f, 3));
+        }
 
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after

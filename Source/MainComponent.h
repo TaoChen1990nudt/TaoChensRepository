@@ -427,6 +427,16 @@ public:
         whose only job is to tidy up after a photograph. */
     juce::Image createTakeSetSnapshot();
 
+    /** Phase 97: the velocity lane, on a layer whose notes have a SHAPE.
+
+        A uniform phrase would photograph as a row of equal bars, which is
+        exactly what the frame has to argue against: the lane's claim is that
+        the bar height is the number the engine reads, and that reading it takes
+        one glance. So the fixture writes a crescendo and a decrescendo, selects
+        one note (the gutter readout earns its keep only with a selection), and
+        leaves the lane open for the rest of the run. */
+    juce::Image createVelocityLaneSnapshot();
+
     /** Phase 54: a note selection and the cards it plays on, in one frame.
 
         The whole point of the mark is that it is NOT the spotlight — the grid

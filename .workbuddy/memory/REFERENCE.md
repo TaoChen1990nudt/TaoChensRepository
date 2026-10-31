@@ -1147,8 +1147,8 @@ build Release → `--snapshot selftest.png`。
 - 替换后不用手动 republish：`AudioEngine` 自己是 rack 的 listener，`rackChanged()` → `republish()`。
   这条不成立时"换音源没声音变化"就会回来。
 
-## 钢琴窗的文件布局（P85：一个类，十二个 TU）
-拆的是**文件边界**，不是类：`PianoRollComponent` 的 316 个成员函数按主题分开定义在
+## 钢琴窗的文件布局（P85：一个类，十三个 TU）
+拆的是**文件边界**，不是类：`PianoRollComponent` 的成员函数按主题分开定义在
 `Source/UI/PianoRoll*.cpp` 里。C++ 允许一个类的成员函数分散在多个翻译单元，所以不需要
 friend、不需要改一行头文件、也不存在"两个对象互相问状态"的问题。
 
@@ -1165,19 +1165,43 @@ friend、不需要改一行头文件、也不存在"两个对象互相问状态"
 | `PianoRollClipboard.cpp` | 音符/采样/编组的复制粘贴、`GroupClip`、`duplicate*` |
 | `PianoRollSamples.cpp` | 采样块编辑：窗口、裁切、拆分、反相、拉伸、挂载、删除 |
 | `PianoRollSampleDraw.cpp` | 采样块绘制、拖放预览、采样块菜单 |
+| `PianoRollVelocity.cpp` | **P97** 力度 lane：条宽/条高、命中、按下与拖动、lane 内的框选、lane 的绘制与读数 |
 | `PianoRollInternals.h` | **唯一**的共享层：调色板别名、菜单 id 段、`boldFont` / `groupLabelText` / `curveCellFitsText` / `addCurveItems` / `neutralCurveValue` / `uniqueGroupName` 等 |
 
 - 共享层放在 `namespace atomic::roll`，**每个定义都 `inline`**，每个 TU 顶部一句
-  `using namespace roll;`。链接器合并 inline 定义，所以十一份 include 只有一份代码。
+  `using namespace roll;`。链接器合并 inline 定义，所以十几份 include 只有一份代码。
   **不要退回匿名 namespace 写进头文件**：那是每个 TU 各一份副本，且 MSVC 会为没用到的
   静态函数准备 C4505 警告位。
 - 仍然留在各自 cpp 里的匿名 namespace：画笔/橡皮光标图（只有 core 用）、
   `membersDescription`（只有剪贴板用）、`subEnvelope`（只有 `splitSamplesAt` 用）。
   **判断标准是"几个 TU 用"**，不是"它看起来像工具函数"。
 - 新增一个函数时先问：它在哪个主题里？跨主题才进 internals。**放进 internals 的代价是
-  改它要重编十一个 TU**（实测约为单文件的三倍），所以宁可留在主题文件里。
+  改它要重编十三个 TU**（实测约为单文件的三倍），所以宁可留在主题文件里。
 - 改一个主题文件 ≈ 1,000–1,700 行重编（实测 1,028 行 ≈ 22 秒，JUCE 模板的实例化占绝大部分），
-  改 internals ≈ 十一个全编。这就是这次拆分唯一的收益，别把它再长回去。
+  改 internals ≈ 十三个全编。这就是这次拆分唯一的收益，别把它再长回去。
+
+## 力度 lane（P97）
+- **数值规则全在 `Model/VelocityLane.h`**（`namespace velocitylane`，header-only）：
+  `clamp`（`[floor, 1]`）、`shifted(from, delta)`、`fromY / toY`（`box` 顶 = 1、底 = floor）。
+  地板是 `0.02`。
+- **轴是线性的**，不是 dB、也不是 MIDI 的平方律。听感的高端全挤在 0.9–1.0，曲线轴会把半屏
+  分给听不出差别的地方，而拖动要的正是"中间这段能细分"。
+- **地板不是 0**：0 在音乐里等于"没有这个音"，那是静音（mute）与删除的语义。柱子最矮 2 px。
+- **一次拖动记 delta，不记绝对值**：按下时把每个参与音符的 `velocity` 存进 `velocityOriginals`，
+  拖动只算 `delta = (velocityDragAnchorY - screenY) / track.getHeight()`，逐根 `shifted` 再夹紧。
+  绝对值会让"框选一排再拖一下"变成"把一排全设成指针下面那个数"，第一个像素就把重音削平。
+- **几何只有一个**：`velocityBarFor (note)`；`right = jmax(head + 3px, jmin(tail, head + 16px))`，
+  `top = toY (velocity)`，`height = jmax (2px, …)`。paint、`velocityBarAt`、`hitsInMarquee` 全问它
+  ——"画出来的 == 抓得到的 == 框得到的"不是三处实现对齐，是一处实现被问三次。
+- **lane 里的空白是框选区**：按下进 `marquee` 并置 `marqueeInLane`；`hitsInMarquee` 在这个模式
+  下**只收柱子并直接返回**，所以 lane 里的带子抓不到网格里的音符与块。
+- **状态**：`showVelocityLane`（默认关）、`velocityOriginals`、`velocityDragAnchorY`、
+  `marqueeInLane`。`getVelocityLaneArea()` 隐藏时返回空矩形，`getGridArea()` 与
+  `getKeyboardArea()` 都从它让高度——**lane 占多高只有一处算**。
+- **没有新数据通路**：改的就是 `NoteEvent::velocity`，通知走 `notifyNotesChanged()`，撤销靠鼠标
+  手势的 `beginUndoGesture/endUndoGesture`，编组靠 `expandToWholeOccurrences`。`formatVersion` 不动。
+- **纵向定位**：`setTopPitch (pitch)` / `getTopPitch()` 是 `setScrollBeats` 的纵向孪生。
+  `resized()` 与滚轮都写 `scrollY`，所以"保证某个音高在画面里"以前只能靠猜。
 
 ## 采样包络窗（P78）
 - `SampleEnvelopePanel`，452×314，和 `NoteEnvelopePanel` 同尺寸同一套行距；浮动 child，

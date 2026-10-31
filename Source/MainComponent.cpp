@@ -2077,6 +2077,87 @@ juce::Image MainComponent::createTakeSetSnapshot()
     return createComponentSnapshot (getLocalBounds(), true);
 }
 
+
+juce::Image MainComponent::createVelocityLaneSnapshot()
+{
+    const int        activeWas  = stack.getActiveLayerIndex();
+    const auto       notesWere  = pianoRoll.getSelection();
+    const auto       blocksWere = pianoRoll.getSampleSelection();
+
+
+    // A layer of its own: the demo's own notes are one velocity, and a lane of
+    // eight identical bars would photograph the layout and nothing else.
+    const int layerIndex = stack.addLayer (utf8 ("力度"), palette::layer3);
+    auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr)
+        return {};
+
+    stack.setActiveLayerIndex (layerIndex);
+
+    // Eight sixteenths: a crescendo to the fifth, then back down. The shape is
+    // the point — a bar chart you can read as a phrase.
+    static const float curve[8] = { 0.30f, 0.42f, 0.55f, 0.70f,
+                                    0.92f, 0.74f, 0.58f, 0.38f };
+
+    int firstId = -1;
+
+    for (int step = 0; step < 8; ++step)
+    {
+        const int id = layer->addNote ({ 0, 60 + (step % 4 == 0 ? 7 : (step % 4 == 2 ? 4 : 0)),
+                                         0.0 + step * 0.5, 0.45, curve[step] });
+
+        if (firstId < 0)
+            firstId = id;
+    }
+
+    stack.notifyNotesChanged();
+
+    pianoRoll.setVelocityLaneVisible (true);
+
+    // Show the phrase, not the part of the world the roll happened to be
+    // parked on: the fixtures before this one scroll and zoom to their own
+    // subject, and the roll opens around C6. Eight notes written at C4 from
+    // beat 0 were a bar chart that photographed as an empty lane.
+    const double scrollWas = pianoRoll.getScrollBeats();
+    const int    topWas    = pianoRoll.getTopPitch();
+
+    pianoRoll.setScrollBeats (0.0);
+    pianoRoll.setTopPitch (67);
+
+    if (firstId >= 0)
+        pianoRoll.setSelection ({ firstId });
+
+    repaint();
+
+    auto image = createComponentSnapshot (getLocalBounds(), true);
+
+    // Give the view back. This fixture runs before `-blank`, `-loop` and
+    // `-metronome`: a visible lane takes 56 px off the grid and a moved camera
+    // moves the loop band with it, so three frames would have been
+    // photographing a workspace that is shorter and panned elsewhere for a
+    // reason none of them share — hiding whatever those frames are for.
+    pianoRoll.setScrollBeats (scrollWas);
+    pianoRoll.setTopPitch (topWas);
+    pianoRoll.setVelocityLaneVisible (false);
+
+    // And give the LAYER and the SELECTION back. The roll paints what the
+    // active layer holds, so a fixture that leaves its own layer active hands
+    // every later frame a workspace with the demo's notes, clips and group boxes
+    // missing — and one that leaves its own note selected hands them a frame
+    // with no selection highlight. Either way, three frames that are about the
+    // loop band and the count-in would have been photographing something else.
+    stack.setActiveLayerIndex (activeWas);
+
+    // One call, not two: `setSelection` and `setSampleSelection` each clear the
+    // other half (that is how "a click picks one kind" works), so restoring them
+    // in sequence would hand back a frame whose notes lost their outline to the
+    // clips.
+    pianoRoll.setMixedSelection (notesWere, blocksWere);
+
+    return image;
+}
+
 //==============================================================================
 juce::Image MainComponent::createAutomationStackSnapshot (int width, int height)
 {

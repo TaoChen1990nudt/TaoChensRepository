@@ -134,6 +134,15 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
             return;
         }
 
+        if (getToolButtonBounds (9).contains (ipos))
+        {
+            // Phase 97: a VIEW toggle, like the magnet — it changes what the
+            // sheet shows, never what a click on a note means.
+            setVelocityLaneVisible (! showVelocityLane);
+            repaint();
+            return;
+        }
+
         return;
     }
 
@@ -172,6 +181,27 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
         if (onMeterRequested != nullptr)
             onMeterRequested (localPointToGlobal (ipos));
 
+        return;
+    }
+
+    // ---- Phase 97: the velocity lane ---------------------------------------
+    // Before the keyboard, because the lane's gutter sits in the same column as
+    // the piano keys: without this, a click on the word "力度" would audition a
+    // pitch. The hand tool is exempt — panning the view is not an edit, and a
+    // lane that swallowed the pan gesture would be a strip you cannot scroll
+    // past.
+    if (getVelocityLaneArea().contains (ipos))
+    {
+        if (tool == Tool::hand)
+        {
+            dragMode = DragMode::panView;
+            panAnchor = pos;
+            panAnchorScrollY = scrollY;
+            panAnchorBeats = scrollBeats;
+            return;
+        }
+
+        handleVelocityPress (pos, mods);
         return;
     }
 
@@ -1227,6 +1257,15 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
             repaint();
             break;
 
+        case DragMode::velocityDrag:
+            // Phase 97: the one shared arithmetic, then the one notification.
+            // The notes themselves are written by `applyVelocityDragToScreenY`,
+            // so a fixture that calls it and the mouse both end up in the same
+            // place.
+            applyVelocityDragToScreenY (e.position.y);
+            stack.notifyNotesChanged();
+            break;
+
         case DragMode::none:
         default:
             break;
@@ -1290,6 +1329,7 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent&)
                 simulateMarquee (marquee);
 
         marqueeAdditive = false;      // the band is over; the next one decides again
+        marqueeInLane   = false;      // Phase 97: same, for which surface it swept
     }
 
     dragMode = DragMode::none;
@@ -1297,6 +1337,7 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent&)
     dragClipOriginals.clear();     // Phase 28: armed by a clip move as well
     dragTrimOriginals.clear();     // Phase 56: armed by a clip trim as well
     dragSpanOriginals.clear();     // Phase 72: armed by a clip height drag
+    velocityOriginals.clear();     // Phase 97: armed by a velocity bar drag
     dragResizeNoteId = -1;
     dragEnvelopePoint = -1;
     dragSampleId = -1;

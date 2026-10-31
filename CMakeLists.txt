@@ -77,6 +77,7 @@ target_sources(AtomicDAW PRIVATE
     Source/UI/PianoRollSamples.cpp
     Source/UI/PianoRollSampleDraw.cpp
     Source/UI/PianoRollComp.cpp
+    Source/UI/PianoRollVelocity.cpp
     Source/UI/RackPanel.cpp
     Source/UI/SampleEnvelopePanel.cpp
     Source/UI/NameEditor.cpp
