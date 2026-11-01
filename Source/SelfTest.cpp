@@ -19383,6 +19383,10 @@ juce::String MainComponent::runSelfTest()
     // anything that only aligns "on average" fails outright. It also covers
     // the return strip, which has no voice of its own — the send is the only
     // thing that makes it a live bus.
+    //
+    // With DRIVE in the chain it pins the far end too: the copy has to arrive
+    // ALREADY driven, so a post tap moved before the inserts fails here by
+    // exactly the margin the effect itself moves the signal by.
     {
         LayerStack st;
         RackModel  rk;
@@ -19400,6 +19404,17 @@ juce::String MainComponent::runSelfTest()
 
         mx.setChannelOutput (0, MixerModel::masterChannel);
         mx.setChannelOutput (1, MixerModel::masterChannel);
+
+        // A tap is only observable if something BETWEEN the two taps changes
+        // the signal. With an empty insert chain the pre and post taps carry
+        // the same samples, so "the pre line was pushed after the inserts" is
+        // a change nobody can see: P99's mutation M6 survived that way, 1008
+        // checks green. DRIVE rather than LOW PASS because it is STATELESS —
+        // a filter carries its tail from one renderOnce() into the next, and
+        // then the two renders differ for a reason that has nothing to do with
+        // where the tap sits.
+        mx.setInsertType (0, 0, fx::Type::drive);
+        mx.setInsertEnabled (0, 0, true);
 
         PlaybackEngine e;
         e.setSampleRate (22050.0);
@@ -19427,8 +19442,11 @@ juce::String MainComponent::runSelfTest()
 
         renderOnce (doubled);
 
-        // One measurement, two taps: `other` must be exactly twice `single`.
-        const auto measure = [&] (const juce::AudioBuffer<float>& other)
+        // One measurement, one reference: `other` must equal `expected` sample
+        // for sample. The reference is now a BUFFER rather than a fixed rule,
+        // because the two taps need two different expectations — see (7).
+        const auto measure = [&] (const juce::AudioBuffer<float>& other,
+                                  const juce::AudioBuffer<float>& expected)
         {
             float residual  = 0.0f;
             float reference = 0.0f;
@@ -19438,8 +19456,8 @@ juce::String MainComponent::runSelfTest()
                 {
                     residual  = juce::jmax (residual,
                                             std::abs (other.getSample (ch, i)
-                                                        - 2.0f * single.getSample (ch, i)));
-                    reference = juce::jmax (reference, std::abs (single.getSample (ch, i)));
+                                                        - expected.getSample (ch, i)));
+                    reference = juce::jmax (reference, std::abs (expected.getSample (ch, i)));
                 }
 
             const float db = reference > 0.0f
@@ -19449,28 +19467,86 @@ juce::String MainComponent::runSelfTest()
             return std::pair<float, float> { reference, db };
         };
 
-        const auto [reference, residualDb] = measure (doubled);
+        /** `single` scaled by `gain`, which is what "one more copy at unity"
+            means for whichever tap we are testing. */
+        const auto scaledSingle = [&] (float gain)
+        {
+            juce::AudioBuffer<float> out (2, len);
 
-        check (utf8 ("副本与直连逐样本重合：两份是单份的 2 倍，残余 ≤ -60 dBFS"),
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                auto* dest     = out.getWritePointer (ch);
+                const auto* in = single.getReadPointer (ch);
+
+                for (int i = 0; i < len; ++i)
+                    dest[i] = in[i] * gain;
+            }
+            return out;
+        };
+
+        const auto [reference, residualDb] = measure (doubled, scaledSingle (2.0f));
+
+        check (utf8 ("副本与直连逐样本重合（通道挂着 DRIVE：post 抽头必须在插入之后）"),
                reference > 0.01f && residualDb <= -60.0f,
                "ref " + juce::String (reference, 4)
                  + " resid " + juce::String (residualDb, 1) + " dB");
 
         //-- (7) The same null test, through the PRE-insert tap ----------------
-        // With no plugins in the session the two taps carry the same signal, so
-        // "still exactly twice" is what says the OTHER line was bought, pushed
-        // and read. A pre send whose buffer was never prepared takes the
-        // `! line.isReady() -> continue` door and drops the copy silently, and
-        // that failure reads as the console's `2x` becoming `1x` — 0 dB of
-        // residual, not a subtle one.
+        // This is the half P99 could not see, and it needs a different expected
+        // value than (6). `single` is the DRIVEN render, so with a pre send the
+        // console sums a dry copy and a driven direct:
+        //
+        //     doubled == single + dry            (dry = the same render with
+        //                                         DRIVE bypassed)
+        //
+        // "still exactly twice" would be the wrong question here — twice the
+        // driven signal is precisely what a tap AFTER the inserts produces.
+        // So the dry render is measured, not assumed: bypass DRIVE, no send,
+        // render. Then switch DRIVE back on and ask for the pre copy.
+        mx.setSendEnabled (0, 0, false);
+        mx.setInsertEnabled (0, 0, false);
+
+        juce::AudioBuffer<float> dryOnly (2, len);
+        renderOnce (dryOnly);
+
+        // The premise, stated before the conclusion: DRIVE has to move the
+        // signal. If it does not — wrong type, disabled, an insert chain that
+        // never ran — then `single` equals `dryOnly` and (7) degenerates into
+        // (6): two checks that assert the same thing and both pass. That is
+        // the shape of a self-test that has stopped testing.
+        {
+            float biggestChange = 0.0f;
+
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < len; ++i)
+                    biggestChange = juce::jmax (biggestChange,
+                                                std::abs (single.getSample (ch, i)
+                                                            - dryOnly.getSample (ch, i)));
+
+            check (utf8 ("DRIVE 真的改了信号（否则两条抽头断言会退化成同一条）"),
+                   biggestChange > 0.05f, juce::String (biggestChange, 4));
+        }
+
+        mx.setInsertEnabled (0, 0, true);
         mx.setSendPreInsert (0, 0, true);
+        mx.setSendEnabled (0, 0, true);
 
         juce::AudioBuffer<float> preDoubled (2, len);
         renderOnce (preDoubled);
 
-        const auto [preReference, preResidualDb] = measure (preDoubled);
+        juce::AudioBuffer<float> drivenPlusDry (2, len);
 
-        check (utf8 ("推子前的副本也走在一条真的通路上（无插件时两条抽头是同一份信号）"),
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            juce::FloatVectorOperations::copy (drivenPlusDry.getWritePointer (ch),
+                                               single.getReadPointer (ch), len);
+            juce::FloatVectorOperations::add (drivenPlusDry.getWritePointer (ch),
+                                              dryOnly.getReadPointer (ch), len);
+        }
+
+        const auto [preReference, preResidualDb] = measure (preDoubled, drivenPlusDry);
+
+        check (utf8 ("推子前的副本是干的：直连（driven）加副本恰好等于 driven 加 dry"),
                preReference > 0.01f && preResidualDb <= -60.0f,
                "ref " + juce::String (preReference, 4)
                  + " resid " + juce::String (preResidualDb, 1) + " dB");
