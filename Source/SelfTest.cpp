@@ -8555,12 +8555,13 @@ juce::String MainComponent::runSelfTest()
         }
 
         //-- 枚举追加不串位：vst=5 被老工程冻结，新三件只能排后面 ------------
-        check (utf8 ("九个效果器枚举值经 typeFromInt 往返不串位"),
-               fx::numTypes() == 9
+        check (utf8 ("十个效果器枚举值经 typeFromInt 往返不串位"),
+               fx::numTypes() == 10
                  && fx::typeFromInt (5) == fx::Type::vst
                  && fx::typeFromInt (6) == fx::Type::eq
                  && fx::typeFromInt (7) == fx::Type::comp
-                 && fx::typeFromInt (8) == fx::Type::reverb,
+                 && fx::typeFromInt (8) == fx::Type::reverb
+                 && fx::typeFromInt (9) == fx::Type::limit,
                utf8 ("numTypes ") + juce::String (fx::numTypes()));
 
         //-- 真实通道集成：引擎真的把三件 DSP 接进了处理链 -------------------
@@ -19893,6 +19894,416 @@ juce::String MainComponent::runSelfTest()
                    loaded ? "src " + juce::String (mx2.getSidechainSource (1)) : error);
         }
     }
+
+    //== Phase 102: the first insert that is late on purpose =================
+    // P83 built the delay table, P99 gave its edges a length, P101 taught the
+    // taps to be visible. All three verified the TABLE. None of them ever
+    // heard a signal actually arrive late, because every built-in was
+    // zero-latency by construction and the only way to make a strip late was
+    // `setInsertLatencyForTest` — a number a test types in. That is P83's own
+    // arithmetic being checked against P83's own arithmetic.
+    //
+    // The lookahead limiter closes the loop: it is late because of what it does
+    // to the samples, not because something said it was. Everything below is
+    // about the difference between those two sentences.
+    //
+    // An immediately-invoked lambda, the local convention since Phase 24. It
+    // does NOT buy a separate frame — the optimiser inlines it (see the /STACK
+    // comment in CMakeLists) — so the six fixtures below cost the caller's frame
+    // about 2 MB, and that was enough to take the run past 64 MB and kill it at
+    // ENTRY with an empty log. The stack raise is in CMakeLists with this phase
+    // named; the point worth remembering is the SYMPTOM: no red check, no stack
+    // trace, and `ATOMIC_TRACE=1` printing nothing at all.
+    [&] {
+        //-- (1) The rule, before the audio ----------------------------------
+        check (utf8 ("延迟是插件的属性：LIMIT 报 128，其余内置效果仍然报 0"),
+               fx::builtInLatency (fx::Type::limit) == fx::lookaheadSamples
+                 && fx::builtInLatency (fx::Type::comp) == 0
+                 && fx::builtInLatency (fx::Type::lowPass) == 0
+                 && fx::builtInLatency (fx::Type::none) == 0,
+               "limit " + juce::String (fx::builtInLatency (fx::Type::limit))
+                 + " comp " + juce::String (fx::builtInLatency (fx::Type::comp)));
+
+        check (utf8 ("启动时间不是一个旋钮：它就是这个 lookahead，所以 LIMIT 只有两个参数"),
+               fx::numParams (fx::Type::limit) == 2,
+               juce::String (fx::numParams (fx::Type::limit)));
+
+        //-- (2) The DSP: a late insert is a delay line, exactly --------------
+        // Ceiling at 0 dB and a signal that never reaches it, so the gain is
+        // exactly 1.0f — a correct implementation multiplies by one — and the
+        // output must be the input, sample for sample, 128 later. "Almost 128"
+        // is the failure this catches: a limiter whose read head is off by the
+        // write of the current block is late by a block and sounds like a
+        // chorus on the drums.
+        {
+            fx::ChainState st;
+            st.prepare (22050.0);
+
+            fx::Settings s;
+            s.type = fx::Type::limit;
+            s.enabled = true;
+            s.params[(size_t) 0] = 1.0f;    // 0 dB ceiling: never engages
+            s.params[(size_t) 1] = 0.5f;    // ~200 ms release
+
+            constexpr int len = 512;
+
+            juce::AudioBuffer<float> buffer (2, len);
+
+            for (int i = 0; i < len; ++i)
+            {
+                buffer.setSample (0, i, 0.0009f * (float) i);
+                buffer.setSample (1, i, -0.0007f * (float) i);
+            }
+
+            st.processSlot (0, s, buffer, len, 22050.0);
+
+            bool exact = true;
+            float worst = 0.0f;
+
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                for (int i = 0; i < fx::lookaheadSamples; ++i)
+                    if (buffer.getSample (ch, i) != 0.0f)
+                        exact = false;
+
+                for (int i = 0; i + fx::lookaheadSamples < len; ++i)
+                {
+                    const float want = (ch == 0 ? 0.0009f : -0.0007f) * (float) i;
+                    const float got  = buffer.getSample (ch, i + fx::lookaheadSamples);
+
+                    worst = juce::jmax (worst, std::abs (got - want));
+
+                    if (std::abs (got - want) > 1.0e-7f)
+                        exact = false;
+                }
+            }
+
+            check (utf8 ("不压缩的时候 LIMIT 就是一条延迟线：输出逐样本等于 128 采样前的输入"),
+                   exact,
+                   "worst " + juce::String (worst, 8)
+                     + " lead " + juce::String (buffer.getMagnitude (0, 0, fx::lookaheadSamples), 8));
+        }
+
+        //-- (3) …and it does limit ------------------------------------------
+        // The premise of every alignment assertion below: if the limiter were
+        // an inert delay line the whole phase would be testing a delay line.
+        // Measured as a RATIO against the input peak, not against a constant:
+        // what matters is that the ceiling put the signal down.
+        {
+            fx::ChainState st;
+            st.prepare (22050.0);
+
+            fx::Settings s;
+            s.type = fx::Type::limit;
+            s.enabled = true;
+            s.params[(size_t) 0] = 0.5f;    // -20 dB ceiling
+            s.params[(size_t) 1] = 0.5f;    // ~200 ms release
+
+            constexpr int len = 8192;
+
+            juce::AudioBuffer<float> buffer (2, len);
+
+            for (int i = 0; i < len; ++i)
+            {
+                const float v = 1.5f * std::sin (juce::MathConstants<float>::twoPi * 441.0f
+                                                   * (float) i / 22050.0f);
+                buffer.setSample (0, i, v);
+                buffer.setSample (1, i, v);
+            }
+
+            const float before = buffer.getMagnitude (0, 0, len);
+
+            st.processSlot (0, s, buffer, len, 22050.0);
+
+            const float after = buffer.getMagnitude (0, len / 2, len / 2);
+
+            check (utf8 ("LIMIT 真的压住了：1.5 的峰值穿过 -20 dB 的天花板之后小一个量级"),
+                   before > 1.4f && after > 0.02f && after < 0.2f,
+                   "in " + juce::String (before, 4) + " out " + juce::String (after, 4));
+        }
+
+        //-- (3b) And the attenuation starts BEFORE the peak -------------------
+        // The definition of lookahead, and the one property a single loud sample
+        // cannot see: with the gain multiplied into the DELAYED sample, the
+        // quiet tail preceding a transient is pulled down while the transient
+        // is still 128 samples away. Multiply it into the incoming sample
+        // instead — a one-word change, and the effect still limits, still peaks
+        // at the ceiling, and still reports 128 — and this region comes out
+        // untouched. Every other assertion in this block would stay green,
+        // which is why this one exists.
+        {
+            fx::ChainState st;
+            st.prepare (22050.0);
+
+            fx::Settings s;
+            s.type = fx::Type::limit;
+            s.enabled = true;
+            s.params[(size_t) 0] = 0.5f;    // -20 dB ceiling
+            s.params[(size_t) 1] = 1.0f;    // 2 s release: the quiet part is
+                                            // not re-gaining while it waits
+
+            constexpr int len    = 1024;
+            constexpr int onset  = 512;     // the loud part enters the detector here
+
+            juce::AudioBuffer<float> buffer (2, len);
+            buffer.clear();
+
+            for (int i = 0; i < len; ++i)
+            {
+                const float amplitude = i < onset ? 0.05f : 1.0f;
+                const float v = amplitude * std::sin (juce::MathConstants<float>::twoPi * 441.0f
+                                                        * (float) i / 22050.0f);
+                buffer.setSample (0, i, v);
+                buffer.setSample (1, i, v);
+            }
+
+            st.processSlot (0, s, buffer, len, 22050.0);
+
+            // Well before the transient the quiet tone passes at unity — this is
+            // the premise: nothing is compressing the quiet part by itself.
+            const float settled = buffer.getMagnitude (0, 200, 200);
+
+            // Between the detector and the output sits the delay, so the output
+            // is `onset + lookahead` old. These 32 samples are the last of the
+            // QUIET part, heard while the loud one is already in the detector.
+            const float beforeThePeak = buffer.getMagnitude (0, onset + fx::lookaheadSamples - 32, 32);
+
+            check (utf8 ("衰减比峰值早到 128 采样：响亮段进来时，它前面的安静尾巴已经被压低"),
+                   settled > 0.03f && settled < 0.06f
+                     && beforeThePeak < settled * 0.8f,
+                   "quiet " + juce::String (settled, 5)
+                     + " beforePeak " + juce::String (beforeThePeak, 5));
+        }
+
+        //-- (4) The console: the table learns it without being told ---------
+        {
+            LayerStack st;
+            RackModel  rk;
+            MixerModel mx;
+
+            st.addLayer (utf8 ("慢的"), palette::layer1);
+            st.setLayerOutputSlot (0, rk.getFirstSlotId());
+            st.getLayer (0)->addNote ({ 0, 60, 0.0, 1.0, 1.0f });
+            rk.setMixerChannel (rk.getFirstSlotId(), 0);
+
+            PlaybackEngine e;
+            e.setSampleRate (22050.0);
+            e.prepareToPlay (22050.0, 512);
+            e.publishSchedule (st, rk, 120.0, 0.0, &mx);
+
+            const int withoutTheLimiter = e.getMaxPdcLatency();
+
+            mx.setInsertType (0, 0, fx::Type::limit);
+            mx.setInsertEnabled (0, 0, true);
+
+            e.publishSchedule (st, rk, 120.0, 0.0, &mx);
+
+            const int withTheLimiter = e.getMaxPdcLatency();
+
+            // A strip with two of them is late TWICE as much: a strip's own
+            // latency is a SUM down its chain.
+            mx.setInsertType (0, 1, fx::Type::limit);
+            mx.setInsertEnabled (0, 1, true);
+
+            e.publishSchedule (st, rk, 120.0, 0.0, &mx);
+
+            const int twoInAChain = e.getMaxPdcLatency();
+
+            check (utf8 ("引擎不问就自己算出来了：挂上 LIMIT 之后总延迟 0 → 128 → 256"),
+                   withoutTheLimiter == 0
+                     && withTheLimiter == fx::lookaheadSamples
+                     && twoInAChain == 2 * fx::lookaheadSamples,
+                   juce::String (withoutTheLimiter) + " → " + juce::String (withTheLimiter)
+                     + " → " + juce::String (twoInAChain));
+        }
+
+        //-- (5) …and the audio really is that late, and really is aligned ---
+        // Two strips playing DIFFERENT notes, one of them through the limiter.
+        // Rendered apart they are two references; rendered together they must
+        // equal the late one plus the dry one held back by 128.
+        //
+        // Deliberately not the P99 "twice the single render" shape: that one
+        // needs the two copies to be identical, so it can only prove that two
+        // equal things stay equal. Unequal material proves the join point puts
+        // each strip at the SAME instant, which is the whole job.
+        //
+        // Three stacks rather than a copy with a layer removed: routing goes by
+        // SLOT (`setLayerOutputSlot`), so a layer's index buys nothing here and
+        // a stack whose only layer is the second one still feeds the same slot
+        // with the same note.
+        {
+            LayerStack both;
+            LayerStack withLimiter;
+            LayerStack dry;
+
+            RackModel  rk;
+            MixerModel mx;                       // 图上挂着那条晚的插入
+            MixerModel mxDry;                    // 同一条路，但没有它
+
+            const int slowSlot = rk.getSlotIdAt (0);   // 0 号条：挂 LIMIT
+            const int fastSlot = rk.getSlotIdAt (1);   // 1 号条：干净
+
+            both.addLayer (utf8 ("慢"), palette::layer1);
+            both.addLayer (utf8 ("快"), palette::layer2);
+            both.setLayerOutputSlot (0, slowSlot);
+            both.setLayerOutputSlot (1, fastSlot);
+            both.getLayer (0)->addNote ({ 0, 60, 0.0, 1.0, 1.0f });
+            both.getLayer (1)->addNote ({ 0, 67, 0.0, 1.0, 1.0f });
+
+            withLimiter.addLayer (utf8 ("慢"), palette::layer1);
+            withLimiter.setLayerOutputSlot (0, slowSlot);
+            withLimiter.getLayer (0)->addNote ({ 0, 60, 0.0, 1.0, 1.0f });
+
+            dry.addLayer (utf8 ("快"), palette::layer2);
+            dry.setLayerOutputSlot (0, fastSlot);
+            dry.getLayer (0)->addNote ({ 0, 67, 0.0, 1.0, 1.0f });
+
+            rk.setMixerChannel (slowSlot, 0);
+            rk.setMixerChannel (fastSlot, 1);
+
+            mx.setChannelOutput (0, MixerModel::masterChannel);
+            mx.setChannelOutput (1, MixerModel::masterChannel);
+            mxDry.setChannelOutput (0, MixerModel::masterChannel);
+            mxDry.setChannelOutput (1, MixerModel::masterChannel);
+
+            // 0 dB ceiling: the limiter is a pure delay, so the expected buffer
+            // is exact rather than "approximately the same music".
+            mx.setInsertType (0, 0, fx::Type::limit);
+            mx.setInsertEnabled (0, 0, true);
+            mx.setInsertParam (0, 0, 0, 1.0f);
+            mx.setInsertParam (0, 0, 1, 0.5f);
+
+            PlaybackEngine e;
+            e.setSampleRate (22050.0);
+            e.prepareToPlay (22050.0, 512);
+
+            constexpr int len = 4096;
+
+            const auto render = [&] (const LayerStack& stack, const MixerModel& mixer,
+                                     juce::AudioBuffer<float>& out)
+            {
+                out.setSize (2, len);
+                out.clear();
+
+                e.publishSchedule (stack, rk, 120.0, 0.0, &mixer);
+
+                // The limiter's ring, the console's delay lines and the synth
+                // are all memory. Without this the second render starts with
+                // the first one's tail and the two references are of different
+                // performances.
+                e.resetMixState();
+                e.renderWindow (0.0, len, out, nullptr);
+            };
+
+            juce::AudioBuffer<float> rawLate (2, len);
+            juce::AudioBuffer<float> rawDry (2, len);
+            juce::AudioBuffer<float> together (2, len);
+
+            // BOTH references come from the graph WITHOUT the late insert.
+            //
+            // Two ways to get this wrong, and the first one is the trap:
+            //   * measured in the same graph, a solo strip comes out held back
+            //     by 128 as well (the console holds every path back to the
+            //     slowest one, and a silent strip's inserts still count), so
+            //     `together == late + dry` holds no matter what the seam does;
+            //   * measured against a solo render of the LATE strip, the
+            //     reference has already passed through the very table being
+            //     tested — an effect that reports 128 and does not delay would
+            //     corrupt both sides equally and pass. Mutation M2 did exactly
+            //     that, and this assertion was green for it.
+            //
+            // So the expected buffer is the raw material of both strips, and the
+            // claim is the whole sentence at once: the mix IS those two signals,
+            // together, 128 late.
+            render (withLimiter, mxDry, rawLate);
+            render (dry,         mxDry, rawDry);
+            render (both,        mx,    together);
+
+            float residual  = 0.0f;
+            float reference = 0.0f;
+
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < len; ++i)
+                {
+                    const float want = i >= fx::lookaheadSamples
+                                         ? rawLate.getSample (ch, i - fx::lookaheadSamples)
+                                             + rawDry.getSample (ch, i - fx::lookaheadSamples)
+                                         : 0.0f;
+
+                    residual  = juce::jmax (residual, std::abs (together.getSample (ch, i) - want));
+                    reference = juce::jmax (reference, std::abs (want));
+                }
+
+            const float db = reference > 0.0f
+                               ? 20.0f * std::log10 (juce::jmax (1.0e-9f, residual / reference))
+                               : -120.0f;
+
+            check (utf8 ("整首就是这两条原始信号合起来、晚 128：晚的那条被等住，干的那条被推后"),
+                   reference > 0.01f && db < -60.0f,
+                   "residual " + juce::String (db, 1) + " dB"
+                     + " ref " + juce::String (reference, 4));
+        }
+
+        //-- (6) A late MASTER insert needs no compensation at all -----------
+        // The mirror image of (5), and the reason it is worth its own assertion:
+        // everything passes through the master, so nothing has to be held back
+        // to meet anything. The mix comes out 128 late and that is the whole
+        // story — `maxPdcLatency` stays 0 because there is nothing to align.
+        {
+            LayerStack st;
+            RackModel  rk;
+            MixerModel mx;
+
+            st.addLayer (utf8 ("主输出"), palette::layer1);
+            st.setLayerOutputSlot (0, rk.getFirstSlotId());
+            st.getLayer (0)->addNote ({ 0, 60, 0.0, 1.0, 1.0f });
+            rk.setMixerChannel (rk.getFirstSlotId(), 0);
+
+            PlaybackEngine e;
+            e.setSampleRate (22050.0);
+            e.prepareToPlay (22050.0, 512);
+
+            constexpr int len = 4096;
+
+            const auto render = [&] (juce::AudioBuffer<float>& out)
+            {
+                out.setSize (2, len);
+                out.clear();
+
+                e.publishSchedule (st, rk, 120.0, 0.0, &mx);
+                e.resetMixState();
+                e.renderWindow (0.0, len, out, nullptr);
+            };
+
+            juce::AudioBuffer<float> plain (2, len);
+            render (plain);
+
+            mx.setInsertType (MixerModel::masterChannel, 0, fx::Type::limit);
+            mx.setInsertEnabled (MixerModel::masterChannel, 0, true);
+            mx.setInsertParam (MixerModel::masterChannel, 0, 0, 1.0f);
+            mx.setInsertParam (MixerModel::masterChannel, 0, 1, 0.5f);
+
+            juce::AudioBuffer<float> late (2, len);
+            render (late);
+
+            float worst = 0.0f;
+
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                for (int i = 0; i < fx::lookaheadSamples; ++i)
+                    worst = juce::jmax (worst, std::abs (late.getSample (ch, i)));
+
+                for (int i = 0; i + fx::lookaheadSamples < len; ++i)
+                    worst = juce::jmax (worst, std::abs (late.getSample (ch, i + fx::lookaheadSamples)
+                                                           - plain.getSample (ch, i)));
+            }
+
+            check (utf8 ("晚的主输出只是让整首晚一点：没有东西要等，总延迟仍然是 0"),
+                   worst < 1.0e-7f && e.getMaxPdcLatency() == 0,
+                   "worst " + juce::String (worst, 8)
+                     + " latency " + juce::String (e.getMaxPdcLatency()));
+        }
+    }();
 
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after

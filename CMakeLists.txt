@@ -115,7 +115,15 @@ if (MSVC)
     # chains) each. 8 MB overflowed at function ENTRY, before the first check
     # could even print. 64 MB is a reserve, not a commit: Windows only backs the
     # pages that are actually touched, so this costs nothing at run time.
-    target_link_options(AtomicDAW PRIVATE /STACK:67108864)
+    #
+    # Phase 102 hit the same ceiling a third time: six fixtures, each with a
+    # console and an engine, took the frame past 64 MB and the run died at ENTRY
+    # with an empty log and exit code 127 — no check red, no stack trace, nothing
+    # to read. The lesson is the one P25 wrote down and this file has now
+    # re-learned: in this harness a big new phase is a STACK change, not just a
+    # source change. `ATOMIC_TRACE=1` is what tells the two apart — if it prints
+    # nothing at all, the frame never got off the ground.
+    target_link_options(AtomicDAW PRIVATE /STACK:134217728)
 endif()
 
 target_compile_definitions(AtomicDAW PRIVATE

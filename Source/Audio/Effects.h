@@ -29,17 +29,54 @@ enum class Type
                 // the project file stores the raw int, and old sessions carry
                 // 5 = vst. Reordering would turn every saved VST3 into an EQ.
     comp,       // Phase 46: level-dependent gain rider
-    reverb      // Phase 46: 4 combs + 2 allpasses per channel
+    reverb,     // Phase 46: 4 combs + 2 allpasses per channel
+    limit       // Phase 102: the only built-in that is LATE on purpose
 };
 
-inline int numTypes() noexcept { return 9; }
+inline int numTypes() noexcept { return 10; }
 
 /** The built-in effects, for the "add insert" menu. `vst` is not in this list
     because it is chosen from the plugin submenu instead. NOTE: vst sits in the
     MIDDLE of the enum (value 5, frozen by old project files), so every menu
     that walks the enum must skip it explicitly — `type < numBuiltInTypes()`
     would have served 6/7/8 as vst. */
-inline int numBuiltInTypes() noexcept { return 8; }
+inline int numBuiltInTypes() noexcept { return 9; }
+
+//==============================================================================
+//  Phase 102 — the one built-in that reports latency.
+
+/** How far the lookahead limiter delays its signal.
+
+    128 samples is 2.7 ms at 48 kHz: enough warning to catch a transient, short
+    enough that nobody plays to it. It is a CONSTANT and not a knob, and that is
+    the point of the effect being a separate type rather than an extra control
+    on the compressor: the console's latency table is solved from this number,
+    and a knob that changes it would change the graph's topology while audio is
+    running through it. Latency is a property of the insert, not of a setting —
+    see `builtInLatency` below, which is the only function the engine asks. */
+inline constexpr int lookaheadSamples = 128;
+
+/** The limiter's signal-path memory. Power of two, so the audio thread indexes
+    it with a mask; big enough for the lookahead plus the largest block the
+    engine hands over in one call (`PluginHost::maxBlockSize` is 4096). */
+inline constexpr int limitRingSamples = 8192;
+
+static_assert ((limitRingSamples & (limitRingSamples - 1)) == 0,
+               "the limiter's ring is indexed with a mask");
+static_assert (limitRingSamples >= lookaheadSamples + 4096,
+               "a block written into the ring must not lap its own read head");
+
+/** What this insert costs in graph latency. The engine's ONE question about it.
+
+    Built-ins are zero-latency by construction except the limiter, whose whole
+    reason to exist is the delay line in the middle. Keeping the answer here
+    rather than in the renderer is what stopped P83's assumption ("only a hosted
+    VST3 can be late") from quietly becoming a lie the day a native effect grew
+    a lookahead. */
+inline int builtInLatency (Type type) noexcept
+{
+    return type == Type::limit ? lookaheadSamples : 0;
+}
 
 inline juce::String typeName (Type type)
 {
@@ -53,6 +90,7 @@ inline juce::String typeName (Type type)
         case Type::eq:      return "EQ";
         case Type::comp:    return "COMP";
         case Type::reverb:  return "REVERB";
+        case Type::limit:   return "LIMIT";
         case Type::none:
         default:            return "EMPTY";
     }
@@ -85,6 +123,11 @@ inline int numParams (Type type) noexcept
         case Type::eq:      return 9;   // 3 bands x (freq, gain, Q)
         case Type::comp:    return 6;   // thr, ratio, makeup, attack, release, knee
         case Type::reverb:  return 5;   // decay, size, low cut, high cut, diffusion
+        case Type::limit:   return 2;   // ceiling, release — the attack IS the
+                                        // lookahead and there is no makeup to
+                                        // set: a limiter's ratio is infinity
+                                        // and its makeup is a lie about the
+                                        // ceiling (see applyLimit)
         case Type::vst:
         case Type::none:
         default:            return 0;
@@ -148,6 +191,7 @@ inline const char* paramName (Type type) noexcept
         case Type::eq:      return "EQ";
         case Type::comp:    return "THR";
         case Type::reverb:  return "LEN";
+        case Type::limit:   return "THR";
         case Type::none:
         default:            return "—";
     }
@@ -191,6 +235,12 @@ inline juce::String paramName (Type type, int index)
                 "混响长度", "空间大小", "低切频率", "高切频率", "散射度"
             };
             return utf8 (names[(size_t) juce::jlimit (0, 4, index)]);
+        }
+
+        case Type::limit:
+        {
+            static const char* names[2] = { "天花板", "释放时间" };
+            return utf8 (names[(size_t) juce::jlimit (0, 1, index)]);
         }
 
         case Type::vst:
@@ -251,6 +301,10 @@ inline juce::String paramText (Type type, int index, float v)
                 case 3:  return hz (reverbHighcutHz (x));
                 default: return juce::String (juce::roundToInt (x * 100.0f)) + "%";
             }
+
+        case Type::limit:
+            return index == 0 ? db (compThresholdDb (x))
+                              : juce::String (compReleaseSecs (x) * 1000.0f, 0) + " ms";
 
         case Type::vst:
         case Type::none:
@@ -363,6 +417,14 @@ struct SlotState
     /** Phase 46 compressor: one linked-stereo envelope, one smoothed gain. */
     float compEnv  = 0.0f;
     float compGain = 1.0f;
+
+    /** Phase 102 limiter: the signal path's own memory, a write head, and the
+        one envelope the detector runs on. Separate from `delayBuffer` on
+        purpose — that one belongs to the DELAY effect, and a slot whose type
+        changed would read an old echo's tail as its lookahead. */
+    juce::AudioBuffer<float> limitBuffer;
+    int   limitPos = 0;
+    float limitEnv = 0.0f;
 };
 
 //==============================================================================
@@ -394,6 +456,11 @@ struct ChainState
             slot.delayBuffer.clear();
             slot.writePos = 0;
             slot.lpL = slot.lpR = slot.hpL = slot.hpR = 0.0f;
+
+            slot.limitBuffer.setSize (2, limitRingSamples, false, true, false);
+            slot.limitBuffer.clear();
+            slot.limitPos = 0;
+            slot.limitEnv = 0.0f;
 
             slot.verbBuffer.setSize (verbLines(), maxVerbSamples, false, true, false);
             slot.verbBuffer.clear();
@@ -444,6 +511,10 @@ struct ChainState
 
             slot.compEnv  = 0.0f;
             slot.compGain = 1.0f;
+
+            slot.limitBuffer.clear();
+            slot.limitPos = 0;
+            slot.limitEnv = 0.0f;
         }
     }
 
@@ -492,6 +563,7 @@ struct ChainState
             case Type::eq:       applyEq       (state, setting, buffer, numSamples, sampleRate); break;
             case Type::comp:     applyComp     (state, setting, buffer, numSamples, sampleRate, key); break;
             case Type::reverb:   applyReverb   (state, setting, buffer, numSamples, sampleRate); break;
+            case Type::limit:    applyLimit    (state, setting, buffer, numSamples, sampleRate); break;
             case Type::vst:
             case Type::none:
             default:             break;
@@ -791,6 +863,105 @@ private:
             const float g = state.compGain * makeup;
             l[n] *= g;
             if (r != nullptr) r[n] *= g;
+        }
+    }
+
+    /** Lookahead limiter — Phase 102, and the only built-in that is late on
+        purpose.
+
+        Params: 0 ceiling (-40..0 dB, the same map the compressor's threshold
+        uses — it is the same number), 1 release (20 ms..2 s).
+
+        The signal path goes through `limitBuffer` and comes out
+        `lookaheadSamples` late; the detector reads the sample that has NOT been
+        delayed. That ordering IS the effect: by the time a peak reaches the
+        output the gain is already on its way down, so nothing overshoots and
+        nothing has to be clipped afterwards.
+
+        Three rules a later reader would otherwise "fix":
+
+        - **The attack is not a parameter.** It is four time constants across
+          the lookahead window (~98% of the reduction in place when the peak
+          arrives). Shorter than the window and the gain steps — a click;
+          longer and the peak gets through — no limiter. And a lookahead knob
+          would make the console's latency follow a knob, which is not a thing
+          the latency table can be solved from while audio runs.
+        - **The ratio is infinity**, so the ceiling is exact: everything above
+          `ceilingDb` comes back down to `ceilingDb`. A ratio knob here would
+          be the compressor wearing a different name.
+        - **The gain multiplies the DELAYED sample.** Multiply the incoming one
+          and this is a fast compressor with no lookahead — exactly what it
+          exists not to be, and a change no picture of the mixer would show.
+
+        One smoother, not two: the compressor smooths its envelope and then its
+        gain because a ratio knob can make that gain jump; here the law is
+        continuous in the envelope, so the envelope is the only state. */
+    static void applyLimit (SlotState& state, const Settings& s,
+                            juce::AudioBuffer<float>& buffer, int numSamples, double sampleRate)
+    {
+        const int ringSize = state.limitBuffer.getNumSamples();
+
+        if (ringSize < lookaheadSamples + 2 || numSamples <= 0 || sampleRate <= 0.0)
+            return;
+
+        const float ceilingDb = compThresholdDb (s.params[(size_t) 0]);
+        const float rel = 1.0f - std::exp (-1.0f / (compReleaseSecs (s.params[(size_t) 1])
+                                                     * (float) sampleRate));
+        const float att = 1.0f - std::exp (-4.0f / (float) lookaheadSamples);
+
+        const int mask = ringSize - 1;
+
+        auto* l = buffer.getWritePointer (0);
+        auto* r = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
+
+        auto* ringL = state.limitBuffer.getWritePointer (0);
+        auto* ringR = state.limitBuffer.getWritePointer (1);
+
+        // Chunked, not clamped: the ring can index all it likes as long as a
+        // block is no longer than `ringSize - lookaheadSamples`, and a caller
+        // that hands over more must be served in pieces. Leaving the tail of an
+        // over-long block unprocessed would emit RAW, undelayed samples at the
+        // end of that block — audio from the wrong instant, once per call, and
+        // entirely invisible in a picture of the mixer.
+        for (int offset = 0; offset < numSamples; )
+        {
+            const int count = juce::jmin (numSamples - offset, ringSize - lookaheadSamples);
+
+            for (int i = 0; i < count; ++i)
+            {
+                const float inL = l[offset + i];
+                const float inR = r != nullptr ? r[offset + i] : 0.0f;
+
+                // Detector first, on what has not been through the delay.
+                const float level = juce::jmax (std::abs (inL), std::abs (inR));
+                state.limitEnv += (level - state.limitEnv) * (level > state.limitEnv ? att : rel);
+
+                float gain = 1.0f;
+
+                if (state.limitEnv > 1.0e-6f)
+                {
+                    const float over = 20.0f * std::log10 (state.limitEnv) - ceilingDb;
+
+                    if (over > 0.0f)
+                        gain = std::pow (10.0f, -over / 20.0f);
+                }
+
+                // Write now, read `lookaheadSamples` ago: the output is the input
+                // of 128 samples earlier, times a gain that already knew about
+                // this one.
+                ringL[state.limitPos & mask] = inL;
+                ringR[state.limitPos & mask] = inR;
+
+                const int readPos = (state.limitPos + ringSize - lookaheadSamples) & mask;
+                l[offset + i] = ringL[readPos] * gain;
+
+                if (r != nullptr)
+                    r[offset + i] = ringR[readPos] * gain;
+
+                state.limitPos = (state.limitPos + 1) & mask;
+            }
+
+            offset += count;
         }
     }
 

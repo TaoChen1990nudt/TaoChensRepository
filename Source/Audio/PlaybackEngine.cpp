@@ -583,11 +583,16 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
         fresh->channels.push_back (std::move (mix));
     }
 
-    //-- Phase 83/99: what each strip's inserts cost --------------------------
-    // Only a hosted VST3 can be late. Every built-in is zero-latency by
-    // construction (a delay line that reports latency, a filter with no
-    // lookahead), so asking the host about them would be a lock for an answer
-    // of 0.
+    //-- Phase 83/99/102: what each strip's inserts cost ----------------------
+    // Phase 102 moved this off the assumption it was written with. Until then
+    // "only a hosted VST3 can be late" was true of every built-in, and asking
+    // the host about them would have been a lock for an answer of 0. The
+    // limiter is a built-in whose whole point is the delay line in its middle,
+    // so the strip's cost is now: SUM over slots of (hosted latency | built-in
+    // latency), and `fx::builtInLatency` is the only place that knows the
+    // second half. Asking it here rather than in the renderer is what keeps
+    // "which inserts are late" a property of the insert set and not a table of
+    // exceptions living somewhere else.
     //
     // Worked out BEFORE the topology is read, because the topology's arithmetic
     // is made of it: an edge's latency is this strip's own latency or zero, and
@@ -603,8 +608,14 @@ void PlaybackEngine::publishSchedule (const LayerStack& stack, const RackModel& 
             int sum = 0;
 
             for (const auto& insert : mix.inserts)
-                if (insert.active() && insert.type == fx::Type::vst)
-                    sum += pluginHost != nullptr ? pluginHost->getLatencySamples (insert.pluginId) : 0;
+            {
+                if (! insert.active())
+                    continue;
+
+                sum += insert.type == fx::Type::vst
+                         ? (pluginHost != nullptr ? pluginHost->getLatencySamples (insert.pluginId) : 0)
+                         : fx::builtInLatency (insert.type);
+            }
 
             mix.insertLatency = juce::jmin (pdc::maxSamples,
                                             sum + testInsertLatency[(size_t) juce::jlimit (0, (int) MixerModel::numChannels - 1, i)]);
