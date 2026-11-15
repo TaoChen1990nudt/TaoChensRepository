@@ -293,6 +293,17 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
                            "拖动音符移动 · 空白处框选",
                            "拖动平移视图 · 滚轮上下 · Ctrl+滚轮或拖标尺缩放" };
 
+    //-- The hint shares this one line with the scroll readout ------------------
+    // Two texts, one line, no divider: whatever the hint says has to end before
+    // the readout's first digit. Phase 109's overview sentence did not — it ran
+    // to x≈1240 straight over "8.0 / 128 beat", and both halves read as garbage.
+    //
+    // The limit is a budget, not a layout. Clamping the hint to the measured
+    // readout width was tried and reverted: JUCE fits text by ADVANCE width while
+    // the eye sees INK, so a strict clamp ellipsised eleven hints that had never
+    // visually touched the readout ("3 个音符 · 已编组" lost "· 已编组", i.e. the
+    // cure was worse). From the last button to the readout is about 215 px of
+    // ink — roughly sixteen CJK characters. Keep the sentence under that.
     const auto hintArea = bar.withTrimmedLeft (getToolButtonBounds (numToolButtons - 1).getRight()
                                                  + ui::px (14));
 
@@ -306,15 +317,17 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
     }
     else if (overviewMode)
     {
-        // The one sentence this mode has to say: what the stripes are, and that
-        // nothing in them can be touched. Without it the mode looks like a
-        // broken roll rather than a different view of the same project. Kept
-        // short on purpose — the eleven-button strip leaves about twenty
-        // characters before the readout on the right, and a sentence that gets
-        // cut in half says less than a shorter one that fits.
+        // The one sentence this mode has to say: the stripes are read-only, and
+        // a note is a line rather than a block. Nine characters against a budget
+        // of about sixteen: the first draft was "总览 · 只读：每层一条带，音符是
+        // 线段　·　Esc 回来", which ran over the readout and left both halves
+        // unreadable (Phase 109 follow-up). What got dropped is what the picture
+        // already says — the left column is captioned Layer 1/2/3, so "one band
+        // per layer" is visible; that the line cannot be dragged is not; and the
+        // lit 总览 button in this very row is the way back out.
         g.setColour (tint.withAlpha (0.85f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.0f))));
-        g.drawText (utf8 ("总览 · 只读：每层一条带，音符是线段　·　Esc 回来"),
+        g.drawText (utf8 ("总览 · 只读　音符是一段线"),
                     hintArea, juce::Justification::centredLeft, true);
     }
     else if (hasPaintState)
