@@ -427,6 +427,22 @@ void PlaybackEngine::setInsertLatencyForTest (int channel, int samples)
         testInsertLatency[(size_t) channel] = juce::jmax (0, samples);
 }
 
+void PlaybackEngine::setInsertGainReductionForTest (int channel, int slot, float db)
+{
+    // Phase 103: for the picture, not for the audio. A still frame cannot wait
+    // for a compressor to be driven by material loud enough to squash it, and a
+    // frame that *did* wait would carry whatever the scheduler gave it — the
+    // same reason the level meters are not photographed from a live render.
+    //
+    // Nothing in the checks uses this: they read the number the audio thread
+    // published, because the whole point of the phase is that the reading and
+    // the sound agree. Here it only has to be a number on a bar.
+    if (juce::isPositiveAndBelow (channel, (int) insertReduction.size())
+          && juce::isPositiveAndBelow (slot, fx::ChainState::maxSlots))
+        insertReduction[(size_t) channel][(size_t) slot]
+            .store (juce::jmax (0.0f, db), std::memory_order_relaxed);
+}
+
 double PlaybackEngine::getPosition() const
 {
     // The playhead is a BEAT; seconds are the map's reading of it. During an
@@ -2034,6 +2050,8 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
         else
             chain.process (mix.inserts, bus, numSamples, sampleRate, &key);
 
+        publishGainReduction (channel, chain);
+
         // Phase 25: mono monitoring, straight after the inserts. Here and not
         // before them because the chain is set up for a stereo signal — summing
         // first would feed every reverb and delay a mono source, which is a
@@ -2193,6 +2211,8 @@ void PlaybackEngine::renderInto (const PublishedSchedule& current, double startS
         processInsertChain (current.masterInserts, output, numSamples, masterChain);
     else
         masterChain.process (current.masterInserts, output, numSamples, sampleRate);
+
+    publishGainReduction (MixerModel::masterChannel, masterChain);
 
     // Balance-style master pan: unity in the centre, so a master fader at 0 dB
     // does not quietly cost 3 dB the way a constant-power law would.
@@ -2638,6 +2658,32 @@ void PlaybackEngine::applyHostedParamAutomation (juce::AudioProcessor& plugin,
 }
 
 //==============================================================================
+void PlaybackEngine::publishGainReduction (int strip, fx::ChainState& chain) const
+{
+    // Consumed whether or not the reading has somewhere to go: `blockMinGain` is
+    // a per-call measurement, and leaving one behind would let a slot that ran
+    // once report that same reduction every block until it ran again.
+    const bool publishable = juce::isPositiveAndBelow (strip, (int) insertReduction.size());
+
+    for (int slot = 0; slot < fx::ChainState::maxSlots; ++slot)
+    {
+        auto& state = chain.slots[(size_t) slot];
+        const float raw = fx::gainReductionDb (state.blockMinGain);
+        state.blockMinGain = 1.0f;
+
+        if (! publishable)
+            continue;
+
+        // Held, not overwritten: the fall is `decayMeters`' job and it is a
+        // RATE. Storing `raw` here would make the bar drop instantly from 8 dB
+        // to 2 dB the moment the loud part ended — a release curve nobody chose,
+        // and one that hides how the compressor actually let go.
+        auto& cell = insertReduction[(size_t) strip][(size_t) slot];
+        cell.store (juce::jmax (raw, cell.load (std::memory_order_relaxed)),
+                    std::memory_order_relaxed);
+    }
+}
+
 void PlaybackEngine::processInsertChain (const std::array<fx::Settings, fx::ChainState::maxSlots>& settings,
                                          juce::AudioBuffer<float>& buffer, int numSamples,
                                          fx::ChainState& chain,
@@ -4026,6 +4072,15 @@ float PlaybackEngine::getMasterPeak (int channel) const
     return masterMeters[(size_t) juce::jlimit (0, 1, channel)].load (std::memory_order_relaxed);
 }
 
+float PlaybackEngine::getInsertGainReductionDb (int channel, int slot) const
+{
+    if (channel < 0 || channel >= (int) insertReduction.size()
+          || ! juce::isPositiveAndBelow (slot, fx::ChainState::maxSlots))
+        return 0.0f;
+
+    return insertReduction[(size_t) channel][(size_t) slot].load (std::memory_order_relaxed);
+}
+
 void PlaybackEngine::decayMeters (int numSamples)
 {
     // 50 dB per second, over exactly this block. The number is a feel decision
@@ -4052,6 +4107,29 @@ void PlaybackEngine::decayMeters (int numSamples)
 
     for (auto& meter : masterMeters)
         meter.store (meter.load (std::memory_order_relaxed) * factor, std::memory_order_relaxed);
+
+    // Phase 103: gain reduction falls here, with everything else, and for the
+    // same reason this function exists at all — a reading is not a maximum.
+    // In dB per second, so the subtraction is linear where the level meters'
+    // multiplication was: the two quantities are not the same shape and must
+    // not share a factor.
+    //
+    // The `> 0` test is what keeps the cost of 128 x 8 cells out of an idle
+    // session: a store that would write zero into a cell that already holds
+    // zero is skipped, so a console with no compressor in it touches nothing.
+    const float fallStep = fx::gainReductionFallDbPerSecond * (float) dt;
+
+    if (fallStep > 0.0f)
+    {
+        for (auto& strip : insertReduction)
+            for (auto& cell : strip)
+            {
+                const float held = cell.load (std::memory_order_relaxed);
+
+                if (held > 0.0f)
+                    cell.store (juce::jmax (0.0f, held - fallStep), std::memory_order_relaxed);
+            }
+    }
 }
 
 bool PlaybackEngine::hasMeters() const noexcept
@@ -4067,9 +4145,20 @@ bool PlaybackEngine::hasMeters() const noexcept
         return false;
     };
 
-    return anyAbove (meters) || anyAbove (layerMeters)
-             || anyAbove (channelMetersL) || anyAbove (channelMetersR)
-             || anyAbove (masterMeters);
+    if (anyAbove (meters) || anyAbove (layerMeters)
+          || anyAbove (channelMetersL) || anyAbove (channelMetersR)
+          || anyAbove (masterMeters))
+        return true;
+
+    // Phase 103: gain reduction is in dB, so it gets its own floor. A hundredth
+    // of a decibel is below anything the rack can draw; a magnitude-style floor
+    // would have kept the window repainting until the arithmetic reached zero.
+    for (const auto& strip : insertReduction)
+        for (const auto& cell : strip)
+            if (cell.load (std::memory_order_relaxed) > 1.0e-2f)
+                return true;
+
+    return false;
 }
 
 void PlaybackEngine::resetMeters()
@@ -4088,6 +4177,14 @@ void PlaybackEngine::resetMeters()
 
     for (auto& meter : masterMeters)
         meter.store (0.0f, std::memory_order_relaxed);
+
+    // Phase 103: "clear every meter" has to include this one, or a bounce that
+    // follows a loud take starts with the previous take's compressor still
+    // pressing — and, worse, `hasMeters()` would keep the window repainting
+    // forever on a session that is not making any sound.
+    for (auto& strip : insertReduction)
+        for (auto& cell : strip)
+            cell.store (0.0f, std::memory_order_relaxed);
 }
 
 void PlaybackEngine::resetMixState()

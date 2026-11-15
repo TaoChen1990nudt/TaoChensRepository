@@ -185,6 +185,12 @@ namespace
         // selected strip — two slots in one rack is what makes it legible.
         writePng ("-sidechain", component.createSidechainSnapshot());
 
+        // Phase 103: the same rack with gain-reduction bars — two effects at two
+        // different readings, one compressor at zero, and a drive with no bar at
+        // all. Only a picture can say "the row that can report says so, the row
+        // that cannot has no track".
+        writePng ("-gr", component.createGainReductionSnapshot());
+
         // Phase 28: the browser tree, taller than the shell's split can give it.
         writePng ("-browser", component.createFileBrowserSnapshot());
 

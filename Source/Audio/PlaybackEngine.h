@@ -827,6 +827,15 @@ public:
         One array, read at publish, never touched by the audio thread. */
     void setInsertLatencyForTest (int channel, int samples);
 
+    /** Phase 103, snapshot only: put a gain-reduction reading on a slot's meter
+        so a still frame can show the bar.
+
+        A frame cannot drive a compressor with material loud enough to squash it
+        and still be deterministic, and a bar photographed from a live render
+        would carry whatever block happened to be in flight. The number here is
+        only ever a picture; the checks read what the audio thread published. */
+    void setInsertGainReductionForTest (int channel, int slot, float db);
+
     //-- Phase 88: the click track and the count-in ---------------------------
     /** The metronome belongs to the transport, not to the mixer: it is mixed
         per segment inside `renderNextBlock`, so it follows the loop and the
@@ -894,6 +903,12 @@ public:
         channel that does not exist reads 0 rather than throwing an index. */
     float getChannelPeakSide (int channel, int side) const;
     float getMasterPeak (int channel) const;
+
+    /** Phase 103: the dB of gain reduction a slot's meter should show, 0 when it
+        is not squeezing. Positive number, because a meter that reads "-6" for
+        "taking 6 away" cannot be read at a glance — the sign convention lives
+        here, once, and the rack only decides how tall to draw it. */
+    float getInsertGainReductionDb (int channel, int slot) const;
 
     /** Clears every meter, and every filter's memory. Call before a deterministic
         measurement so a previous pass cannot colour the next one. */
@@ -1111,6 +1126,16 @@ private:
                              fx::ChainState& chain,
                              const fx::KeySignal* key = nullptr) const;
 
+    /** Phase 103: turns what a chain's slots just did into dB, and hands it to
+        the meter array.
+
+        CONSUMES what it reads: every slot's `blockMinGain` goes back to 1.0, so
+        the next block starts from "nothing taken off" even for a slot that will
+        not run at all (a bypassed compressor must not keep a bar lit for the
+        rest of the session). Called immediately after a strip's chain and after
+        the master's — two call sites, one rule. */
+    void publishGainReduction (int strip, fx::ChainState& chain) const;
+
     /** One hosted insert, in place. */
     void processHostedEffect (int pluginInstanceId, juce::AudioBuffer<float>& buffer,
                               int numSamples) const;
@@ -1189,6 +1214,25 @@ private:
     std::array<std::atomic<float>, MixerModel::numChannels> channelMetersL;
     std::array<std::atomic<float>, MixerModel::numChannels> channelMetersR;
     std::array<std::atomic<float>, 2>                masterMeters;
+
+    /** Phase 103: how many dB each insert slot is pulling its strip down.
+
+        Indexed by strip and slot — `[numChannels]` is the master — because the
+        answer belongs to ONE slot. A strip-level number would be ambiguous the
+        moment a chain holds two compressors, and the ambiguity would be silent:
+        the bar would move and the user would have to guess which of the two rows
+        it was describing.
+
+        Released by `decayMeters` at `fx::gainReductionFallDbPerSecond`, on every
+        callback including the ones with nothing in them: a stopped transport
+        that still shows a compressor squeezing is a lie, and the only way to
+        make it not one is to fall in the same place the other meters fall.
+
+        `mutable` for the same reason the chains are: the render paths are
+        `const` because they must not change the SCHEDULE, and a meter reading is
+        not part of the schedule. */
+    mutable std::array<std::array<std::atomic<float>, fx::ChainState::maxSlots>,
+                       MixerModel::numChannels + 1> insertReduction;
 
     /** Reused every block: one stereo bus, one slot at a time. Allocated in
         prepareToPlay, never inside the callback. */

@@ -20305,6 +20305,304 @@ juce::String MainComponent::runSelfTest()
         }
     }();
 
+    //== Phase 103: 增益衰减看得见 =============================================
+    // P102 made an insert that is late on purpose; this phase makes a dynamic
+    // insert that can be WATCHED. `compGain` and `limitEnv` have been per-sample
+    // all along and nothing read them, so the one question a compressor raises —
+    // "how much is it taking off right now" — had no answer on screen and no
+    // answer in the checks either.
+    //
+    // The shape of the phase is the shape of P101's lesson: a number is worth
+    // having only if something can be wrong about it. So the checks are not
+    // "the meter moves", they are "the meter says what the DSP did" and "the
+    // meter lets go like a meter".
+    [&] {
+        //-- (1) One function, three users --------------------------------------
+        {
+            check (utf8 ("衰减的换算是同一个出口：单位增益是 0，减半是 6.02，再减半是 12.04"),
+                   fx::gainReductionDb (1.0f) == 0.0f
+                     && std::abs (fx::gainReductionDb (0.5f)  -  6.0206f) < 0.001f
+                     && std::abs (fx::gainReductionDb (0.25f) - 12.0412f) < 0.002f,
+                   "0.5 → " + juce::String (fx::gainReductionDb (0.5f), 4));
+
+            // Above unity is not "negative reduction", and a gain of zero is not
+            // an infinity the panel would have to special-case: both are ends of
+            // one clamp, and both have to be answers rather than exceptions.
+            check (utf8 ("放大不算衰减；增益 0 读成 96 dB 的天花板，不是无穷"),
+                   fx::gainReductionDb (1.5f) == 0.0f
+                     && fx::gainReductionDb (0.0f) == 96.0f,
+                   "1.5 → " + juce::String (fx::gainReductionDb (1.5f), 3)
+                     + " / 0 → " + juce::String (fx::gainReductionDb (0.0f), 3));
+
+            check (utf8 ("表是 24 dB 满量程：一半高度是 12 dB，超过就钉在满，负值读空"),
+                   fx::gainReductionMeterFraction (0.0f) == 0.0f
+                     && std::abs (fx::gainReductionMeterFraction (12.0f) - 0.5f) < 1.0e-6f
+                     && fx::gainReductionMeterFraction (24.0f) == 1.0f
+                     && fx::gainReductionMeterFraction (60.0f) == 1.0f
+                     && fx::gainReductionMeterFraction (-3.0f) == 0.0f,
+                   "12 → " + juce::String (fx::gainReductionMeterFraction (12.0f), 3));
+        }
+
+        //-- (2) The compressor reports the gain it actually applied ------------
+        // Not the level at the detector (that is `compEnv`, a different quantity
+        // with the same number of digits), and not the gain after makeup. Read
+        // off the audio: with no lookahead, out/in IS the gain of that sample,
+        // so the smallest ratio in the settled part of the block has to be the
+        // number the meter is given.
+        constexpr int len = 16384;
+        constexpr int tailFrom = len - 4096;
+
+        juce::AudioBuffer<float> original (2, len);
+
+        for (int i = 0; i < len; ++i)
+        {
+            const float v = 0.7071f * std::sin (juce::MathConstants<float>::twoPi * 441.0f
+                                                  * (float) i / 22050.0f);
+            original.setSample (0, i, v);
+            original.setSample (1, i, v);
+        }
+
+        fx::Settings comp;
+        comp.type = fx::Type::comp;
+        comp.enabled = true;
+        comp.params.fill (0.0f);
+        comp.params[(size_t) 0] = 0.5f;      // -20 dB
+        comp.params[(size_t) 1] = 0.4628f;   // 4:1
+        comp.params[(size_t) 2] = 0.0f;      // no makeup
+        comp.params[(size_t) 3] = 0.0f;      // 1 ms attack
+        comp.params[(size_t) 4] = 0.0f;      // 20 ms release
+        comp.params[(size_t) 5] = 0.0f;      // hard knee
+
+        // The smallest per-sample ratio in the window, ignoring the zero
+        // crossings where a division says nothing.
+        const auto smallestGain = [&] (const juce::AudioBuffer<float>& in,
+                                      const juce::AudioBuffer<float>& out)
+        {
+            float smallest = 1.0f;
+
+            for (int i = tailFrom; i < len; ++i)
+                if (std::abs (in.getSample (0, i)) > 0.05f)
+                    smallest = juce::jmin (smallest, std::abs (out.getSample (0, i)
+                                                                 / in.getSample (0, i)));
+
+            return smallest;
+        };
+
+        float reportedDb = 0.0f;
+        float measuredDb = 0.0f;
+
+        {
+            fx::ChainState state;
+            state.prepare (22050.0);
+
+            juce::AudioBuffer<float> buffer (original);
+
+            state.processSlot (0, comp, buffer, len, 22050.0);
+
+            const float applied = smallestGain (original, buffer);
+
+            reportedDb = fx::gainReductionDb (state.slots[0].blockMinGain);
+            measuredDb = applied > 0.0f ? -20.0f * std::log10 (applied) : 96.0f;
+
+            check (utf8 ("压缩器报的衰减就是它真乘下去的那个增益（对声音量的，不是对参数算的）"),
+                   applied > 0.05f && applied < 0.9f && std::abs (reportedDb - measuredDb) < 0.05f,
+                   "reported " + juce::String (reportedDb, 2)
+                     + " measured " + juce::String (measuredDb, 2));
+        }
+
+        //-- (3) …and makeup gain is not part of it -----------------------------
+        // Makeup is a fader the user set. Fold it into the reading and a
+        // compressor doing 12 dB with 9 dB of makeup reads as doing 3 — or, once
+        // clamped at zero, as doing nothing while the audio is plainly louder.
+        {
+            fx::ChainState state;
+            state.prepare (22050.0);
+
+            auto withMakeup = comp;
+            withMakeup.params[(size_t) 2] = 0.5f;    // +9 dB
+
+            juce::AudioBuffer<float> buffer (original);
+            state.processSlot (0, withMakeup, buffer, len, 22050.0);
+
+            const float reported = fx::gainReductionDb (state.slots[0].blockMinGain);
+            const float applied  = smallestGain (original, buffer);
+            const float louderBy = applied > 0.0f ? 20.0f * std::log10 (applied)
+                                                       - (-measuredDb) : 0.0f;
+
+            check (utf8 ("补偿增益不进程表：读数一点没变，声音大了 9 dB"),
+                   std::abs (reported - reportedDb) < 0.01f && louderBy > 8.0f,
+                   "reported " + juce::String (reported, 2)
+                     + " vs " + juce::String (reportedDb, 2)
+                     + " / louder " + juce::String (louderBy, 2) + " dB");
+        }
+
+        //-- (4) The limiter reports exactly how far over the ceiling it was ----
+        {
+            constexpr int ceilingParam = 0;
+            constexpr int releaseParam = 1;
+
+            fx::Settings limit;
+            limit.type = fx::Type::limit;
+            limit.enabled = true;
+            limit.params.fill (0.0f);
+            limit.params[(size_t) ceilingParam] = 0.5f;   // -20 dB
+            limit.params[(size_t) releaseParam] = 1.0f;   // 2 s: the envelope holds
+
+            fx::ChainState state;
+            state.prepare (22050.0);
+
+            juce::AudioBuffer<float> buffer (2, 4096);
+            buffer.clear();
+
+            for (int i = 0; i < 4096; ++i)
+            {
+                const float v = 1.5f * std::sin (juce::MathConstants<float>::twoPi * 441.0f
+                                                   * (float) i / 22050.0f);
+                buffer.setSample (0, i, v);
+                buffer.setSample (1, i, v);
+            }
+
+            state.processSlot (0, limit, buffer, 4096, 22050.0);
+
+            const float reported = fx::gainReductionDb (state.slots[0].blockMinGain);
+            const float expected = 20.0f * std::log10 (1.5f) + 20.0f;   // 23.52 dB
+
+            // 0.15 dB of slack, and it is the envelope's own ripple: the detector
+            // follows a sine, so "the over" is a fraction of a dB lower between
+            // two peaks than at one. The rule is the peak.
+            check (utf8 ("限幅器报的是它比天花板高出去的那几 dB（1.5 峰值穿 -20 dB → 23.52）"),
+                   std::abs (reported - expected) < 0.15f,
+                   "reported " + juce::String (reported, 3)
+                     + " expected " + juce::String (expected, 3));
+        }
+
+        //-- (5) The engine publishes it, per slot ------------------------------
+        {
+            LayerStack st;
+            RackModel  rk;
+            MixerModel mx;
+
+            st.addLayer (utf8 ("压缩"), palette::layer1);
+            st.setLayerOutputSlot (0, rk.getSlotIdAt (0));
+            st.getLayer (0)->addNote ({ 0, 60, 0.0, 2.0, 1.0f });
+
+            rk.setMixerChannel (rk.getSlotIdAt (0), 0);
+            mx.setChannelOutput (0, MixerModel::masterChannel);
+
+            mx.setInsertType (0, 0, fx::Type::comp);
+            mx.setInsertEnabled (0, 0, true);
+            mx.setInsertParam (0, 0, 0, 0.0f);   // -40 dB: anything audible is over
+            mx.setInsertParam (0, 0, 1, 0.9f);   // ~15:1
+            mx.setInsertParam (0, 0, 2, 0.0f);   // no makeup: the reading is the
+                                                 // reduction and nothing else
+            mx.setInsertParam (0, 0, 5, 0.0f);   // hard knee
+
+            PlaybackEngine e;
+            e.setSampleRate (22050.0);
+            e.prepareToPlay (22050.0, 512);
+            e.publishSchedule (st, rk, 120.0, 0.0, &mx);
+
+            juce::AudioBuffer<float> block (2, 512);
+
+            const auto renderBlock = [&]
+            {
+                block.clear();
+                e.renderNextBlock (block, 512);
+            };
+
+            e.resetMixState();
+            e.setPositionBeats (0.5);
+            renderBlock();
+
+            const float first = e.getInsertGainReductionDb (0, 0);
+
+            check (utf8 ("引擎把通道上的衰减发布出来；这一条上别的插槽还是 0"),
+                   first > 3.0f && e.getInsertGainReductionDb (0, 1) == 0.0f,
+                   "slot0 " + juce::String (first, 2)
+                     + " slot1 " + juce::String (e.getInsertGainReductionDb (0, 1), 2));
+
+            //-- (6) …and it lets go at a RATE, not by snapping to zero --------
+            // The fall lives in `decayMeters` beside every other meter, so this
+            // also proves the new number is in that loop at all. One block of
+            // 512 at 22050 Hz is 23.2 ms, and 24 dB/s of it is 0.557 dB.
+            {
+                const float expectedFall = fx::gainReductionFallDbPerSecond
+                                             * (float) (512.0 / 22050.0);
+
+                e.decayMeters (512);
+
+                const float afterOne = e.getInsertGainReductionDb (0, 0);
+
+                check (utf8 ("表按 24 dB/s 落一个块：既不是钉住不动，也不是一下跳回 0"),
+                       std::abs ((first - afterOne) - expectedFall) < 0.02f,
+                       "Δ " + juce::String (first - afterOne, 4)
+                         + " expected " + juce::String (expectedFall, 4));
+            }
+
+            //-- (7) A block that does not compress must not snap the bar to zero -
+            // The fall is a rate, so the only thing the publisher is allowed to
+            // do with a smaller reading is ignore it. Store it instead and the
+            // bar drops from 8 dB to 0 between two frames — which looks like a
+            // working meter right up until the release you were watching for
+            // becomes a step.
+            const float beforeBypass = e.getInsertGainReductionDb (0, 0);
+
+            mx.setInsertEnabled (0, 0, false);
+            e.publishSchedule (st, rk, 120.0, 0.0, &mx);
+            e.setPositionBeats (0.5);
+            renderBlock();
+
+            const float afterBypass = e.getInsertGainReductionDb (0, 0);
+
+            check (utf8 ("旁通之后的那一块不把表打到 0：它只认得更大的读数，回落是回落的事"),
+                   beforeBypass > 1.0f && std::abs (afterBypass - beforeBypass) < 0.01f,
+                   "before " + juce::String (beforeBypass, 2)
+                     + " after " + juce::String (afterBypass, 2));
+
+            //-- (8) …and it does reach zero -----------------------------------
+            // Blocks, not bare decays: the publisher consumes what it reads, so
+            // a slot that stops running cannot keep re-raising the bar. Drop
+            // that and the loop below holds at 8 dB forever, which is exactly
+            // the ratchet the `> 0` skip in `decayMeters` was written against.
+            for (int i = 0; i < 40; ++i)
+            {
+                e.decayMeters (512);
+                renderBlock();
+            }
+
+            check (utf8 ("落到底就是真的 0：窗口不用再为一个已经不压的压缩器重绘"),
+                   e.getInsertGainReductionDb (0, 0) == 0.0f,
+                   juce::String (e.getInsertGainReductionDb (0, 0), 6));
+
+            //-- (9) The master's inserts are in the same table ------------------
+            // A master compressor is not a channel that happens to be last: it
+            // sits at index `numChannels`, which is the one place a strip index
+            // and an array index stop being the same number everywhere else in
+            // this file.
+            {
+                mx.setInsertEnabled (0, 0, false);
+                mx.setInsertType (MixerModel::masterChannel, 0, fx::Type::comp);
+                mx.setInsertEnabled (MixerModel::masterChannel, 0, true);
+                mx.setInsertParam (MixerModel::masterChannel, 0, 0, 0.0f);
+                mx.setInsertParam (MixerModel::masterChannel, 0, 1, 0.9f);
+                mx.setInsertParam (MixerModel::masterChannel, 0, 2, 0.0f);
+                mx.setInsertParam (MixerModel::masterChannel, 0, 5, 0.0f);
+
+                e.publishSchedule (st, rk, 120.0, 0.0, &mx);
+                e.resetMixState();
+                e.setPositionBeats (0.5);
+                renderBlock();
+
+                const float onMaster = e.getInsertGainReductionDb (MixerModel::masterChannel, 0);
+
+                check (utf8 ("主输出上的压缩器也在表里，而且它不占用任何通道的那一格"),
+                       onMaster > 1.0f && e.getInsertGainReductionDb (0, 0) == 0.0f,
+                       "master " + juce::String (onMaster, 2)
+                         + " / channel " + juce::String (e.getInsertGainReductionDb (0, 0), 2));
+            }
+        }
+    }();
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

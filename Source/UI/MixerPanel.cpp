@@ -780,11 +780,17 @@ void MixerPanel::mixerChanged()
 //==============================================================================
 void MixerPanel::updateMeters()
 {
-    if (levelSource == nullptr)
-        return;
+    if (levelSource != nullptr)
+        for (int slot = 0; slot < getStripCount(); ++slot)
+            repaint (getMeterBounds (channelForDisplaySlot (slot)).expanded (2));
 
-    for (int slot = 0; slot < getStripCount(); ++slot)
-        repaint (getMeterBounds (channelForDisplaySlot (slot)).expanded (2));
+    // Phase 103: the gain-reduction bars move on the same timer and for the same
+    // reason, but they are not on the strips — they are in the rack, which draws
+    // the SELECTED strip only. So this is eight small rectangles, not another
+    // pass over the console.
+    if (insertGainReductionSource != nullptr)
+        for (int slot = 0; slot < MixerModel::numInserts; ++slot)
+            repaint (getInsertTypeBounds (slot).reduced (0, ui::px (1)));
 }
 
 void MixerPanel::resized()
@@ -1257,6 +1263,39 @@ void MixerPanel::drawRack (juce::Graphics& g)
             g.drawText ("K" + juce::String (keySource + 1),
                         getInsertTypeBounds (slot).removeFromRight (ui::px (20)),
                         juce::Justification::centred, false);
+        }
+
+        // Phase 103: gain reduction, drawn as a bar along the bottom of the type
+        // cell. It lives in THIS row and not on the strip's meter for one
+        // reason: the number belongs to a slot. Two compressors in one chain is
+        // an ordinary thing to build, and a strip-level bar would move without
+        // saying which of the two was moving.
+        //
+        // The track is drawn for the two types that can report at all, so a row
+        // says "this one has a meter" before it has anything to show. Reduction
+        // is amber because it is a quantity being taken away; the channel colour
+        // is already carrying identity in this cell and must not also carry a
+        // measurement.
+        if (insert.type == fx::Type::comp || insert.type == fx::Type::limit)
+        {
+            const float reduction = insertGainReductionSource != nullptr
+                                      ? insertGainReductionSource (selectedChannel, slot)
+                                      : 0.0f;
+
+            auto track = getInsertTypeBounds (slot).reduced (ui::px (4), 0)
+                                                    .removeFromBottom (ui::px (3))
+                                                    .toFloat();
+
+            g.setColour (juce::Colours::black.withAlpha (0.30f));
+            g.fillRect (track);
+
+            const float fraction = fx::gainReductionMeterFraction (reduction);
+
+            if (fraction > 0.0f)
+            {
+                g.setColour (theme::warn.withAlpha (on ? 0.95f : 0.35f));
+                g.fillRect (track.withWidth (track.getWidth() * fraction));
+            }
         }
 
         // Parameter bar. A VST3 has its own parameter set, so the bar is

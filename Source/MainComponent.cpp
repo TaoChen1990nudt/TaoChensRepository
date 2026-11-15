@@ -1048,6 +1048,14 @@ MainComponent::MainComponent()
                  : audio.getPlayback().getChannelPeakSide (channel, side);
     };
 
+    // Phase 103: the rack's gain-reduction bars. Same publisher as the meters
+    // above — the number is written by the audio thread and only read here, so
+    // a bar cannot be "the panel's idea of what the compressor is doing".
+    mixerPanel.insertGainReductionSource = [this] (int channel, int slot)
+    {
+        return audio.getPlayback().getInsertGainReductionDb (channel, slot);
+    };
+
     // Phase 10: the app opens on a blank session — one empty layer, no synths,
     // no notes. The demo arrangement is a test fixture now (loadDemoProject),
     // not the thing every launch starts with.
@@ -1616,6 +1624,63 @@ juce::Image MainComponent::createSidechainSnapshot (int width, int height)
 
     mixer.getInserts (0) = savedInserts;
     mixer.setSidechainSource (0, savedKey);
+    mixerPanel.setSelectedChannel (previousChannel);
+    mixer.notify();
+
+    mixerPanel.setBounds (previousBounds);
+    mixerPanel.resized();
+
+    return image;
+}
+
+juce::Image MainComponent::createGainReductionSnapshot (int width, int height)
+{
+    // Phase 103. One rack, four rows, and every row is a different claim about
+    // the same bar:
+    //
+    //   1  COMP   8 dB   — a bar a third of the way across its cell
+    //   2  LIMIT  3 dB   — a different effect, the same ruler
+    //   3  COMP   0 dB   — the track with nothing in it: "this one can report,
+    //                      and right now it is not"
+    //   4  DRIVE  —      — no track at all, because a drive has no detector and
+    //                      a row that showed an empty meter would promise one
+    //
+    // The numbers are staged (`setInsertGainReductionForTest`) for the reason a
+    // still frame can never drive a compressor: see the note on that method.
+    const int previousChannel = mixerPanel.getSelectedChannel();
+    const auto savedInserts   = mixer.getInserts (0);
+    const auto previousBounds = mixerPanel.getBounds();
+
+    mixerPanel.setSelectedChannel (0);
+
+    mixer.setInsertType (0, 1, fx::Type::comp);
+    mixer.setInsertType (0, 2, fx::Type::limit);
+    mixer.setInsertType (0, 3, fx::Type::comp);
+    mixer.setInsertType (0, 4, fx::Type::drive);
+
+    for (int slot = 1; slot <= 4; ++slot)
+        mixer.setInsertEnabled (0, slot, true);
+
+    audio.getPlayback().setInsertGainReductionForTest (0, 1, 8.0f);
+    audio.getPlayback().setInsertGainReductionForTest (0, 2, 3.0f);
+    audio.getPlayback().setInsertGainReductionForTest (0, 3, 0.0f);
+
+    mixerPanel.setSize (width, height);
+    mixerPanel.resized();
+    mixerPanel.updateMeters();
+
+    auto image = mixerPanel.createComponentSnapshot (mixerPanel.getLocalBounds(), true);
+
+    // The readings are engine state, not model state, so they outlive the frame
+    // unless they are put back — and a later frame that happens to show this
+    // strip would inherit three bars nobody measured. Put back the three cells
+    // this fixture wrote, not `resetMeters()`: that would also clear the level
+    // meters, and a screenshot erasing a reading it did not create is the kind
+    // of side effect that turns up two frames later as someone else's bug.
+    for (int slot = 1; slot <= 4; ++slot)
+        audio.getPlayback().setInsertGainReductionForTest (0, slot, 0.0f);
+
+    mixer.getInserts (0) = savedInserts;
     mixerPanel.setSelectedChannel (previousChannel);
     mixer.notify();
 

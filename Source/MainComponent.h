@@ -656,6 +656,9 @@ public:
         both back. */
     juce::Image createSidechainSnapshot (int width = ui::px (1180), int height = ui::px (300));
 
+    /** Phase 103: the effect rack with a gain-reduction bar in it. */
+    juce::Image createGainReductionSnapshot (int width = ui::px (1180), int height = ui::px (300));
+
     /** Phase 43: how tall the file tree's pane is, in device pixels, as the
         splitter currently has it. The self-test asks this instead of measuring
         components: the number IS the setting, and a component's height also

@@ -139,6 +139,15 @@ public:
         cannot show that a hard-panned strip is silent on one side. */
     std::function<float (int channel, int side)> levelSource;
 
+    /** Phase 103: how many dB a slot is pulling its strip down, 0 when it is not
+        squeezing. Asked per SLOT, and the panel draws it inside that slot's own
+        row, because "the compressor is working" is not a property of the strip:
+        a chain with two of them would light one bar and leave the user to guess.
+
+        Comes from the same place the level meters come from — the engine's
+        published numbers — so the bar cannot disagree with the sound. */
+    std::function<float (int channel, int slot)> insertGainReductionSource;
+
     /** The host owns the plugin library, so it owns the VST3 submenu. */
     std::function<void (int channel, int slot, juce::Point<int> screenPos)> onInsertPluginRequested;
 

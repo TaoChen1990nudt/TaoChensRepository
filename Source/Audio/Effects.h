@@ -172,6 +172,57 @@ inline float compAttackSecs  (float v) noexcept { return 0.001f * std::pow (200.
 inline float compReleaseSecs (float v) noexcept { return 0.020f * std::pow (100.0f, juce::jlimit (0.0f, 1.0f, v)); }
 inline float compKneeDb      (float v) noexcept { return 24.0f * juce::jlimit (0.0f, 1.0f, v); }
 
+// --- gain reduction, as a number a meter can show -----------------------------
+/** Phase 103: how much a dynamic insert is pulling the signal down, in dB, from
+    the smallest gain it multiplied by during the block.
+
+    ONE function, because three places have to agree about it: the compressor
+    and the limiter produce it, the engine publishes it, and the rack draws it.
+    A meter that computes its own dB from a linear gain is a second opinion, and
+    the second opinion is always the one that is wrong by a factor of two.
+
+    Unity means "nothing taken off" — not "almost nothing". A signal below the
+    threshold leaves `compGain` at exactly 1.0, and a meter that showed
+    -0.0001 dB there would flicker on every quiet passage. The floor is 96 dB
+    because no built-in insert can reduce more than that (LIMIT's ceiling knob
+    bottoms out at -24 dB against material that peaks at 0 dBFS, COMP's ratio
+    tops out at 20:1), so anything beyond it is a bug and should read as "a lot",
+    not as a number nobody can see. */
+inline float gainReductionDb (float minGain) noexcept
+{
+    if (! (minGain < 0.9999f))
+        return 0.0f;
+
+    return juce::jlimit (0.0f, 96.0f, -20.0f * std::log10 (juce::jmax (1.0e-5f, minGain)));
+}
+
+/** Phase 103: the full scale of a gain-reduction bar, in dB, and the fraction of
+    it a reading fills.
+
+    Here rather than in the panel because the number is a decision about the
+    MEASUREMENT, not about this one drawing of it: 24 dB is where a bar stops
+    being useful, since a compressor doing more than that has stopped shaping and
+    started muting. Anything above pins at full, which is honest — a bar that
+    went past its own end would be a bar with no scale. */
+inline constexpr float gainReductionMeterScaleDb = 24.0f;
+
+inline float gainReductionMeterFraction (float db) noexcept
+{
+    return juce::jlimit (0.0f, 1.0f, db / gainReductionMeterScaleDb);
+}
+
+/** Phase 103: how fast the meter lets go, in dB per second of AUDIO.
+
+    24 dB/s clears the whole scale in one second, and a typical 6 dB of squashing
+    is gone in a quarter of a second — fast enough that a stopped passage does
+    not leave a bar lit, slow enough to read a punch.
+
+    Expressed per second, not per block, for the reason `decayMeters` wrote
+    down in Phase 42: the same number has to fall at the same speed at any
+    buffer size, and a per-block constant would make a 64-sample buffer look
+    like a 6 dB jump and a 2048-sample buffer like a slow crawl. */
+inline constexpr float gainReductionFallDbPerSecond = 24.0f;
+
 // --- REVERB ------------------------------------------------------------------
 inline float reverbDecaySecs (float v) noexcept { return 0.2f * std::pow (50.0f, juce::jlimit (0.0f, 1.0f, v)); }
 inline float reverbSizeX     (float v) noexcept { return 0.2f + 1.6f * juce::jlimit (0.0f, 1.0f, v); }
@@ -418,6 +469,23 @@ struct SlotState
     float compEnv  = 0.0f;
     float compGain = 1.0f;
 
+    /** Phase 103: the smallest gain this slot multiplied by during the call that
+        just ran — the ONE number a gain-reduction meter needs, and the only new
+        state a meter costs.
+
+        A minimum and not the last value: a compressor that squashes 8 dB on the
+        first transient and lets go by the end of the block is doing its job, and
+        a meter that reported the last sample would read zero exactly when the
+        user turned round to look. It is also not the envelope: `compEnv` is the
+        LEVEL at the detector, which is a different quantity with the same
+        digits — reporting it produces a plausible-looking number that is wrong
+        by the whole ratio (PITFALLS P103-A).
+
+        1.0 means "did not run, or ran and took nothing off". Both are the same
+        answer to the meter and must stay the same answer here, or a bypassed
+        slot would need a second flag to say so. */
+    float blockMinGain = 1.0f;
+
     /** Phase 102 limiter: the signal path's own memory, a write head, and the
         one envelope the detector runs on. Separate from `delayBuffer` on
         purpose — that one belongs to the DELAY effect, and a slot whose type
@@ -484,6 +552,7 @@ struct ChainState
 
             slot.compEnv  = 0.0f;
             slot.compGain = 1.0f;
+            slot.blockMinGain = 1.0f;
         }
     }
 
@@ -511,6 +580,7 @@ struct ChainState
 
             slot.compEnv  = 0.0f;
             slot.compGain = 1.0f;
+            slot.blockMinGain = 1.0f;
 
             slot.limitBuffer.clear();
             slot.limitPos = 0;
@@ -829,6 +899,11 @@ private:
         const float* keyL  = keyed ? key->left  : nullptr;
         const float* keyR  = keyed ? key->right : nullptr;
 
+        // Phase 103: this call's own measurement, starting from "nothing taken
+        // off". Reset here rather than in the engine so the number always means
+        // the same thing: the smallest gain THIS call applied.
+        state.blockMinGain = 1.0f;
+
         for (int n = 0; n < numSamples; ++n)
         {
             const float level = keyed
@@ -859,6 +934,13 @@ private:
             }
 
             state.compGain += (target - state.compGain) * (target < state.compGain ? att : rel);
+
+            // Measured BEFORE the makeup gain, and this is not a detail: makeup
+            // is a fader the user set, not something the compressor took away.
+            // Fold it in and a working compressor with 12 dB of makeup reads as
+            // "adding 6 dB" — or, after clamping at zero, as doing nothing at
+            // all while the audio is plainly 12 dB louder (PITFALLS P103-B).
+            state.blockMinGain = juce::jmin (state.blockMinGain, state.compGain);
 
             const float g = state.compGain * makeup;
             l[n] *= g;
@@ -911,6 +993,11 @@ private:
 
         const int mask = ringSize - 1;
 
+        // Phase 103: this call's measurement. Same sentence as the compressor's
+        // — the smallest gain applied, 1.0 for "nothing taken off" — so a rack
+        // can draw both with one ruler.
+        state.blockMinGain = 1.0f;
+
         auto* l = buffer.getWritePointer (0);
         auto* r = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
 
@@ -945,6 +1032,8 @@ private:
                     if (over > 0.0f)
                         gain = std::pow (10.0f, -over / 20.0f);
                 }
+
+                state.blockMinGain = juce::jmin (state.blockMinGain, gain);
 
                 // Write now, read `lookaheadSamples` ago: the output is the input
                 // of 128 samples earlier, times a gain that already knew about
