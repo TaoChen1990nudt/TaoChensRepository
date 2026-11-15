@@ -2274,24 +2274,6 @@ juce::Image MainComponent::createGroupScrollSnapshot (int width, int height)
 }
 
 //==============================================================================
-juce::Image MainComponent::createAuditionStripSnapshot (int width)
-{
-    AuditionStrip strip;
-    strip.setSize (width, AuditionStrip::preferredHeight());
-
-    // A mouse can only hold one key, so the frame shows one held white key and
-    // everything else at rest: the two states side by side is the whole point
-    // of the picture. Index 7 is G3 — a white key, and not one of the two ends,
-    // so the reader can see the band continues on both sides of it.
-    strip.beginHoldForTest (7);
-
-    auto image = strip.createComponentSnapshot (strip.getLocalBounds(), true);
-
-    strip.endHoldForTest();
-
-    return image;
-}
-
 juce::Image MainComponent::createPerfSnapshot()
 {
     // A headless run has no sound card, so the meter is fed by hand — through
@@ -3737,30 +3719,7 @@ void MainComponent::openPluginEditor (int instanceId, const juce::String& displa
     // forwarder on itself and on its content (the plugin's own editor).
     window->setKeyForwarder (&pluginForwarder);
 
-    // Phase 106: the keys at the bottom of that window play THIS slot. Which
-    // slot is resolved at press time and not captured here — a slot can be
-    // replaced under an open window, and a preview aimed at the old one would
-    // be silent for exactly the reason the user opened the window.
-    window->setAuditionCallbacks (
-        [this, instanceId] (int pitch, float velocity)
-        {
-            const int slotId = slotIdForPlugin (instanceId);
-
-            if (slotId >= 0)
-                auditionPreview (slotId, pitch, velocity, false);
-        },
-        [this] { releaseHostedPreview(); });
-
     pluginWindows[instanceId] = std::move (window);
-}
-
-int MainComponent::slotIdForPlugin (int instanceId) const
-{
-    for (int i = 0; i < rack.getNumSlots(); ++i)
-        if (const auto* slot = rack.getSlot (i); slot != nullptr && slot->pluginId == instanceId)
-            return rack.getSlotIdAt (i);
-
-    return -1;
 }
 
 void MainComponent::closePluginEditor (int instanceId)
