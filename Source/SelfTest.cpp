@@ -3259,7 +3259,7 @@ juce::String MainComponent::runSelfTest()
                      : juce::String ("no note"));
         }
 
-        //-- Phase 20: the toolbar has to fit its buttons (10 since Phase 97) ---
+        //-- Phase 20: the toolbar has to fit its buttons (11 since Phase 109) ---
         {
             LayerStack t;
             RackModel  r;
@@ -3276,7 +3276,7 @@ juce::String MainComponent::runSelfTest()
 
             check ("Every toolbar button owns its own pixels (the velocity toggle included)",
                    ! overlap
-                     && PianoRollComponent::numToolButtons == 10
+                     && PianoRollComponent::numToolButtons == 11
                      && roll.getToolbarArea().contains (
                               roll.getToolButtonBounds (PianoRollComponent::numToolButtons - 1)),
                    juce::String (PianoRollComponent::numToolButtons) + utf8 (" 个按钮，右端 ")
@@ -9934,7 +9934,7 @@ juce::String MainComponent::runSelfTest()
         pianoRoll.setTool (PianoRollComponent::Tool::knife);
 
         check ("The knife is the toolbar's fifth tool button",
-               PianoRollComponent::numToolButtons == 10
+               PianoRollComponent::numToolButtons == 11
                  && pianoRoll.getToolButtonBounds (4).getX()
                       > pianoRoll.getToolButtonBounds (3).getRight()
                  && pianoRoll.getToolButtonBounds (5).getX()
@@ -20994,6 +20994,198 @@ juce::String MainComponent::runSelfTest()
                  && ! idle.hasSameShapeAs (fresh),
                juce::String (idle.valueAt (0.5f), 3));
     }
+
+    //== Phase 109: 总览 — 每个图层一条带，音符是一条线段 ====================
+    // 用户原话：「增加一个总体显示模式，相当于是把每个图层的钢琴窗的琴键宽度
+    // 压缩到一条线段的宽度，然后有音符的起始位置就显示一条线段，不能编辑，只
+    // 显示作为提示，然后不同的图层按从上到下的顺序拆开来显示」。
+    //
+    // 这一块钉的是三件事，一件也不能少：
+    //   1. **带号就是图层号**，从上到下，铺满网格，中间不留缝；
+    //   2. **时间轴不动** —— 拍 0 还是原来那一列，否则下面的自动化窗口对不上；
+    //   3. **按不动** —— 这是唯一一条「什么都不该发生」的断言，所以它必须配一个
+    //      「同一个音符在钢琴窗里一按就选中」的前提，否则一个根本没接上鼠标的
+    //      夹具也会让它变绿（P101/P104/P106 同一个坑，第五次）。
+    [&]
+    {
+        LayerStack stack;
+        RackModel  rack;
+
+        stack.addLayer (utf8 ("一层"), palette::layer1);
+        stack.addLayer (utf8 ("二层"), palette::layer2);
+        stack.addLayer (utf8 ("三层"), palette::layer3);
+        stack.setActiveLayerIndex (0);
+
+        auto* l0 = stack.getLayer (0);
+        auto* l1 = stack.getLayer (1);
+        auto* l2 = stack.getLayer (2);
+
+        // 三个图层各放一个音符，前两个刻意在**同一拍、同一音高**上：在钢琴窗里
+        // 它们落在同一行、同一段像素上（这正是 ghost 必须存在的理由），而在总览
+        // 里它们必须出现在两条不同的带里。
+        const int n0 = l0->addNote ({ 0, 60, 8.0, 2.0, 0.8f });
+        const int n1 = l1->addNote ({ 0, 60, 8.0, 2.0, 0.8f });
+        const int n2 = l2->addNote ({ 0, 84, 20.0, 0.5, 0.8f });
+
+        PianoRollComponent roll (stack, rack);
+        roll.setSize (1200, 500);
+        roll.setScrollBeats (0.0);
+
+        const auto gridSheet = roll.getGridBounds();
+
+        roll.setOverviewMode (true);
+
+        check (utf8 ("总览把画布分成 N 条带，N 就是图层数（带号就是图层号）"),
+               roll.getOverviewBandCount() == 3,
+               juce::String (roll.getOverviewBandCount()) + utf8 (" 条带"));
+
+        //-- (2) 首尾相接，铺满网格 --------------------------------------
+        const auto b0 = roll.getOverviewBandBounds (0);
+        const auto b1 = roll.getOverviewBandBounds (1);
+        const auto b2 = roll.getOverviewBandBounds (2);
+
+        check (utf8 ("三条带自上而下首尾相接、铺满网格：不留缝，也不重叠"),
+               std::abs (b0.getY() - gridSheet.getY()) < 0.01f
+                 && std::abs (b1.getY() - b0.getBottom()) < 0.01f
+                 && std::abs (b2.getY() - b1.getBottom()) < 0.01f
+                 && std::abs (b2.getBottom() - gridSheet.getBottom()) < 0.01f
+                 && b0.getHeight() > 1.0f,
+               juce::String (b0.getY(), 1) + ".." + juce::String (b0.getBottom(), 1)
+                 + " / " + juce::String (b1.getY(), 1) + ".." + juce::String (b1.getBottom(), 1)
+                 + " / " + juce::String (b2.getY(), 1) + ".." + juce::String (b2.getBottom(), 1));
+
+        //-- (3) 时间轴一点没动 ------------------------------------------
+        // 下面那条自动化窗用的是 `ui::gutterWidth`，它和这里是同一个 x。总览要是
+        // 把网格往左挪（"琴键压成一条线"最直觉的做法就是把那一列让出来），曲线
+        // 就会跑到错的拍子底下——P13 修过一次的那件事。
+        check (utf8 ("总览里拍 0 还在原来那一列，网格的 x 与高度都没变"),
+               std::abs (roll.screenXForBeatForTest (0.0) - gridSheet.getX()) < 0.01f
+                 && std::abs (roll.getGridBounds().getHeight() - gridSheet.getHeight()) < 0.01f,
+               juce::String (roll.screenXForBeatForTest (0.0), 1) + " vs "
+                 + juce::String (gridSheet.getX(), 1));
+
+        //-- (4) 线段从起点画到终点 --------------------------------------
+        const auto s0 = roll.getOverviewSegmentBounds (0, n0);
+        const float startX = roll.screenXForBeatForTest (8.0);
+        const float endX   = roll.screenXForBeatForTest (10.0);
+
+        check (utf8 ("线段左沿就是音符的起点，右沿就是它的终点"),
+               ! s0.isEmpty()
+                 && std::abs (s0.getX() - startX) < 0.01f
+                 && std::abs (s0.getRight() - endX) < 0.01f,
+               s0.toString());
+
+        //-- (4b) 是「线」，不是「块」 ------------------------------------
+        // 块（采样）画满整条带的高度，音符只画三成：两种东西在这个视图里
+        // 必须一眼分得开，而唯一能用的手段是厚度（颜色已经表示图层了）。
+        check (utf8 ("音符线段是细的：不到条带的四成高，也不超过 5 个设计像素"),
+               s0.getHeight() > 1.0f
+                 && s0.getHeight() < b0.getHeight() * 0.4f
+                 && s0.getHeight() <= ui::pf (5.0f) + 0.01f,
+               juce::String (s0.getHeight(), 1) + " / " + juce::String (b0.getHeight(), 1));
+
+        //-- (5) 同一拍、同一音高的两个图层，被拆到两条带里 --------------
+        const auto s1 = roll.getOverviewSegmentBounds (1, n1);
+
+        check (utf8 ("同一拍同一音高的两个音符，在总览里上下两条带各一条线（不再叠在一起）"),
+               ! s0.isEmpty() && ! s1.isEmpty()
+                 && s1.getY() > s0.getY()
+                 && s0.getBottom() <= b0.getBottom() + 0.01f
+                 && s1.getY() >= b0.getBottom() - 0.01f,
+               juce::String (s0.getY(), 1) + " / " + juce::String (s1.getY(), 1));
+
+        //-- (6) 短线也有线宽，而且是从起点往右长 ------------------------
+        // 0.5 拍在 48 px/拍 下是 24 px，本来够；这条测的是「短于最小线宽时，
+        // 加宽加在右边」——起点是这张图唯一要回答的问题，不能被抹掉。
+        const auto s2 = roll.getOverviewSegmentBounds (2, n2);
+
+        check (utf8 ("线段始终盖住自己的起点，最小宽度只往右加，不往左"),
+               ! s2.isEmpty()
+                 && std::abs (s2.getX() - roll.screenXForBeatForTest (20.0)) < 0.01f
+                 && s2.getWidth() >= ui::pf (2.9f),
+               s2.toString());
+
+        //-- (7) 只读：同一点，钢琴窗选中、总览什么都不做 ------------------
+        // 「按在总览里什么都没发生」这句话本身是**证明不了任何事**的：一个
+        // 根本没接上鼠标的夹具、一个按在空白处的点，都会让它变绿（第一版就是
+        // 这样，把只读判据删掉仍然全绿）。所以先把那一点变成「真的有东西」的
+        // 一点：把带里的 y 反查成一条音高行，再把一个音符放到那一行上 ——
+        // 然后**同一个像素**在两种模式下各按一次。
+        const juce::Point<float> probe = roll.getOverviewSegmentBounds (0, n0).getCentre();
+
+        int probePitch = -1;
+
+        for (int p = 0; p < 128; ++p)
+            if (roll.screenYForPitchForTest (p) <= probe.y
+                 && probe.y < roll.screenYForPitchForTest (p) + PianoRollComponent::keyHeight)
+                probePitch = p;
+
+        const int under = probePitch >= 0
+                            ? l0->addNote ({ 0, probePitch, 8.0, 2.0, 0.8f })
+                            : -1;
+
+        roll.setOverviewMode (false);
+        roll.setSelection ({});
+        roll.simulatePressForTest (probe);
+
+        check (utf8 ("（前提）这一点在钢琴窗里真的压着一个音符：一按就选中它"),
+               under >= 0 && roll.isNoteSelectedForTest (under),
+               juce::String (probePitch) + utf8 (" 行 / 选中 ")
+                 + juce::String ((int) roll.getSelection().size()));
+
+        roll.setOverviewMode (true);
+        roll.setSelection ({});
+
+        const int notesBefore = (int) l0->getNotes().size();
+
+        roll.simulatePressForTest (probe);
+        roll.simulatePressForTest (probe, {}, 2);      // 双击也不行
+
+        check (utf8 ("同一个点：总览里不选、不加、也不删（只读）"),
+               roll.getSelection().empty()
+                 && (int) l0->getNotes().size() == notesBefore
+                 && roll.getEditingGroupId() < 0,
+               juce::String ((int) l0->getNotes().size()) + utf8 (" 个音符 / 选中 ")
+                 + juce::String ((int) roll.getSelection().size()));
+
+        //-- (8) 顺手把「带着选中进总览」这件事钉一下 --------------------
+        // 选区是工程的，不是视图的：进总览不该清空它（清空会是一次看不见的
+        // 编辑），但总览里也不能拿它画出任何东西。这里只钉前半句，后半句
+        // 由上面那条负责。
+        roll.setSelection ({ n0 });
+
+        check (utf8 ("进总览不清空选区：视图换了一种画法，不换工程的状态"),
+               roll.getSelection().size() == 1 && roll.isNoteSelectedForTest (n0),
+               juce::String ((int) roll.getSelection().size()) + utf8 (" 个选中"));
+
+        roll.setSelection ({});
+
+        //-- (9) 眼睛关着也仍然有它那条带 --------------------------------
+        // P20 的「没有眼睛就没有 ghost」说的是**叠在别人身后**的那张纸。总览里
+        // 没有身后，所以眼睛在这里只改亮度，不改成员资格：带号 == 图层号，
+        // 三条带永远三条带。第三层的眼睛是有意用来对照的（它一直是当前层）。
+        // 上面那条把视图留在了钢琴窗里，所以先回总览——条带几何只在总览里存在。
+        roll.setOverviewMode (true);
+        stack.setLayerVisible (1, false);
+
+        check (utf8 ("某个图层的眼睛关着，它那条带仍然在（没有ghost，也就没有「没有ghost」）"),
+               ! roll.getOverviewBandBounds (1).isEmpty()
+                 && roll.getOverviewBandCount() == 3,
+               juce::String (roll.getOverviewBandCount()) + utf8 (" 条带，带 1 ")
+                 + roll.getOverviewBandBounds (1).toString());
+
+        //-- (10) 越界与「不在总览里」都是空矩形 -------------------------
+        roll.setOverviewMode (true);
+
+        const bool outOfRange = roll.getOverviewBandBounds (3).isEmpty()
+                                  && roll.getOverviewBandBounds (-1).isEmpty();
+
+        roll.setOverviewMode (false);
+
+        check (utf8 ("越界索引、以及钢琴窗里的「压缩后的线段」，都答空矩形"),
+               outOfRange && roll.getOverviewSegmentBounds (0, n0).isEmpty(),
+               "band3 " + roll.getOverviewBandBounds (3).toString());
+    }();
 
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after

@@ -487,6 +487,13 @@ juce::Rectangle<int> PianoRollComponent::getVelocityLaneArea() const
     if (! showVelocityLane)
         return {};
 
+    // Phase 109: the overview has no lane, and it does not switch the setting
+    // off — it just has nowhere to put one. The strip is a bar-per-note editing
+    // surface; this mode is read-only, and a read-only view that still took 56
+    // pixels off the stripes would be taking them for a control nobody can use.
+    if (overviewMode)
+        return {};
+
     // Never more than a third of the component: the lane is a tool, and a tool
     // that can eat the sheet it edits is worse than a tool that gets shorter.
     const int height = juce::jmin (velocityLaneHeight,
@@ -514,6 +521,98 @@ void PianoRollComponent::setVelocityLaneVisible (bool shouldShow)
     clampScroll();
     updateCursor();
     repaint();
+}
+
+
+void PianoRollComponent::setOverviewMode (bool shouldShow)
+{
+    if (overviewMode == shouldShow)
+        return;
+
+    overviewMode = shouldShow;
+
+    // A mode change is not a gesture. Nothing may stay half-dragged across it:
+    // the thing under the pointer belonged to the other layout, and the band a
+    // press started in here does not answer presses at all.
+    dragMode      = DragMode::none;
+    hoveredNoteId = -1;
+
+    // The three floating editors hang off a note, a group and a block, none of
+    // which has a place in a band. They are closed rather than hidden — a box
+    // that is still "open" is a state the next keystroke would edit.
+    if (overviewMode)
+    {
+        closeNoteAutomation();
+        closeGroupAutomation();
+        closeSampleAutomation();
+    }
+
+    // The lane comes and goes with the mode, which changes the grid's height,
+    // which is what every y in this view is measured from.
+    clampScroll();
+    updateCursor();
+    repaint();
+}
+
+
+juce::Rectangle<float> PianoRollComponent::getOverviewBandBounds (int index) const
+{
+    const int count = getOverviewBandCount();
+
+    if (! overviewMode || count <= 0 || index < 0 || index >= count)
+        return {};
+
+    const auto grid = getGridArea();
+    const float slice = grid.getHeight() / (float) count;
+
+    // Round the two EDGES, never the height: a 7-layer stack on 449 pixels
+    // otherwise ends with a band that is a fraction short of its neighbour's
+    // top, and one stray pixel row of background down the middle of the stack
+    // reads as "that layer is empty".
+    const float top    = grid.getY() + (float) juce::roundToInt (slice * (float) index);
+    const float bottom = grid.getY() + (float) juce::roundToInt (slice * (float) (index + 1));
+
+    return { grid.getX(), top, grid.getWidth(), juce::jmax (0.0f, bottom - top) };
+}
+
+
+juce::Rectangle<float> PianoRollComponent::overviewSegmentOf (int layerIndex,
+                                                              const NoteEvent& note) const
+{
+    const auto band = getOverviewBandBounds (layerIndex);
+
+    if (band.isEmpty())
+        return {};
+
+    const float x0 = screenXForBeat (note.startBeat);
+    const float x1 = screenXForBeat (note.startBeat + note.lengthBeats);
+
+    // A THIRD of the band, not half: a note has to read as a line across the
+    // stripe, not as a bar with air around it. The clamp keeps a twelfth-layer
+    // stack from turning the lines into nothing at the top end, and a three-layer
+    // one from turning them into bricks at the bottom.
+    const float height = juce::jlimit (1.5f, ui::pf (5.0f), band.getHeight() * 0.30f);
+
+    // A note shorter than the minimum is still a mark at its start — that is
+    // the whole of "有音符的起始位置就显示一条线段". The minimum widens to the
+    // right, never to the left, so the left edge stays exactly the onset.
+    const float width = juce::jmax (ui::pf (3.0f), x1 - x0);
+
+    return { x0, band.getCentreY() - height * 0.5f, width, height };
+}
+
+
+juce::Rectangle<float> PianoRollComponent::getOverviewSegmentBounds (int layerIndex,
+                                                                    int noteId) const
+{
+    auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr)
+        return {};
+
+    const auto* note = layer->findNote (noteId);
+
+    return note != nullptr ? overviewSegmentOf (layerIndex, *note) : juce::Rectangle<float>();
 }
 
 

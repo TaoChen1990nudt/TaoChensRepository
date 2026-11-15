@@ -258,6 +258,11 @@ namespace
         writePng ("-groups", component.createGroupMuteSnapshot());
         writePng ("-groupscroll", component.createGroupScrollSnapshot());
 
+        // Phase 109: 总览 — every layer in its own band, each note a line from its
+        // own start. Its own frame because it is a MODE: no other picture here
+        // shows the same session laid out differently.
+        writePng ("-overview", component.createOverviewSnapshot());
+
         // Phase 21: the group's inline curve box. Its own frame, because only
         // one floating editor can be open at a time and the main image above
         // already documents the note box.

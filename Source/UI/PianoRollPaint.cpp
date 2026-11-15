@@ -30,19 +30,31 @@ void PianoRollComponent::paint (juce::Graphics& g)
         juce::Graphics::ScopedSaveState clip (g);
         g.reduceClipRegion (area.toNearestInt());
 
-        drawPitchRows (g);
-        drawTimeGrid (g);
-        drawGridLines (g);
-        drawGroupBands (g);       // Phase 16: a frame around each group
-        drawSamples (g);          // Phase 17: audio blocks sit under the notes
-        drawNotes (g);
-        drawGroupFrames (g);      // Phase 57: the frame's outline, ON the members
-        drawGroupLabels (g);      // ... and their name pills in front
-        drawFocusHighlights (g);  // the focused synth's notes, on top of all
-        drawSpotlightExitChip (g); // Phase 29: and the way back out of the veil
-        drawMarquee (g);
-        drawDropPreview (g);      // Phase 17: where a dragged sample would land
-        drawPlayhead (g);
+        if (overviewMode)
+        {
+            // Phase 109: a different picture of the same data, not the same
+            // picture with a layer added. Pitch rows, group brackets, name
+            // pills, drop previews and the automation boxes are all answers to
+            // "where on the keyboard", and this view has no keyboard.
+            drawOverview (g);
+            drawPlayhead (g);
+        }
+        else
+        {
+            drawPitchRows (g);
+            drawTimeGrid (g);
+            drawGridLines (g);
+            drawGroupBands (g);       // Phase 16: a frame around each group
+            drawSamples (g);          // Phase 17: audio blocks sit under the notes
+            drawNotes (g);
+            drawGroupFrames (g);      // Phase 57: the frame's outline, ON the members
+            drawGroupLabels (g);      // ... and their name pills in front
+            drawFocusHighlights (g);  // the focused synth's notes, on top of all
+            drawSpotlightExitChip (g); // Phase 29: and the way back out of the veil
+            drawMarquee (g);
+            drawDropPreview (g);      // Phase 17: where a dragged sample would land
+            drawPlayhead (g);
+        }
     }
 
     drawToolbar (g);
@@ -54,6 +66,7 @@ void PianoRollComponent::paint (juce::Graphics& g)
     // The inline note automation box floats above the notes and is clipped to
     // the grid: it is anchored under a note, so it must not creep over the
     // keyboard or the ruler when that note sits near an edge.
+    if (! overviewMode)
     {
         juce::Graphics::ScopedSaveState clip (g);
         g.reduceClipRegion (area.toNearestInt());
@@ -222,7 +235,38 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
     {
         const auto bounds  = getToolButtonBounds (9).toFloat();
         const bool hovered = hoveredTool == 9;
-        const bool on      = showVelocityLane;
+
+        // Phase 109: the overview has no strip to show and no bars to drag, so
+        // the button reads "not here" while it is on — but the setting itself is
+        // untouched, which is why it lights up again the moment the mode ends.
+        const bool on       = showVelocityLane && ! overviewMode;
+        const float inkAlpha = overviewMode ? 0.35f : 0.75f;
+
+        g.setColour (on ? tint.withAlpha (0.22f)
+                        : juce::Colours::white.withAlpha (hovered && ! overviewMode ? 0.12f : 0.05f));
+        g.fillRoundedRectangle (bounds, ui::pf (4));
+
+        g.setColour (on ? tint.withAlpha (0.85f)
+                        : juce::Colours::white.withAlpha (overviewMode ? 0.10f : 0.20f));
+        g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (4), 1.0f);
+
+        drawToolIcon (g, 9, bounds.withTrimmedLeft (ui::pf (7)).withWidth (ui::pf (18)),
+                      on ? juce::Colours::white : kText.withAlpha (inkAlpha));
+
+        g.setColour (on ? juce::Colours::white : kText.withAlpha (inkAlpha));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
+        g.drawText (utf8 ("力度"),
+                    bounds.withTrimmedLeft (ui::pf (26)), juce::Justification::centredLeft, false);
+    }
+
+    //-- Phase 109: 总览 ------------------------------------------------------
+    // A view mode, drawn like the two next to it: lit while it is on. It is the
+    // only way in and the only way out, which is why the hint below also names
+    // Esc — a read-only mode needs an obvious exit.
+    {
+        const auto bounds  = getToolButtonBounds (10).toFloat();
+        const bool hovered = hoveredTool == 10;
+        const bool on      = overviewMode;
 
         g.setColour (on ? tint.withAlpha (0.22f)
                         : juce::Colours::white.withAlpha (hovered ? 0.12f : 0.05f));
@@ -232,12 +276,12 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
                         : juce::Colours::white.withAlpha (0.20f));
         g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (4), 1.0f);
 
-        drawToolIcon (g, 9, bounds.withTrimmedLeft (ui::pf (7)).withWidth (ui::pf (18)),
+        drawToolIcon (g, 10, bounds.withTrimmedLeft (ui::pf (7)).withWidth (ui::pf (18)),
                       on ? juce::Colours::white : kText.withAlpha (0.75f));
 
         g.setColour (on ? juce::Colours::white : kText.withAlpha (0.75f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
-        g.drawText (utf8 ("力度"),
+        g.drawText (utf8 ("总览"),
                     bounds.withTrimmedLeft (ui::pf (26)), juce::Justification::centredLeft, false);
     }
 
@@ -259,6 +303,19 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
         g.setColour (tint);
         g.setFont (boldFont (10.0f));
         g.drawText (statusText, hintArea, juce::Justification::centredLeft, true);
+    }
+    else if (overviewMode)
+    {
+        // The one sentence this mode has to say: what the stripes are, and that
+        // nothing in them can be touched. Without it the mode looks like a
+        // broken roll rather than a different view of the same project. Kept
+        // short on purpose — the eleven-button strip leaves about twenty
+        // characters before the readout on the right, and a sentence that gets
+        // cut in half says less than a shorter one that fits.
+        g.setColour (tint.withAlpha (0.85f));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.0f))));
+        g.drawText (utf8 ("总览 · 只读：每层一条带，音符是线段　·　Esc 回来"),
+                    hintArea, juce::Justification::centredLeft, true);
     }
     else if (hasPaintState)
     {
@@ -492,6 +549,193 @@ void PianoRollComponent::drawNotes (juce::Graphics& g)
     // (a tinted wash, a ring and a tab in the slot's colour, drawn in
     // drawFocusHighlights); nothing on the grid gets darker, so nothing becomes
     // unreadable.
+}
+
+
+//==============================================================================
+//  Phase 109: 总览 — one band per layer, a note is a line
+//==============================================================================
+void PianoRollComponent::drawOverview (juce::Graphics& g)
+{
+    const auto area = getGridArea();
+    const int  count = getOverviewBandCount();
+
+    if (count <= 0)
+        return;
+
+    // Time is the only axis this view has, so the grid it shares with the sheet
+    // view is drawn first and unchanged: beat 0 is the same column, the bars are
+    // the same bars, and the automation window below still lines up.
+    drawTimeGrid (g);
+    drawGridLines (g);
+
+    const int activeIndex = stack.getActiveLayerIndex();
+
+    for (int i = 0; i < count; ++i)
+    {
+        const auto band = getOverviewBandBounds (i);
+        auto* layer = stack.getLayer (i);
+
+        if (layer == nullptr || band.isEmpty())
+            continue;
+
+        // Alternating tint: with the names in the other column, this is what
+        // lets the eye carry a band across 800 pixels without losing it.
+        g.setColour (juce::Colours::white.withAlpha (i % 2 == 0 ? 0.018f : 0.042f));
+        g.fillRect (band);
+
+        // The eye button is the GHOST switch (Phase 20) — "paint this behind the
+        // sheet I am editing". Nothing is behind anything here, so hiding is not
+        // available: a mode called 总体 that dropped rows would be answering a
+        // different question. The eye shows as a dimmer band instead, and the
+        // active layer is the bright one.
+        const float strength = (i == activeIndex)
+                                 ? 1.0f
+                                 : (layer->isVisible() ? 0.72f : 0.40f);
+
+        const auto tint = layer->getColour();
+
+        //-- Groups: the span they occupy, as a wash -------------------------
+        // The SAME geometry the frame is drawn from (groupFrameOf, Phase 105).
+        // Only its x range is used: the box is "this much time", and vertical
+        // extent is the one thing a band has thrown away.
+        for (const auto& group : layer->getGroups())
+            for (int which : layer->getGroupOccurrences (group.getId()))
+            {
+                const auto frame = groupFrameOf (i, group.getId(), which);
+
+                if (frame.isEmpty())
+                    continue;
+
+                const float left  = juce::jmax (band.getX(),      frame.getX());
+                const float right = juce::jmin (band.getRight(),  frame.getRight());
+
+                if (right - left < 1.0f)
+                    continue;
+
+                const auto wash = juce::Rectangle<float> (left, band.getY() + 1.0f,
+                                                          right - left,
+                                                          juce::jmax (1.0f, band.getHeight() - 2.0f));
+
+                const auto colour = group.getColour();
+
+                g.setColour (colour.withAlpha (0.10f * strength * takeFadeOf (*layer, group.getId())));
+                g.fillRoundedRectangle (wash, 2.0f);
+
+                g.setColour (colour.withAlpha (0.30f * strength * takeFadeOf (*layer, group.getId())));
+                g.drawHorizontalLine (juce::roundToInt (wash.getY()),
+                                      wash.getX(), wash.getRight());
+            }
+
+        //-- Blocks: the full height of the band, faintly --------------------
+        // Taller than a note line on purpose: "this stretch is audio" and "these
+        // are notes" have to be distinguishable without reading a label, and the
+        // only other difference available here is colour, which already means
+        // "which layer".
+        for (const auto& clip : layer->getSamples())
+        {
+            const float x0 = screenXForBeat (clip.startBeat);
+            const float x1 = screenXForBeat (clip.startBeat + clip.lengthBeats);
+
+            if (x1 < area.getX() || x0 > area.getRight())
+                continue;
+
+            auto box = juce::Rectangle<float> (x0, band.getY() + 1.0f,
+                                               juce::jmax (1.0f, x1 - x0),
+                                               juce::jmax (1.0f, band.getHeight() - 2.0f));
+
+            g.setColour (tint.withAlpha (0.13f * strength));
+            g.fillRoundedRectangle (box, 2.0f);
+
+            g.setColour (tint.withAlpha (0.42f * strength));
+            g.drawRoundedRectangle (box.reduced (0.5f), 2.0f, 1.0f);
+        }
+
+        //-- Notes: one line each, at its own start --------------------------
+        for (const auto& note : layer->getNotes())
+        {
+            const auto segment = overviewSegmentOf (i, note);
+
+            if (segment.isEmpty() || ! segment.intersects (area))
+                continue;
+
+            const float alpha = strength * takeFadeOf (*layer, note.groupId);
+
+            g.setColour (tint.withAlpha (0.80f * alpha));
+            g.fillRoundedRectangle (segment, 1.5f);
+
+            // The onset: a brighter cap on the left edge. "起点在哪" is the
+            // question the user asked this view to answer, so the answer is a
+            // pixel the eye lands on rather than an edge it has to infer.
+            g.setColour (tint.brighter (0.75f).withAlpha (alpha));
+            g.fillRect (juce::Rectangle<float> (segment.getX(), segment.getY(),
+                                                juce::jmin (2.0f, segment.getWidth()),
+                                                segment.getHeight()));
+        }
+
+        //-- The seam between two bands --------------------------------------
+        if (i + 1 < count)
+        {
+            g.setColour (juce::Colours::white.withAlpha (0.07f));
+            g.drawHorizontalLine (juce::roundToInt (band.getBottom()) - 1,
+                                  area.getX(), area.getRight());
+        }
+    }
+}
+
+
+void PianoRollComponent::drawOverviewColumn (juce::Graphics& g)
+{
+    auto column = getKeyboardArea();
+
+    if (column.isEmpty())
+        return;
+
+    g.setColour (kRollBackground);
+    g.fillRect (column);
+
+    const int activeIndex = stack.getActiveLayerIndex();
+
+    for (int i = 0; i < getOverviewBandCount(); ++i)
+    {
+        const auto band = getOverviewBandBounds (i);
+        auto* layer = stack.getLayer (i);
+
+        if (layer == nullptr || band.isEmpty())
+            continue;
+
+        auto label = column.withY (juce::roundToInt (band.getY()))
+                            .withHeight (juce::roundToInt (band.getHeight()));
+
+        const bool active = (i == activeIndex);
+        const auto tint   = layer->getColour();
+
+        // The keys are gone; this rule is what is left of them — "琴键压成一条
+        // 线". It is the layer's colour, at the same strength the band uses, so
+        // the column and the stripe it names read as one object.
+        g.setColour (tint.withAlpha (active ? 1.0f : (layer->isVisible() ? 0.8f : 0.42f)));
+        g.fillRect (label.withTrimmedLeft (label.getWidth() - ui::px (3))
+                         .withTrimmedBottom (1));
+
+        // A name needs about 16 px of band. Below that the bands are a barcode
+        // and the only honest thing to draw is the colour.
+        if (label.getHeight() >= ui::px (16))
+        {
+            g.setColour (active ? juce::Colours::white
+                                : kText.withAlpha (layer->isVisible() ? 0.78f : 0.45f));
+            g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.0f))));
+            g.drawText (layer->getName(),
+                        label.withTrimmedRight (ui::px (8)).reduced (ui::px (5), 0),
+                        juce::Justification::centredLeft, false);
+        }
+
+        if (i + 1 < getOverviewBandCount())
+        {
+            g.setColour (juce::Colours::white.withAlpha (0.07f));
+            g.drawHorizontalLine (juce::roundToInt (band.getBottom()) - 1,
+                                  0.0f, (float) column.getWidth());
+        }
+    }
 }
 
 
@@ -1301,6 +1545,16 @@ void PianoRollComponent::drawRuler (juce::Graphics& g)
 
 void PianoRollComponent::drawKeyboard (juce::Graphics& g)
 {
+    // Phase 109: the column has a second job. In the overview there is no pitch
+    // axis to play, so the keys are not drawn at all — what the user asked for
+    // is that the keyboard stop taking a column's worth of width; what is left
+    // is one colour rule per layer and its name.
+    if (overviewMode)
+    {
+        drawOverviewColumn (g);
+        return;
+    }
+
     auto keys = getKeyboardArea();
 
     g.setColour (theme::surface2);
@@ -1587,6 +1841,27 @@ void PianoRollComponent::drawToolIcon (juce::Graphics& g, int toolIndex,
 
             g.fillRect (juce::Rectangle<float> (box.getX() + 1.5f, floorY,
                                                 box.getWidth() - 3.0f, 1.0f));
+            break;
+        }
+
+        case 10:    // Phase 109: overview — three lanes, one segment in each
+        {
+            // Not a "zoom out" magnifier: the mode is not a smaller picture of
+            // the same sheet, it is the stack laid out. Three rows, each with a
+            // thick short bar at a different place, is the whole idea at 16 px.
+            // The rows are 4.8 apart with a 2.8-tall bar — at 4.4/2.4 the three
+            // of them merged into one striped block when the button was lit.
+            for (int i = 0; i < 3; ++i)
+            {
+                const float y = box.getY() + 1.8f + (float) i * 4.8f;
+
+                // The lane itself: a hairline all the way across.
+                g.fillRect (juce::Rectangle<float> (box.getX() + 1.5f, y + 2.6f, 13.0f, 0.8f));
+
+                // ... and the segment in it, which is what a note becomes.
+                g.fillRoundedRectangle (juce::Rectangle<float> (box.getX() + 2.0f + (float) i * 3.2f,
+                                                                y, 4.6f, 2.8f), 0.6f);
+            }
             break;
         }
 

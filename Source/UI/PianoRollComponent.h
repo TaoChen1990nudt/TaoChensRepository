@@ -151,7 +151,7 @@ public:
         hours at 120 BPM — "unlimited" in any practical sense. */
     static constexpr double maxTimelineBeats = 10000.0;
 
-    static constexpr int    numToolButtons = 10;     // 5 tools + copy-state + group + ungroup + snap + velocity lane
+    static constexpr int    numToolButtons = 11;     // 5 tools + copy-state + group + ungroup + snap + velocity lane + overview
 
     //-- Phase 7: tools -------------------------------------------------------
     enum class Tool
@@ -1492,6 +1492,58 @@ public:
     bool isVelocityLaneVisible() const noexcept { return showVelocityLane; }
     void setVelocityLaneVisible (bool shouldShow);
 
+    //-- Phase 109: 总览模式 ---------------------------------------------------
+    /** The whole stack at once, instead of one sheet with the others behind it.
+
+        What the user asked for, in one sentence: 「把每个图层的钢琴窗的琴键宽度压
+        缩到一条线段的宽度……其他图层的音符就也压缩起来显示到上一个图层的下面,
+        其他的图层依次往下排开」.
+
+        In the sheet view every layer is drawn through ONE pitch grid, so the
+        others have to be ghosts behind the one being edited (Phase 20) — two
+        notes on the same pitch are literally the same pixels. This mode gives
+        each layer its own horizontal BAND instead: pitch collapses to nothing
+        (a note is a line at its own start, as wide as it lasts), and the stack
+        is read top to bottom the way the layer panel lists it.
+
+        READ-ONLY, by the same request ("不能编辑，只显示作为提示"): nothing in
+        the bands answers a press. That is why the mode is a band layout rather
+        than "a zoomed-out grid" — a view whose notes cannot be dragged has to
+        not look like the one whose notes can.
+
+        Two things deliberately do NOT change:
+          - **the time axis**. `screenXForBeat` is the same call, so beat 0 is
+            the same pixel column as in the sheet view and as in the automation
+            window below it. A mode that shifted the timeline would put the
+            curves under the wrong bars — the exact bug `ui::gutterWidth` exists
+            to prevent.
+          - **the layer list**. A band's index IS its layer index, with no
+            filtering: band 3 is layer 3 even when the eye is shut. Hiding a
+            sheet from behind the one you edit is a different question from
+            "show me everything", and a mode called 总体 that silently dropped
+            rows would be answering the first one. The eye shows as a dimmer
+            band instead. */
+    bool isOverviewMode() const noexcept { return overviewMode; }
+    void setOverviewMode (bool shouldShow);
+
+    /** How many bands the overview divides the grid into. Zero when there are
+        no layers at all; otherwise it is EXACTLY the layer count. */
+    int getOverviewBandCount() const noexcept { return stack.getNumLayers(); }
+
+    /** Band `index` — one layer's stripe — in local coordinates. Empty when the
+        mode is off or the index is out of range.
+
+        The bands TILE the grid: band 0 starts at its top edge, the last one
+        ends at its bottom edge, and each band's bottom is the next one's top.
+        Rounded once per edge (not once per height) so a 7-layer stack cannot
+        leave a one-pixel gap that reads as "a layer with nothing on it". */
+    juce::Rectangle<float> getOverviewBandBounds (int index) const;
+
+    /** The line a note becomes in the overview: from its start to its end, one
+        row inside its layer's band. Empty in the sheet view, and for a note
+        that does not exist. */
+    juce::Rectangle<float> getOverviewSegmentBounds (int layerIndex, int noteId) const;
+
     /** Phase 98: what the lane is showing. Four tabs share one strip.
 
         The numbers are the TAB order, not `MidiCcLane`'s order — 0 is velocity
@@ -1996,6 +2048,23 @@ private:
     void drawGridLines (juce::Graphics&);
     void drawNotes (juce::Graphics&);
 
+    //-- Phase 109: the overview ----------------------------------------------
+    /** One pass over the whole stack: bands, the groups inside them, the blocks
+        and the note segments. Called INSTEAD of the sheet chain (pitch rows,
+        notes, group frames, samples, boxes) — not in addition to it. */
+    void drawOverview (juce::Graphics&);
+
+    /** The keyboard column's other job: one row per band, a colour rule and the
+        layer's name. The keys are not drawn at all here — what the user asked
+        for is that the pitch axis stops taking a column. */
+    void drawOverviewColumn (juce::Graphics&);
+
+    /** The segment a note becomes, given the note object the caller is already
+        holding. `drawOverview` walks every note, so the public query (which has
+        to look one up by id) is a wrapper around this, not the other way
+        round — otherwise painting would be O(notes²). */
+    juce::Rectangle<float> overviewSegmentOf (int layerIndex, const NoteEvent&) const;
+
     //-- Phase 17: audio clips ------------------------------------------------
     /** P79: `sample.name`, plus "→ sampler" when the block is mounted somewhere
         whose name differs. One function, because two callers now want the same
@@ -2441,6 +2510,13 @@ private:
 
     //-- Phase 97: the velocity lane -----------------------------------------
     bool showVelocityLane = false;
+
+    /** Phase 109: the whole stack at once. Session state, like the lane above
+        and unlike the notes: it says how to LOOK at the project, and the
+        project file has nothing to say about that. `showVelocityLane` is kept
+        as it is while this is on and simply has no strip to show — leaving
+        the mode restores it without a round trip through a saved value. */
+    bool overviewMode = false;
 
     /** The velocities this gesture is moving, captured at the press.
 

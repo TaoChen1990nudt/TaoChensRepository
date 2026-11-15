@@ -462,6 +462,14 @@ public:
         the demonstration is of a property, not of anything the demo contains. */
     juce::Image createGroupScrollSnapshot (int width = ui::px (900), int height = ui::px (420));
 
+    /** Phase 109: the whole demo arrangement as the overview draws it.
+
+        Eight bars at 36 px per beat, so the stack fits the frame instead of
+        being cropped to its first six; the two ghost layers' eyes are opened for
+        the shot and put back afterwards, because the claim is "every layer, in
+        order" and a nearly invisible band would document the opposite. */
+    juce::Image createOverviewSnapshot (int width = ui::px (980), int height = ui::px (420));
+
     /** Phase 36: the note inspector with all three automation layers live.
 
         The overlay only earns its pixels when the three curves disagree — three

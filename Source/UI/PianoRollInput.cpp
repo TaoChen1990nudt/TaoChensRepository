@@ -138,8 +138,27 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
         {
             // Phase 97: a VIEW toggle, like the magnet — it changes what the
             // sheet shows, never what a click on a note means.
-            setVelocityLaneVisible (! showVelocityLane);
+            //
+            // Phase 109: in the overview there is no strip to switch, so the
+            // click says why instead of doing nothing. Silence would read as a
+            // dead button, and the lane is not gone — it is the mode that has
+            // no room for it.
+            if (overviewMode)
+                flashStatus (utf8 ("总览里没有力度条 —— 先退出总览"));
+            else
+                setVelocityLaneVisible (! showVelocityLane);
+
             repaint();
+            return;
+        }
+
+        if (getToolButtonBounds (10).contains (ipos))
+        {
+            // Phase 109: the whole stack, or the sheet. A mode, exactly like the
+            // tools to its left: it changes what the grid means, so it takes the
+            // whole canvas with it.
+            setOverviewMode (! overviewMode);
+            repaint (getToolbarArea());
             return;
         }
 
@@ -223,7 +242,11 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
     // Before the ruler and the grid: the keys are outside both, and the old
     // code simply fell through to "not in the grid, ignore". A pitch grid you
     // cannot hear while pointing at it is a picture of a keyboard.
-    if (getKeyboardArea().contains (ipos))
+    //
+    // Phase 109: and in the overview that column is not a keyboard at all — it
+    // is the band's name and its colour rule. Auditioning a pitch from a pixel
+    // that names a layer would be playing notes the view does not show.
+    if (! overviewMode && getKeyboardArea().contains (ipos))
     {
         const int pitch = juce::jlimit (0, numPitches - 1, pitchAtScreenY ((float) pos.y));
 
@@ -296,6 +319,16 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
     }
 
     if (! getGridArea().contains (pos))
+        return;
+
+    // ---- Phase 109: 总览 is read-only ---------------------------------------
+    // Everything above this line is navigation or a view setting — the ruler
+    // still scrubs and still zooms, the scrollbar still scrolls, the tool strip
+    // still switches. Everything below it is an EDIT: draw, move, select, open a
+    // box, enter a group. The bands answer none of them, by request ("不能编辑，
+    // 只显示作为提示"), and the place to say so is one line here rather than a
+    // condition sprinkled through thirty branches.
+    if (overviewMode)
         return;
 
     //-- Phase 73: the second press of a double click on empty canvas ---------
@@ -871,6 +904,12 @@ void PianoRollComponent::handleDoubleClick (juce::Point<float> pos)
     }
 
     if (! getGridArea().contains (pos))
+        return;
+
+    // Phase 109: opening is an edit. In the overview a band has nothing to open,
+    // and a double click that reached the branches below would open the editor
+    // for a note the view deliberately does not make editable.
+    if (overviewMode)
         return;
 
     //-- Phase 73: 双击 = 打开组。空白处双击 = 关掉它 ------------------------
@@ -1475,6 +1514,22 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
         return;
     }
 
+    //-- Phase 109: nothing in the bands is a handle ---------------------------
+    // The arrow is the point: no note edge to stretch, no pill to grab, no group
+    // frame to move. Leaving `hoveredNoteId` set would also keep a hover alive
+    // on a note that this view draws as a line somewhere else entirely.
+    if (overviewMode)
+    {
+        if (hoveredNoteId >= 0)
+        {
+            hoveredNoteId = -1;
+            repaint();
+        }
+
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+        return;
+    }
+
     //-- Phase 8: the inline box ---------------------------------------------
     if (expandedNoteId >= 0)
     {
@@ -1812,8 +1867,11 @@ void PianoRollComponent::mouseWheelMove (const juce::MouseEvent& e, const juce::
         const float dx = std::abs (wheel.deltaX) > 0.0001f ? wheel.deltaX : wheel.deltaY;
         scrollBeats -= (double) dx * 4.0;
     }
-    else
+    else if (! overviewMode)
     {
+        // Phase 109: the overview has no pitch axis, so a plain vertical wheel
+        // has nothing to move. Scrolling it would only store a scrollY that
+        // jumps the sheet somewhere else the moment the mode ends.
         scrollY -= wheel.deltaY * 120.0f;
     }
 
@@ -1866,6 +1924,15 @@ bool PianoRollComponent::keyPressed (const juce::KeyPress& key)
 
         if (dismissSpotlight())     // Phase 30: one exit, shared with the grid click
             didSomething = true;
+
+        // Phase 109: and the overview. It is read-only, so Esc is the key people
+        // will press when a mode does not behave like an editor — the mode should
+        // get out of the way rather than make them find the button.
+        if (overviewMode)
+        {
+            setOverviewMode (false);
+            didSomething = true;
+        }
 
         if (didSomething)
             return true;

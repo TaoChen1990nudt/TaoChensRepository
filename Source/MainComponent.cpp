@@ -2274,6 +2274,70 @@ juce::Image MainComponent::createGroupScrollSnapshot (int width, int height)
 }
 
 //==============================================================================
+juce::Image MainComponent::createOverviewSnapshot (int width, int height)
+{
+    const auto   previousBounds    = pianoRoll.getBounds();
+    const float  previousBeatWidth = pianoRoll.getBeatWidth();
+    const double previousScroll    = pianoRoll.getScrollBeats();
+    const int    previousFocus     = focusedSlotId;
+    const bool   previousMode      = pianoRoll.isOverviewMode();
+
+    focusSynth (-1);
+
+    // The eyes are the GHOST switch (Phase 20), and the mode does not consult
+    // them for membership — it consults them for strength. This frame wants the
+    // other two layers at their normal weight, because "every layer, in order"
+    // is the claim; a picture of one bright band and two nearly invisible ones
+    // would be documenting the opposite. Restored before returning: a staged eye
+    // is not the user's session. Set through the layer, not through the stack,
+    // so a screenshot does not fire a model notification (and an undo step) on
+    // its way past.
+    bool previousEyes[2] { false, false };
+
+    for (int i = 0; i < 2; ++i)
+        if (auto* layer = stack.getLayer (i))
+        {
+            previousEyes[i] = layer->isVisible();
+            layer->setVisible (true);
+        }
+
+    // The zoom is the point: at the opening 48 px per beat the frame would be
+    // cropped to six bars, and the stack would look like three stripes of notes
+    // that happen to line up rather than one arrangement seen whole.
+    //
+    // From bar 3: the demo's own music, not the debris. A headless run leaves a
+    // block and a group behind on the active sheet at bar 2 (from the self-test
+    // and an earlier frame's fixture — see STATUS), and a frame ABOUT this view
+    // must not look like the view is what scattered them. Everything the picture
+    // is meant to show — three layers, two groups, notes of two very different
+    // lengths — lives between bars 3 and 9.
+    pianoRoll.setSize (width, height);
+    pianoRoll.setBeatWidth (ui::pf (44.0f));
+    pianoRoll.setScrollBeats (8.0);
+
+    // The strip's own message, not the last frame's: `-stretch` leaves "已删除 3
+    // 个采样" in there, and that sentence belongs to a different picture.
+    pianoRoll.flashStatus ({});
+
+    pianoRoll.setOverviewMode (true);
+
+    auto image = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
+
+    pianoRoll.setOverviewMode (previousMode);
+
+    for (int i = 0; i < 2; ++i)
+        if (auto* layer = stack.getLayer (i))
+            layer->setVisible (previousEyes[i]);
+
+    pianoRoll.setBounds (previousBounds);
+    pianoRoll.setBeatWidth (previousBeatWidth);
+    pianoRoll.setScrollBeats (previousScroll);
+    focusSynth (previousFocus);
+
+    return image;
+}
+
+//==============================================================================
 juce::Image MainComponent::createPerfSnapshot()
 {
     // A headless run has no sound card, so the meter is fed by hand — through
@@ -4636,6 +4700,12 @@ void MainComponent::showSettingsMenu (juce::Point<int> screenPosition)
     menu.addSeparator();
     menu.addItem (6, utf8 ("打开混音台窗口"), true);
 
+    // Phase 109: the second way in, next to the other view settings. The toolbar
+    // button is the primary one; this is where someone looks when they cannot
+    // find a mode — and it is the only place that can say which way it is
+    // currently set.
+    menu.addItem (7, utf8 ("总览模式（全部图层压成条带，只读）"), true, pianoRoll.isOverviewMode());
+
     juce::Component::SafePointer<MainComponent> safe (this);
 
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (
@@ -4653,6 +4723,7 @@ void MainComponent::showSettingsMenu (juce::Point<int> screenPosition)
             case 4: safe->pianoRoll.setGhostAlpha (0.45f); break;
             case 5: safe->pianoRoll.setGhostAlpha (0.60f); break;
             case 6: safe->toggleMixerWindow(); break;
+            case 7: safe->pianoRoll.setOverviewMode (! safe->pianoRoll.isOverviewMode()); break;
             default: break;
         }
 
