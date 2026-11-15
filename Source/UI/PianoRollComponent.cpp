@@ -661,22 +661,45 @@ std::vector<int> PianoRollComponent::overviewRowPitches (int layerIndex) const
 
 int PianoRollComponent::getOverviewRowCount (int index) const
 {
-    if (overviewFolded)
+    // Per band, not for the stack: two bands of one picture can be cut into
+    // different numbers of rows, and that is the point of Phase 111.
+    if (isOverviewFolded (index))
         return 1;
 
     return juce::jmax (1, (int) overviewRowPitches (index).size());
 }
 
 
-void PianoRollComponent::setOverviewFolded (bool shouldFold)
+bool PianoRollComponent::isOverviewFolded (int layerIndex) const
 {
-    if (overviewFolded == shouldFold)
+    auto* layer = stack.getLayer (layerIndex);
+
+    // No layer behind the index is neither folded nor unfolded; both callers
+    // draw nothing for it either way.
+    return layer != nullptr && foldedOverviewLayers.count (layer->getId()) > 0;
+}
+
+
+void PianoRollComponent::setOverviewFolded (int layerIndex, bool shouldFold)
+{
+    auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr)
         return;
 
-    overviewFolded = shouldFold;
+    const int  id  = layer->getId();
+    const bool was = foldedOverviewLayers.count (id) > 0;
+
+    if (was == shouldFold)
+        return;
+
+    if (shouldFold)
+        foldedOverviewLayers.insert (id);
+    else
+        foldedOverviewLayers.erase (id);
 
     // No gesture to cancel and no selection to touch: this changes where a line
-    // is drawn inside a band, and nothing else. The cursor is reset for the
+    // is drawn inside ONE band, and nothing else. The cursor is reset for the
     // same reason the mode reset it — the pointer is now over a different
     // picture, and a stale corner-resize arrow belongs to the old one.
     dragMode      = DragMode::none;
@@ -684,6 +707,93 @@ void PianoRollComponent::setOverviewFolded (bool shouldFold)
 
     updateCursor();
     repaint();
+}
+
+
+bool PianoRollComponent::isAllOverviewFolded() const
+{
+    const int count = getOverviewBandCount();
+
+    // An empty stack has nothing folded, and answering true would light a button
+    // that has nothing to unfold.
+    if (count <= 0)
+        return false;
+
+    for (int i = 0; i < count; ++i)
+        if (! isOverviewFolded (i))
+            return false;
+
+    return true;
+}
+
+
+void PianoRollComponent::setAllOverviewFolded (bool shouldFold)
+{
+    if (shouldFold)
+    {
+        for (int i = 0; i < getOverviewBandCount(); ++i)
+            if (auto* layer = stack.getLayer (i))
+                foldedOverviewLayers.insert (layer->getId());
+    }
+    else
+    {
+        // clear(), not one erase per band: this also drops the ids of layers
+        // that were folded and then deleted, which is the only cleanup they get.
+        foldedOverviewLayers.clear();
+    }
+
+    dragMode      = DragMode::none;
+    hoveredNoteId = -1;
+
+    updateCursor();
+    repaint();
+}
+
+
+juce::Rectangle<float> PianoRollComponent::getOverviewFoldToggleBounds (int index) const
+{
+    const auto band = getOverviewBandBounds (index);
+
+    if (band.isEmpty())
+        return {};
+
+    const auto column = getKeyboardArea();
+
+    // A column narrower than "a name and a chevron" has room for one of them,
+    // and the name is the one that says which layer this is.
+    if (column.getWidth() < ui::px (44))
+        return {};
+
+    // The chevron also has to fit INSIDE its band: a stack of twelve layers on
+    // 200 px gives bands of 16 px, and a 13 px button in a 12 px band would
+    // spill into its neighbour and fold the wrong layer.
+    const float size = juce::jmin (ui::pf (13.0f), band.getHeight() - ui::pf (4.0f));
+
+    if (size < ui::pf (9.0f))
+        return {};
+
+    // Right edge: the column's, less the 3 px colour rule and a 3 px gap, so the
+    // chevron never eats the one line that says which layer this is.
+    const float right = (float) column.getRight() - ui::pf (6.0f);
+
+    return { right - size, band.getCentreY() - size * 0.5f, size, size };
+}
+
+
+int PianoRollComponent::overviewFoldToggleAt (juce::Point<float> point) const
+{
+    if (! overviewMode)
+        return -1;
+
+    for (int i = 0; i < getOverviewBandCount(); ++i)
+    {
+        const auto bounds = getOverviewFoldToggleBounds (i);
+
+        if (! bounds.isEmpty() && bounds.expanded (ui::pf (2.0f)).contains (point))
+            return i;
+    }
+
+    return -1;
 }
 
 
@@ -700,7 +810,7 @@ juce::Rectangle<float> PianoRollComponent::getOverviewSegmentBounds (int layerIn
     if (note == nullptr)
         return {};
 
-    if (overviewFolded)
+    if (isOverviewFolded (layerIndex))
         return overviewSegmentOf (layerIndex, *note, nullptr);
 
     const auto rows = overviewRowPitches (layerIndex);

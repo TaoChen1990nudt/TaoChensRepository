@@ -21227,7 +21227,7 @@ juce::String MainComponent::runSelfTest()
         check (utf8 ("展开时，一条带的行数就是这一层用到的不同音高数（不是 128）"),
                roll.getOverviewRowCount (0) == 4
                  && roll.getOverviewRowCount (1) == 1
-                 && ! roll.isOverviewFolded(),
+                 && ! roll.isAllOverviewFolded(),
                juce::String (roll.getOverviewRowCount (0)) + " / "
                  + juce::String (roll.getOverviewRowCount (1)));
 
@@ -21263,7 +21263,7 @@ juce::String MainComponent::runSelfTest()
         //-- (4) 只有一个音高的层：一行，压在带中心（与折叠后同一个 y）-----
         const auto sOnlyOpen = roll.getOverviewSegmentBounds (1, only);
 
-        roll.setOverviewFolded (true);
+        roll.setAllOverviewFolded (true);
 
         const auto sOnlyFolded = roll.getOverviewSegmentBounds (1, only);
 
@@ -21278,7 +21278,7 @@ juce::String MainComponent::runSelfTest()
         const auto fLow  = roll.getOverviewSegmentBounds (0, low);
 
         check (utf8 ("折叠之后，几个音高全部回到同一条中心线上（行数 1，就是 P109 那张图）"),
-               roll.isOverviewFolded()
+               roll.isAllOverviewFolded()
                  && roll.getOverviewRowCount (0) == 1
                  && std::abs (fHigh.getCentreY() - fLow.getCentreY()) < 0.01f
                  && std::abs (fHigh.getCentreY() - band0.getCentreY()) < 0.01f,
@@ -21292,7 +21292,7 @@ juce::String MainComponent::runSelfTest()
         const int    notesBefore = (int) l0->getNotes().size();
         const double startBefore = l0->findNote (high) != nullptr ? l0->findNote (high)->startBeat : -1.0;
 
-        roll.setOverviewFolded (false);
+        roll.setAllOverviewFolded (false);
 
         const auto reopened = roll.getOverviewSegmentBounds (0, high);
 
@@ -21347,8 +21347,255 @@ juce::String MainComponent::runSelfTest()
                  && roll.getToolbarArea().contains (roll.getToolButtonBounds (11)),
                "btn11 x " + juce::String (roll.getToolButtonBounds (11).getX()));
 
-        roll.setOverviewFolded (false);
+        roll.setAllOverviewFolded (false);
         roll.setSelection ({});
+    }();
+
+    //== Phase 111: 折叠是每层一个 ==========================================
+    // 用户原话：「折叠也给每个图层单独加一个，可以单独折叠一个选定的图层」。
+    //
+    // P110 的折叠是一个 bool，管整摞。P111 把它拆成每层一份，入口是左列每层
+    // 名字右边的那个小三角（`getOverviewFoldToggleBounds`）；工具栏第 12 颗与
+    // 菜单第 8 项仍然管「全部」，否则一次点全折之后就没有一键回头的路。
+    //
+    // 钉十件事：默认全展 / 只折一层不动邻居 / 同一画面两种答案 / 箭头长在自己
+    // 带里且不越界 / 点箭头只翻那一层 / 点箭头不是编辑 / 全部折叠可逆 / 跨模式
+    // 保留 / 记的是图层 id 不是下标 / 箭头不随行数移动。
+    [&]
+    {
+        LayerStack stack;
+        RackModel  rack;
+
+        stack.addLayer (utf8 ("两层"), palette::layer1);
+        stack.addLayer (utf8 ("三层"), palette::layer2);
+        stack.addLayer (utf8 ("单音"), palette::layer3);
+        stack.setActiveLayerIndex (0);
+
+        auto* la = stack.getLayer (0);
+        auto* lb = stack.getLayer (1);
+        auto* lc = stack.getLayer (2);
+
+        // 两行 / 三行 / 一行：中间那层是这次要单独折的，左右两层是证人——
+        // 它们一个该变、一个不该变，都写在同一个断言里。
+        const int aHigh = la->addNote ({ 0, 84, 0.0, 4.0, 0.8f });
+        const int aLow  = la->addNote ({ 0, 72, 0.0, 4.0, 0.8f });
+        const int b1    = lb->addNote ({ 0, 96, 0.0, 4.0, 0.8f });
+        const int b2    = lb->addNote ({ 0, 95, 0.0, 4.0, 0.8f });
+        const int b3    = lb->addNote ({ 0, 94, 0.0, 4.0, 0.8f });
+        const int cOnly = lc->addNote ({ 0, 60, 0.0, 4.0, 0.8f });
+
+        PianoRollComponent roll (stack, rack);
+        roll.setSize (1100, 460);
+        roll.setScrollBeats (0.0);
+        roll.setOverviewMode (true);
+
+        const auto band0 = roll.getOverviewBandBounds (0);
+        const auto band1 = roll.getOverviewBandBounds (1);
+
+        //-- (1) 默认：一层都没折 ------------------------------------------
+        // 第三层只有一个音高，展开时也是一行、也在带中心：它是后面每一条的
+        // 对照组——折叠在它身上什么都不会变，所以「变了」只可能来自别的层。
+        check (utf8 ("默认一层都没折叠：行数 2 / 3 / 1，整摞的回答是「没有」"),
+               roll.getOverviewRowCount (0) == 2
+                 && roll.getOverviewRowCount (1) == 3
+                 && roll.getOverviewRowCount (2) == 1
+                 && ! roll.isAllOverviewFolded()
+                 && ! roll.isOverviewFolded (0)
+                 && ! roll.isOverviewFolded (1)
+                 && std::abs (roll.getOverviewSegmentBounds (2, cOnly).getCentreY()
+                                - roll.getOverviewBandBounds (2).getCentreY()) < 0.01f,
+               juce::String (roll.getOverviewRowCount (0)) + " / "
+                 + juce::String (roll.getOverviewRowCount (1)) + " / "
+                 + juce::String (roll.getOverviewRowCount (2)));
+
+        //-- (2) 只折中间那层 --------------------------------------------
+        const auto aHighOpen = roll.getOverviewSegmentBounds (0, aHigh);
+
+        roll.setOverviewFolded (1, true);
+
+        check (utf8 ("只折叠第 2 层：它变 1 行，上下两层的行数一个都没动"),
+               roll.getOverviewRowCount (1) == 1
+                 && roll.getOverviewRowCount (0) == 2
+                 && roll.getOverviewRowCount (2) == 1
+                 && roll.isOverviewFolded (1)
+                 && ! roll.isOverviewFolded (0)
+                 && ! roll.isOverviewFolded (2)
+                 && ! roll.isAllOverviewFolded(),
+               juce::String (roll.getOverviewRowCount (0)) + " / "
+                 + juce::String (roll.getOverviewRowCount (1)) + " / "
+                 + juce::String (roll.getOverviewRowCount (2)));
+
+        //-- (3) 同一画面，两种答案 ---------------------------------------
+        // 这是本阶段唯一真正要说的话：一摞里可以同时有「压成一条线」和
+        // 「按音高分行」。第 1 层三个音高必须并到带中心，而第 0 层两个音高
+        // 仍然上下错开 —— 并且它们的 y 与折叠之前**逐点相同**（只折一层，
+        // 不许顺手重排别的层）。
+        const auto fB1 = roll.getOverviewSegmentBounds (1, b1);
+        const auto fB2 = roll.getOverviewSegmentBounds (1, b2);
+        const auto fB3 = roll.getOverviewSegmentBounds (1, b3);
+        const auto aHighAfter = roll.getOverviewSegmentBounds (0, aHigh);
+        const auto aLowAfter  = roll.getOverviewSegmentBounds (0, aLow);
+
+        check (utf8 ("同一摞里：折叠的那层三个音高并到带中心，没折的那层照旧上下错开"),
+               std::abs (fB1.getCentreY() - fB2.getCentreY()) < 0.01f
+                 && std::abs (fB2.getCentreY() - fB3.getCentreY()) < 0.01f
+                 && std::abs (fB1.getCentreY() - band1.getCentreY()) < 0.01f
+                 && aHighAfter.getCentreY() < aLowAfter.getCentreY() - 1.0f,
+               juce::String (fB1.getCentreY(), 1) + " / " + juce::String (fB2.getCentreY(), 1)
+                 + " / " + juce::String (fB3.getCentreY(), 1) + utf8 ("；带1 中心 ")
+                 + juce::String (band1.getCentreY(), 1));
+
+        check (utf8 ("折叠一层不移动别人的像素：第 0 层的线段 y 与折叠前逐点相同"),
+               std::abs (aHighAfter.getY() - aHighOpen.getY()) < 0.01f
+                 && std::abs (aHighAfter.getHeight() - aHighOpen.getHeight()) < 0.01f,
+               juce::String (aHighOpen.getY(), 2) + " -> " + juce::String (aHighAfter.getY(), 2));
+
+        //-- (4) 箭头长在自己的带里 ---------------------------------------
+        // 几何有且只有一处（`getOverviewFoldToggleBounds`），绘制与命中都问它。
+        // 这里钉的是它的边界：在左列里（网格左边）、在自己那条带里，而且相邻
+        // 两层的箭头不重叠——重叠就等于「点第 2 层折了第 3 层」。
+        const auto t0 = roll.getOverviewFoldToggleBounds (0);
+        const auto t1 = roll.getOverviewFoldToggleBounds (1);
+        const auto t2 = roll.getOverviewFoldToggleBounds (2);
+        const auto gridNow = roll.getGridBounds();
+
+        check (utf8 ("每层一个箭头：都在左列里、在自己带里，相邻两层的不重叠"),
+               ! t0.isEmpty() && ! t1.isEmpty() && ! t2.isEmpty()
+                 && t0.getRight() <= (float) gridNow.getX()
+                 && t1.getRight() <= (float) gridNow.getX()
+                 && t0.getY() >= band0.getY() - 0.01f
+                 && t0.getBottom() <= band0.getBottom() + 0.01f
+                 && t1.getY() >= band1.getY() - 0.01f
+                 && t1.getBottom() <= band1.getBottom() + 0.01f
+                 && t0.getBottom() <= t1.getY() + 0.01f,
+               t0.toString() + " / " + t1.toString());
+
+        const bool outOfRange = roll.getOverviewFoldToggleBounds (3).isEmpty()
+                                  && roll.getOverviewFoldToggleBounds (-1).isEmpty();
+
+        roll.setOverviewMode (false);
+
+        const bool emptyInSheet = roll.getOverviewFoldToggleBounds (0).isEmpty();
+
+        roll.setOverviewMode (true);
+
+        check (utf8 ("越界索引、以及钢琴窗里，箭头答空矩形（空 = 这里没有可点的东西）"),
+               outOfRange && emptyInSheet,
+               "band3 " + roll.getOverviewFoldToggleBounds (3).toString());
+
+        //-- (5) 点箭头只翻那一层 -----------------------------------------
+        // 从「第 1 层折着」开始：点第 1 层的箭头 = 展开它，别的层不动。
+        roll.simulatePressForTest (t1.getCentre());
+
+        check (utf8 ("点第 2 层的箭头，只有它自己翻了过来"),
+               ! roll.isOverviewFolded (1)
+                 && roll.getOverviewRowCount (1) == 3
+                 && ! roll.isOverviewFolded (0)
+                 && ! roll.isOverviewFolded (2),
+               juce::String (roll.getOverviewRowCount (1)) + utf8 (" 行 / 折 ")
+                 + (roll.isOverviewFolded (1) ? "yes" : "no"));
+
+        roll.simulatePressForTest (t2.getCentre());
+
+        check (utf8 ("点第 3 层的箭头，也只有它自己翻了过来"),
+               roll.isOverviewFolded (2)
+                 && ! roll.isOverviewFolded (0)
+                 && ! roll.isOverviewFolded (1),
+               juce::String (roll.getOverviewRowCount (2)) + utf8 (" 行"));
+
+        roll.simulatePressForTest (t2.getCentre());     // 还原
+
+        //-- (6) 点箭头不是编辑 -------------------------------------------
+        // 左列那个三角是视图控件。它可以点，不代表这里开始能改工程：选区、
+        // 音符数、起点都不许动。（P109 的只读管的是网格，这条管的是新按钮。）
+        roll.setSelection ({ aLow });
+        const int    notesBefore = (int) la->getNotes().size()
+                                 + (int) lb->getNotes().size()
+                                 + (int) lc->getNotes().size();
+
+        roll.simulatePressForTest (t1.getCentre());
+
+        check (utf8 ("点箭头只换画法：选区还在、音符数没变、音符的起点没变"),
+               roll.getSelection().size() == 1
+                 && roll.isNoteSelectedForTest (aLow)
+                 && (int) la->getNotes().size() + (int) lb->getNotes().size()
+                      + (int) lc->getNotes().size() == notesBefore
+                 && la->findNote (aHigh) != nullptr
+                 && std::abs (la->findNote (aHigh)->startBeat - 0.0) < 1e-9,
+               juce::String ((int) roll.getSelection().size()) + utf8 (" 个选中 / 选对了 ")
+                 + (roll.isNoteSelectedForTest (aLow) ? "yes" : "no")
+                 + utf8 (" / 音符 ") + juce::String (notesBefore) + " -> "
+                 + juce::String ((int) la->getNotes().size() + (int) lb->getNotes().size()
+                                 + (int) lc->getNotes().size())
+                 + utf8 (" / 起点 ")
+                 + (la->findNote (aHigh) != nullptr
+                      ? juce::String (la->findNote (aHigh)->startBeat, 3) : juce::String ("<null>")));
+
+        roll.setSelection ({});
+
+        //-- (7) 全部折叠 / 全部展开 --------------------------------------
+        // 工具栏那颗按钮是「整摞」的意思：混合态下它不是亮的（没有单一答案），
+        // 点它是把剩下的折完，再点一次才全开。
+        const bool mixedNotLit = ! roll.isAllOverviewFolded();
+
+        roll.setAllOverviewFolded (true);
+
+        const bool allFolded = roll.getOverviewRowCount (0) == 1
+                                 && roll.getOverviewRowCount (1) == 1
+                                 && roll.getOverviewRowCount (2) == 1
+                                 && roll.isAllOverviewFolded();
+
+        roll.setAllOverviewFolded (false);
+
+        check (utf8 ("全部折叠再全部展开：三层 1 行 → 回到 2 / 3 / 1，中间态不算「全折」"),
+               mixedNotLit && allFolded
+                 && roll.getOverviewRowCount (0) == 2
+                 && roll.getOverviewRowCount (1) == 3
+                 && ! roll.isAllOverviewFolded(),
+               juce::String (roll.getOverviewRowCount (0)) + " / "
+                 + juce::String (roll.getOverviewRowCount (1)) + " / "
+                 + juce::String (roll.getOverviewRowCount (2)));
+
+        //-- (8) 折叠跨模式保留 -------------------------------------------
+        // 会话状态，不是模式内的临时量：折一层、出去看一眼钢琴窗、回来它还是
+        // 折着的。这条也是「不存盘」的前提——它必须活过视图切换才谈得上像
+        // 力度条那样被记住。
+        roll.setOverviewFolded (1, true);
+        roll.setOverviewMode (false);
+        roll.setOverviewMode (true);
+
+        check (utf8 ("折叠是会话状态：退出总览再进来，那一层还是折着的"),
+               roll.isOverviewFolded (1) && roll.getOverviewRowCount (1) == 1,
+               juce::String (roll.getOverviewRowCount (1)) + utf8 (" 行"));
+
+        //-- (9) 箭头不随行数移动 -----------------------------------------
+        // 三角长在带里，跟着带的中心走；折叠改的是带内的行，不是带本身。
+        const auto toggleWhileFolded = roll.getOverviewFoldToggleBounds (1);
+
+        check (utf8 ("折叠前后，箭头在同一个位置（它跟着带，不跟着行）"),
+               ! toggleWhileFolded.isEmpty()
+                 && std::abs (toggleWhileFolded.getCentreY() - t1.getCentreY()) < 0.01f,
+               juce::String (t1.getCentreY(), 1) + " -> "
+                 + juce::String (toggleWhileFolded.getCentreY(), 1));
+
+        //-- (10) 记的是图层 id，不是下标 ---------------------------------
+        // 折的是第 2 层（id），然后把第 1 层删掉。若状态按下标存，折叠会留在
+        // 「下标 1」这个位置上 —— 也就是留给了原来的第 3 层，而原来被折的那层
+        // 会自己展开。两者都不是用户说的「这一层折着」。
+        stack.removeLayer (0);
+
+        check (utf8 ("删掉上面一层之后，折叠跟着那一层走，不是留在那个下标上"),
+               stack.getNumLayers() == 2
+                 && roll.isOverviewFolded (0)
+                 && ! roll.isOverviewFolded (1)
+                 && roll.getOverviewRowCount (0) == 1
+                 && roll.getOverviewRowCount (1) == 1,
+               utf8 ("带0 ") + (roll.isOverviewFolded (0) ? "折" : "展")
+                 + utf8 (" / 带1 ") + (roll.isOverviewFolded (1) ? "折" : "展")
+                 + utf8 ("，") + juce::String (stack.getNumLayers()) + utf8 (" 层"));
+
+        roll.setAllOverviewFolded (false);
+        roll.setOverviewMode (false);
     }();
 
     // The summary MUST come after the last check. It used to sit mid-function

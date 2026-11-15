@@ -469,12 +469,18 @@ public:
         the shot and put back afterwards, because the claim is "every layer, in
         order" and a nearly invisible band would document the opposite.
 
-        Phase 110: `folded` takes the same picture with the pitch axis removed —
+        Phase 110: `foldAll` takes the same picture with the pitch axis removed —
         one line per band, which is what every note in it collapses onto. Same
         project, same framing, one setting apart, so the two frames are a
-        before/after rather than two illustrations. */
+        before/after rather than two illustrations.
+
+        Phase 111: `foldOnlyLayer` stages the MIXED state instead — that one
+        band folded, its neighbours untouched. It is the frame for the thing
+        this phase added (the column chevron), and it is the only one that can
+        show two bands answering differently in the same picture. Takes
+        precedence over `foldAll` when it is >= 0. */
     juce::Image createOverviewSnapshot (int width = ui::px (980), int height = ui::px (420),
-                                        bool folded = false);
+                                        bool foldAll = false, int foldOnlyLayer = -1);
 
     /** Phase 36: the note inspector with all three automation layers live.
 

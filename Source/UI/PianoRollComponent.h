@@ -4,6 +4,7 @@
 
 #include "Util/Metrics.h"
 #include <functional>
+#include <set>
 #include <vector>
 
 #include "Model/HardwareRack.h"
@@ -1544,24 +1545,50 @@ public:
         that does not exist. */
     juce::Rectangle<float> getOverviewSegmentBounds (int layerIndex, int noteId) const;
 
-    /** Phase 110: does a band keep the pitch axis?
+    /** Phase 110/111: does band `layerIndex` keep the pitch axis?
 
-        Folded (the Phase 109 look) puts every note of a layer on ONE centre
+        Folded (the Phase 109 look) puts every note of that layer on ONE centre
         line, so two notes that overlap in time are one line. Unfolded — the
         default — gives the band as many rows as the layer has DISTINCT pitches
         and puts each note on its own, high notes at the top. The keys in
         between are skipped, which is the point: 128 rows in a 150 px band is a
         pixel each, and "these two overlap" would be invisible all over again.
 
-        The row set is the whole LAYER's pitches, not the pitches on screen:
-        a row table built from what the viewport happens to contain would make
-        the lines jump up and down whenever the timeline scrolled sideways. */
-    bool isOverviewFolded() const noexcept { return overviewFolded; }
-    void setOverviewFolded (bool shouldFold);
+        Phase 111 made this PER BAND. A layer with sixty pitches wants folding;
+        the two-pitch bass beside it is more useful unfolded, and one switch for
+        the whole stack forced a choice that only one of them had. The answer is
+        stored per LAYER ID, not per band index, so folding the second sheet and
+        then deleting the first keeps the fold on the sheet the user folded —
+        `Layer::getId` is the identity the whole project already binds to.
+
+        The row set is the whole LAYER's pitches, not the pitches on screen: a
+        row table built from what the viewport happens to contain would make the
+        lines jump up and down whenever the timeline scrolled sideways. */
+    bool isOverviewFolded (int layerIndex) const;
+    void setOverviewFolded (int layerIndex, bool shouldFold);
+
+    /** Every band at once — what the toolbar's 折叠 button and the menu item
+        say. "All folded" is a fact about the stack, not a fourth state: a
+        half-folded stack answers false, and the button's click then folds the
+        remainder instead of unfolding the ones already done. */
+    bool isAllOverviewFolded() const;
+    void setAllOverviewFolded (bool shouldFold);
+
+    /** Where band `index`'s fold chevron sits, in local coordinates: a small
+        square in the left column, just left of the colour rule.
+
+        Empty when the mode is off, when the index is out of range, when a band
+        is too thin to hold a chevron (< 9 design px), and when the column is
+        narrower than "a name plus a chevron". Empty means "there is nothing
+        here to click" — that is what the press handler reads it as, and it is
+        why a 128-layer stack does not grow 128 invisible hit targets. */
+    juce::Rectangle<float> getOverviewFoldToggleBounds (int index) const;
 
     /** How many pitch rows band `index` is cut into: the number of distinct
-        pitches the layer's notes use, 1 when folded, 1 for an empty layer.
-        The band is split evenly between them — that IS "skip the empty keys". */
+        pitches that layer's notes use, 1 when the band is folded, 1 for an empty
+        layer. The band is split evenly between them — that IS "skip the empty
+        keys". Two bands of the same stack can answer differently, which is the
+        whole of Phase 111. */
     int getOverviewRowCount (int index) const;
 
     /** Phase 98: what the lane is showing. Four tabs share one strip.
@@ -2096,6 +2123,11 @@ private:
         viewport — see `getOverviewRowCount`. */
     std::vector<int> overviewRowPitches (int layerIndex) const;
 
+    /** Phase 111: which band's chevron is under `point`, or -1. The press
+        handler and the cursor both ask this, so a click and the pointing hand
+        can never disagree about where the buttons are. */
+    int overviewFoldToggleAt (juce::Point<float> point) const;
+
     //-- Phase 17: audio clips ------------------------------------------------
     /** P79: `sample.name`, plus "→ sampler" when the block is mounted somewhere
         whose name differs. One function, because two callers now want the same
@@ -2549,15 +2581,22 @@ private:
         the mode restores it without a round trip through a saved value. */
     bool overviewMode = false;
 
-    /** Phase 110: does the overview keep the pitch axis? Session state like the
-        mode it belongs to, and it survives leaving the mode — you fold once,
-        the way you like looking at it, and it stays folded.
+    /** Phase 110/111: which bands keep the pitch axis, by LAYER ID.
+
+        Session state like the mode it belongs to, and it survives leaving the
+        mode — you fold once, the way you like looking at it, and it stays
+        folded.
 
         The default is UNFOLDED: "两个音符上下重叠，总览里也该上下重叠" is a
         property of the picture, so it has to be the picture you get without
         asking. Folding is the escape hatch for a layer that uses sixty pitches,
-        which is exactly when sixty rows in a 150 px band stop meaning anything. */
-    bool overviewFolded = false;
+        which is exactly when sixty rows in a 150 px band stop meaning anything.
+
+        Ids rather than band indices: a band index is a POSITION, and deleting
+        the sheet above would silently move the fold down one. An id that no
+        longer matches any layer costs one integer and is cleaned up by the next
+        全不折叠. */
+    std::set<int> foldedOverviewLayers;
 
     /** The velocities this gesture is moving, captured at the press.
 

@@ -270,6 +270,12 @@ namespace
         writePng ("-overviewfold", component.createOverviewSnapshot (atomic::ui::px (980),
                                                                    atomic::ui::px (420), true));
 
+        // Phase 111: one band folded, its neighbours as they were. The two
+        // earlier frames each answer the question for the whole stack; this one
+        // is the only picture where two bands answer differently.
+        writePng ("-overviewmix", component.createOverviewSnapshot (atomic::ui::px (980),
+                                                                  atomic::ui::px (420), false, 1));
+
         // Phase 21: the group's inline curve box. Its own frame, because only
         // one floating editor can be open at a time and the main image above
         // already documents the note box.

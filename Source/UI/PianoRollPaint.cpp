@@ -286,14 +286,14 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
     }
 
     //-- Phase 110: 折叠 ------------------------------------------------------
-    // A second state of the overview, drawn like the toggles to its left: lit
-    // while folded. Dimmed outside the mode — it is not a thing you can want
-    // from the sheet view, and a button that does nothing for no stated reason
-    // is worse than one that says "not here".
+    // Lit only when EVERY band is folded (Phase 111): a half-folded stack has no
+    // single answer, and lighting the button for it would say "this is the
+    // state" about something that is not one. Its click folds the remainder,
+    // so the way back is still one press.
     {
         const auto bounds  = getToolButtonBounds (11).toFloat();
         const bool hovered = hoveredTool == 11;
-        const bool on      = overviewMode && overviewFolded;
+        const bool on      = overviewMode && isAllOverviewFolded();
         const float inkAlpha = overviewMode ? 0.75f : 0.35f;
 
         g.setColour (on ? tint.withAlpha (0.22f)
@@ -345,10 +345,15 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
     }
     else if (overviewMode)
     {
-        // The one sentence this mode has to say is that nothing here can be
-        // touched. What a note looks like is now the picture's job: since Phase
-        // 110 the bands keep the pitch axis, so "两条线上下错开" reads off the
-        // screen, and 折叠 next door says what to do when a band gets crowded.
+        // The one sentence this mode has to say is that nothing in the GRID can
+        // be touched. What a note looks like is now the picture's job: since
+        // Phase 110 the bands keep the pitch axis, so "两条线上下错开" reads off
+        // the screen.
+        //
+        // Phase 111: the sentence also has to point at the one thing in this
+        // picture that IS a control — the chevrons in the left column. "按不动"
+        // alone would now be false about them, and a button nobody notices is
+        // a feature nobody has.
         //
         // "总览" left the sentence too — the lit button at the head of this very
         // row already says which mode you are in, and twelve buttons plus the
@@ -358,7 +363,7 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
         // over "8.0 / 128 beat".
         g.setColour (tint.withAlpha (0.85f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.0f))));
-        g.drawText (utf8 ("只读 · 按不动"),
+        g.drawText (utf8 ("只读 · 左列可折叠"),
                     hintArea, juce::Justification::centredLeft, true);
     }
     else if (hasPaintState)
@@ -699,11 +704,14 @@ void PianoRollComponent::drawOverview (juce::Graphics& g)
         // Phase 110: the pitch table is built ONCE per band and handed to the
         // per-note geometry. Asking for it inside the loop would re-sort the
         // layer once per note, which is the O(n²) this file already avoids for
-        // `findNote`. Folded, the table is empty and every note lands on the
-        // centre line.
-        const std::vector<int> rows = overviewFolded ? std::vector<int>()
-                                                     : overviewRowPitches (i);
-        const std::vector<int>* rowTable = overviewFolded ? nullptr : &rows;
+        // `findNote`.
+        //
+        // Phase 111: the question is asked per band, so one stripe can be a row
+        // per pitch while the next is a single line. Folded, the table is empty
+        // and every note of THAT layer lands on its centre line.
+        const bool folded = isOverviewFolded (i);
+        const std::vector<int> rows = folded ? std::vector<int>() : overviewRowPitches (i);
+        const std::vector<int>* rowTable = folded ? nullptr : &rows;
 
         for (const auto& note : layer->getNotes())
         {
@@ -772,14 +780,50 @@ void PianoRollComponent::drawOverviewColumn (juce::Graphics& g)
 
         // A name needs about 16 px of band. Below that the bands are a barcode
         // and the only honest thing to draw is the colour.
+        const auto toggle = getOverviewFoldToggleBounds (i);
+
         if (label.getHeight() >= ui::px (16))
         {
+            auto nameArea = label.reduced (ui::px (5), 0);
+
+            // Phase 111: the chevron takes the right end of this row, so the
+            // name stops before it instead of running underneath — a button
+            // with half a layer name across it is not a button.
+            nameArea.setRight (toggle.isEmpty()
+                                 ? label.getRight() - ui::px (8)
+                                 : juce::roundToInt (toggle.getX()) - ui::px (4));
+
             g.setColour (active ? juce::Colours::white
                                 : kText.withAlpha (layer->isVisible() ? 0.78f : 0.45f));
             g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.0f))));
-            g.drawText (layer->getName(),
-                        label.withTrimmedRight (ui::px (8)).reduced (ui::px (5), 0),
+            g.drawText (layer->getName(), nameArea,
                         juce::Justification::centredLeft, false);
+        }
+
+        //-- Phase 111: this band's own fold switch --------------------------
+        if (! toggle.isEmpty())
+        {
+            // ▼ open — this band is cut into its rows; ▶ closed — one line.
+            // The sign is the state, so a stack where only one band is folded
+            // reads at a glance instead of by comparing band heights.
+            const auto  centre = toggle.getCentre();
+            const float r      = toggle.getWidth() * 0.30f;
+
+            juce::Path chevron;
+
+            if (isOverviewFolded (i))
+                chevron.addTriangle (centre.x - r * 0.75f, centre.y - r,
+                                     centre.x - r * 0.75f, centre.y + r,
+                                     centre.x + r * 0.85f, centre.y);
+            else
+                chevron.addTriangle (centre.x - r,      centre.y - r * 0.70f,
+                                     centre.x + r,      centre.y - r * 0.70f,
+                                     centre.x,          centre.y + r * 0.85f);
+
+            g.setColour (isOverviewFolded (i)
+                           ? (active ? juce::Colours::white : kText.withAlpha (0.85f))
+                           : kText.withAlpha (active ? 0.50f : 0.30f));
+            g.fillPath (chevron);
         }
 
         if (i + 1 < getOverviewBandCount())

@@ -168,10 +168,15 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
             // no band to fold, and saying so is the whole handling — the same
             // shape as the velocity button two to the left, because it is the
             // same situation with the roles reversed.
+            //
+            // Phase 111: this button is the STACK-wide version; the per-band
+            // switches live in the left column. A half-folded stack therefore
+            // answers "not folded" here and folds the remainder, which is the
+            // only reading that keeps one click from doing nothing visible.
             if (! overviewMode)
                 flashStatus (utf8 ("折叠是总览里的开关 —— 先点「总览」"));
             else
-                setOverviewFolded (! overviewFolded);
+                setAllOverviewFolded (! isAllOverviewFolded());
 
             repaint();
             return;
@@ -250,6 +255,19 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
         else
             handleCcPress (pos, mods);
 
+        return;
+    }
+
+    // ---- Phase 111: the chevron in the left column -------------------------
+    // One band at a time. This is a different gesture from everything the grid
+    // refuses, not an exception to it: the column is a caption, and a caption
+    // may be a button. The grid's own early return sits further down, so "can I
+    // click here" and "can I edit this" stay two separate questions — the same
+    // split Phase 109 made between the ruler and the bands.
+    if (const int foldBand = overviewFoldToggleAt (pos); foldBand >= 0)
+    {
+        setOverviewFolded (foldBand, ! isOverviewFolded (foldBand));
+        repaint();
         return;
     }
 
@@ -1541,7 +1559,12 @@ void PianoRollComponent::mouseMove (const juce::MouseEvent& e)
             repaint();
         }
 
-        setMouseCursor (juce::MouseCursor::NormalCursor);
+        // Phase 111: the chevrons in the column ARE clickable and the pointer
+        // says so; everything to their right says the opposite. Two cursors a
+        // few pixels apart tell the whole read-only story without a sentence.
+        setMouseCursor (overviewFoldToggleAt (e.position)
+                          ? juce::MouseCursor::PointingHandCursor
+                          : juce::MouseCursor::NormalCursor);
         return;
     }
 

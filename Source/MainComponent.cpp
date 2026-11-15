@@ -2274,14 +2274,22 @@ juce::Image MainComponent::createGroupScrollSnapshot (int width, int height)
 }
 
 //==============================================================================
-juce::Image MainComponent::createOverviewSnapshot (int width, int height, bool folded)
+juce::Image MainComponent::createOverviewSnapshot (int width, int height,
+                                                   bool foldAll, int foldOnlyLayer)
 {
     const auto   previousBounds    = pianoRoll.getBounds();
     const float  previousBeatWidth = pianoRoll.getBeatWidth();
     const double previousScroll    = pianoRoll.getScrollBeats();
     const int    previousFocus     = focusedSlotId;
     const bool   previousMode      = pianoRoll.isOverviewMode();
-    const bool   previousFold      = pianoRoll.isOverviewFolded();
+
+    // Phase 111: "restore" is per band now. One bool would have collapsed a
+    // mixed stack into "all folded" or "all open" on the way out of a shot,
+    // which is a screenshot quietly editing the session.
+    std::vector<bool> previousFold;
+
+    for (int i = 0; i < pianoRoll.getOverviewBandCount(); ++i)
+        previousFold.push_back (pianoRoll.isOverviewFolded (i));
 
     focusSynth (-1);
 
@@ -2325,11 +2333,25 @@ juce::Image MainComponent::createOverviewSnapshot (int width, int height, bool f
     // Phase 110: the two frames differ in exactly one setting, so the pair reads
     // as "these are the same project, this is the switch". Staged after the mode
     // because that is the order the user meets them in.
-    pianoRoll.setOverviewFolded (folded);
+    //
+    // Phase 111: and the third frame folds ONE band, so the shot can carry two
+    // answers at once — which is the only way to see at a glance that the switch
+    // is per band.
+    if (foldOnlyLayer >= 0)
+    {
+        for (int i = 0; i < pianoRoll.getOverviewBandCount(); ++i)
+            pianoRoll.setOverviewFolded (i, i == foldOnlyLayer);
+    }
+    else
+    {
+        pianoRoll.setAllOverviewFolded (foldAll);
+    }
 
     auto image = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
 
-    pianoRoll.setOverviewFolded (previousFold);
+    for (int i = 0; i < (int) previousFold.size(); ++i)
+        pianoRoll.setOverviewFolded (i, previousFold[(size_t) i]);
+
     pianoRoll.setOverviewMode (previousMode);
 
     for (int i = 0; i < 2; ++i)
@@ -4717,8 +4739,24 @@ void MainComponent::showSettingsMenu (juce::Point<int> screenPosition)
     // can tick it without a toolbar round trip. Disabled rather than hidden
     // while the mode is off: a menu that grows and shrinks is a menu you have to
     // read twice.
-    menu.addItem (8, utf8 ("总览里折叠重叠音符（每层压回一条线）"),
-                  pianoRoll.isOverviewMode(), pianoRoll.isOverviewFolded());
+    //
+    // Phase 111: this entry is the WHOLE stack. The per-band switches are the
+    // chevrons in the left column — and a submenu with one entry per layer,
+    // because a chevron in a 16 px band is not much of a target and a setting
+    // nobody can name is a setting nobody finds.
+    menu.addItem (8, utf8 ("总览里折叠全部图层（每层压回一条线）"),
+                  pianoRoll.isOverviewMode(), pianoRoll.isAllOverviewFolded());
+
+    juce::PopupMenu foldMenu;
+
+    for (int i = 0; i < pianoRoll.getOverviewBandCount(); ++i)
+        if (const auto* layer = stack.getLayer (i))
+            foldMenu.addItem (100 + i,
+                              utf8 ("折叠 ") + layer->getName(),
+                              true, pianoRoll.isOverviewFolded (i));
+
+    menu.addSubMenu (utf8 ("总览里只折叠一层"), foldMenu,
+                     pianoRoll.isOverviewMode() && foldMenu.containsAnyActiveItems());
 
     juce::Component::SafePointer<MainComponent> safe (this);
 
@@ -4738,8 +4776,20 @@ void MainComponent::showSettingsMenu (juce::Point<int> screenPosition)
             case 5: safe->pianoRoll.setGhostAlpha (0.60f); break;
             case 6: safe->toggleMixerWindow(); break;
             case 7: safe->pianoRoll.setOverviewMode (! safe->pianoRoll.isOverviewMode()); break;
-            case 8: safe->pianoRoll.setOverviewFolded (! safe->pianoRoll.isOverviewFolded()); break;
-            default: break;
+            case 8: safe->pianoRoll.setAllOverviewFolded (! safe->pianoRoll.isAllOverviewFolded()); break;
+            default:
+                // Phase 111: one entry per band, numbered from 100. This folds
+                // THAT layer — the same call the column chevron makes, so the
+                // two ways in cannot drift apart.
+                if (result >= 100)
+                {
+                    const int band = result - 100;
+
+                    safe->pianoRoll.setOverviewFolded (band,
+                                                       ! safe->pianoRoll.isOverviewFolded (band));
+                }
+
+                break;
         }
 
         safe->repaint();
