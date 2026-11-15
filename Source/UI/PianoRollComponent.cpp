@@ -565,22 +565,34 @@ juce::Rectangle<float> PianoRollComponent::getOverviewBandBounds (int index) con
 
     const auto grid = getGridArea();
 
-    //-- Phase 113: a folded band is thin, and the room it gives back is real --
+    //-- Phase 113/114: a folded band is thin, and the room it gives back is real --
     // Phase 109..112 gave every band an equal slice whatever its state, so a
     // folded layer kept its third of the window and drew one line down the
     // middle of it with air above and below: folding answered "how many rows",
-    // never "how much room". The user asked for the other half of the sentence
-    // — 折叠之后，整个图层在总览中的宽度也变成一条线的宽度 — and that is not
-    // one band's geometry: a band can only be thin if something else is thick,
-    // which is why this function now reads the fold state of every band.
+    // never "how much room". A band can only be thin if something else is thick,
+    // which is why this function reads the fold state of every band.
     //
-    // 16 px is not a new number. It is the threshold this file already states in
-    // drawOverviewColumn ("a name needs about 16 px of band"), and it is what
-    // keeps a fold reversible: the chevron is `min (13, height - 4)`, so 16
-    // leaves a 12 px button inside its own stripe, and the layer keeps its name.
-    // Thinner and the only way back out of a fold would be the menu item — P111
-    // put the switch where the fold happened, and a switch that disappears
-    // exactly when it is needed is not a switch.
+    // Phase 113 stopped at 16 px (the "a name needs 16 px" threshold) because
+    // that is what kept the band's own chevron inside the band, and it read as
+    // "thin" next to a 128 px neighbour. It was not thin enough: the user's next
+    // sentence was 图层的高度，在折叠的情况下，跟一条音符占位符的宽度相等，或者
+    // 略宽一点 — the folded layer is supposed to BE one line, so the band has to
+    // be as thick as the line it carries, not thirty times thicker.
+    //
+    // 7 design px is that number, and it is derived, not picked: a segment is at
+    // most `ui::pf (5)` thick (see overviewSegmentOf — the clamp that keeps a
+    // twelve-layer stack from turning lines into bricks), plus one pixel of air
+    // above and below so two folded bands in a row do not fuse into one bar.
+    // 5 + 1 + 1 = 7. The line then fills its own band, which is the whole point:
+    // 折叠之后，整个图层在总览中的宽度 = 一条线的宽度.
+    //
+    // The cost of going below 16 is real and is paid elsewhere, not here: a band
+    // this thin cannot hold a name, and cannot hold a 13 px chevron. Phase 114
+    // pays it by making THE WHOLE STRIPE the switch (getOverviewFoldToggleBounds
+    // returns the entire band in the column when folded) — P111 put the switch
+    // where the fold happened, and "the switch got smaller but is still exactly
+    // there" is a different thing from "the switch is gone until you find the
+    // menu". A 9 px × 34 px hit area is still a hit area.
     //
     // This is O(count) per call where it used to be O(1), and the note loop calls
     // it once per note. `count` is layers, not notes — a handful of set lookups —
@@ -599,7 +611,7 @@ juce::Rectangle<float> PianoRollComponent::getOverviewBandBounds (int index) con
     // Never taller than the equal slice: a twenty-layer stack on 200 px has 10 px
     // bands, and a "collapsed" band taller than an expanded one would be a lie
     // about which one is collapsed.
-    const float thin = juce::jmin (ui::pf (16.0f), slice);
+    const float thin = juce::jmin (ui::pf (7.0f), slice);
 
     // Nothing folded ⟹ `open == count` ⟹ this is EXACTLY the equal split of
     // Phase 109, which is why every picture that folds nothing did not move by a
@@ -620,8 +632,9 @@ juce::Rectangle<float> PianoRollComponent::getOverviewBandBounds (int index) con
     // otherwise ends with a band that is a fraction short of its neighbour's
     // top, and one stray pixel row of background down the middle of the stack
     // reads as "that layer is empty". With two different heights in play this
-    // matters more, not less — a 16 px stripe with 449/7 px neighbours puts the
-    // fraction on a much shorter ruler.
+    // matters more, not less — a 7 px stripe with 449/7 px neighbours puts the
+    // fraction on a much shorter ruler, and half a pixel of gap around a stripe
+    // that thin is a visible seam.
     float offset = 0.0f;
 
     for (int i = 0; i < index; ++i)
@@ -683,8 +696,23 @@ juce::Rectangle<float> PianoRollComponent::overviewSegmentOf (int layerIndex,
     // (C and C# are one row apart, which is now ~4 px) would touch and the whole
     // stack would read as one block. When the row IS the band, the two rules
     // agree and nothing changes.
-    const float height = juce::jlimit (1.5f, ui::pf (5.0f),
-                                       juce::jmin (band.getHeight() * 0.30f, rowHeight * 0.55f));
+    //
+    // Phase 114, folded: the row IS the band, and the band was cut down to the
+    // thickness of one line — so "a third of the band" would now mean a third of
+    // a line, i.e. a one-pixel thread floating in a 9 px stripe with air above
+    // and below. That is exactly what the user rejected. Folded, the line takes
+    // the band minus one pixel of air at each edge; the 5 px clamp still applies,
+    // so a band that somehow is taller than a line does not turn into a bar.
+    //
+    // `rows == nullptr` is the caller's way of saying "this band is one row",
+    // and Phase 111/112 only pass that when the band is folded.
+    const bool  collapsed = (rows == nullptr);
+    const float height = collapsed
+                           ? juce::jlimit (1.5f, ui::pf (5.0f),
+                                           band.getHeight() - ui::pf (2.0f))
+                           : juce::jlimit (1.5f, ui::pf (5.0f),
+                                           juce::jmin (band.getHeight() * 0.30f,
+                                                       rowHeight * 0.55f));
 
     // A note shorter than the minimum is still a mark at its start — that is
     // the whole of "有音符的起始位置就显示一条线段". The minimum widens to the
@@ -888,13 +916,38 @@ juce::Rectangle<float> PianoRollComponent::getOverviewFoldToggleBounds (int inde
     if (column.getWidth() < ui::px (44))
         return {};
 
-    // The chevron also has to fit INSIDE its band: a stack of twelve layers on
-    // 200 px gives bands of 16 px, and a 13 px button in a 12 px band would
-    // spill into its neighbour and fold the wrong layer.
+    // The chevron also has to fit INSIDE its band, or it would spill into the
+    // neighbour and fold the wrong layer.
+    //
+    //-- Phase 114: when it cannot fit, THE BAND ITSELF is the button --------
+    // A folded band is 7 design px (getOverviewBandBounds), so neither a name nor
+    // a 13 px chevron fits inside it. Phase 113 answered that by refusing to go
+    // below 16 px; the user has since asked for the band to be the thickness of
+    // one line, so the SIZE has to give instead of the fold.
+    //
+    // A 9 × 96 px hit area is a hit area: the stripe's colour rule is right
+    // there, the pointer turns into a hand over it, and clicking anywhere in
+    // that band's slice of the column toggles that band. The chevron is still
+    // drawn, shrunk to fit (drawOverviewColumn measures it against the shorter
+    // side) — but the CLICK does not depend on it being visible. P111's rule was
+    // "the switch lives where the fold happened", not "the switch is a triangle".
+    //
+    // This branch also catches a band with no chevron room for the ordinary
+    // reason (a twenty-layer stack), and there the answer is the old one: empty,
+    // no switch. Only a FOLDED band gets promoted to "whole stripe", because
+    // only a folded band is thin by design rather than by accident.
     const float size = juce::jmin (ui::pf (13.0f), band.getHeight() - ui::pf (4.0f));
 
     if (size < ui::pf (9.0f))
+    {
+        // A fully folded stack falls back to the equal split (Phase 113), where a
+        // folded band is 133 px tall and the chevron fits — no promotion needed.
+        if (isOverviewFolded (index))
+            return { (float) column.getX(), band.getY(),
+                     (float) column.getWidth(), band.getHeight() };
+
         return {};
+    }
 
     // Right edge: the column's, less the 3 px colour rule and a 3 px gap, so the
     // chevron never eats the one line that says which layer this is.
@@ -913,7 +966,15 @@ int PianoRollComponent::overviewFoldToggleAt (juce::Point<float> point) const
     {
         const auto bounds = getOverviewFoldToggleBounds (i);
 
-        if (! bounds.isEmpty() && bounds.expanded (ui::pf (2.0f)).contains (point))
+        if (bounds.isEmpty())
+            continue;
+
+        // Phase 114: a folded band's bounds ARE the band, so it must not be
+        // grown by the 2 px slop that the small chevron needs — that slop would
+        // reach into the neighbour above and fold the wrong layer.
+        const float slack = isOverviewFolded (i) ? 0.0f : ui::pf (2.0f);
+
+        if (bounds.expanded (slack).contains (point))
             return i;
     }
 

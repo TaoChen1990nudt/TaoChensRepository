@@ -21599,22 +21599,26 @@ juce::String MainComponent::runSelfTest()
 
         //-- (9) 箭头跟着带 -----------------------------------------------
         // 三角长在带里，跟着带的中心走。Phase 113 之后「带的中心」自己会动
-        // （折起来的那条只剩 16 px，它下面的带全部上移），所以这条钉的不再是
+        // （折起来的那条变薄，它下面的带全部上移），所以这条钉的不再是
         // 「折叠前后同一个像素」——那件事已经随那轮改动失效了——而是真正不变的
-        // 那一条：箭头永远落在自己那条带的正中间，而且塞得进去。
+        // 那一条：开关永远落在自己那条带里。
+        //
+        // Phase 114 起，「薄」只有一条线那么厚（7 设计像素），三角装不进 13 px，
+        // 于是折叠态的开关改成**整条带**（见 getOverviewFoldToggleBounds）。这条
+        // 仍然是它的上界：不论开关是方块还是横条，它不许跑出自己的带。
         const auto toggleWhileFolded = roll.getOverviewFoldToggleBounds (1);
         const auto thinBandNow       = roll.getOverviewBandBounds (1);
 
-        check (utf8 ("折叠前后，箭头仍然在自己那条带的正中间，而且装得进那条带"),
+        check (utf8 ("折叠前后，开关仍然装在自己那条带里（薄到一条线时它就是那条带）"),
                ! toggleWhileFolded.isEmpty()
-                 && thinBandNow.getHeight() <= ui::pf (16.0f) + 1.01f
+                 && thinBandNow.getHeight() <= ui::pf (7.0f) + 1.01f
                  && std::abs (toggleWhileFolded.getCentreY() - thinBandNow.getCentreY()) < 0.01f
                  && toggleWhileFolded.getY() >= thinBandNow.getY() - 0.01f
                  && toggleWhileFolded.getBottom() <= thinBandNow.getBottom() + 0.01f,
                juce::String (band1.getCentreY(), 1) + utf8 ("（等分时）-> ")
                  + juce::String (thinBandNow.getCentreY(), 1) + utf8 ("，带 ")
-                 + juce::String (thinBandNow.getHeight(), 1) + utf8 (" px / 箭头 ")
-                 + juce::String (toggleWhileFolded.getCentreY(), 1));
+                 + juce::String (thinBandNow.getHeight(), 1) + utf8 (" px / 开关 ")
+                 + toggleWhileFolded.toString());
 
         //-- (10) 记的是图层 id，不是下标 ---------------------------------
         // 折的是第 2 层（id），然后把第 1 层删掉。若状态按下标存，折叠会留在
@@ -21867,15 +21871,25 @@ juce::String MainComponent::runSelfTest()
                  + juce::String (slice, 1));
 
         //-- (2) 折一条：那条带自己也变成一条线 -----------------------------
+        // Phase 114 改了口径。P113 说「不超过 16 px」——16 是「放得下名字」的
+        // 门槛，跟「一条线有多厚」没关系：带 21 px、线 6.5 px，那条带里三分之
+        // 二是空气。用户下一句话把这个说穿了：「图层的高度，在折叠的情况下，跟
+        // 一条音符占位符的宽度相等，或者略宽一点」。
+        //
+        // 现在带宽 = 线厚上限 (5 设计像素) + 上下各一像素缝 = 7。所以这条同时
+        // 钉两头：**不少于一条线**（否则线装不下，或带比线还薄），**不多于线+缝**。
         roll.setOverviewFolded (2, true);
 
         const auto thin2 = roll.getOverviewBandBounds (2);
 
-        check (utf8 ("折叠之后，那一层自己那条带也变薄：不超过 16 px，也不到等分的四分之一"),
+        check (utf8 ("折叠之后，那一层自己那条带就是一条线的厚度：5 到 7 设计像素之间，"
+                     "也不到等分的四分之一"),
                thin2.getHeight() > 1.0f
-                 && thin2.getHeight() <= ui::pf (16.0f) + 1.01f
+                 && thin2.getHeight() <= ui::pf (7.0f) + 1.01f
+                 && thin2.getHeight() >= ui::pf (5.0f) - 1.01f
                  && thin2.getHeight() < open2.getHeight() * 0.25f,
-               juce::String (open2.getHeight(), 1) + " -> " + juce::String (thin2.getHeight(), 1));
+               juce::String (open2.getHeight(), 1) + " -> " + juce::String (thin2.getHeight(), 1)
+                 + utf8 ("（线厚上限 ") + juce::String (ui::pf (5.0f), 1) + utf8 ("）"));
 
         //-- (3) 还回来的高度归了没折的层，整摞仍然铺满 ---------------------
         // 「铺满」必须连着头尾一起钉：只检查每条都变高的话，一个把折叠带丢掉、
@@ -21898,16 +21912,23 @@ juce::String MainComponent::runSelfTest()
                  + utf8 ("，底 ") + juce::String (grew3.getBottom(), 1)
                  + utf8 (" vs 网格 ") + juce::String (grid.getBottom(), 1));
 
-        //-- (4) 折起来那条里的线，仍然在带里、仍然细 -----------------------
-        // 带薄了，线不能跟着变粗：线高的公式里那一夹（55% 行高）在 count == 1 时
-        // 等于 55% 的带高，于是 16 px 的带会画出 8.8 px 的「线」。真正压住它的是
-        // 那条 `jmin (…, 5 px)`，这条断言就是它的收据。
+        //-- (4) 折起来那条里的线，填满这条带 -------------------------------
+        // Phase 113 这里钉的是「线比带薄得多」，理由写在当时的注释里：带 16 px
+        // 时 55% 行高那一夹会画出 8.8 px 的「线」，真正压住它的是 `jmin (…, 5 px)`。
+        // 那一版的问题是带本身还太厚，于是「线很细」是对的、画面是错的——带 21 px、
+        // 线 6.5 px，上下各 7 px 空气，读起来像「这一层内容很少」。
+        //
+        // Phase 114 把这条反转过来：折叠的带已经是「一条线那么厚」，线就该占满它，
+        // 只留上下各一像素的缝（不让两条相邻的折叠带糊成一根粗条）。判据因此变成
+        // **线高 ≥ 带高 - 2 设计像素**，而不是「线高 < 带高的一半」。
         const auto lineC = roll.getOverviewSegmentBounds (2, cHigh);
 
-        check (utf8 ("折起来的那层：线压在带的中间，比带薄得多，也没跑出带"),
+        check (utf8 ("折起来的那层：线就是那条带，上下各只留一像素缝，不是悬在带中间的细线"
+                     "（P113 这条说的是反面，P114 翻了它）"),
                ! lineC.isEmpty()
                  && lineC.getHeight() <= ui::pf (5.0f) + 0.01f
-                 && lineC.getHeight() < thin2.getHeight() * 0.5f
+                 && lineC.getHeight() >= thin2.getHeight() - ui::pf (2.5f)
+                 && lineC.getHeight() > thin2.getHeight() * 0.5f
                  && std::abs (lineC.getCentreY() - thin2.getCentreY()) < 0.01f
                  && lineC.getY() >= thin2.getY() - 0.01f
                  && lineC.getBottom() <= thin2.getBottom() + 0.01f,
@@ -21920,9 +21941,9 @@ juce::String MainComponent::runSelfTest()
         const auto two1  = roll.getOverviewBandBounds (1);
         const auto two3  = roll.getOverviewBandBounds (3);
 
-        check (utf8 ("折两条：两条各自 16 px，剩下两条一起分掉空出来的高度"),
-               thin0.getHeight() <= ui::pf (16.0f) + 1.01f
-                 && roll.getOverviewBandBounds (2).getHeight() <= ui::pf (16.0f) + 1.01f
+        check (utf8 ("折两条：两条各自一条线的厚度，剩下两条一起分掉空出来的高度"),
+               thin0.getHeight() <= ui::pf (7.0f) + 1.01f
+                 && roll.getOverviewBandBounds (2).getHeight() <= ui::pf (7.0f) + 1.01f
                  && two1.getHeight() > grew1.getHeight() + 1.0f
                  && two3.getHeight() > grew3.getHeight() + 1.0f
                  && std::abs (two3.getBottom() - grid.getBottom()) < 0.01f,
@@ -21965,16 +21986,26 @@ juce::String MainComponent::runSelfTest()
                back2.toString() + " vs " + open2.toString());
 
         //-- (8) 矮面板：「薄」不许比等分还厚 -------------------------------
-        // 八层挤在两百来像素里，等分只剩十几个像素（实测 14）。这时候 16 px 的
-        // 「薄」比等分还厚——一个「折叠」把条带撑大的实现就这么漏过去（它只在
-        // 层数少的面板上看着对）。上限必须是 min (16, 等分)。
+        // Phase 113 用八层 / 208 px 面板来咬这条（等分 14，而当时的「薄」是 16）。
+        // Phase 114 的「薄」只有 7 设计像素，八层咬不动了，所以这里加到二十层：
+        // 等分掉到 6 左右，`min (7, 等分)` 里的**等分那一支**才是真正生效的那支。
+        // 一个「折叠」把条带撑大的实现只在层数少的面板上看着对；一个忘了夹等分
+        // 的实现只在层数多的时候错——两种都得有靶子。
+        //
+        // 这条同时钉住「折叠带至少装得下一条线」：等分再小，线也不能比带还粗。
         LayerStack many;
         RackModel  manyRack;
 
-        for (int i = 0; i < 8; ++i)
+        int tallNote = -1;
+
+        for (int i = 0; i < 20; ++i)
         {
             many.addLayer (utf8 ("层 ") + juce::String (i + 1), palette::layer1);
-            many.getLayer (i)->addNote ({ 0, 60 + i, 0.0, 4.0, 0.8f });
+
+            const int id = many.getLayer (i)->addNote ({ 0, 60 + i, 0.0, 4.0, 0.8f });
+
+            if (i == 7)
+                tallNote = id;
         }
 
         PianoRollComponent tall (many, manyRack);
@@ -21983,24 +22014,55 @@ juce::String MainComponent::runSelfTest()
         tall.setOverviewMode (true);
 
         const auto  tallGrid  = tall.getGridBounds();
-        const float tallSlice = tallGrid.getHeight() / 8.0f;
+        const float tallSlice = tallGrid.getHeight() / 20.0f;
 
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 10; ++i)
             tall.setOverviewFolded (i, true);
 
         const auto thinTall = tall.getOverviewBandBounds (3);
-        const auto openTall = tall.getOverviewBandBounds (7);
+        const auto openTall = tall.getOverviewBandBounds (19);
+        const auto lineTall = tall.getOverviewSegmentBounds (7, tallNote);
 
-        check (utf8 ("面板矮到等分只有十几个像素时，折叠带的上限就是等分，不是 16"),
+        check (utf8 ("等分比一条线还薄时，折叠带的上限就是等分；而线仍然装得进那条带"),
                tallSlice > 1.0f
-                 && tallSlice < ui::pf (16.0f)                 // 前提：夹子真的咬得住
-                 && thinTall.getHeight() < ui::pf (16.0f)      // 它没有被写死的 16 顶大
+                 && tallSlice < ui::pf (7.0f)                 // 前提：夹子真的咬得住
+                 && thinTall.getHeight() < ui::pf (7.0f)      // 它没有被写死的 7 顶大
                  && thinTall.getHeight() <= tallSlice + 1.01f
+                 && thinTall.getHeight() >= tallSlice - 1.01f // 就是等分，不是别的数
                  && openTall.getHeight() >= thinTall.getHeight() - 0.01f
+                 && ! lineTall.isEmpty()
+                 && lineTall.getHeight() <= thinTall.getHeight() + 0.01f
                  && std::abs (openTall.getBottom() - tallGrid.getBottom()) < 0.01f,
                juce::String (tallSlice, 1) + utf8 (" 等分 / 折 ")
-                 + juce::String (thinTall.getHeight(), 1) + utf8 (" / 展 ")
+                 + juce::String (thinTall.getHeight(), 1) + utf8 (" / 线 ")
+                 + juce::String (lineTall.getHeight(), 1) + utf8 (" / 展 ")
                  + juce::String (openTall.getHeight(), 1));
+
+        //-- (9) 折叠之后，开关没有跟着消失 ---------------------------------
+        // Phase 113 的注释写着「薄到 16 以下，折完之后左列只剩色带，展开只能走
+        // 菜单」——那是它给自己设的下限，而这轮用户要更薄，于是这个问题必须
+        // 正面回答，不能靠「算了」带过。
+        //
+        // 答案：折叠的那条带，**整条带就是它的开关**（从列左沿到列右沿，高度
+        // 就是带高）。三角画不画取决于带里有没有位置，点击不取决于它——P111 的
+        // 规则是「开关长在折叠发生的地方」，不是「开关必须是个 13 px 的三角」。
+        roll.setOverviewFolded (2, true);
+
+        const auto tThin    = roll.getOverviewFoldToggleBounds (2);
+        const auto bandThin = roll.getOverviewBandBounds (2);
+
+        roll.simulatePressForTest (tThin.getCentre());
+
+        check (utf8 ("折叠之后开关还在：整条带就是它的按钮，点一下就展开回来"),
+               ! tThin.isEmpty()
+                 && std::abs (tThin.getHeight() - bandThin.getHeight()) < 0.01f
+                 && tThin.getWidth() > tThin.getHeight()          // 横条，不是方块
+                 && tThin.getY() >= bandThin.getY() - 0.01f
+                 && tThin.getBottom() <= bandThin.getBottom() + 0.01f
+                 && ! roll.isOverviewFolded (2)
+                 && roll.getOverviewRowCount (2) == 4,
+               tThin.toString() + utf8 (" / 带 ") + bandThin.toString()
+                 + utf8 ("，展开后 ") + juce::String (roll.getOverviewRowCount (2)) + utf8 (" 行"));
     }();
 
     // The summary MUST come after the last check. It used to sit mid-function

@@ -795,6 +795,11 @@ void PianoRollComponent::drawOverviewColumn (juce::Graphics& g)
 
         // A name needs about 16 px of band. Below that the bands are a barcode
         // and the only honest thing to draw is the colour.
+        //
+        // Phase 114 sends every FOLDED band down this branch on purpose: a
+        // folded band is 7 design px, i.e. one line, and a name in it would be
+        // four clipped pixels. The stripe's colour and its place in the stack
+        // are what identify it; the switch is the whole stripe.
         const auto toggle = getOverviewFoldToggleBounds (i);
 
         if (label.getHeight() >= ui::px (16))
@@ -821,8 +826,15 @@ void PianoRollComponent::drawOverviewColumn (juce::Graphics& g)
             // ▼ open — this band is cut into its rows; ▶ closed — one line.
             // The sign is the state, so a stack where only one band is folded
             // reads at a glance instead of by comparing band heights.
+            //
+            // Phase 114: folded, the toggle IS the whole stripe (a 9 px band
+            // cannot hold a 13 px button), so the chevron has to be measured
+            // against the SHORTER side — otherwise it would be drawn at 30% of
+            // the column's width, i.e. a triangle as big as three bands. It
+            // shrinks to about 5 px and stays centred in the line it belongs to.
+            // The hit area does not depend on this: see overviewFoldToggleAt.
             const auto  centre = toggle.getCentre();
-            const float r      = toggle.getWidth() * 0.30f;
+            const float r      = juce::jmin (toggle.getWidth(), toggle.getHeight()) * 0.30f;
 
             juce::Path chevron;
 

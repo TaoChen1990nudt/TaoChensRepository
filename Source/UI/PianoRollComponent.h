@@ -1598,14 +1598,22 @@ public:
     bool isAllOverviewFolded() const;
     void setAllOverviewFolded (bool shouldFold);
 
-    /** Where band `index`'s fold chevron sits, in local coordinates: a small
-        square in the left column, just left of the colour rule.
+    /** Where band `index`'s fold switch sits, in local coordinates.
+
+        Unfolded, that is a small square in the left column, just left of the
+        colour rule. FOLDED and too thin for any chevron (Phase 114: a folded
+        band is 7 design px), it is THE WHOLE STRIPE — the entire column width
+        by the band's height — because a folded band cannot hold a button and a
+        switch that disappears exactly when it is needed is not a switch (P111).
+        The chevron is still drawn when there is room; the CLICK does not depend
+        on it.
 
         Empty when the mode is off, when the index is out of range, when a band
-        is too thin to hold a chevron (< 9 design px), and when the column is
-        narrower than "a name plus a chevron". Empty means "there is nothing
-        here to click" — that is what the press handler reads it as, and it is
-        why a 128-layer stack does not grow 128 invisible hit targets. */
+        is too thin to hold a chevron AND is not folded (a twenty-layer stack,
+        unfolded: nothing to promote), and when the column is narrower than
+        "a name plus a chevron". Empty means "there is nothing here to click" —
+        that is what the press handler reads it as, and it is why a 128-layer
+        stack does not grow 128 invisible hit targets. */
     juce::Rectangle<float> getOverviewFoldToggleBounds (int index) const;
 
     /** How many pitch rows band `index` is cut into: the number of distinct
