@@ -2221,6 +2221,58 @@ juce::Image MainComponent::createGroupMuteSnapshot (int width, int height)
     return image;
 }
 
+
+juce::Image MainComponent::createGroupScrollSnapshot (int width, int height)
+{
+    auto* layer = stack.getActiveLayer();
+
+    if (layer == nullptr)
+        return {};
+
+    const auto   previousBounds     = pianoRoll.getBounds();
+    const float  previousBeatWidth  = pianoRoll.getBeatWidth();
+    const double previousScroll     = pianoRoll.getScrollBeats();
+
+    // A fixture, not the demo's own content: three notes sixteen beats apart, so
+    // the group is genuinely wider than the window this shot gives it and BOTH
+    // ends end up outside the grid at once. A group that merely touched one edge
+    // would leave the reader guessing whether the box stops there because the
+    // group does or because the window does — which is exactly the question this
+    // phase answers. The middle member stays in view, so the picture shows what
+    // the box belongs to without pretending the whole group is on screen.
+    //
+    // Pitches 74 / 68 / 61 keep both horizontal edges of the band INSIDE the
+    // grid (16 lanes ≈ 291 px against 450), so the frame is a rectangle that
+    // leaves the window left and right rather than a band clipped to it.
+    const int first  = layer->addNote ({ 0, 74,  2.0, 2.0, 0.85f });
+    const int middle = layer->addNote ({ 0, 68, 10.0, 2.0, 0.85f });
+    const int last   = layer->addNote ({ 0, 61, 18.0, 2.0, 0.85f });
+
+    const int gid = layer->addGroup (utf8 ("跨越视口"),
+                                     groupPalette::nextGroupColour ((int) layer->getGroups().size()));
+
+    layer->assignNotesToGroup ({ first, middle, last }, gid);
+
+    pianoRoll.setSize (width, height);
+    pianoRoll.setBeatWidth (ui::pf (72.0f));      // 16 beats ≈ 1150 px: cannot fit
+    pianoRoll.setScrollBeats (6.0);               // ... and starts left of the grid
+
+    auto image = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
+
+    // The fixture leaves with the frame. Nothing here is part of the session the
+    // shot was taken in.
+    layer->removeGroup (gid);
+    layer->removeNote (first);
+    layer->removeNote (middle);
+    layer->removeNote (last);
+
+    pianoRoll.setBounds (previousBounds);
+    pianoRoll.setBeatWidth (previousBeatWidth);
+    pianoRoll.setScrollBeats (previousScroll);
+
+    return image;
+}
+
 //==============================================================================
 juce::Image MainComponent::createPerfSnapshot()
 {

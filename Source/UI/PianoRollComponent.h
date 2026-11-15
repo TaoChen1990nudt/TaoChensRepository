@@ -890,6 +890,17 @@ public:
         return groupFrameOf (layerIndex, groupId, occurrence);
     }
 
+    /** Phase 105: test hook — where the name tag lands. "The tag stays in view
+        when the group's left edge has scrolled out" is a claim about a
+        rectangle, and the pill's own rectangle is the only honest way to say
+        it; the alternative is a point-probe that passes for the wrong reason
+        when the probe happens to land on a member. */
+    juce::Rectangle<float> getGroupLabelBoundsForTest (int layerIndex, int groupId,
+                                                       int occurrence = -1) const
+    {
+        return getGroupLabelBounds (layerIndex, groupId, occurrence);
+    }
+
     /** The group whose label is under this point, or -1. `occurrence`, when
         given, receives WHICH appearance of it (Phase 58). */
     int getGroupLabelAt (juce::Point<float> position, int* occurrence = nullptr) const;
@@ -1449,6 +1460,10 @@ public:
     /** Phase 87: where a beat lands on screen. The loop gestures are driven by
         x, so a fixture has to be able to name one. */
     float screenXForBeatForTest (double beat) const noexcept { return screenXForBeat (beat); }
+
+    /** Phase 105: its vertical twin, for the same reason: "is this point on a
+        pitch row that belongs to the group's band" needs the row's own y. */
+    float screenYForPitchForTest (int pitch) const noexcept { return screenYForPitch (pitch); }
 
     /** Phase 87: the whole gesture, from press to report, without a MouseEvent.
         The three parts are the three the real handler runs — press decides which

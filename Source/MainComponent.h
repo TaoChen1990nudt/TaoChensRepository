@@ -453,6 +453,15 @@ public:
         The mute is put back before returning: it exists for the frame. */
     juce::Image createGroupMuteSnapshot (int width = ui::px (900), int height = ui::px (420));
 
+    /** Phase 105: one group with BOTH ends scrolled out of the window.
+
+        The frame that makes "the box keeps its size" visible rather than
+        arguable: the band runs edge to edge because the group does, and the
+        name tag sits at the left edge because the group's own left edge is off
+        screen. A fixture group is built for the shot and removed afterwards —
+        the demonstration is of a property, not of anything the demo contains. */
+    juce::Image createGroupScrollSnapshot (int width = ui::px (900), int height = ui::px (420));
+
     /** Phase 36: the note inspector with all three automation layers live.
 
         The overlay only earns its pixels when the three curves disagree — three

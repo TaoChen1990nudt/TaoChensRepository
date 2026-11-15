@@ -164,6 +164,14 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
     判定搭在**已经算出来的峰值**上，一次扫描两个读者（通道 `channelPeaks` / 主输出
     `getMagnitude`）。通道与主输出是**两盏**灯：「谁太响」是两个总线上的两个答案。
 
+38. **几何算「有多大」，绘制算「画哪些像素」**（P105）：`getGroupContentBounds` 是组框唯一来源，
+    它**不看视口**；「看不见就不画」落在 `drawGroupBands` / `drawGroupFrames` 里各一次
+    `intersects(area)`，不改变任何数字。四个读者共用这一份几何——框、pill 落点、
+    替换预览（`PianoRollSampleDraw`）、命中测试——改它等于改四件事。pill 有两条**互补**规则：
+    左沿夹紧（它是双击改名与右侧 caret 的把手，不许跟着组的起点滚走）、整组不可见时返回空
+    （悬在边上的名字指不到任何东西）。**跟着视口伸缩的框 = 每次滚动抓到不同大小的矩形。**
+    未修：`getGroupBeatSpan` 只扫音符不扫块，组里只有块时自动化框为空。
+
 ## 索引
 - 目录结构、构建命令（含 `unset *proxy*`）、CI 四条门禁、`formatVersion` 逐版字段、快照夹具
   —— 全在 `STATUS.md` 与 `REFERENCE.md`，本文件不重复。

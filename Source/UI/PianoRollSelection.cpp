@@ -1038,7 +1038,6 @@ juce::Rectangle<float> PianoRollComponent::getGroupContentBounds (const Layer& l
                                                                  const NoteGroup& group,
                                                                  int occurrence) const
 {
-    const auto area = getGridArea();
     juce::Rectangle<float> unionBounds;
 
     // Phase 58: -1 means "the whole group" (every appearance at once), which is
@@ -1049,15 +1048,27 @@ juce::Rectangle<float> PianoRollComponent::getGroupContentBounds (const Layer& l
         return groupId == group.getId() && (occurrence < 0 || memberOccurrence == occurrence);
     };
 
+    // Phase 105: the box is a property of the GROUP, not of the window.
+    //
+    // This used to skip every member that did not intersect the grid, so a
+    // group whose first two notes had been scrolled off the left edge drew a
+    // box starting at the first note still visible: the bracket then grew and
+    // shrank as you scrolled, and "drag the group by its frame" grabbed a
+    // rectangle that was a different size at every scroll position. The
+    // culling was doing two jobs and only one of them was legitimate —
+    // "do not paint what nobody can see" belongs in the paint loop (see
+    // drawGroupBands), where it costs one intersects() and changes no number.
+    //
+    // It is also what the automation box already does: getGroupAutomationBoxBounds
+    // takes its beat span from the model (getGroupBeatSpan) and lets the paint
+    // clip trim it, so the two boxes over one group stay aligned no matter where
+    // the view is scrolled to.
     for (const auto& note : layer.getNotes())
     {
         if (! belongs (note.groupId, note.groupOccurrence))
             continue;
 
         const auto bounds = getNoteBounds (note);
-
-        if (! bounds.intersects (area))
-            continue;
 
         unionBounds = unionBounds.isEmpty() ? bounds : unionBounds.getUnion (bounds);
     }
@@ -1073,7 +1084,7 @@ juce::Rectangle<float> PianoRollComponent::getGroupContentBounds (const Layer& l
 
         const auto bounds = getSampleScreenBounds (layerIndexOf (&layer), sample.id);
 
-        if (bounds.isEmpty() || ! bounds.intersects (area))
+        if (bounds.isEmpty())
             continue;
 
         unionBounds = unionBounds.isEmpty() ? bounds : unionBounds.getUnion (bounds);
@@ -1117,6 +1128,14 @@ juce::Rectangle<float> PianoRollComponent::getGroupLabelBounds (int layerIndex, 
         return {};
 
     const auto area = getGridArea();
+
+    // Phase 105: a box that is scrolled entirely out of view has no name tag.
+    // The pill is a HANDLE — the clamps below are what keep it reachable while
+    // part of the group is still on screen, and "reachable" must not turn into
+    // "pinned to the edge for a group nobody can see".
+    if (! content.intersects (area))
+        return {};
+
     const float height = ui::pf (14);
 
     const juce::String text = groupLabelText (*layer, *group);
@@ -1147,7 +1166,13 @@ juce::Rectangle<float> PianoRollComponent::getGroupLabelBounds (int layerIndex, 
     if (labelY < area.getY())
         labelY = juce::jmin (area.getBottom() - height, content.getY() + ui::pf (2));
 
-    float labelX = content.getX();
+    // Phase 105: the pill rides with the group's left edge — until that edge
+    // has been scrolled out of view. The pill is not decoration: it is the
+    // appearance's only grab target (double click renames it, the caret on its
+    // right end opens the automation), so it stops at the edge of the grid
+    // rather than leaving with the first note. Same rule as the right-hand
+    // clamp below, applied to the other edge.
+    float labelX = juce::jmax (content.getX(), area.getX());
 
     if (labelX + width > area.getRight())
         labelX = juce::jmax (area.getX(), area.getRight() - width);

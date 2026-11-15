@@ -256,6 +256,7 @@ namespace
         // 静音 and the block under it is lit by the same selection that lights
         // the notes — a muted group is still an editable group.
         writePng ("-groups", component.createGroupMuteSnapshot());
+        writePng ("-groupscroll", component.createGroupScrollSnapshot());
 
         // Phase 21: the group's inline curve box. Its own frame, because only
         // one floating editor can be open at a time and the main image above

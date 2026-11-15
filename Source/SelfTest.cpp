@@ -17224,10 +17224,11 @@ juce::String MainComponent::runSelfTest()
 
         // Inside C's bracket, on no member: horizontal at 20.5 (C's first note
         // runs 20..21, but on the pitch-80 row), vertical at the frame's middle.
-        // Every pitch here stays inside the visible 84..57 window — a group whose
-        // members are scrolled out has an EMPTY frame (getGroupContentBounds only
-        // unions what intersects the grid), and every check below would then pass
-        // on (-1, -1) for the wrong reason.
+        // Every pitch here stays inside the visible 84..57 window, so the points
+        // land where they claim to. Since Phase 105 the box is the WHOLE group
+        // (a member scrolled out no longer cuts it down), so a point on a row
+        // that is out of view would still be "inside the frame" — and the checks
+        // below would then pass on a hit nobody could make with a mouse.
         const juce::Point<float> pointGap { roll.screenXForBeatForTest (20.5),
                                             frameC.getCentreY() };
 
@@ -20796,6 +20797,106 @@ juce::String MainComponent::runSelfTest()
                    ! e.getChannelClipped (0),
                    juce::String ((int) e.getChannelClipped (0)));
         }
+    }();
+
+    //== Phase 105: 组的框是组的属性，不是窗口的属性 ==========================
+    // The report, in one line: 「组内的音符有几个在视口外时，编组区域只判定到
+    // 视口内部的几个」. getGroupContentBounds used to skip every member that missed
+    // the grid, so the bracket was a function of the scroll position — it grew as
+    // the first note came into view and shrank as it left, and "grab the group by
+    // its frame" grabbed a different rectangle at every offset. These checks pin
+    // the box to the GROUP, then pin the two things that follow from it: what the
+    // pointer finds in the band, and where the name tag ends up.
+    [&]
+    {
+        LayerStack stack;
+        RackModel  rack;
+
+        stack.addLayer (utf8 ("一层"), palette::layer1);
+        stack.setActiveLayerIndex (0);
+
+        auto* layer = stack.getLayer (0);
+
+        PianoRollComponent roll (stack, rack);
+        roll.setSize (1400, 620);
+        roll.setScrollBeats (0.0);
+
+        const auto addNote = [layer] (int pitch, double beat, double length)
+        {
+            NoteEvent note;
+            note.pitch       = pitch;
+            note.startBeat   = beat;
+            note.lengthBeats = length;
+            return layer->addNote (note);
+        };
+
+        // 40 beats apart at 48 px per beat: the grid is about 27 beats wide, so
+        // one end or the other is ALWAYS off screen. That is the whole point —
+        // a fixture where both ends fit would have gone on passing with the old
+        // culling and proved nothing.
+        const int first = addNote (72,  2.0, 2.0);
+        const int last  = addNote (60, 40.0, 2.0);
+
+        const int gid = layer->addGroup (utf8 ("P105 长组"), groupPalette::group2);
+        layer->assignNotesToGroup ({ first, last }, gid);
+
+        const auto grid = roll.getGridBounds();
+
+        //-- (1) 视口外的那个成员也算进框里 ----------------------------------
+        const auto frameOpen = roll.getGroupFrameBoundsForTest (0, gid, 0);
+
+        check (utf8 ("框伸到滚在视口右边之外的那个成员，不是到最后一个看得见的为止"),
+               ! frameOpen.isEmpty() && frameOpen.getRight() > grid.getRight(),
+               "frame " + frameOpen.toString() + " / grid " + grid.toString());
+
+        //-- (2) 滚过去，宽高一点没变 ----------------------------------------
+        roll.setScrollBeats (38.0);
+
+        const auto frameScrolled = roll.getGroupFrameBoundsForTest (0, gid, 0);
+
+        check (utf8 ("滚到第一个成员出界：框的宽高与滚动前相同，只是整体左移"),
+               std::abs (frameScrolled.getWidth()  - frameOpen.getWidth())  < 0.01f
+                 && std::abs (frameScrolled.getHeight() - frameOpen.getHeight()) < 0.01f
+                 && frameScrolled.getX() < grid.getX(),
+               juce::String (frameOpen.getWidth(), 1) + " -> "
+                 + juce::String (frameScrolled.getWidth(), 1)
+                 + utf8 (" 宽，左沿 ") + juce::String (frameScrolled.getX(), 1));
+
+        //-- (3) 框盖住的空白处，指针答的还是这个组 --------------------------
+        // (40.5, the pitch-72 row): inside the band, on NO member — the note on
+        // that row is exactly the one that scrolled away. Cut down to the visible
+        // notes the box no longer covers this row, so "press the group" answered
+        // -1 over the half of the group that was still there.
+        const juce::Point<float> inBand { roll.screenXForBeatForTest (40.5),
+                                          roll.screenYForPitchForTest (72) + 6.0f };
+
+        check (utf8 ("只剩一半在视口里时，按在框的空白处命中的还是这个组"),
+               roll.getGroupFrameAt (inBand) == gid,
+               juce::String (roll.getGroupFrameAt (inBand)));
+
+        //-- (4) 名字停在视口左沿，不跟着滚走 --------------------------------
+        const auto pill = roll.getGroupLabelBoundsForTest (0, gid, 0);
+
+        check (utf8 ("组的左沿滚出视口之后，名字仍留在视口里（它是这一处唯一的把手）"),
+               ! pill.isEmpty() && pill.getX() >= grid.getX() - 0.01f
+                 && pill.getRight() <= grid.getRight() + 0.01f,
+               "pill " + pill.toString());
+
+        //-- (5) 整组滚出视口：框还在，尺寸还是那个 --------------------------
+        roll.setScrollBeats (200.0);
+
+        const auto frameAway = roll.getGroupFrameBoundsForTest (0, gid, 0);
+
+        check (utf8 ("整组滚出视口：框仍然存在、尺寸不变（它是组的属性，不是窗口的）"),
+               ! frameAway.isEmpty()
+                 && std::abs (frameAway.getWidth() - frameOpen.getWidth()) < 0.01f,
+               "frame " + frameAway.toString());
+
+        // ... and the name does NOT stay behind. A pill pinned to the edge for a
+        // group nobody can see is a control with nothing left to point at.
+        check (utf8 ("整组都看不见时，不会在视口边上留一个悬着的名字"),
+               roll.getGroupLabelBoundsForTest (0, gid, 0).isEmpty(),
+               "pill " + roll.getGroupLabelBoundsForTest (0, gid, 0).toString());
     }();
 
     // The summary MUST come after the last check. It used to sit mid-function

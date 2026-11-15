@@ -1822,6 +1822,26 @@ friend、不需要改一行头文件、也不存在"两个对象互相问状态"
 - **层级**：标题 `title()` > 正文 > 大写副标题 `section()`（小字号 + 字距 + 降饱和）。
   已落地的面板：`LayerPanel` 标题与副标题、`BpmField` 标签与数值。
 
+## 编组框的几何（P105：一份几何，四个读者）
+
+`getGroupContentBounds` 是组框的**唯一**几何来源（`groupFrameOf` 是它的薄封装）。
+四个读者：`drawGroupBands` / `drawGroupFrames`、`drawGroupLabels`（pill 落点）、
+`PianoRollSampleDraw` 的替换预览、以及没有像素的 `getGroupFrameAt` / `getGroupReplaceTargetAt`。
+改它等于同时改四件事，所以任何一处「看起来只影响显示」的改动都要问一句另外三个。
+
+- **框是组的属性，不是窗口的属性**。P105 之前它在求并集时跳过与网格不相交的成员，
+  于是框随滚动伸缩、「拖动整个组」在每个滚动位置抓到不同大小的矩形。现在无条件并集，
+  整组在视口外时**框仍然存在且尺寸不变**（只是被绘制裁掉）。
+- **「看不见就不画」属于绘制循环**：`drawGroupBands` / `drawGroupFrames` 里各一次
+  `content.intersects (area)`，只决定画不画，不改变任何数字。
+- **pill 是把手，不是装饰**。组的左沿滚出视口后 pill 夹在网格左沿（右沿那条夹紧规则的镜像），
+  因为双击改名与右侧的自动化 caret 都长在它身上；**整组都看不见时 pill 返回空**
+  （`!content.intersects(area)` 早退），一个指不到任何东西的控件不如没有。
+- **替换预览必须跟着变**：它画的正是 `groupFrameOf`，「预览说会替换哪一块」和
+  「真的替换哪一块」共用一份几何——这也是 P105 让 `-dropnote` 那一帧变化最大的原因。
+- **没有改的一处**：`getGroupBeatSpan`（自动化框的宽度）只看音符不看采样块，所以它比组框窄；
+  组里只有块时它返回空。要统一得单独做，并给它自己的验收。
+
 ## 踩坑档案
 平台陷阱、自检夹具摆位、出图尺寸见同目录 **`PITFALLS.md`**。动以下任一处前先读它：
 VST3 扫描 / 采样解码 / 试听声部 / 标尺 / ghost / `--snapshot` / 折叠行高 / 插件参数自动化 /

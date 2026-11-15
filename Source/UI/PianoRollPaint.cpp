@@ -501,6 +501,7 @@ void PianoRollComponent::drawNotes (juce::Graphics& g)
 void PianoRollComponent::drawGroupBands (juce::Graphics& g)
 {
     const int activeIndex = stack.getActiveLayerIndex();
+    const auto area = getGridArea();
 
     for (int i = 0; i < stack.getNumLayers(); ++i)
     {
@@ -523,7 +524,10 @@ void PianoRollComponent::drawGroupBands (juce::Graphics& g)
                 // nobody draws with.
                 const auto content = groupFrameOf (i, group.getId(), which);
 
-                if (content.isEmpty())
+                // Phase 105: the box is the whole group even when part of it is
+                // scrolled away (see getGroupContentBounds); THIS is where "not
+                // on screen" is decided, and it decides only whether to draw.
+                if (content.isEmpty() || ! content.intersects (area))
                     continue;
 
                 const bool focused = isGroupFocused (i, group.getId(), which);
@@ -543,6 +547,7 @@ void PianoRollComponent::drawGroupBands (juce::Graphics& g)
 void PianoRollComponent::drawGroupFrames (juce::Graphics& g)
 {
     const int activeIndex = stack.getActiveLayerIndex();
+    const auto area = getGridArea();
 
     for (int i = 0; i < stack.getNumLayers(); ++i)
     {
@@ -559,7 +564,7 @@ void PianoRollComponent::drawGroupFrames (juce::Graphics& g)
             {
                 const auto content = groupFrameOf (i, group.getId(), which);
 
-                if (content.isEmpty())
+                if (content.isEmpty() || ! content.intersects (area))
                     continue;
 
                 const bool focused = isGroupFocused (i, group.getId(), which);
