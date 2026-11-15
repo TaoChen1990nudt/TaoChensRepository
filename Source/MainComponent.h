@@ -493,6 +493,18 @@ public:
         lines. */
     juce::Image createSampleRowsSnapshot (int width = ui::px (980), int height = ui::px (420));
 
+    /** Phase 116: the same five overlapping notes in two bands — the top one
+        folded, the bottom one not.
+
+        One folded band would show the answer ("one line") but not the thing it
+        replaced ("five lines, five onsets, brighter where they pile up"), and
+        the whole point of the phase is that difference. The third band stays
+        folded with a gap in it, so "merged" cannot be read as "one line across
+        the whole layer". Own fixture, for the same two reasons as the frame
+        above: the demo has no five stacked notes, and staging them into the
+        live session would be a screenshot editing the project. */
+    juce::Image createOverviewMergeSnapshot (int width = ui::px (980), int height = ui::px (420));
+
     /** Phase 36: the note inspector with all three automation layers live.
 
         The overlay only earns its pixels when the three curves disagree — three

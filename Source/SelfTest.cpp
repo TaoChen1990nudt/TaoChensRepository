@@ -22091,6 +22091,161 @@ juce::String MainComponent::runSelfTest()
                  + utf8 ("，展开后 ") + juce::String (roll.getOverviewRowCount (2)) + utf8 (" 行"));
     }();
 
+    //== Phase 116: 折叠之后，重叠的音符合成一条 ==========================
+    // 用户原话：「折叠起来之后，假如有两个音符相重叠，就只显示一个音符从前一个
+    // 音符的头延续到后一个音符的尾这样，不要显示中间的重叠，再比如如果有 5 个
+    // 音符相重叠，就只显示一个音符从第一个音符的头延续到第五个音符的尾」。
+    //
+    // 折叠把一层压成一行，重叠的音符本来就落在同一个 y 上——可它们画成的是两个
+    // 叠在一起的矩形：中间那段 alpha 更亮、两头各有一个圆角和一个亮头，眼睛读到的
+    // 是「两段」。现在折叠带画的是**合并后的区间**：最早的头到最晚的尾，一段一条
+    // 线、一个起点头。未折叠时一条都不合并——音高就是行，重叠在那儿是上下关系，
+    // 消掉它等于把「哪两个音撞上了」这个唯一的用处抹了。
+    //
+    // 钉七件事：未折叠不合并 / 两个重叠并成一段（头是前一个的头、尾是后一个的尾）
+    // / 有间隙的不许并（中间那段空白是「这里没声音」）/ 五个重叠并成一段 / 首尾
+    // 相接的算并 / 合并段与单音符线是同一套几何（y、厚度、仍在带里）/ 极短音符
+    // 合并之后仍然够宽。
+    [&]
+    {
+        LayerStack stack;
+        RackModel  rack;
+
+        stack.addLayer (utf8 ("两重叠"), palette::layer1);
+        stack.addLayer (utf8 ("五重叠"), palette::layer2);
+        stack.addLayer (utf8 ("有间隙"), palette::layer3);
+        stack.addLayer (utf8 ("相接"),   palette::layer4);
+        stack.setActiveLayerIndex (0);
+
+        auto* l2 = stack.getLayer (0);
+        auto* l5 = stack.getLayer (1);
+        auto* lg = stack.getLayer (2);
+        auto* lt = stack.getLayer (3);
+
+        // 第 0 层：A 0..4 与 B 2..6 重叠两拍；C 10..12 跟它们毫无关系。
+        const int a = l2->addNote ({ 0, 72, 0.0, 4.0, 0.8f });
+        const int b = l2->addNote ({ 0, 72, 2.0, 4.0, 0.8f });
+        l2->addNote ({ 0, 72, 10.0, 2.0, 0.8f });
+
+        // 第 1 层：五个首尾错开的音符，0..3 .. 4..7，全部落在同一段上。
+        const int n1 = l5->addNote ({ 0, 64, 0.0, 3.0, 0.8f });
+        l5->addNote ({ 0, 64, 1.0, 3.0, 0.8f });
+        l5->addNote ({ 0, 64, 2.0, 3.0, 0.8f });
+        l5->addNote ({ 0, 64, 3.0, 3.0, 0.8f });
+        const int n5 = l5->addNote ({ 0, 64, 4.0, 3.0, 0.8f });
+
+        // 第 2 层：0..2 与 4..6 之间空了两拍——这段空白必须留着。再加两个完全
+        // 重合的极短音符（0.01 拍），合并之后仍然要够宽才看得见。
+        lg->addNote ({ 0, 60, 0.0, 2.0, 0.8f });
+        lg->addNote ({ 0, 60, 4.0, 2.0, 0.8f });
+        lg->addNote ({ 0, 60, 20.0, 0.01, 0.8f });
+        lg->addNote ({ 0, 60, 20.0, 0.01, 0.8f });
+
+        // 第 3 层：0..4 结束的地方正是 4..8 开始的地方。那不是「重叠」，但中间
+        // 也不该冒出缝来。
+        lt->addNote ({ 0, 55, 0.0, 4.0, 0.8f });
+        lt->addNote ({ 0, 55, 4.0, 4.0, 0.8f });
+
+        PianoRollComponent roll (stack, rack);
+        roll.setSize (1100, 420);
+        roll.setScrollBeats (0.0);
+        roll.setOverviewMode (true);
+
+        //-- (1) 未折叠：一条都不合并 --------------------------------------
+        // 音高就是行，两个同时响的音符本来就一个上一个下。这一条同时是「别把
+        // 折叠态的实现漏到钢琴窗画法上」的收据。
+        const auto openRuns = roll.getOverviewMergedRuns (0);
+
+        check (utf8 ("未折叠时不合并：重叠在那儿是上下关系，音高就是行"),
+               openRuns.empty()
+                 && ! roll.getOverviewSegmentBounds (0, a).isEmpty()
+                 && ! roll.getOverviewSegmentBounds (0, b).isEmpty(),
+               juce::String ((int) openRuns.size()) + utf8 (" 段"));
+
+        for (int i = 0; i < roll.getOverviewBandCount(); ++i)
+            roll.setOverviewFolded (i, true);
+
+        const auto band0 = roll.getOverviewBandBounds (0);
+        const auto segA  = roll.getOverviewSegmentBounds (0, a);
+        const auto segB  = roll.getOverviewSegmentBounds (0, b);
+        const auto runs0 = roll.getOverviewMergedRuns (0);
+
+        //-- (2) 两个重叠并成一段 ------------------------------------------
+        // 头是 A 的头，尾是 B 的尾：这正是用户那句「从前一个音符的头延续到后一个
+        // 音符的尾」。上一轮的实现会给出两段（各自的头尾），所以这条能判红它。
+        const auto detail0 = runs0.empty()
+                               ? juce::String ((int) runs0.size()) + utf8 (" 段")
+                               : juce::String ((int) runs0.size()) + utf8 (" 段，第一段 ")
+                                   + runs0[0].bounds.toString();
+
+        check (utf8 ("两个重叠并成一段：头是前一个的头，尾是后一个的尾"),
+               runs0.size() == 2
+                 && ! runs0[0].bounds.isEmpty()
+                 && std::abs (runs0[0].bounds.getX() - segA.getX()) < 0.01f
+                 && std::abs (runs0[0].bounds.getRight() - segB.getRight()) < 0.01f,
+               detail0);
+
+        //-- (3) 有间隙的不许并 --------------------------------------------
+        // C 在 10 拍上，离 A+B 那段 0..6 差四拍。中间那段空白是「这里没声音」，
+        // 抹掉它等于把「哪一段是连着的」也一起抹了。
+        check (utf8 ("同层里分开的两段各自成段，中间那段空白留着"),
+               runs0.size() == 2
+                 && runs0[0].bounds.getRight() < runs0[1].bounds.getX() - 1.0f,
+               runs0.size() == 2
+                 ? juce::String (runs0[0].bounds.getRight(), 1) + utf8 (" -> ")
+                     + juce::String (runs0[1].bounds.getX(), 1)
+                 : juce::String ((int) runs0.size()) + utf8 (" 段"));
+
+        //-- (4) 五个重叠并成一段 ------------------------------------------
+        const auto runs5 = roll.getOverviewMergedRuns (1);
+        const auto seg1  = roll.getOverviewSegmentBounds (1, n1);
+        const auto seg5  = roll.getOverviewSegmentBounds (1, n5);
+
+        check (utf8 ("五个重叠并成一段：从第一个的头到第五个的尾，中间那三截不画"),
+               runs5.size() == 1
+                 && std::abs (runs5[0].bounds.getX() - seg1.getX()) < 0.01f
+                 && std::abs (runs5[0].bounds.getRight() - seg5.getRight()) < 0.01f,
+               juce::String ((int) runs5.size()) + utf8 (" 段，")
+                 + (runs5.empty() ? juce::String() : runs5[0].bounds.toString()));
+
+        //-- (5) 首尾相接也算一段 ------------------------------------------
+        // 一次「重叠」的定义麻烦的地方就在这儿：4.0 结束、4.0 开始，区间交集是
+        // 空的，可耳朵听到的是一个音。判据用 <= 而不是 <，缝才不会是一个像素的
+        // 取整事实。
+        const auto runsT = roll.getOverviewMergedRuns (3);
+
+        check (utf8 ("首尾相接的算一段：一像素的缝是取整的事实，不是音乐的事实"),
+               runsT.size() == 1,
+               juce::String ((int) runsT.size()) + utf8 (" 段"));
+
+        //-- (6) 合并段与单音符线是同一套几何 ------------------------------
+        // 「换画法」不能变成「换几何」：段的 y、厚度必须跟同一层里单条音符线逐点
+        // 相同，也必须装在自己的带里。P114 把线厚从两个地方各算一次吃过一次亏，
+        // 这一条是「一份公式两个调用者」的收据。
+        check (utf8 ("合并段的 y 与厚度跟单音符线逐点相同，而且仍在自己的带里"),
+               ! runs0[0].bounds.isEmpty()
+                 && std::abs (runs0[0].bounds.getY() - segA.getY()) < 0.01f
+                 && std::abs (runs0[0].bounds.getHeight() - segA.getHeight()) < 0.01f
+                 && runs0[0].bounds.getY() >= band0.getY() - 0.01f
+                 && runs0[0].bounds.getBottom() <= band0.getBottom() + 0.01f
+                 && std::abs (runs0[0].fade - 1.0f) < 0.01f,
+               (runs0.empty() ? juce::String (utf8 ("没有段"))
+                              : runs0[0].bounds.toString())
+                 + utf8 (" / 线 ") + segA.toString());
+
+        //-- (7) 极短音符合并之后仍然够宽 ----------------------------------
+        // 0.01 拍的音符按拍算不到一个像素。合并段走的是与单音符线同一条最小宽度，
+        // 这一条防止「合并」顺手把那一夹丢了——那会让两个重合的短音符直接消失。
+        const auto runsG = roll.getOverviewMergedRuns (2);
+
+        check (utf8 ("两个完全重合的极短音符并成一段，且仍然有最小宽度"),
+               runsG.size() == 3
+                 && runsG[2].bounds.getWidth() >= ui::pf (3.0f) - 0.01f,
+               juce::String ((int) runsG.size()) + utf8 (" 段，最后一段宽 ")
+                 + (runsG.size() == 3 ? juce::String (runsG[2].bounds.getWidth(), 1)
+                                      : juce::String()));
+    }();
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

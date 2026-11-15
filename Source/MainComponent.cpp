@@ -2434,6 +2434,62 @@ juce::Image MainComponent::createSampleRowsSnapshot (int width, int height)
 }
 
 //==============================================================================
+juce::Image MainComponent::createOverviewMergeSnapshot (int width, int height)
+{
+    // Phase 116: a frame about ONE rule — folded, notes that overlap in time are
+    // one line — and the honest way to show a rule is next to the picture it
+    // replaced. So the same five notes appear twice: band 0 as it was (five rows,
+    // five onsets), band 1 folded (one line from the first onset to the last
+    // end). Bands 2 and 3 repeat that pair with GAPS in them, so "merged" cannot
+    // be mistaken for "the layer is one line no matter what".
+    //
+    // Two unfolded bands, not one: the height a folded band gives up is shared
+    // among the OPEN ones (P113), so a single open band would swallow the window
+    // and the two 9 px stripes would sit at the very bottom, reading as a border
+    // rather than as two layers folded down to a line.
+    LayerStack showStack;
+    RackModel  showRack;
+
+    showStack.addLayer (utf8 ("没折"),   palette::layer2);
+    showStack.addLayer (utf8 ("折叠"),   palette::layer1);
+    showStack.addLayer (utf8 ("没折·隙"), palette::layer3);
+    showStack.addLayer (utf8 ("折·隙"),   palette::layer4);
+    showStack.setActiveLayerIndex (1);
+
+    // Five notes, half a beat apart, three beats long: every one of them starts
+    // before the previous one ends, so the pile is 0..5 and nothing else. This
+    // is the case the user described as "5 个音符相重叠".
+    const int pitches[5] = { 64, 66, 68, 70, 72 };
+
+    for (int i = 0; i < 5; ++i)
+    {
+        const double start = (double) i * 0.5;
+
+        showStack.getLayer (0)->addNote ({ 0, pitches[i], start, 3.0, 0.8f });
+        showStack.getLayer (1)->addNote ({ 0, pitches[i], start, 3.0, 0.8f });
+    }
+
+    // Three stretches with real silence between them: 0..2, 4..6, 10..12. Merged
+    // or not, these are three lines, not one.
+    for (int layerIndex : { 2, 3 })
+    {
+        showStack.getLayer (layerIndex)->addNote ({ 0, 60,  0.0, 2.0, 0.8f });
+        showStack.getLayer (layerIndex)->addNote ({ 0, 60,  4.0, 2.0, 0.8f });
+        showStack.getLayer (layerIndex)->addNote ({ 0, 60, 10.0, 2.0, 0.8f });
+    }
+
+    PianoRollComponent showRoll (showStack, showRack);
+    showRoll.setSize (width, height);
+    showRoll.setBeatWidth (ui::pf (44.0f));
+    showRoll.setScrollBeats (0.0);
+    showRoll.setOverviewMode (true);
+    showRoll.setOverviewFolded (1, true);
+    showRoll.setOverviewFolded (3, true);
+
+    return showRoll.createComponentSnapshot (showRoll.getLocalBounds(), true);
+}
+
+//==============================================================================
 juce::Image MainComponent::createPerfSnapshot()
 {
     // A headless run has no sound card, so the meter is fed by hand — through

@@ -728,14 +728,25 @@ void PianoRollComponent::drawOverview (juce::Graphics& g)
         // Phase 112: `rows` / `rowTable` are built above, before the blocks, and
         // shared — a note and a block must agree about which row a pitch is on,
         // and two tables meant one sort of the layer per band instead of two.
-        for (const auto& note : layer->getNotes())
+        //
+        // Phase 116: a FOLDED band does not walk its notes any more. With one
+        // row per layer, every overlapping note lands on the same y, so five
+        // stacked notes were five rectangles at one y and their alpha piled up
+        // in the middle: the overlap became the brightest thing in the picture,
+        // which is exactly backwards — folding is the view that is supposed to
+        // make the overlap DISAPPEAR. Folded, the band draws merged runs instead:
+        // earliest onset to latest end, one line, one brightness, one cap.
+        //
+        // The two branches differ only in WHERE the segments and their fade come
+        // from, so the ink is one lambda. A merged run and a single note have to
+        // look like the same object, or folding would change what a note looks
+        // like as well as what it says.
+        auto drawSegment = [&] (const juce::Rectangle<float>& segment, float fade)
         {
-            const auto segment = overviewSegmentOf (i, note, rowTable);
-
             if (segment.isEmpty() || ! segment.intersects (area))
-                continue;
+                return;
 
-            const float alpha = strength * takeFadeOf (*layer, note.groupId);
+            const float alpha = strength * fade;
 
             g.setColour (tint.withAlpha (0.80f * alpha));
             g.fillRoundedRectangle (segment, 1.5f);
@@ -743,10 +754,26 @@ void PianoRollComponent::drawOverview (juce::Graphics& g)
             // The onset: a brighter cap on the left edge. "起点在哪" is the
             // question the user asked this view to answer, so the answer is a
             // pixel the eye lands on rather than an edge it has to infer.
+            //
+            // Phase 116: one cap per RUN. The run's left edge is the first
+            // note's onset; the onsets in between are precisely the overlaps
+            // folding is meant to hide, and capping them would draw them back.
             g.setColour (tint.brighter (0.75f).withAlpha (alpha));
             g.fillRect (juce::Rectangle<float> (segment.getX(), segment.getY(),
                                                 juce::jmin (2.0f, segment.getWidth()),
                                                 segment.getHeight()));
+        };
+
+        if (folded)
+        {
+            for (const auto& run : getOverviewMergedRuns (i))
+                drawSegment (run.bounds, run.fade);
+        }
+        else
+        {
+            for (const auto& note : layer->getNotes())
+                drawSegment (overviewSegmentOf (i, note, rowTable),
+                             takeFadeOf (*layer, note.groupId));
         }
 
         //-- The seam between two bands --------------------------------------

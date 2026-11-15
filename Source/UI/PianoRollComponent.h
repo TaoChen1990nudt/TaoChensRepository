@@ -1558,6 +1558,33 @@ public:
         that does not exist. */
     juce::Rectangle<float> getOverviewSegmentBounds (int layerIndex, int noteId) const;
 
+    /** Phase 116: one merged run of a FOLDED band — a stretch of time covered by
+        at least one note, drawn as a single line.
+
+        `bounds` is what to draw; `fade` is the dimmest take factor among the
+        notes that went into the run (see `roll::takeFadeOf`), so a run that
+        swallowed a silent take does not look like the take that sounds.
+
+        Folded, a note is no longer "one line at its own start" — overlapping
+        notes are ONE line running from the first onset to the last end, and the
+        overlaps in between are not visible. Five notes stacked on each other
+        give one line, not five lines at the same y with brighter alpha where
+        they pile up. */
+    struct OverviewRun
+    {
+        juce::Rectangle<float> bounds;
+        float fade = 1.0f;
+    };
+
+    /** The merged runs of band `layerIndex`, in time order. Empty unless the
+        band is FOLDED — an unfolded band gives every note its own row, where
+        "overlap" is vertical and must stay visible.
+
+        Notes that merely TOUCH (one ends exactly where the next starts) are one
+        run too: a one-pixel seam between two touching notes is a fact about
+        pixel rounding, not about the music. */
+    std::vector<OverviewRun> getOverviewMergedRuns (int layerIndex) const;
+
     /** The block a sample becomes in the overview: from its start to its end,
         covering the pitch lanes it occupies in the sheet (`pitch` ..
         `pitch + laneSpan - 1`). Empty in the sheet view, and for a sample that
@@ -2160,6 +2187,17 @@ private:
         different ones do not overlap. */
     juce::Rectangle<float> overviewBlockOf (int layerIndex, const SampleEvent&,
                                             const std::vector<int>* rows) const;
+
+    /** The ONE place a folded band's line thickness is decided: the band minus a
+        pixel of air at each edge, clamped to 5 design px.
+
+        Phase 114 wrote this inside `overviewSegmentOf`; Phase 116 needs the same
+        line for a merged run, which has no NoteEvent to pass in. Two callers,
+        one formula — a run whose line was a pixel taller than a single note's
+        would make folding change the stripe's ink depending on how many notes
+        happen to overlap. */
+    juce::Rectangle<float> overviewFoldedLine (const juce::Rectangle<float>& band,
+                                               float x0, float x1) const;
 
     /** Phase 110: the distinct pitches a layer's notes use, highest first — plus
         (Phase 112) every lane a sample block covers, because a block that spans

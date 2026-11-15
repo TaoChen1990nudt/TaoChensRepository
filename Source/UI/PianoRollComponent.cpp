@@ -720,13 +720,21 @@ juce::Rectangle<float> PianoRollComponent::overviewSegmentOf (int layerIndex,
     //
     // `rows == nullptr` is the caller's way of saying "this band is one row",
     // and Phase 111/112 only pass that when the band is folded.
-    const bool  collapsed = (rows == nullptr);
-    const float height = collapsed
-                           ? juce::jlimit (1.5f, ui::pf (5.0f),
-                                           band.getHeight() - ui::pf (2.0f))
-                           : juce::jlimit (1.5f, ui::pf (5.0f),
-                                           juce::jmin (band.getHeight() * 0.30f,
-                                                       rowHeight * 0.55f));
+    //
+    // Phase 116: folded, the answer comes from `overviewFoldedLine` instead of
+    // from the formula below. A merged run (several notes as one line) has no
+    // NoteEvent to hand in, so the thickness had to move somewhere both callers
+    // can reach; leaving a copy here as well would let the two drift, and the
+    // symptom would be a stripe whose line grew a pixel once notes started to
+    // overlap.
+    const bool collapsed = (rows == nullptr);
+
+    if (collapsed)
+        return overviewFoldedLine (band, x0, x1);
+
+    const float height = juce::jlimit (1.5f, ui::pf (5.0f),
+                                       juce::jmin (band.getHeight() * 0.30f,
+                                                   rowHeight * 0.55f));
 
     // A note shorter than the minimum is still a mark at its start — that is
     // the whole of "有音符的起始位置就显示一条线段". The minimum widens to the
@@ -734,6 +742,114 @@ juce::Rectangle<float> PianoRollComponent::overviewSegmentOf (int layerIndex,
     const float width = juce::jmax (ui::pf (3.0f), x1 - x0);
 
     return { x0, centreY - height * 0.5f, width, height };
+}
+
+
+juce::Rectangle<float> PianoRollComponent::overviewFoldedLine (const juce::Rectangle<float>& band,
+                                                               float x0, float x1) const
+{
+    // The band was cut down to one line (Phase 114), so "a third of the band"
+    // would be a thread inside a thread. The line takes the band minus a pixel
+    // of air at each edge; the 5 px clamp still applies so that a band which
+    // somehow is taller than a line does not turn into a bar.
+    const float height = juce::jlimit (1.5f, ui::pf (5.0f),
+                                       band.getHeight() - ui::pf (2.0f));
+
+    // A note shorter than the minimum is still a mark at its start. The minimum
+    // widens to the right, never to the left, so the left edge stays exactly
+    // the onset — for a merged run that edge is the FIRST note's onset.
+    const float width = juce::jmax (ui::pf (3.0f), x1 - x0);
+
+    return { x0, band.getCentreY() - height * 0.5f, width, height };
+}
+
+
+std::vector<PianoRollComponent::OverviewRun>
+PianoRollComponent::getOverviewMergedRuns (int layerIndex) const
+{
+    std::vector<OverviewRun> runs;
+
+    // Only a FOLDED band has one row per layer. Unfolded, a note's pitch IS its
+    // row, so two notes at the same time are already two lines one above the
+    // other — merging them would answer "when" and destroy "which pitch".
+    if (! overviewMode || ! isOverviewFolded (layerIndex))
+        return runs;
+
+    auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr)
+        return runs;
+
+    const auto band = getOverviewBandBounds (layerIndex);
+
+    if (band.isEmpty())
+        return runs;
+
+    struct Span
+    {
+        double from = 0.0, to = 0.0;
+        float  fade = 1.0f;
+    };
+
+    std::vector<Span> spans;
+    spans.reserve (layer->getNotes().size());
+
+    for (const auto& note : layer->getNotes())
+    {
+        // The run's brightness is the Dimmest member, not the newest one: a line
+        // that swallowed a silent take must not look like the take you hear, and
+        // "average" would invent a third brightness nobody can point at a note
+        // for. `takeFadeOf` is the same rule the single-note path uses.
+        spans.push_back ({ note.startBeat,
+                           note.startBeat + note.lengthBeats,
+                           takeFadeOf (*layer, note.groupId) });
+    }
+
+    if (spans.empty())
+        return runs;
+
+    std::sort (spans.begin(), spans.end(),
+               [] (const Span& a, const Span& b) { return a.from < b.from; });
+
+    // Touching counts as overlapping: [0,4) and [4,8) is the same continuous
+    // sound, and a one-pixel seam between them would be a fact about rounding.
+    const double eps = 1e-9;
+
+    auto emit = [&] (double from, double to, float fade)
+    {
+        auto line = overviewFoldedLine (band,
+                                        screenXForBeat (from),
+                                        screenXForBeat (to));
+
+        if (! line.isEmpty())
+            runs.push_back ({ line, fade });
+    };
+
+    double from = spans.front().from;
+    double to   = spans.front().to;
+    float  fade = spans.front().fade;
+
+    for (size_t i = 1; i < spans.size(); ++i)
+    {
+        const auto& s = spans[i];
+
+        if (s.from <= to + eps)
+        {
+            to   = juce::jmax (to, s.to);
+            fade = juce::jmin (fade, s.fade);
+            continue;
+        }
+
+        emit (from, to, fade);
+
+        from = s.from;
+        to   = s.to;
+        fade = s.fade;
+    }
+
+    emit (from, to, fade);
+
+    return runs;
 }
 
 

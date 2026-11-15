@@ -282,6 +282,12 @@ namespace
         // because the demo has no two blocks stacked on each other.
         writePng ("-overviewsamples", component.createSampleRowsSnapshot());
 
+        // Phase 116: folded, overlapping notes are ONE line — from the first
+        // onset to the last end, with the overlaps in between not drawn. Same
+        // five notes in the band above (folded) and the one below (not), plus a
+        // folded band with a gap so "merged" is not read as "always one line".
+        writePng ("-overviewmerge", component.createOverviewMergeSnapshot());
+
         // Phase 21: the group's inline curve box. Its own frame, because only
         // one floating editor can be open at a time and the main image above
         // already documents the note box.
