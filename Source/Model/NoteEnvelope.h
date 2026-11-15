@@ -77,14 +77,34 @@ public:
 
     static NoteEnvelope makeADSR();
     static NoteEnvelope makeFadeOut();
+
+    /** The straight line, and the one number behind it.
+
+        Phase 108: this is what a brand new note carries. Before it, the default
+        constructor built an ADSR — which meant every note was shaped twice,
+        once by its own curve and once by the synth's amp envelope, and a user
+        who wanted "just play it" had to go and flatten it by hand. A curve is
+        an EDIT, and the state for "no edit yet" is a line.
+
+        Why 0.8 and not 1.0: the line is the note's unity-ish level, and 0.8
+        leaves the top of the box drawable. A default sitting on the ceiling
+        would make every curve a downward gesture.
+
+        One constant, three readers — the default constructor, `NoteEvent`'s
+        curve bank, and the 直线 preset. Two of those drifting apart is exactly
+        the "0.7 here, 0.8 there" bug this phase removes. */
+    static constexpr float defaultFlatValue = 0.8f;
+
     static NoteEnvelope makeFlat();
 
     /** Phase 49: a flat, DISABLED curve — the default for a fresh sample clip.
 
-        A note's default is an ADSR because a synth note without a shape sounds
-        wrong; a clip's default must be "the file, untouched", which here is a
-        flat 1.0 line that is switched off. Same class, different factory, so
-        the editor and the renderer cannot invent two different idle states.
+        A clip's default must be "the file, untouched", which here is a flat
+        1.0 line that is switched off. Different factory from `makeFlat`, and
+        a different number on purpose: a note's curve multiplies a gain the
+        engine already shaped, while a clip's curve IS the level. Same class,
+        two factories, so the editor and the renderer cannot invent two
+        different idle states.
 
         Phase 50: the flat value is a parameter because a clip now has two
         curves and they do not share a neutral point — volume idles at 1.0

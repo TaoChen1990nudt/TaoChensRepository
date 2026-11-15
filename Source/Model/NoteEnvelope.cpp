@@ -16,12 +16,12 @@ namespace
 //==============================================================================
 NoteEnvelope::NoteEnvelope()
 {
-    // Default automation for a brand new note: a plain ADSR.
-    points = { { 0.00f, 0.00f },
-               { 0.08f, 1.00f },
-               { 0.34f, 0.62f },
-               { 0.82f, 0.58f },
-               { 1.00f, 0.00f } };
+    // Phase 108: a brand new note carries a straight line at 0.8, not an ADSR.
+    // An ADSR here was a second envelope on top of the synth's own — the note
+    // got shaped twice, and "play it as written" was the one thing the editor
+    // could not express without the user redrawing it. The shape is still one
+    // click away (the ADSR preset); this is the state BEFORE any edit.
+    points = { { 0.0f, defaultFlatValue }, { 1.0f, defaultFlatValue } };
 }
 
 NoteEnvelope NoteEnvelope::makeADSR()
@@ -45,7 +45,7 @@ NoteEnvelope NoteEnvelope::makeFadeOut()
 NoteEnvelope NoteEnvelope::makeFlat()
 {
     NoteEnvelope env (EmptyTag{});
-    env.points = { { 0.0f, 0.7f }, { 1.0f, 0.7f } };
+    env.points = { { 0.0f, defaultFlatValue }, { 1.0f, defaultFlatValue } };
     return env;
 }
 
@@ -60,7 +60,9 @@ NoteEnvelope NoteEnvelope::makeIdle (float flatValue)
 
 void NoteEnvelope::resetToDefault()
 {
-    *this = makeADSR();
+    // "Default" is the straight line, not the ADSR — the preset row owns the
+    // shapes, and reset means "back to untouched".
+    *this = makeFlat();
 }
 
 void NoteEnvelope::loadPoints (std::vector<EnvelopePoint> restoredPoints)

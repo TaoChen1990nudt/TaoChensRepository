@@ -26,11 +26,11 @@ build Release → `--snapshot selftest.png`。
 1. 退出码 0；
 2. `[FAIL]` 行数为 0；
 3. 日志里有 `ALL CHECKS PASSED`；
-4. PASS 行数 ≥ `env.MIN_CHECKS`（当前 **810**）。**加断言的那一轮顺手把它调大**——
+4. PASS 行数 ≥ `env.MIN_CHECKS`（当前 **1067**）。**加断言的那一轮顺手把它调大**——
    它必须是一个有人选的数，不能是"这次跑出来多少"。这是"断言只增不减"唯一的执法点。
 
 **故意不做三件事**：
-- **不跑视觉回归**。8 张本来就会抖（电平表 / 播放头 / 恢复时间戳），其余依赖 runner 的
+- **不跑视觉回归**。**16 张**本来就会抖（电平表 / 播放头 / 负载表 / 削波灯），`-recovery` 那张更绝——它印着恢复副本的时间戳，跨轮**永远**不同；其余依赖 runner 的
   字体与 DPI。这里做逐字节比较，红了也不是缺陷；会喊狼的闸门最后一定被人关掉。
   30 张图照样当 artifact 传上去，给人看。
 - **不扫机器上的插件**。`--snapshot` 已经 `setScanExtraPathsOnly(true)`，只看构建树里那两个
@@ -590,6 +590,21 @@ build Release → `--snapshot selftest.png`。
 - **零延迟那条路必须逐位不变**：没有 LIMIT 的工程里 `builtInLatency` 全 0 ⟹ 每张表都是 0 ⟹
   渲染逐位等于 P102 之前（P83 的退化条款继续成立）。
 
+## 音符曲线的默认值（P108：一条 80% 的平线）
+- **曲线是改动，「还没改」是一条线**。`NoteEnvelope::defaultFlatValue = 0.8f` 是唯一那个数，
+  三个读者共用：`NoteEnvelope()`、`NoteEvent::curves` 的初始值、以及「直线」预设
+  （`makeFlat()`）。任何一处自己写 0.7 / 1.0 都是同一个 bug 的第 N 次发作——它已经发作过一次
+  （默认 0.8 与预设 0.7 并存两个阶段，没人发现）。
+- **Why 0.8**：它是音符的"接近原样"，上面留一截给"往上画"。满刻度的默认会让每一条曲线都只能是
+  向下的手势。ADSR 曾经是默认，等于每个音符被包络两次（自己的 + 合成器放大器），而"照原样弹"
+  反而要用户先拉平。
+- **形状是预设，不是默认**：ADSR / 渐弱 / 直线 三个按钮照旧，`resetToDefault()` 回的是平线。
+- **采样块的中性点不是这个数**：采样块的曲线**就是**它的电平（没有第二层包络），所以音量上的
+  「直线」= 1.0 原样、声相 = 0.5 中置（`SampleEnvelopePanel::applyPreset` 显式要 `makeIdle`）。
+  两个中性点不同是设计，**不要为了"统一"把它们合成一个常量**。
+- **存盘不需要动**：文件里写的是那个音符自己的点（`loadPoints` 有首尾修复），默认值只影响
+  "造一个新音符"。旧工程读回来还是当年的形状。
+
 ## 曲线库（P82：一个形状 + 一个去处）
 - **`Model/CurveBank<CurveType>` 是唯一的曲线容器**：音符 / 采样 / 编组三个对象各持一份，
   `CurveSlot{id, name, target, pluginParam, curve}`，`target = -1` 即**空**。以前"哪条曲线"和
@@ -600,7 +615,8 @@ build Release → `--snapshot selftest.png`。
   ②**列表永不为空**——`remove()` 拒绝最后一条，因为引擎里每个读者都直接解引用"当前那条"。
   ③**用 id 不用下标**——框开着的时候可能增删，下标会把编辑器悄悄指到别人的形状上。
 - **const 读永不创建**：`volumeCurve()` / `automationFor()` / `activeAutomation()` 找不到就返回
-  `idleCurve` / `idleLane`。`NoteEnvelope` 的默认构造是**启用的 ADSR**，替身必须用
+  `idleCurve` / `idleLane`。`NoteEnvelope` 的默认构造是**启用的平线**（P108 起是 0.8，
+  在那之前是 ADSR——**两种情况下它都是启用的**，所以替身必须用
   `NoteEnvelope::makeIdle()`（扁平 + 禁用）；`AutomationLane` 默认 `enabled = false`，直接默认构造即可。
   任何 `ensure…` 只能在写路径上调，painter 里调一次就等于"看一眼就改模型"。
 - **新建曲线不路由、且是扁平的**：`add()` 之后 `target = -1`、形状是 `makeIdle()`。点「新建」是在要

@@ -47,9 +47,14 @@ struct NoteEvent
         else, and any of them can be parked on 空 without losing its shape.
 
         Stored BY VALUE, still. Move the note -> the curves move with it. Copy
-        the note -> the curves are duplicated. No map<noteId, curve> to sync. */
+        the note -> the curves are duplicated. No map<noteId, curve> to sync.
+
+        Phase 108: the curve a new note is born with is `makeFlat()` — a
+        straight line at `NoteEnvelope::defaultFlatValue`. It used to be
+        `makeADSR()`, which is a shape the user has to un-draw; a curve is an
+        edit, and "no edit yet" is a line. */
     CurveBank<NoteEnvelope> curves = CurveBank<NoteEnvelope>::withOne (
-        NoteEnvelope::makeADSR(), utf8 ("音量"), (int) NoteModTarget::level);
+        NoteEnvelope::makeFlat(), utf8 ("音量"), (int) NoteModTarget::level);
 
     /** 3 in the bank's numbering = a parameter of the HOSTED instrument. 0..2
         are NoteModTarget's own values, so `(NoteModTarget) target` stays valid
@@ -366,12 +371,13 @@ private:
 
     /** Where a const reader lands when nothing drives the target it asked for.
 
-        `makeIdle`, NOT a default-constructed envelope: NoteEnvelope's default
-        is an ENABLED ADSR (a new note should sound like a synth note), and
-        handing that to a reader that only asked "is anything automating pan?"
-        would answer yes — the block would grow a volume shape nobody drew. The
-        idle curve is flat AND disabled, which is the only honest answer to
-        "nobody is driving this". */
+        `makeIdle`, NOT a default-constructed envelope: since Phase 108 a
+        default-constructed one is an ENABLED flat line at 0.8 (a new note
+        should sound like an unedited note), and handing that to a reader that
+        only asked "is anything automating pan?" would answer yes — the block
+        would grow a level of 0.8 nobody drew. The idle curve is flat at unity
+        AND disabled, which is the only honest answer to "nobody is driving
+        this". */
     NoteEnvelope idleCurve = NoteEnvelope::makeIdle();
 
 public:

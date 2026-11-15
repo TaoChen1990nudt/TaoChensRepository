@@ -3580,6 +3580,13 @@ juce::String MainComponent::runSelfTest()
                      + " / at 29 " + juce::String (longLane.valueAtBeat (29.0), 3));
 
             //-- a note's curve onto a group: one representation, two boxes
+            // Phase 108: the shape is given explicitly. A new note's curve is a
+            // flat 0.8 line now, and a flat line pasted onto a lane looks the
+            // same as a lane nobody pasted onto — this check is about the
+            // crossing, so it has to carry a shape that could not be mistaken
+            // for the target's own default.
+            layer->findNote (n6)->envelope() = NoteEnvelope::makeADSR();
+
             roll.openNoteAutomation (0, n6);
             const bool noteCopied = roll.copyAutomationCurve();
 
@@ -13203,6 +13210,17 @@ juce::String MainComponent::runSelfTest()
                juce::String (model->volumeCurve().valueAt (0.0f), 2) + " -> "
                  + juce::String (model->volumeCurve().valueAt (1.0f), 2));
 
+        //-- 音量上的「直线」是 unity，不是音符那条 0.8 -------------------
+        // Phase 108 之前这里是 makeFlat()（当年 0.7），而上面那段注释一直写着
+        // "unity for level"——注释和代码对不上两个阶段。一个采样的曲线就是它
+        // 的电平，所以「直线」= 文件原样 = 1.0；音符的 0.8 是另一件事。
+        panel.applyPreset (2);
+
+        check (utf8 ("音量曲线上的「直线」落在 1.0 原样，不是音符的 0.8"),
+               juce::approximatelyEqual (model->volumeCurve().valueAt (0.5f), 1.0f)
+                 && model->volumeCurve().isEnabled(),
+               juce::String (model->volumeCurve().valueAt (0.5f), 3));
+
         //-- 换活动层：关 -----------------------------------------------
         t78b.addLayer (utf8 ("别的层"), palette::layer2);   // 新层即活动层
 
@@ -18383,22 +18401,24 @@ juce::String MainComponent::runSelfTest()
                      && ! comping::blockJoins (0.0, 2.0, { 2.0, 4.0 }),
                    juce::String ((int) comping::blockJoins (0.0, 2.0, { 2.0, 4.0 })));
 
-            // 淡化是在原曲线上乘，不是另画一条。用平线测（makeFlat 是 0.7，
-            // 不是 1.0）：尾巴归零、平线中间一点不碰；0.99 处正好一半，说明
-            // 斜坡只有 4 ms 那么长 —— 少了肩点的话它会从 0 一路斜到 1.0，
-            // 那条断言立刻红。
+            // 淡化是在原曲线上乘，不是另画一条。用平线测（平线的高度是
+            // `defaultFlatValue`，不是 1.0）：尾巴归零、平线中间一点不碰；
+            // 0.99 处正好一半，说明斜坡只有 4 ms 那么长 —— 少了肩点的话它会
+            // 从 0 一路斜到 1.0，那条断言立刻红。
+            constexpr float flat = NoteEnvelope::defaultFlatValue;
+
             NoteEnvelope fadeCurve = NoteEnvelope::makeFlat();
 
             comping::addEdgeFade (fadeCurve, false, 0.02f);
 
             check (utf8 ("尾淡化：端点归零，块中间的曲线一点不动"),
                    fadeCurve.valueAt (1.0f) < 1.0e-4f
-                     && std::abs (fadeCurve.valueAt (0.5f) - 0.7f) < 1.0e-4f,
+                     && std::abs (fadeCurve.valueAt (0.5f) - flat) < 1.0e-4f,
                    juce::String (fadeCurve.valueAt (1.0f), 5)
                      + " / " + juce::String (fadeCurve.valueAt (0.5f), 5));
 
             check (utf8 ("淡化的斜坡只有 4 ms 那么长，不是整块"),
-                   std::abs (fadeCurve.valueAt (0.99f) - 0.35f) < 0.035f,
+                   std::abs (fadeCurve.valueAt (0.99f) - flat * 0.5f) < 0.035f,
                    juce::String (fadeCurve.valueAt (0.99f), 4));
         }
 
@@ -20898,6 +20918,82 @@ juce::String MainComponent::runSelfTest()
                roll.getGroupLabelBoundsForTest (0, gid, 0).isEmpty(),
                "pill " + roll.getGroupLabelBoundsForTest (0, gid, 0).toString());
     }();
+
+    //== Phase 108: 音符的默认曲线是一条 80% 的平线 ==========================
+    // 用户原话：「音符的自动化曲线默认是80%的直线」。原来默认是一个 ADSR，
+    // 于是每个音符被包络了两次——它自己的那条，加上合成器自己的放大器包络
+    // ——而「照原样弹」这件事在编辑器里反而要用户先手动拉平。
+    // 这一块的判据是**出厂状态**，不是形状本身：形状有 ADSR / 渐弱 / 直线
+    // 三个预设，默认值只负责回答「还没人改过的时候是什么样」。
+    {
+        const NoteEnvelope fresh;                    // 默认构造函数 = 出厂状态
+
+        //-- (1) 两条腿，一样高 -----------------------------------------
+        const auto& pts = fresh.getPoints();
+
+        check (utf8 ("新音符的曲线是一条平线：两个点，首尾都在 80%"),
+               pts.size() == 2
+                 && std::abs (pts[0].time) < 1.0e-6f && std::abs (pts[1].time - 1.0f) < 1.0e-6f
+                 && std::abs (pts[0].value - NoteEnvelope::defaultFlatValue) < 1.0e-6f
+                 && std::abs (fresh.valueAt (0.5f) - NoteEnvelope::defaultFlatValue) < 1.0e-6f,
+               juce::String ((int) pts.size()) + utf8 (" 点 / 中点 ")
+                 + juce::String (fresh.valueAt (0.5f), 3));
+
+        //-- (2) 真实路径也走这条线 -------------------------------------
+        // 新音符的曲线是 `NoteEvent` 的曲线库给的，不是 NoteEnvelope 的构造
+        // 函数给的。两处各自写一个 makeADSR 正是这一轮要拆掉的重复。
+        check (utf8 ("默认构造的 NoteEvent 拿到的是同一条线（曲线库默认值也对上了）"),
+               NoteEvent{}.envelope().hasSameShapeAs (fresh),
+               juce::String (NoteEvent{}.envelope().valueAt (0.5f), 3));
+
+        //-- (3) 0.8 是刻意的：上面留一截给「往上画」 -------------------
+        check (utf8 ("这条线是 0.8：比满刻度低，但不是一个藏起来的衰减"),
+               NoteEnvelope::defaultFlatValue < 1.0f
+                 && NoteEnvelope::defaultFlatValue > 0.75f
+                 && fresh.isEnabled(),
+               juce::String (NoteEnvelope::defaultFlatValue, 3)
+                 + (fresh.isEnabled() ? utf8 (" / 启用") : utf8 (" / 停用")));
+
+        //-- (4) 一个数只有一处 -----------------------------------------
+        // 「直线」预设曾经写死 0.7，而默认值又一个数——改了默认就会变成
+        // 「新音符 0.8，点一下『直线』跳到 0.7」。这条断言钉住它们相等。
+        const auto straight = NoteEnvelope::makeFlat();
+
+        check (utf8 ("「直线」预设与默认是同一条线：一个数，不是 0.7 一个 0.8 一个"),
+               straight.hasSameShapeAs (fresh)
+                 && std::abs (straight.valueAt (0.5f) - NoteEnvelope::defaultFlatValue) < 1.0e-6f,
+               juce::String (straight.valueAt (0.5f), 3));
+
+        //-- (5) 形状还在：ADSR 没有被默认值吃掉 -------------------------
+        const auto adsr = NoteEnvelope::makeADSR();
+
+        check (utf8 ("ADSR 仍是那个形状（从 0 起、峰值 1.0、收尾回 0），且不等于默认"),
+               adsr.valueAt (0.0f) < 0.01f
+                 && adsr.valueAt (0.08f) > 0.98f
+                 && adsr.valueAt (1.0f) < 0.01f
+                 && ! adsr.hasSameShapeAs (fresh),
+               juce::String (adsr.valueAt (0.08f), 3));
+
+        //-- (6) 复位回的是平线 -----------------------------------------
+        NoteEnvelope reset = NoteEnvelope::makeADSR();
+        reset.resetToDefault();
+
+        check (utf8 ("resetToDefault 回到那条平线，不是 ADSR"),
+               reset.hasSameShapeAs (fresh),
+               juce::String (reset.valueAt (0.5f), 3));
+
+        //-- (7) 采样块的中性点不是这个数 -------------------------------
+        // 一个采样块的曲线是「文件本身」的电平，所以它的无人状态是 1.0 且
+        // 停用；音符的曲线乘在一个已经被引擎塑过形的电平上，所以是 0.8。
+        // 两个 0.8/1.0 不是同一个概念，别在下一轮把它们合成一个常量。
+        const auto idle = NoteEnvelope::makeIdle();
+
+        check (utf8 ("采样块的「没人动过」仍是 1.0 且停用——音符的 0.8 不是它的中性点"),
+               std::abs (idle.valueAt (0.5f) - 1.0f) < 1.0e-6f
+                 && ! idle.isEnabled()
+                 && ! idle.hasSameShapeAs (fresh),
+               juce::String (idle.valueAt (0.5f), 3));
+    }
 
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after

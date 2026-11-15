@@ -156,9 +156,16 @@ void SampleEnvelopePanel::applyPreset (int index)
             // "Flat" has two meanings and the target decides which one: unity
             // for level, centre for pan. Flattening a pan curve to 1.0 would
             // put the clip hard right under a button labelled "直线".
+            //
+            // Phase 108: the level case asks for unity explicitly instead of
+            // borrowing `makeFlat()`. That factory is the NOTE's default line
+            // (0.8, because a note's curve multiplies a level the engine
+            // already shaped); a clip's curve IS its level, so "直线" on the
+            // file means the file, untouched. The comment above had promised
+            // unity for two phases while the code handed over 0.7.
             curve = sample->curveTarget() == (int) SampleAutomationTarget::pan
                       ? NoteEnvelope::makeIdle (0.5f)
-                      : NoteEnvelope::makeFlat();
+                      : NoteEnvelope::makeIdle (1.0f);
             break;
 
         default:
