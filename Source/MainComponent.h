@@ -482,6 +482,17 @@ public:
     juce::Image createOverviewSnapshot (int width = ui::px (980), int height = ui::px (420),
                                         bool foldAll = false, int foldOnlyLayer = -1);
 
+    /** Phase 112: a block is as tall as the lanes it covers, so two blocks that
+        overlap in the sheet overlap here and two that do not, do not.
+
+        It builds its OWN three-layer fixture instead of photographing the demo:
+        the demo has no two blocks that overlap vertically (which is the point of
+        the frame), and staging blocks into the live session to take them out
+        again would be a screenshot editing the project. Three bands, three
+        answers: overlapping, apart, and a one-lane block next to two note
+        lines. */
+    juce::Image createSampleRowsSnapshot (int width = ui::px (980), int height = ui::px (420));
+
     /** Phase 36: the note inspector with all three automation layers live.
 
         The overlay only earns its pixels when the three curves disagree — three

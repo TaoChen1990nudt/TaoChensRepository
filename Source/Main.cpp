@@ -276,6 +276,12 @@ namespace
         writePng ("-overviewmix", component.createOverviewSnapshot (atomic::ui::px (980),
                                                                   atomic::ui::px (420), false, 1));
 
+        // Phase 112: the same view with audio in it. Blocks are as tall as the
+        // lanes they cover, so "these two overlap" survives the trip from the
+        // sheet to the stripe — which the three earlier frames cannot show,
+        // because the demo has no two blocks stacked on each other.
+        writePng ("-overviewsamples", component.createSampleRowsSnapshot());
+
         // Phase 21: the group's inline curve box. Its own frame, because only
         // one floating editor can be open at a time and the main image above
         // already documents the note box.

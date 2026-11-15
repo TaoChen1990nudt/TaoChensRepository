@@ -638,6 +638,61 @@ juce::Rectangle<float> PianoRollComponent::overviewSegmentOf (int layerIndex,
 }
 
 
+juce::Rectangle<float> PianoRollComponent::overviewBlockOf (int layerIndex,
+                                                            const SampleEvent& clip,
+                                                            const std::vector<int>* rows) const
+{
+    const auto band = getOverviewBandBounds (layerIndex);
+
+    if (band.isEmpty())
+        return {};
+
+    // Same arithmetic as a note's segment, and for the same reason: unfolded the
+    // band is cut into one row per used pitch, folded it is one row.
+    const int count = (rows != nullptr) ? juce::jmax (1, (int) rows->size()) : 1;
+    const float rowHeight = band.getHeight() / (float) count;
+
+    auto rankOf = [&] (int pitch) -> int
+    {
+        if (count <= 1 || rows == nullptr)
+            return 0;
+
+        const auto found = std::lower_bound (rows->begin(), rows->end(), pitch,
+                                             std::greater<int>());
+
+        // A block's lanes are in the table (overviewRowPitches puts them there),
+        // so the miss branch is unreachable; it lands on the bottom row for the
+        // same reason the note one does — off-by-a-row beats off-the-band.
+        return (found != rows->end() && *found == pitch)
+                 ? (int) std::distance (rows->begin(), found)
+                 : count - 1;
+    };
+
+    // A block covers its LANES, it does not sit on one of them: from the top
+    // lane it reaches down to the bottom one. This is the whole of Phase 112 —
+    // the sheet draws a four-lane block as a four-lane rectangle, so the
+    // overview has to as well, or two blocks that overlap there look like two
+    // stripes that happen to start at the same beat.
+    const int span   = juce::jmax (1, clip.laneSpan);
+    const int topRow = rankOf (clip.pitch + span - 1);
+    const int botRow = rankOf (clip.pitch);
+
+    const float top    = band.getY() + (float) topRow * rowHeight;
+    const float bottom = band.getY() + (float) (botRow + 1) * rowHeight;
+
+    const float x0 = screenXForBeat (clip.startBeat);
+    const float x1 = screenXForBeat (clip.startBeat + clip.lengthBeats);
+
+    // Half a pixel off the top, a whole one off the bottom: two blocks in
+    // adjacent lanes then read as two blocks (the sheet separates them by an
+    // outline), and a block that fills its band still shows the stripe's own
+    // background along both edges.
+    return { x0, top + 0.5f,
+             juce::jmax (1.0f, x1 - x0),
+             juce::jmax (1.0f, bottom - top - 1.0f) };
+}
+
+
 std::vector<int> PianoRollComponent::overviewRowPitches (int layerIndex) const
 {
     std::vector<int> rows;
@@ -647,10 +702,20 @@ std::vector<int> PianoRollComponent::overviewRowPitches (int layerIndex) const
     if (layer == nullptr)
         return rows;
 
-    rows.reserve (layer->getNotes().size());
+    rows.reserve (layer->getNotes().size() + layer->getSamples().size() * 4);
 
     for (const auto& note : layer->getNotes())
         rows.push_back (note.pitch);
+
+    // Phase 112: a block is not pitchless. `SampleEvent` has carried `pitch` and
+    // `laneSpan` since Phase 17 — it covers that many pitch lanes in the sheet,
+    // which is exactly how two blocks can sit one above the other. So the band's
+    // rows have to include the lanes a block covers, or "these two overlap" is
+    // unrepresentable here and every block has to fill the stripe (Phase 109's
+    // rule, which was written when this view threw the pitch axis away).
+    for (const auto& clip : layer->getSamples())
+        for (int lane = 0; lane < juce::jmax (1, clip.laneSpan); ++lane)
+            rows.push_back (clip.pitch + lane);
 
     std::sort (rows.begin(), rows.end(), std::greater<int>());
     rows.erase (std::unique (rows.begin(), rows.end()), rows.end());
@@ -816,6 +881,28 @@ juce::Rectangle<float> PianoRollComponent::getOverviewSegmentBounds (int layerIn
     const auto rows = overviewRowPitches (layerIndex);
 
     return overviewSegmentOf (layerIndex, *note, &rows);
+}
+
+
+juce::Rectangle<float> PianoRollComponent::getOverviewSampleBounds (int layerIndex,
+                                                                   int sampleId) const
+{
+    auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr)
+        return {};
+
+    const auto* clip = layer->findSample (sampleId);
+
+    if (clip == nullptr)
+        return {};
+
+    if (isOverviewFolded (layerIndex))
+        return overviewBlockOf (layerIndex, *clip, nullptr);
+
+    const auto rows = overviewRowPitches (layerIndex);
+
+    return overviewBlockOf (layerIndex, *clip, &rows);
 }
 
 

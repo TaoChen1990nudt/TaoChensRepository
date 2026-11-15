@@ -676,27 +676,42 @@ void PianoRollComponent::drawOverview (juce::Graphics& g)
                                       wash.getX(), wash.getRight());
             }
 
-        //-- Blocks: the full height of the band, faintly --------------------
-        // Taller than a note line on purpose: "this stretch is audio" and "these
-        // are notes" have to be distinguishable without reading a label, and the
-        // only other difference available here is colour, which already means
-        // "which layer".
+        //-- Blocks: as tall as the lanes they cover --------------------------
+        // Phase 112: a block used to fill the stripe. That was Phase 109's rule
+        // ("it has no pitch"), and it was wrong the day it was written — a
+        // SampleEvent has carried `pitch` and `laneSpan` since Phase 17, and the
+        // sheet draws it as a rectangle over exactly those lanes. Filling the
+        // stripe made two blocks at opposite ends of the keyboard look like they
+        // overlapped, and two doing the genuine thing invisible.
+        //
+        // Blocks still read as blocks rather than lines: a note is a 1-row line,
+        // a block is as many rows as it covers, and the fill is faint where a
+        // note is solid.
+        //
+        // The row table is the one the notes below are about to use, so it is
+        // built once, here, and passed to both.
+        const bool folded = isOverviewFolded (i);
+        const std::vector<int> rows = folded ? std::vector<int>() : overviewRowPitches (i);
+        const std::vector<int>* rowTable = folded ? nullptr : &rows;
+
         for (const auto& clip : layer->getSamples())
         {
-            const float x0 = screenXForBeat (clip.startBeat);
-            const float x1 = screenXForBeat (clip.startBeat + clip.lengthBeats);
+            const auto box = overviewBlockOf (i, clip, rowTable);
 
-            if (x1 < area.getX() || x0 > area.getRight())
+            if (box.isEmpty() || ! box.intersects (area))
                 continue;
 
-            auto box = juce::Rectangle<float> (x0, band.getY() + 1.0f,
-                                               juce::jmax (1.0f, x1 - x0),
-                                               juce::jmax (1.0f, band.getHeight() - 2.0f));
+            const float alpha = strength * takeFadeOf (*layer, clip.groupId);
 
-            g.setColour (tint.withAlpha (0.13f * strength));
+            // Phase 112: a touch more ink than Phase 109 gave blocks. A block used
+            // to be the whole stripe, and 13% is a lot of area at 13%; now it is
+            // four rows of a seven-row band, and in a ghost layer (0.72 × 0.13)
+            // it was a smudge you had to look for. Overlap still reads darker
+            // because the fills add up, which is the point.
+            g.setColour (tint.withAlpha (0.20f * alpha));
             g.fillRoundedRectangle (box, 2.0f);
 
-            g.setColour (tint.withAlpha (0.42f * strength));
+            g.setColour (tint.withAlpha (0.55f * alpha));
             g.drawRoundedRectangle (box.reduced (0.5f), 2.0f, 1.0f);
         }
 
@@ -709,10 +724,10 @@ void PianoRollComponent::drawOverview (juce::Graphics& g)
         // Phase 111: the question is asked per band, so one stripe can be a row
         // per pitch while the next is a single line. Folded, the table is empty
         // and every note of THAT layer lands on its centre line.
-        const bool folded = isOverviewFolded (i);
-        const std::vector<int> rows = folded ? std::vector<int>() : overviewRowPitches (i);
-        const std::vector<int>* rowTable = folded ? nullptr : &rows;
-
+        //
+        // Phase 112: `rows` / `rowTable` are built above, before the blocks, and
+        // shared — a note and a block must agree about which row a pitch is on,
+        // and two tables meant one sort of the layer per band instead of two.
         for (const auto& note : layer->getNotes())
         {
             const auto segment = overviewSegmentOf (i, note, rowTable);

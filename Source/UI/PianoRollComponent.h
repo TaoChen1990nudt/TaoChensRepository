@@ -1545,6 +1545,18 @@ public:
         that does not exist. */
     juce::Rectangle<float> getOverviewSegmentBounds (int layerIndex, int noteId) const;
 
+    /** The block a sample becomes in the overview: from its start to its end,
+        covering the pitch lanes it occupies in the sheet (`pitch` ..
+        `pitch + laneSpan - 1`). Empty in the sheet view, and for a sample that
+        does not exist.
+
+        Phase 112: two blocks the sheet draws one above the other come out one
+        above the other here, and two that overlap in the sheet overlap here —
+        that relation is the whole point of the call. Folded, the band is one
+        row, so every block covers the whole stripe, which is what Phase 109
+        drew unconditionally. */
+    juce::Rectangle<float> getOverviewSampleBounds (int layerIndex, int sampleId) const;
+
     /** Phase 110/111: does band `layerIndex` keep the pitch axis?
 
         Folded (the Phase 109 look) puts every note of that layer on ONE centre
@@ -1585,10 +1597,11 @@ public:
     juce::Rectangle<float> getOverviewFoldToggleBounds (int index) const;
 
     /** How many pitch rows band `index` is cut into: the number of distinct
-        pitches that layer's notes use, 1 when the band is folded, 1 for an empty
-        layer. The band is split evenly between them — that IS "skip the empty
-        keys". Two bands of the same stack can answer differently, which is the
-        whole of Phase 111. */
+        pitches that layer's notes use — plus every lane a sample block covers,
+        since a block that spans four lanes makes those four pitches used
+        (Phase 112) — 1 when the band is folded, 1 for an empty layer. The band is
+        split evenly between them — that IS "skip the empty keys". Two bands of
+        the same stack can answer differently, which is the whole of Phase 111. */
     int getOverviewRowCount (int index) const;
 
     /** Phase 98: what the lane is showing. Four tabs share one strip.
@@ -2118,9 +2131,18 @@ private:
     juce::Rectangle<float> overviewSegmentOf (int layerIndex, const NoteEvent&,
                                               const std::vector<int>* rows) const;
 
-    /** Phase 110: the distinct pitches a layer's notes use, highest first. The
-        rows of its band, once sorted. Built from the LAYER, never from the
-        viewport — see `getOverviewRowCount`. */
+    /** Phase 112: the block a sample becomes, same contract as the segment
+        above — the caller hands in the pitch table it already built, or nullptr
+        when the band is folded. A block covers its LANES rather than sitting on
+        one of them: `pitch + laneSpan - 1` at the top down to `pitch`, so two
+        blocks covering the same lanes are the same rectangle and two covering
+        different ones do not overlap. */
+    juce::Rectangle<float> overviewBlockOf (int layerIndex, const SampleEvent&,
+                                            const std::vector<int>* rows) const;
+
+    /** Phase 110: the distinct pitches a layer's notes use, highest first — plus
+        (Phase 112) every lane a sample block covers, because a block that spans
+        four lanes makes those four pitches "used" in exactly the same sense. */
     std::vector<int> overviewRowPitches (int layerIndex) const;
 
     /** Phase 111: which band's chevron is under `point`, or -1. The press

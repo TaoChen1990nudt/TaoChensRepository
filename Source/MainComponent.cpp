@@ -2367,6 +2367,73 @@ juce::Image MainComponent::createOverviewSnapshot (int width, int height,
 }
 
 //==============================================================================
+juce::Image MainComponent::createSampleRowsSnapshot (int width, int height)
+{
+    // Phase 112: a frame about ONE rule — a block is as tall as the lanes it
+    // covers — so it brings its own fixture instead of using the demo session.
+    // Two reasons, both learned the hard way: staging blocks into the live
+    // project and pulling them out again would be a screenshot editing the
+    // session (P111), and the demo has no two blocks that overlap vertically,
+    // which is the one thing this frame exists to show.
+    LayerStack showStack;
+    RackModel  showRack;
+
+    showStack.addLayer (utf8 ("重叠"),   palette::layer1);
+    showStack.addLayer (utf8 ("并排"),   palette::layer2);
+    showStack.addLayer (utf8 ("单行"),   palette::layer3);
+    showStack.setActiveLayerIndex (0);
+
+    const auto blockOn = [&] (int layerIndex, const juce::String& name, int pitch, int span,
+                              double start, double length)
+    {
+        SampleEvent clip;
+        clip.name        = name;
+        clip.startBeat   = start;
+        clip.lengthBeats = length;
+        clip.pitch       = pitch;
+        clip.laneSpan    = span;
+
+        showStack.getLayer (layerIndex)->addSample (clip);
+    };
+
+    //-- Band 1: two blocks two lanes apart, overlapping in time --------------
+    // In the sheet they are one above the other and both are audio. The stripe
+    // has to say the same, or the two facts it could mean ("they clash" and
+    // "they are two steps of a sequence") look identical.
+    showStack.getLayer (0)->addNote ({ 0, 72, 0.0, 16.0, 0.8f });
+    blockOn (0, "low.wav",  60, 4, 2.0, 8.0);
+    blockOn (0, "high.wav", 62, 4, 6.0, 8.0);
+
+    //-- Band 2: three blocks, each on its own rows --------------------------
+    // The other side of the same rule. These do not overlap, so they read as
+    // three bars stacked — each keeps its own outline and its own two edges —
+    // where band 1's pair melts into one darker rectangle in the middle. Note
+    // that "one row apart" is the same distance as "an octave and a half apart":
+    // the band skips empty keys, so the gap costs one row whatever its size.
+    blockOn (1, "a.wav", 60, 4, 2.0, 8.0);
+    blockOn (1, "b.wav", 64, 4, 2.0, 8.0);
+    blockOn (1, "c.wav", 88, 2, 2.0, 8.0);
+
+    //-- Band 3: a one-lane block between two note lines ----------------------
+    // laneSpan IS the height, so this one is a single row — a thin bar, not a
+    // stripe, which is what makes "block" and "line" two different words here.
+    // The notes sit above AND below it on purpose: a block at the lowest pitch
+    // would be flush with the band's bottom edge, where it reads as a border
+    // rather than as a block.
+    showStack.getLayer (2)->addNote ({ 0, 72, 0.0, 16.0, 0.8f });
+    showStack.getLayer (2)->addNote ({ 0, 48, 0.0, 16.0, 0.8f });
+    blockOn (2, "tick.wav", 56, 1, 2.0, 12.0);
+
+    PianoRollComponent showRoll (showStack, showRack);
+    showRoll.setSize (width, height);
+    showRoll.setBeatWidth (ui::pf (44.0f));
+    showRoll.setScrollBeats (0.0);
+    showRoll.setOverviewMode (true);
+
+    return showRoll.createComponentSnapshot (showRoll.getLocalBounds(), true);
+}
+
+//==============================================================================
 juce::Image MainComponent::createPerfSnapshot()
 {
     // A headless run has no sound card, so the meter is fed by hand — through

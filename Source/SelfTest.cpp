@@ -21598,6 +21598,168 @@ juce::String MainComponent::runSelfTest()
         roll.setOverviewMode (false);
     }();
 
+    //== Phase 112: 采样块也落在行上 ========================================
+    // 用户原话：「在总览状态下显示某一个图层里的采样时，如果有采样在钢琴窗状态下
+    // 上下重叠，那么总览状态下也应该上下重叠」。
+    //
+    // P109 起采样块画满整条带，理由是「它没有音高」——可 SampleEvent 从 Phase 17
+    // 就带着 `pitch` 与 `laneSpan`，钢琴窗里它就是占那么多行的矩形。于是总览把
+    // 键盘两端毫不相干的块画成一模一样，看起来像重叠；真正重叠的两个反而没区别。
+    //
+    // 钉九件事：行表含采样占的琴键 / 重叠的块上下也重叠 / 分开的块不重叠且高的在上 /
+    // 块落在它那几行上 / 块比音符线厚 / 音符与块共用一张行表 / laneSpan == 1 就细成
+    // 一行且在最下面 / 折叠时仍压满条带 / 越界与模式外答空。
+    [&]
+    {
+        LayerStack stack;
+        RackModel  rack;
+
+        stack.addLayer (utf8 ("音+块"), palette::layer1);
+        stack.addLayer (utf8 ("单行块"), palette::layer2);
+        stack.setActiveLayerIndex (0);
+
+        auto* la = stack.getLayer (0);
+        auto* lb = stack.getLayer (1);
+
+        const int aNote   = la->addNote ({ 0, 72, 0.0, 4.0, 0.8f });
+        const int aBottom = la->addNote ({ 0, 60, 0.0, 4.0, 0.8f });
+
+        const auto addClip = [&] (Layer& layer, int pitch, int span, double start, double length)
+        {
+            SampleEvent clip;
+            clip.name        = "clip.wav";
+            clip.startBeat   = start;
+            clip.lengthBeats = length;
+            clip.pitch       = pitch;
+            clip.laneSpan    = span;
+
+            return layer.addSample (clip);
+        };
+
+        // A 占 60..63，C 占 62..65：钢琴窗里它们压着两行，时间上也叠着。
+        const int idA = addClip (*la, 60, 4, 0.0, 4.0);
+        const int idC = addClip (*la, 62, 4, 2.0, 4.0);
+        // B 占 84..85，在键盘上离 A 一个八度多：那边根本不挨着。
+        const int idB = addClip (*la, 84, 2, 0.0, 2.0);
+
+        // 第二层：两个音符 + 一个只占一行的块，它在最下面。
+        lb->addNote ({ 0, 60, 0.0, 4.0, 0.8f });
+        const int bLow  = lb->addNote ({ 0, 52, 0.0, 4.0, 0.8f });
+        const int idThin = addClip (*lb, 40, 1, 0.0, 4.0);
+
+        PianoRollComponent roll (stack, rack);
+        roll.setSize (1100, 460);
+        roll.setScrollBeats (0.0);
+        roll.setOverviewMode (true);
+
+        const auto band0 = roll.getOverviewBandBounds (0);
+        const auto band1 = roll.getOverviewBandBounds (1);
+
+        //-- (1) 行表把采样占的琴键也算进去 --------------------------------
+        // A 的 60..63、C 的 62..65、B 的 84..85，加上音符 72 与 60，去重之后是
+        // 9 个音高；第二层 60 / 52 / 40 是 3 行。只有采样的一层也照样分得出行，
+        // 否则「不挨着的块」在纯采样层里还是无从表达。
+        check (utf8 ("行表把采样占的琴键也算进去：9 行 / 3 行"),
+               roll.getOverviewRowCount (0) == 9
+                 && roll.getOverviewRowCount (1) == 3,
+               juce::String (roll.getOverviewRowCount (0)) + " / "
+                 + juce::String (roll.getOverviewRowCount (1)));
+
+        const auto bA = roll.getOverviewSampleBounds (0, idA);
+        const auto bB = roll.getOverviewSampleBounds (0, idB);
+        const auto bC = roll.getOverviewSampleBounds (0, idC);
+
+        const float rowH0 = band0.getHeight() / 9.0f;
+
+        //-- (2) 上下重叠的块，总览里也重叠 ---------------------------------
+        // 「错开两行」是这条的一半：只断言「相交」的话，两个都撑满条带的实现
+        // 也满足它（咬测 M1 就是这么漏过去的），而撑满恰恰是这一轮要废掉的画法。
+        check (utf8 ("钢琴窗里上下重叠的两个块：在总览里错开两行，而且仍然交叠"),
+               std::abs (bA.getY() - bC.getY()) > 1.5f * rowH0
+                 && bA.getY() < bC.getBottom() - 0.5f
+                 && bC.getY() < bA.getBottom() - 0.5f,
+               juce::String (bA.getY(), 1) + utf8 (" vs ") + juce::String (bC.getY(), 1)
+                 + utf8 ("（行高 ") + juce::String (rowH0, 1) + utf8 ("）"));
+
+        //-- (3) 分开的块不重叠，而且高的在上面 ------------------------------
+        check (utf8 ("上下不挨着的两个块在总览里也不重叠，高的那个在上面"),
+               bB.getBottom() <= bA.getY() + 0.5f,
+               juce::String (bB.getBottom(), 1) + " <= " + juce::String (bA.getY(), 1));
+
+        //-- (4) 块落在它那几行上 -------------------------------------------
+        // 行序（降）：85 84 72 65 64 63 62 61 60。A 的顶行是 63（第 6 行），
+        // 底行是 60（第 9 行），所以顶边 = band + 5 行，高 = 4 行。
+        const float wantTop = band0.getY() + 5.0f * rowH0 + 0.5f;
+        const float wantH   = 4.0f * rowH0 - 1.0f;
+
+        check (utf8 ("块落在它那几行上：顶边是最高那一行的顶，高是行数 × 行高"),
+               std::abs (bA.getY() - wantTop) < 0.6f
+                 && std::abs (bA.getHeight() - wantH) < 0.6f,
+               juce::String (bA.getY(), 1) + " vs " + juce::String (wantTop, 1) + " / "
+                 + juce::String (bA.getHeight(), 1) + " vs " + juce::String (wantH, 1));
+
+        //-- (5) 块仍然读得出是块 -------------------------------------------
+        const auto noteLine = roll.getOverviewSegmentBounds (0, aNote);
+
+        check (utf8 ("块比音符线厚：四行的块至少是线高的三倍"),
+               noteLine.getHeight() > 0.5f
+                 && bA.getHeight() > noteLine.getHeight() * 3.0f,
+               juce::String (bA.getHeight(), 1) + " vs " + juce::String (noteLine.getHeight(), 1));
+
+        //-- (6) 音符与块共用一张行表 ---------------------------------------
+        // 60 那个音符与 A 的最低一行是同一个音高，所以在画面上它必须落在块里。
+        // 两张表各算一次的话，这一条会红——而肉眼看只会觉得「差一点」。
+        const auto bottomLine = roll.getOverviewSegmentBounds (0, aBottom);
+
+        check (utf8 ("音符与块共用一张行表：60 的音符落在块的底下那一行里"),
+               bottomLine.getCentreY() > bA.getY()
+                 && bottomLine.getCentreY() < bA.getBottom(),
+               juce::String (bottomLine.getCentreY(), 1) + " in "
+                 + juce::String (bA.getY(), 1) + ".." + juce::String (bA.getBottom(), 1));
+
+        //-- (7) 只占一行的块就细成一行，而且在最下面 -----------------------
+        const auto  thin  = roll.getOverviewSampleBounds (1, idThin);
+        const float rowH1 = band1.getHeight() / 3.0f;
+
+        check (utf8 ("laneSpan == 1 的块细成一行（不是整个条带），最低的块在最下面"),
+               std::abs (thin.getHeight() - (rowH1 - 1.0f)) < 0.6f
+                 && thin.getHeight() < band1.getHeight() * 0.5f
+                 && thin.getBottom() <= band1.getBottom() + 0.01f
+                 && roll.getOverviewSegmentBounds (1, bLow).getCentreY() < thin.getY(),
+               juce::String (thin.getHeight(), 1) + utf8 (" / 行高 ") + juce::String (rowH1, 1)
+                 + utf8 (" / 带高 ") + juce::String (band1.getHeight(), 1));
+
+        //-- (8) 折叠时仍然压满条带 -----------------------------------------
+        // 折叠 = 一行 = 整条带，所以那一行里的所有块 y 区间相同。这条是 P109 的
+        // 画面在 P112 之后仍然成立：折叠没有把块变细。
+        roll.setAllOverviewFolded (true);
+
+        const auto fA = roll.getOverviewSampleBounds (0, idA);
+        const auto fB = roll.getOverviewSampleBounds (0, idB);
+
+        check (utf8 ("折叠时块仍然压满条带：一行就是整条带，两块 y 区间相同"),
+               std::abs (fA.getY() - (band0.getY() + 0.5f)) < 0.6f
+                 && std::abs (fA.getBottom() - (band0.getBottom() - 0.5f)) < 0.6f
+                 && std::abs (fA.getY() - fB.getY()) < 0.01f,
+               fA.toString() + " / " + fB.toString());
+
+        roll.setAllOverviewFolded (false);
+
+        //-- (9) 越界、不存在、模式外都答空 ---------------------------------
+        const bool outOfRange = roll.getOverviewSampleBounds (7, idA).isEmpty()
+                                  && roll.getOverviewSampleBounds (0, 99999).isEmpty();
+
+        roll.setOverviewMode (false);
+
+        const bool sheetEmpty = roll.getOverviewSampleBounds (0, idA).isEmpty();
+
+        roll.setOverviewMode (true);
+
+        check (utf8 ("越界、不存在的采样、以及钢琴窗里，块答空矩形"),
+               outOfRange && sheetEmpty,
+               "off-grid " + roll.getOverviewSampleBounds (7, idA).toString());
+    }();
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the
