@@ -462,6 +462,14 @@ public:
         the demonstration is of a property, not of anything the demo contains. */
     juce::Image createGroupScrollSnapshot (int width = ui::px (900), int height = ui::px (420));
 
+    /** Phase 106: the preview keyboard that now sits under a plugin's editor.
+
+        Shot on its own rather than inside the plugin's window: a DesktopWindow
+        is native chrome and its content depends on which plugin is installed,
+        so a frame of "the strip in a window" would differ on every machine.
+        The strip is the part that is new, and it is fully deterministic. */
+    juce::Image createAuditionStripSnapshot (int width = ui::px (620));
+
     /** Phase 36: the note inspector with all three automation layers live.
 
         The overlay only earns its pixels when the three curves disagree — three
@@ -949,6 +957,13 @@ private:
     void openInsertEditor (int channel, int slot);
     void openPluginEditor (int instanceId, const juce::String& displayName);
     void closePluginEditor (int instanceId);
+
+    /** Phase 106: which rack slot is showing this plugin, or -1.
+
+        The window knows an instance id and nothing else; the preview path wants
+        a slot. Asked at the moment of the press rather than cached, because a
+        slot can be replaced (or removed) while its old window is still open. */
+    int  slotIdForPlugin (int instanceId) const;
     void closeInsertEditor (InsertEditorWindow* window);
 
     /** Phase 85: open the editor of whatever instrument a rack slot holds.

@@ -40,6 +40,223 @@ int InsertEditorContent::preferredHeightFor (int numParams)
 }
 
 //==============================================================================
+AuditionStrip::AuditionStrip()
+{
+    setOpaque (true);
+
+    // The computer keyboard keeps playing notes while this is on screen; a
+    // mouse-only strip that stole focus would break the very thing it adds to.
+    setWantsKeyboardFocus (false);
+}
+
+AuditionStrip::~AuditionStrip()
+{
+    stopTimer();
+}
+
+bool AuditionStrip::isBlackKey (int index) noexcept
+{
+    switch (index % 12)
+    {
+        case 1: case 3: case 6: case 8: case 10: return true;
+        default:                                return false;
+    }
+}
+
+juce::Rectangle<int> AuditionStrip::getLabelArea() const
+{
+    return getLocalBounds().withWidth (atomic::ui::px (52));
+}
+
+juce::Rectangle<float> AuditionStrip::getKeyboardArea() const
+{
+    return getLocalBounds().withTrimmedLeft (atomic::ui::px (52))
+                           .toFloat()
+                           .reduced (atomic::ui::pf (3), atomic::ui::pf (5));
+}
+
+juce::Rectangle<float> AuditionStrip::getKeyBounds (int index) const
+{
+    if (! juce::isPositiveAndBelow (index, numKeys))
+        return {};
+
+    const auto area = getKeyboardArea();
+
+    // Two octaves = fourteen white keys, and the white key is the unit the
+    // black ones are placed against: a keyboard is a white-key ruler with
+    // short dark keys straddling the lines between them.
+    const int   whiteCount = (numKeys / 12) * 7;
+    const float white      = area.getWidth() / (float) juce::jmax (1, whiteCount);
+
+    int whiteBefore = 0;
+
+    for (int i = 0; i < index; ++i)
+        if (! isBlackKey (i))
+            ++whiteBefore;
+
+    if (! isBlackKey (index))
+        return { area.getX() + (float) whiteBefore * white, area.getY(),
+                 white, area.getHeight() };
+
+    const float blackWidth = white * 0.62f;
+
+    return { area.getX() + (float) whiteBefore * white - blackWidth * 0.5f, area.getY(),
+             blackWidth, area.getHeight() * 0.62f };
+}
+
+int AuditionStrip::getKeyIndexAt (juce::Point<float> position) const
+{
+    // Black keys first: they are drawn on top, so the pixel under the pointer
+    // belongs to the key the user can see there.
+    for (int i = 0; i < numKeys; ++i)
+        if (isBlackKey (i) && getKeyBounds (i).contains (position))
+            return i;
+
+    for (int i = 0; i < numKeys; ++i)
+        if (! isBlackKey (i) && getKeyBounds (i).contains (position))
+            return i;
+
+    return -1;
+}
+
+void AuditionStrip::paint (juce::Graphics& g)
+{
+    g.fillAll (theme::surface2);
+
+    g.setColour (theme::hairline);
+    g.fillRect (0, 0, getWidth(), 1);
+
+    g.setColour (heldIndex >= 0 ? theme::accent : theme::inkMuted);
+    g.setFont (atomic::ui::font (9.5f));
+    g.drawText (utf8 ("试听"),
+                getLabelArea().reduced (atomic::ui::px (12), 0),
+                juce::Justification::centredLeft, false);
+
+    for (int i = 0; i < numKeys; ++i)
+    {
+        if (isBlackKey (i))
+            continue;
+
+        const auto key = getKeyBounds (i);
+
+        g.setColour (i == heldIndex ? theme::accent : theme::ink.withAlpha (0.82f));
+        g.fillRect (key);
+
+        g.setColour (theme::surface0);
+        g.drawRect (key, 1.0f);
+    }
+
+    for (int i = 0; i < numKeys; ++i)
+    {
+        if (! isBlackKey (i))
+            continue;
+
+        const auto key = getKeyBounds (i);
+
+        g.setColour (i == heldIndex ? theme::accent.darker (0.3f) : theme::bgApp);
+        g.fillRect (key);
+    }
+}
+
+void AuditionStrip::mouseDown (const juce::MouseEvent& e)
+{
+    hold (getKeyIndexAt (e.position));
+}
+
+void AuditionStrip::mouseDrag (const juce::MouseEvent& e)
+{
+    // Sliding across the keys is how a keyboard is supposed to sound: one note
+    // at a time, the one being left released on the way out.
+    hold (getKeyIndexAt (e.position));
+}
+
+void AuditionStrip::mouseUp (const juce::MouseEvent&)
+{
+    releaseHeld();
+}
+
+void AuditionStrip::beginHoldForTest (int index) { hold (index); }
+void AuditionStrip::endHoldForTest()            { releaseHeld(); }
+
+void AuditionStrip::hold (int index)
+{
+    if (index == heldIndex)
+        return;
+
+    releaseHeld();
+
+    if (index < 0)
+        return;
+
+    heldIndex = index;
+    repaint();
+    startTimer (200);
+
+    if (onHold != nullptr)
+        onHold (lowestPitch + index, 0.85f);
+}
+
+void AuditionStrip::releaseHeld()
+{
+    if (heldIndex < 0)
+        return;
+
+    heldIndex = -1;
+    stopTimer();
+    repaint();
+
+    if (onRelease != nullptr)
+        onRelease();
+}
+
+void AuditionStrip::timerCallback()
+{
+    // The host lets a held preview go a little after the last request, so a key
+    // that is still down has to keep saying so. A key that is up stops the
+    // timer and is released by that timeout, not by this one.
+    if (heldIndex < 0)
+    {
+        stopTimer();
+        return;
+    }
+
+    if (onHold != nullptr)
+        onHold (lowestPitch + heldIndex, 0.85f);
+}
+
+//==============================================================================
+EditorHost::EditorHost (std::unique_ptr<juce::Component> bodyToUse)
+    : body (std::move (bodyToUse))
+{
+    setOpaque (true);
+
+    if (body != nullptr)
+        addAndMakeVisible (*body);
+
+    addAndMakeVisible (strip);
+}
+
+juce::Rectangle<int> EditorHost::getBodyArea() const
+{
+    return getLocalBounds().withTrimmedBottom (AuditionStrip::preferredHeight());
+}
+
+void EditorHost::resized()
+{
+    const int stripHeight = AuditionStrip::preferredHeight();
+
+    if (body != nullptr)
+        body->setBounds (getBodyArea());
+
+    strip.setBounds (0, getHeight() - stripHeight, getWidth(), stripHeight);
+}
+
+void EditorHost::paint (juce::Graphics& g)
+{
+    g.fillAll (kBackground);
+}
+
+//==============================================================================
 PluginEditorWindow::PluginEditorWindow (juce::AudioPluginInstance& processor,
                                         const juce::String& pluginName,
                                         int instanceIdToShow)
@@ -50,39 +267,68 @@ PluginEditorWindow::PluginEditorWindow (juce::AudioPluginInstance& processor,
 {
     setUsingNativeTitleBar (true);
 
-    editor = processor.createEditorIfNeeded();
+    std::unique_ptr<juce::Component> body;
+    int  bodyWidth  = atomic::ui::px (320);
+    int  bodyHeight = atomic::ui::px (180);
+    bool canResize  = false;
 
-    if (editor != nullptr)
+    if (auto* editor = processor.createEditorIfNeeded())
     {
-        setContentOwned (editor, true);
-        setResizable (editor->isResizable(), false);
+        body.reset (editor);
 
-        const int w = juce::jmax (320, editor->getWidth());
-        const int h = juce::jmax (180, editor->getHeight());
-
-        setResizeLimits (juce::jmax (240, w / 2), juce::jmax (140, h / 2), 2600, 1600);
-        centreWithSize (w, h);
+        canResize  = editor->isResizable();
+        bodyWidth  = juce::jmax (atomic::ui::px (320), editor->getWidth());
+        bodyHeight = juce::jmax (atomic::ui::px (180), editor->getHeight());
     }
     else
     {
         // A plugin is allowed to have no UI. Saying so is better than a window
-        // that opens at 0x0 and looks like a crash.
-        auto* label = new juce::Label ({}, utf8 ("这个插件没有提供界面，参数请在插件管理器里调整"));
+        // that opens at 0x0 and looks like a crash — and the preview keys below
+        // still play it, which is the only thing such a plugin needs a window
+        // for in the first place.
+        auto* label = new juce::Label ({}, utf8 ("这个插件没有提供界面，参数请在插件管理器里调整；下面这一排键仍然可以弹它"));
         label->setJustificationType (juce::Justification::centred);
         label->setColour (juce::Label::textColourId, kText);
         label->setColour (juce::Label::backgroundColourId, kBackground);
-        setContentOwned (label, true);
-        centreWithSize (atomic::ui::px (420), atomic::ui::px (120));
+
+        body.reset (label);
+        bodyWidth  = atomic::ui::px (420);
+        bodyHeight = atomic::ui::px (96);
     }
+
+    const int stripHeight = AuditionStrip::preferredHeight();
+    const int height      = bodyHeight + stripHeight;
+
+    requestedBodyHeight = bodyHeight;
+
+    auto content = std::make_unique<EditorHost> (std::move (body));
+
+    // Sized BEFORE it becomes the content: `setContentOwned` resizes the window
+    // to fit what it is given, and a 0x0 host would be clamped up to the
+    // minimum and then fought over by `centreWithSize` below.
+    content->setSize (bodyWidth, height);
+
+    host = content.get();
+
+    setContentOwned (content.release(), true);
+
+    setResizable (canResize, false);
+    setResizeLimits (juce::jmax (atomic::ui::px (240), bodyWidth / 2),
+                     juce::jmax (atomic::ui::px (140), height / 2),
+                     2600, 1600 + stripHeight);
+
+    centreWithSize (bodyWidth, height);
 
     setVisible (true);
 }
 
 PluginEditorWindow::~PluginEditorWindow()
 {
-    // The editor is owned by the content slot. Clear it explicitly so the
-    // processor is told the editor is gone before this window stops existing.
+    // Deleting the content deletes the host, which owns the plugin's editor.
+    // Explicit so the processor is told the editor is gone before this window
+    // stops existing.
     clearContentComponent();
+    host = nullptr;
 }
 
 void PluginEditorWindow::setKeyForwarder (juce::KeyListener* listener)
@@ -96,6 +342,35 @@ void PluginEditorWindow::setKeyForwarder (juce::KeyListener* listener)
 
     if (auto* content = getContentComponent())
         content->addKeyListener (listener);
+
+    // The plugin's editor now sits inside that content, one level down. A key
+    // pressed in one of its knobs walks up to the host's listener anyway, but
+    // only a listener ON the body runs before the plugin's own handler.
+    if (host != nullptr)
+        if (auto* body = host->getBody())
+            body->addKeyListener (listener);
+}
+
+void PluginEditorWindow::setAuditionCallbacks (std::function<void (int, float)> onHold,
+                                               std::function<void()> onRelease)
+{
+    if (host == nullptr)
+        return;
+
+    auto& strip = host->getStrip();
+
+    strip.onHold    = std::move (onHold);
+    strip.onRelease = std::move (onRelease);
+}
+
+AuditionStrip* PluginEditorWindow::getAuditionStrip() const noexcept
+{
+    return host != nullptr ? &host->getStrip() : nullptr;
+}
+
+juce::Rectangle<int> PluginEditorWindow::getEditorBodyAreaForTest() const
+{
+    return host != nullptr ? host->getBodyArea() : juce::Rectangle<int>();
 }
 
 void PluginEditorWindow::closeButtonPressed()
@@ -103,6 +378,7 @@ void PluginEditorWindow::closeButtonPressed()
     if (onCloseRequest != nullptr)
         onCloseRequest();
 }
+
 
 //==============================================================================
 InsertEditorContent::InsertEditorContent (MixerModel& mixerModel, int channelToUse, int slotToUse)

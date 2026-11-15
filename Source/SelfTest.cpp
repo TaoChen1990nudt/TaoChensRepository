@@ -20899,6 +20899,182 @@ juce::String MainComponent::runSelfTest()
                "pill " + roll.getGroupLabelBoundsForTest (0, gid, 0).toString());
     }();
 
+    //== Phase 106: 插件窗口里的试听条 ======================================
+    [&]
+    {
+        AuditionStrip strip;
+        strip.setSize (ui::px (620), AuditionStrip::preferredHeight());
+
+        //-- (1) 键位表：两个八度，白键是尺子 ---------------------------------
+        int whites = 0, blacks = 0;
+
+        for (int i = 0; i < AuditionStrip::numKeys; ++i)
+            (AuditionStrip::isBlackKey (i) ? blacks : whites)++;
+
+        const bool triads = ! AuditionStrip::isBlackKey (0) && AuditionStrip::isBlackKey (1)
+                             && ! AuditionStrip::isBlackKey (2) && AuditionStrip::isBlackKey (3)
+                             && ! AuditionStrip::isBlackKey (4) && ! AuditionStrip::isBlackKey (5)
+                             && AuditionStrip::isBlackKey (6);
+
+        check (utf8 ("试听条是两个八度：14 白 10 黑，C 白 / C# 黑，第二个八度是同一张表"),
+               whites == 14 && blacks == 10 && triads
+                 && AuditionStrip::isBlackKey (1 + 12) == AuditionStrip::isBlackKey (1)
+                 && AuditionStrip::isBlackKey (6 + 12) == AuditionStrip::isBlackKey (6),
+               "white " + juce::String (whites) + " black " + juce::String (blacks)
+                 + (triads ? juce::String() : utf8 (" 排列不对")));
+
+        //-- (2) 黑键更矮更窄，中心落在两个白键的接缝上 -----------------------
+        const auto keyC  = strip.getKeyBounds (0);
+        const auto keyCs = strip.getKeyBounds (1);
+        const auto keyD  = strip.getKeyBounds (2);
+
+        check (utf8 ("黑键更矮更窄，中心正好压在两个白键的接缝上（这是键盘，不是两排方块）"),
+               ! keyC.isEmpty() && ! keyCs.isEmpty() && ! keyD.isEmpty()
+                 && keyCs.getHeight() < keyC.getHeight() * 0.75f
+                 && keyCs.getWidth()  < keyC.getWidth()  * 0.75f
+                 && std::abs (keyCs.getCentreX() - keyC.getRight()) < 0.01f
+                 && std::abs (keyD.getX() - keyC.getRight()) < 0.01f,
+               "C " + keyC.toString() + " / C# " + keyCs.toString()
+                 + " / D " + keyD.toString());
+
+        //-- (3) 命中的是看得见的那一个 ---------------------------------------
+        // The premise is part of the check: with no black keys at all, "the
+        // point on the black key hits a black key" would pass on a flat row of
+        // white boxes — the same tautology Phase 101 and 104 were bitten by.
+        check (utf8 ("按在黑键露出来的那一截上，命中的是黑键而不是它底下的白键"),
+               AuditionStrip::isBlackKey (1)
+                 && ! AuditionStrip::isBlackKey (0)
+                 && strip.getKeyIndexAt (keyCs.getCentre()) == 1
+                 && strip.getKeyIndexAt ({ keyC.getX() + 2.0f, keyC.getBottom() - 2.0f }) == 0
+                 && strip.getKeyIndexAt ({ -50.0f, -50.0f }) == -1,
+               utf8 ("黑键 ") + juce::String (strip.getKeyIndexAt (keyCs.getCentre()))
+                 + utf8 (" 白键下端 ")
+                 + juce::String (strip.getKeyIndexAt ({ keyC.getX() + 2.0f,
+                                                        keyC.getBottom() - 2.0f })));
+
+        //-- (4) 按住 = 一个音；滑键 = 先放后按；松开 = 只有一次 release ------
+        std::vector<int> held;
+        int releases = 0;
+
+        strip.onHold    = [&held] (int pitch, float) { held.push_back (pitch); };
+        strip.onRelease = [&releases] { ++releases; };
+
+        strip.beginHoldForTest (7);
+
+        const bool oneOnDown = held.size() == 1 && held.back() == 55;
+
+        // The same key arriving again is the same held key, not a new gesture.
+        strip.beginHoldForTest (7);
+        const bool noRetrigger = held.size() == 1;
+
+        strip.beginHoldForTest (8);
+        const bool slid = held.size() == 2 && held.back() == 56 && releases == 1;
+
+        strip.endHoldForTest();
+
+        check (utf8 ("按住试听条的键：送出去的是那个键的音高，同一个键按住一次只有一个音"),
+               oneOnDown && noRetrigger,
+               utf8 ("hold 次数 ") + juce::String ((int) held.size())
+                 + utf8 (" / 第一个 ") + juce::String (held.empty() ? -1 : held.front()));
+
+        check (utf8 ("滑到另一个键：先放开上一个再按下新的（键盘不是和弦）"),
+               slid,
+               utf8 ("hold 次数 ") + juce::String ((int) held.size())
+                 + utf8 (" / 最后 ") + juce::String (held.empty() ? -1 : held.back())
+                 + " / release " + juce::String (releases));
+
+        check (utf8 ("松开之后键不再是按下的，而且 release 只报一次"),
+               strip.getHeldIndex() == -1 && releases == 2,
+               "held " + juce::String (strip.getHeldIndex())
+                 + " / release " + juce::String (releases));
+
+        //-- (5) 窗口里：试听条在、插件没被挤小、键还在转发 -------------------
+        juce::PluginDescription testSynth;
+
+        for (const auto& entry : plugins.getLibrary())
+            if (entry.isInstrument && entry.description.name.containsIgnoreCase ("Test Synth"))
+                testSynth = entry.description;
+
+        if (testSynth.name.isNotEmpty())
+        {
+            const int instanceId = plugins.load (testSynth);
+            const int slotId = rack.getFirstSlotId();
+
+            auto* slot = rack.findSlot (slotId);
+            const int previousPluginId = slot != nullptr ? slot->pluginId : 0;
+
+            if (slot != nullptr)
+                slot->pluginId = instanceId;
+
+            openPluginEditor (instanceId, "Atomic Test Synth");
+
+            auto window = pluginWindows.find (instanceId);
+            const bool opened = instanceId > 0 && window != pluginWindows.end()
+                                  && window->second != nullptr;
+
+            auto* stripInWindow = opened ? window->second->getAuditionStrip() : nullptr;
+            auto* content = opened ? window->second->getContentComponent() : nullptr;
+
+            const bool wired = stripInWindow != nullptr
+                                 && stripInWindow->onHold != nullptr
+                                 && stripInWindow->onRelease != nullptr;
+
+            const bool forwards = opened && window->second->hasKeyForwarder();
+
+            // The strip must be RESERVED space, not squeezed out of the plugin.
+            // "content grew by a strip" and "the strip ate the plugin" produce
+            // the same total height, so the two numbers that tell them apart
+            // are the height the body ASKED for and the window's total.
+            const int askedFor = opened ? window->second->getEditorBodyHeightRequested() : 0;
+            const int gotIt    = opened ? window->second->getEditorBodyAreaForTest().getHeight() : -1;
+            const int total    = opened && content != nullptr ? content->getHeight() : -1;
+
+            const bool reserved = opened
+                                    && gotIt == askedFor
+                                    && total == askedFor + AuditionStrip::preferredHeight();
+
+            check (utf8 ("插件窗口里有一条试听条，它占的是窗口多出来的高度而不是把插件挤小"),
+                   opened && wired && reserved && forwards,
+                   ! opened ? utf8 ("窗口没打开（本次会话没有桌面？）")
+                            : ("wired " + juce::String ((int) wired)
+                               + " / asked " + juce::String (askedFor)
+                               + " got " + juce::String (gotIt)
+                               + " + strip " + juce::String (AuditionStrip::preferredHeight())
+                               + " vs content " + juce::String (total)));
+
+            //-- (6) 窗口里的键真的交给了那个槽 -------------------------------
+            // Observed at the preview state and not at the engine: a headless
+            // run has no device callback, so a queued live note is never taken
+            // and "the engine has a note" would be true before the press too.
+            const bool foundSlot = slotIdForPlugin (instanceId) == slotId;
+
+            if (stripInWindow != nullptr)
+                stripInWindow->beginHoldForTest (0);
+
+            const bool previewed = hostedPreview.slotId == slotId
+                                     && hostedPreview.pitch == AuditionStrip::lowestPitch;
+
+            check (utf8 ("窗口里的试听条按下去：音符走的是那个槽，音高就是按下的那个键"),
+                   foundSlot && wired && previewed,
+                   "slot " + juce::String (hostedPreview.slotId) + " (want " + juce::String (slotId) + ")"
+                     + " pitch " + juce::String (hostedPreview.pitch)
+                     + " (want " + juce::String (AuditionStrip::lowestPitch) + ")");
+
+            releaseHostedPreview();
+
+            if (stripInWindow != nullptr)
+                stripInWindow->endHoldForTest();
+
+            if (slot != nullptr)
+                slot->pluginId = previousPluginId;
+
+            if (window != pluginWindows.end())
+                pluginWindows.erase (window);
+
+            reconcilePlugins();
+        }
+    }();
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the
