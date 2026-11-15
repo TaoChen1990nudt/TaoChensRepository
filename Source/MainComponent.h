@@ -505,6 +505,23 @@ public:
         live session would be a screenshot editing the project. */
     juce::Image createOverviewMergeSnapshot (int width = ui::px (980), int height = ui::px (420));
 
+    /** Phase 117: what the double click produces — the frame is the SHEET, not
+        the bands, because the sheet is the answer.
+
+        The gesture cannot be photographed as an event (a PNG has no pointer), so
+        this fixture drives it through the same public calls the mouse does: put
+        the overview up, scroll so the target sits near the right edge, then
+        double click that band at that beat. What comes out is the layer that
+        band named, the playhead on the beat, and the window centred on it — the
+        three things the user asked for, and the only frame where the pointer's
+        x is what decides where you end up.
+
+        The host's half (`setPlayheadBeat` + `setTransportActive`) is wired here
+        the way MainComponent wires it, because a component with no host has no
+        transport and a frame of this feature with no playhead in it would be a
+        frame of two thirds of it. */
+    juce::Image createOverviewJumpSnapshot (int width = ui::px (980), int height = ui::px (420));
+
     /** Phase 36: the note inspector with all three automation layers live.
 
         The overlay only earns its pixels when the three curves disagree — three

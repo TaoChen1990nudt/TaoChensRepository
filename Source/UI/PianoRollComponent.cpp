@@ -1112,6 +1112,177 @@ int PianoRollComponent::overviewFoldToggleAt (juce::Point<float> point) const
 }
 
 
+//== Phase 117: 双击一条带 = 打开那一层、去那个时间点 =========================
+
+int PianoRollComponent::getOverviewBandAt (juce::Point<float> position) const
+{
+    if (! overviewMode)
+        return -1;
+
+    // A linear scan, and it is exact rather than approximate: the bands are
+    // packed from the grid's top edge with each bottom being the next one's top
+    // (getOverviewBandBounds), so there is no gap to fall through and no overlap
+    // that would need a tie-break.
+    //
+    // It cannot be "y / bandHeight" any more, and not only because the division
+    // is worse to read: since Phase 113 there is no single band height, and since
+    // Phase 115 the space below a collapsed stack is not a band at all. Both of
+    // those are facts the per-band bounds already know.
+    for (int i = 0; i < getOverviewBandCount(); ++i)
+    {
+        const auto band = getOverviewBandBounds (i);
+
+        if (! band.isEmpty() && band.contains (position))
+            return i;
+    }
+
+    return -1;
+}
+
+
+int PianoRollComponent::getOverviewPitchAt (int layerIndex, juce::Point<float> position) const
+{
+    if (! overviewMode)
+        return -1;
+
+    const auto band = getOverviewBandBounds (layerIndex);
+
+    if (band.isEmpty() || ! band.contains (position))
+        return -1;
+
+    // Folded, the stripe has ONE row and it is not a pitch — that is the whole
+    // of what folding did to it (Phase 110). Reporting the layer's average
+    // pitch here would be inventing an answer the picture never gave, so the
+    // honest one is "there is no pitch under this pixel".
+    if (isOverviewFolded (layerIndex))
+        return -1;
+
+    const auto rows = overviewRowPitches (layerIndex);
+
+    if (rows.empty())
+        return -1;
+
+    const float rowHeight = band.getHeight() / (float) rows.size();
+
+    if (rowHeight <= 0.0f)
+        return -1;
+
+    // The inverse of `overviewSegmentOf`: rows count from the TOP, the table is
+    // sorted high-to-low, and the floor makes a point belong to the CELL it is
+    // in — the same rule `pitchAtScreenY` uses for the sheet's own keys, so the
+    // two views cannot disagree about which pitch a pixel means. (Not "nearest
+    // line": that would move the answer by half a row at a cell boundary, and it
+    // would make a band whose rows are one pixel apart answer every pixel
+    // differently from the sheet.) The clamp is unreachable for a point inside
+    // the band; it is here so a float edge can never index past the table.
+    const int rank = juce::jlimit (0, (int) rows.size() - 1,
+                                   (int) std::floor ((position.y - band.getY()) / rowHeight));
+
+    return rows[(size_t) rank];
+}
+
+
+void PianoRollComponent::openOverviewBand (int layerIndex, juce::Point<float> position)
+{
+    if (stack.getLayer (layerIndex) == nullptr)
+        return;
+
+    //-- Read the band while it is still a band ------------------------------
+    // Both numbers come from the overview's own layout, so both are taken
+    // BEFORE the mode is left. The x axis would survive the switch (P109 keeps
+    // the timeline running under the bands), but the y axis would not: after the
+    // switch it is 128 keys, not this layer's rows.
+    const double raw  = beatAtScreenX (position.x);
+    const double beat = juce::jlimit (0.0, timelineBeats,
+                                      snapEnabled ? snapBeat (raw) : raw);
+
+    const int pitch = getOverviewPitchAt (layerIndex, position);
+
+    //-- 打开该图层 ------------------------------------------------------------
+    // Band 3 IS layer 3 (Phase 109), which is why this is one call and not a
+    // search. It notifies, and `layersChanged` drops the selection when the
+    // sheet changes — notes you cannot see must not stay selected. That
+    // notification also re-clamps the scroll, so it has to happen BEFORE the
+    // window is placed, not after.
+    stack.setActiveLayerIndex (layerIndex);
+
+    //-- The mode has done its job -------------------------------------------
+    // "打开" is the other half of the gesture: the bands are a hint about what
+    // is where, and the sheet is the thing you can edit. Staying in the overview
+    // would put the playhead on a hint.
+    setOverviewMode (false);
+
+    //-- 视口也相应地移过去 ----------------------------------------------------
+    // Horizontal: the target becomes the middle of the window. The click was
+    // already on screen (the bands share the sheet's x axis), so this is not
+    // "make it visible" — it is "stop leaving it in the corner you happened to
+    // hit", and it is why the caret lands somewhere you can work instead of
+    // against an edge. Vertical: only if that row is off screen, because the
+    // pitch axis has not changed meaning and rearranging what was already
+    // visible would be a jump that did not need to happen.
+    centreViewOnBeat (beat);
+
+    if (pitch >= 0)
+        revealPitch (pitch);
+
+    //-- The playhead --------------------------------------------------------
+    // The same call the ruler makes (scrubRulerTo), so a jump and a scrub cannot
+    // disagree about what locating means — including snapping. It is a callback
+    // and not a write because the transport belongs to the host: a view that set
+    // the playhead itself would be a second writer of the one number the engine
+    // reads.
+    if (onLocateRequested != nullptr)
+        onLocateRequested (beat);
+}
+
+
+void PianoRollComponent::centreViewOnBeat (double beat)
+{
+    const double visible = getVisibleBeats();
+
+    if (visible <= 1.0)
+        return;
+
+    //-- The clamp is the point of the function ------------------------------
+    // `setScrollBeats` EXTENDS the ruler when it is asked to scroll past the end
+    // (ensureTimelineExtendsTo, in whole 64-beat chunks). That is right for a
+    // wheel — the user is saying "there is more over here" — and wrong for a
+    // jump, which only says "look over there". Near the end of a project the
+    // centring has nowhere to go: the window stops with its right edge on the
+    // last beat and the target sits off-centre rather than off-screen. Clamping
+    // HERE, and not inside setScrollBeats, keeps "make room" and "keep the ruler
+    // honest" as two separate questions with two separate answers.
+    const double maxScroll = juce::jmax (0.0, timelineBeats - visible);
+
+    setScrollBeats (juce::jlimit (0.0, maxScroll, beat - visible * 0.5));
+}
+
+
+void PianoRollComponent::revealPitch (int pitch)
+{
+    if (! juce::isPositiveAndBelow (pitch, numPitches))
+        return;
+
+    const auto area = getGridArea();
+
+    if (area.getHeight() <= 0.0f)
+        return;
+
+    const float top    = pitchToContentY (pitch);
+    const float bottom = top + keyHeight;
+
+    if (top < scrollY)
+        scrollY = top;
+    else if (bottom > scrollY + area.getHeight())
+        scrollY = bottom - area.getHeight();
+    else
+        return;                      // already on screen: the map stays put
+
+    clampScroll();
+    repaint();
+}
+
+
 juce::Rectangle<float> PianoRollComponent::getOverviewSegmentBounds (int layerIndex,
                                                                     int noteId) const
 {

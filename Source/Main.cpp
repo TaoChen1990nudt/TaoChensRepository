@@ -288,6 +288,11 @@ namespace
         // folded band with a gap so "merged" is not read as "always one line".
         writePng ("-overviewmerge", component.createOverviewMergeSnapshot());
 
+        // Phase 117: the result of double clicking a band — the sheet that band
+        // named, the playhead on that beat, the window centred on it. The only
+        // frame in the list whose subject is a pointer's x rather than a rule.
+        writePng ("-overviewjump", component.createOverviewJumpSnapshot());
+
         // Phase 21: the group's inline curve box. Its own frame, because only
         // one floating editor can be open at a time and the main image above
         // already documents the note box.

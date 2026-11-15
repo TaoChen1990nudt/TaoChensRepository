@@ -4,56 +4,57 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
 必须能编译并跑通视觉或数据逻辑。
 
 **当前阶段、自检基准、构建命令看 `STATUS.md`；为什么这么做在 `REFERENCE.md`；陷阱与咬测在 `PITFALLS.md`。**
-本文件只写**不能违反的那一句 + 去哪里找它**；理由、咬测红数、快照流水一律在 `PITFALLS.md` 对应阶段段里。
+本文件只写**不能违反的那一句 + 去哪找它**——理由与咬测流水一律在 `PITFALLS.md` 对应阶段段里。
 
 ## 硬规则
 
-1. **中文一律 `atomic::utf8("...")`**，含自检失败信息。裸中文 = 乱码。
-2. **几何走 `ui::px()/pf()`，字号 `ui::sp()`**，唯一密度旋钮 `ui::scale`。不缩放三处：`numPitches` / gutter / 内联自动化框最小宽度。
-3. **路由只有 `Model/Routing.h`**：`resolve()`（音符）、`resolveSample()`（采样，不看组）、`layerSlotId()`（兜底跳过 sampler）。UI 高亮与引擎调同一份。
-4. **音频线程不读 Layer / NoteEvent / RackModel**：消息线程 `publishSchedule()` 产出不可变 `PublishedSchedule`，锁只覆盖 shared_ptr 赋值。
-5. **改模型后必发 `layersChanged()` / `notesChanged()`**——`pruneOrphanSamplerSlots()` 挂在通知上。撤销 = 整工程快照，粒度**一次鼠标手势**（`beginUndoGesture()`/`endUndoGesture()`）。
-6. **唯一入口**：会话重置 `buildSession()`；删槽 `removeSlotAndItsClips()`；试听分岔 `auditionPreview()`。
-7. **组的形状只按「起点 + 名字」配对**（`clipShapeLess`）——配对键不能是形状编辑自己会改的字段。改了宽度/窗口/曲线/`laneSpan`，一律 `syncShapeOfClip()` / `syncGroupShape()`。
-8. **编组默认是对象，不是容器**（P73）：`enterGroupEdit()` 之前组内按下只回答「整个出现」。状态只有 `editingGroupId`，在 `layersChanged()` 里**无条件**清。
-9. **按下的话事权归「你以为自己在按的东西」**（P75）：`clipEdgeAt` 答 `(id, none)`；组编辑态下组框内的空白不是把手。
-10. **选中一个成员 = 选中它所在的编组**（P74）：`armGroupMove` / `expandToWholeOccurrences` / `addOccurrenceToSelection`。**扩散只在手势层**，不写进 `setMixedSelection`。
-11. **打开不是选择**（P76）：双击进组只改 `editingGroupId`；按在已选中成员上不替换选区（`else if (! isSelected)`）。判据是「谁会被缩放」（`dragResizeNoteId`）。
-12. **双击 = 打开，顺序照绘制顺序**（P78）：采样那一问排在 `hitTestActiveLayer` **之后**。机架卡上**名字是改名、其余是打开**；只有插件槽有窗。
-13. **名字是一份数据，不是一个副本**（P79）：三个名字各一处字段，入口都是**双击那行名字**（`NameEditor`，位置 = `getNameBounds()`）；改名按 **id**。例外只有 `SampleEvent::name`。
-14. **速度一旦会变，时间就是积分**（P80）：唯一换算 `Model/TempoMap`，`secondsPerBeat` 已消失。段内 BPM 线性 ⟹ 求秒取对数、反解取指数；**平坦分支走线性形式**。`renderNextBlock` **每段**重算 `beatsPerSample`。曲线值到 BPM 是 `60·4^v`。
-15. **录制的拍号在事件发生的地方取**（P81）：回调里读 `getPositionBeats()`，**beat 随事件一起**过桥；`finish()` **先读 `writePos` 再 disarm**；写 lane 前必须 `decimateRecordedCurve`（上限 32 点，**少于两点不写**）。
-16. **一条曲线 = 一个形状 + 一个去处**（P82）：`Model/CurveBank` 三不变量——**目标至多归一条**、**列表永不为空**、**用 id 不用下标**。**const 读永不创建**；磁盘上「空」= 没有 `target`。
-17. **两条路径汇到一处，慢的那条不能被拉快**（P83）：`pdc::solve` 是唯一延迟表，补偿只在**汇合点**。**没有插件报延迟 ⟹ 每张表都是 0 ⟹ 渲染逐位等于 P83 之前**，别加「至少 1」兜底。延迟线是记忆体：locate / 停止 / `resetMixState` 都必须清。
-18. **恢复副本是「一份副本」，不是「那个工程」**（P84）：写它的路**绝不能改 `currentProject`**；不变量 = **有未保存编辑且进程没能正常收尾**；走 `File::replaceWithText`（**不要 appendOpen**）；恢复出来的会话**仍算未保存**；**默认关闭**。
-19. **一个类可以住在多个 TU 里，共享辅助必须 inline**（P85）：`UI/PianoRollInternals.h`（`namespace atomic::roll`）；**进不进 internals 的标准是「几个 TU 用」**。
-20. **模型只存绝对路径**（P86）：`Model/SamplePath` 是唯一路径规则层；**相对路径必须解得回原文件才写**；读盘时把修好的位置写回模型；**重定位不许自动发生**。
-21. **循环是一个区间，不是一个标志**（P87）：`Model/LoopRegion`；**开关与数字分开**，关掉不许忘记位置；最短 0.25 拍；**`isUsable()` 是唯一判据**。
-22. **点击是监听，不是声音，也不是定时器**（P88）：`Audio/Metronome` 混进 `renderNextBlock` 的**每个 segment**，`renderInto` 里没有——「导出拿不到点击」是**结构性的**。分句 `ceil(fromBeat - 1e-9)` 让块边界那一拍**只算一次**；**预备拍不改 `positionBeats`**。
-23. **量化是形状的改动，不是位置的搬家**（P90）：`quantize::apply` 是唯一规则——`round` 不是 `floor`、0 与网格 0 都逐位退回、**只改起点**、`moved == 0` 不重绘也不产生撤销步（判据 `1e-9`）。编组先重锚定出现原点，再**无条件** `syncGroupShape`。
-24. **拍号是一个值，不是一个 `constexpr`**（P91）：`Model/Meter.h` 是唯一规则；**`<Transport>` 永远写**；读侧先无条件赋默认再查表；`setBeatsPerBar` 不调 `modelChanged()`。
-25. **拖放的下一个动作由指针底下是什么决定**（P92）：`getGroupReplaceTargetAt` 是唯一判据（预览与松手都调）；**自己组的成员不算目标**；**只认同图层**；锚点是目标的出现原点。
-26. **一个度量只有一个来源**（P93）：`perf::advance` 是唯一负载/峰值规则（平滑 0.2）；**丢帧不自己数**；**峰值不夹到 1.0**；预算来自 `numSamples`；顶栏读 `meter::positionAt`，不许再写字面量 4.0。
-27. **一个 take 有两半，就有两条链、两个偏移**（P94）：监听**默认关**；补偿在 `commitTake` 门口一次做完；`getRecordOffsetSamples` = 输出 + **输入** + 监听链，MIDI 那条 = 输出 + 监听链（**键盘没走过采集缓冲**）；**三项都不看监听开关**；换算**走秒不走拍分数**。
-28. **一遍录音 = 一个容器，只有当前那一遍出声**（P95）：take 集合是**派生的**；入组唯一判据 `Layer::joinTakeSet`（覆盖率按**长**的那段量，0.9 起）；**`setActiveTake` 是唯一写 active 的地方**；发声门在发布（`GroupMix::takeSilent` → `gainAt` 一处），**它不是 mute**；`groups` 是 vector，**不许跨一次录音缓存 `NoteGroup*`**。
-29. **拼接是「把这段换成那一遍的材料」**（P96）：`Model/Comp.h`（`comping`）是唯一规则；**不存 provenance 是设计**；第一次拼接先分一份（`NoteGroup::comp`）；**接缝要的是重叠，不是前后相接**；淡化在原曲线上乘且必须插肩点；切块只走 `splitSampleBlocksRaw`。
-30. **一根柱子只有一个矩形，一次拖动只算一个 delta**（P97）：`Model/VelocityLane.h` 是唯一数值规则（**线性轴**、**地板 0.02 不是 0**）；`velocityBarFor` 是唯一几何（paint / 命中 / 框选都问它）；**lane 里的空白是框选区**；快照夹具必须把它改过的状态还回去。
-31. **说「某功能已有模型」之前先 `grep` 那个符号**（P98）：**「我上次写的」不是证据，源码是**；**能复用就不新建**；要让规则在无声卡环境里咬得动，就把「何时发送」抽成纯函数（`midicc::valueToSend`）。
-32. **一条信号走两条路时，拓扑和延迟是同一个答案**（P99/P100）：`send` 是**并行**的一份，不许指向主输出；`wouldLoop` 是 BFS（`MixerModel::reaches`）；**`pdc::solve` 的边必须带延迟**，排序与延迟表问同一个 `edgeLatency()`；推子前要 `pdcPre`，`pdcExit` 一块只 push 一次；`isSendTarget` 就是 return；**键是「喂探测器的发送」**（存在 `channelKeys[listener]`）；**`noKeySource` 是 -1 不是 0**；**模型查环比发布严**。
-33. **断言的第一步是让被测对象真的被改变**（P101/P102）：夹具要放**会改信号**的插入（`drive`，因为**无状态**）；**非线性插入会让「2 倍」失效**——期望 `single + dry`，dry 要**量出来**；**前提本身要写成断言**；**参照必须量在「被测对象不存在」的那张图里**。`fx::builtInLatency(Type)` 是引擎**唯一**的问题，`lookaheadSamples` 是常量；LIMIT 的增益乘在延迟之后读出来的样本上。**空日志 + 秒退（127）= 帧太大**（`/STACK`）。
-34. **一个读数要三个动作配套**（P103）：发布**取大**、每块**按速率落**、读完**消费**（少一个意思就变，不消费 = 旁通之后表反而**涨**）；换算只有 `fx::gainReductionDb`；记的是**这一块乘下去的最小增益**（不是最后那个、不是 `compEnv`、不含补偿）；表画在**插槽那一行**。
-35. **一个读数会不会自己消失，取决于它记的是状态还是事件**（P104）：状态自己回落 + 读完消费；事件（削波）**闩锁**，只在用户点它或会话被换时清零（`resetMixState` **不碰它**）；**满刻度不是削波**（`>` 不是 `>=`）；通道与主输出是**两盏**灯。
-36. **几何算「有多大」，绘制算「画哪些像素」**（P105）：`getGroupContentBounds` 是组框唯一来源、**不看视口**；「看不见就不画」落在 `drawGroupBands` / `drawGroupFrames` 里各一次 `intersects(area)`；pill 两条互补规则（左沿夹紧、整组不可见时答空）。**未修**：`getGroupBeatSpan` 不扫块。
-37. **不要往别人的窗口里塞宿主的东西**（P107）：插件窗口的 content **就是插件编辑器**；`AuditionStrip` 与 `EditorHost` 已随 P106 **一起删**——**一个只为一件事存在的中间层，那件事没了就该一起没**。要加「能看见的预览」，找**不占插件像素**的地方。**撤回也要按改动来验**：断言（`MIN_CHECKS`）、快照帧、文档一起撤。
-38. **默认值不是一种形状，是「还没有人改过」**（P108）：`NoteEnvelope::defaultFlatValue = 0.8f` 是**唯一那个数**，三个读者共用；**中性点不是全局常量**（音符 0.8 / 采样块 1.0 且停用 / 声相 0.5）；存盘不动。快照：**拷帧按清单不按 `glob`**，判据是**帧名集合与上一轮逐字符相等**；`-recovery` 印时间戳，**跨轮永远不同**。
-39. **换一种画法，不是加一层东西**（P109）：总览把音高维收掉，**网格 x 与高度都不动**；不画琴键，那一列改成名字 + 色条；**带号 == 图层号，不过滤**；眼睛只改亮度；**只读判据是一行**（`handlePress` 导航之后、编辑之前）。条带**两条边各自取整**。**「按了没反应」证明不了只读**。提示撞读数时**把句子改短**，别夹到读数左边。
-40. **保留一维要先定它的口径**（P110）：**行 = 这一层用到的不同音高**（`overviewRowPitches`，降序），**行高等分**；**行表按图层算不按视口算**；行表传 `nullptr` = 折叠（**折叠不是第二条绘制路径**）；线厚 = min(条带三成, **行高 55%**) 夹 1.5–5；**rank 0 在 `band.getY()` 那一侧**；默认展开。代价：**行距跨层不可比**。
-41. **一个开关回答的是「每层各自」的事，就该每层一个**（P111）：`std::set<int> foldedOverviewLayers` **存图层 id 不存带号**；三个入口（左列三角 / 菜单子项 / 工具栏第 12 颗）；**绘制·命中·光标问同一个 `getOverviewFoldToggleBounds`**（答空 = 这里没有可点的东西）；视图状态不存盘。
-42. **「它没有 X」和「它有 X」一样，都要先 grep 结构体**（P112）：`SampleEvent` 有 `pitch` / `laneSpan`；**一层的行 = 音符音高 ∪ 块占的 `pitch..pitch+laneSpan-1`**；块**盖它的行，不坐在某行上**；块墨 0.20/0.55；**断言「重叠」必须同时断言「错开」**。
-43. **一条带占多高，取决于别人折没折**（P113）：带宽是**整摞**的派生量（先数 `folded` / `open`）；**`1/N` 不是不变量**，只是「没人折」的特例；折一层会让它下面的带全部上移，**缓存的箭头/命中坐标当场失效**；两条边各自取整。
-44. **「一条线的宽度」是一个数，要从被描述的东西推出来**（P114）：`thin = min(7 设计像素, 等分)`，**7 = 线厚上限 5 + 上下各一像素缝**；**带是因、线是果**（`band*0.30` 在 count==1 时就是带高三成）；折叠态判据是 **`rows == nullptr`** 不是 `count == 1`；**开关不许消失但可以换形状**（整条带就是按钮），判据是「三角真的装不下 **且** 折着」，三角按**短边**量尺。
-45. **一个只在部分情况下生效的折叠，不叫折叠**（P115）：`open == 0`（工具栏第 12 颗 / 菜单第 8 项 / **单层工程**）不再回等分——折着的带永远是 `thin`，从顶边摞下来，**下面空着**；`share` 的 `open == 0` 分支**不可达**（只为防 0/0），改动它**测不出来**；**断言里同时有「折叠前/后」的量时，先问凭什么相等**。跨轮比帧要编**同期对照**（stash 源码重编跑一遍），抖动集只是**下界**。
-46. **「重叠」是一个区间运算**（P116）：折叠带把该层区间**取并集**（相接或相交合成一段，判据 `<=` 不是 `<`），一段一条线、一个起点头，不相邻的空白留着；**只对折叠带生效**（未折叠时音高就是行）；线厚走 `overviewFoldedLine`，**合并段与单音符线逐点相同**；段亮度取**最暗的 take**。**等价变异不是咬测**——先问它会不会改变输出。**摆总览夹具先算高度**（只有一层展开时它吃掉整个窗口）。
+1. 中文一律 `atomic::utf8("...")`（含自检失败信息）；裸中文 = 乱码。
+2. 几何 `ui::px()/pf()`、字号 `ui::sp()`，唯一旋钮 `ui::scale`；不缩放：`numPitches` / gutter / 内联自动化框最小宽。
+3. 路由只有 `Model/Routing.h`（`resolve` / `resolveSample` 不看组 / `layerSlotId` 兜底跳 sampler）；UI 与引擎问同一份。
+4. 音频线程不读 Layer / NoteEvent / RackModel：消息线程 `publishSchedule()` 出不可变 `PublishedSchedule`，锁只盖 shared_ptr 赋值。
+5. 改模型必发 `layersChanged()` / `notesChanged()`；撤销 = 整工程快照、粒度一次手势（`beginUndoGesture`/`endUndoGesture`）。
+6. 唯一入口：`buildSession()` 会话重置、`removeSlotAndItsClips()` 删槽、`auditionPreview()` 试听。
+7. 组的形状只按「起点 + 名字」配对（`clipShapeLess`）；改了宽/窗/曲线/`laneSpan` 一律 `syncShapeOfClip()` / `syncGroupShape()`。
+8. 编组默认是对象不是容器（P73）：状态只有 `editingGroupId`，`layersChanged()` 里无条件清。
+9. 按下的话事权归「你以为自己在按的东西」（P75）：`clipEdgeAt` 答 `(id, none)`；组框里的空白不是把手。
+10. 选中一个成员 = 选中它所在的编组（P74）；扩散只在手势层，不写进 `setMixedSelection`。
+11. 打开不是选择（P76）：判据是「谁会被缩放」（`dragResizeNoteId`）。
+12. 双击 = 打开，顺序照绘制顺序（P78）；机架卡上名字是改名、其余是打开。
+13. 名字是一份数据不是副本（P79）：入口都是双击那行名字（`NameEditor`），改名按 id。
+14. 速度一旦会变，时间就是积分（P80）：唯一换算 `Model/TempoMap`；`renderNextBlock` 每段重算 `beatsPerSample`。
+15. 录制的拍号在事件发生处取（P81）：beat 随事件过桥；`finish()` 先读 `writePos` 再 disarm。
+16. 一条曲线 = 一个形状 + 一个去处（P82）：`Model/CurveBank` 目标至多归一、列表永不为空、用 id 不用下标；const 读永不创建。
+17. 两条路径汇到一处，慢的那条不能被拉快（P83）：`pdc::solve` 是唯一延迟表，补偿只在汇合点；没有延迟就全 0，别加兜底。
+18. 恢复副本是「一份副本」（P84）：写它绝不改 `currentProject`；走 `File::replaceWithText`；默认关。
+19. 一个类可以住多个 TU，共享辅助必须 inline（P85，`UI/PianoRollInternals.h`）；判据是「几个 TU 用」。
+20. 模型只存绝对路径（P86）：`Model/SamplePath` 是唯一路径层；重定位不许自动发生。
+21. 循环是一个区间不是标志（P87）：`Model/LoopRegion`；开关与数字分开；`isUsable()` 是唯一判据。
+22. 点击是监听（P88）：`Audio/Metronome` 混进 `renderNextBlock` 每段，`renderInto` 里没有；预备拍不改 `positionBeats`。
+23. 量化是形状的改动不是搬家（P90）：`quantize::apply` 唯一；`moved == 0` 不重绘不撤销；编组先重锚定再 `syncGroupShape`。
+24. 拍号是一个值（P91）：`Model/Meter.h` 唯一；`<Transport>` 永远写；读侧先赋默认再查表。
+25. 拖放的下一个动作由指针底下是什么决定（P92）：`getGroupReplaceTargetAt` 唯一判据（预览与松手都调）。
+26. 一个度量只有一个来源（P93）：`perf::advance` 唯一；丢帧不自己数；峰值不夹 1.0；顶栏读 `meter::positionAt`。
+27. 一个 take 两半 ⟹ 两条链两个偏移（P94）：补偿在 `commitTake` 门口一次做完；三项都不看监听开关；换算走秒。
+28. 一遍录音 = 一个容器，只有当前那遍出声（P95）：入组唯一判据 `Layer::joinTakeSet`；`setActiveTake` 唯一写 active；发声门在 `gainAt`，它不是 mute。
+29. 拼接是「把这段换成那一遍的材料」（P96）：`Model/Comp.h` 唯一；第一次拼接先分一份；接缝要重叠不是相接。
+30. 一根柱子只有一个矩形（P97）：`velocityBarFor` 是唯一几何；lane 空白是框选区；夹具要把改过的状态还回去。
+31. 说「已有模型」前先 grep 那个符号（P98）：「我上次写的」不是证据；能复用就不新建。
+32. 一条信号两条路 ⟹ 拓扑与延迟同一答案（P99/P100）：`pdc::solve` 的边必须带延迟；`noKeySource` 是 -1；模型查环比发布严；send 不许指主输出。
+33. 断言的第一步是让被测对象真的被改变（P101/102）：前提写成断言；参照量在「被测对象不存在」那张图里；空日志 + 秒退 127 = 帧太大。
+34. 一个读数要三个动作配套（P103）：发布取大、按速率落、读完消费；换算只有 `fx::gainReductionDb`。
+35. 读数会不会自己消失看它记状态还是事件（P104）：削波闩锁，`resetMixState` 不碰它；满刻度不是削波（`>`）。
+36. 几何算「多大」，绘制算「画哪些像素」（P105）：`getGroupContentBounds` 不看视口；「看不见不画」落在绘制循环里。
+37. 不要往别人的窗口里塞宿主的东西（P107）：只为一件事存在的中间层，那件事没了就一起删；撤回连断言/帧/文档一起撤。
+38. 默认值不是一种形状，是「还没人改过」（P108）：`NoteEnvelope::defaultFlatValue = 0.8f` 唯一；中性点不是全局常量；拷帧按清单不按 glob。
+39. 换一种画法，不是加一层东西（P109）：总览网格 x 与高度都不动；带号==图层号不过滤；只读判据是一行；「按了没反应」证明不了只读。
+40. 保留一维先定口径（P110）：行 = 这层用到的不同音高等分；行表按图层不按视口；`rows == nullptr` = 折叠 = `count == 1`，不是第二条路径。
+41. 「每层各自」的开关就该每层一个（P111）：`foldedOverviewLayers` 存图层 id 不存带号；绘制/命中/光标问同一个函数。
+42. 「它没有 X」也要先 grep 结构体（P112）：块盖它的行不坐在行上；断言「重叠」必须同时断言「错开」。
+43. 一条带多高取决于别人折没折（P113）：带宽是整摞派生量；折一层让下面全部上移，缓存的命中坐标当场失效。
+44. 「一条线的宽度」要从被描述的东西推出来（P114）：`thin = min(7 设计像素, 等分)`；开关不许消失但可以换形状。
+45. 只在部分情况下生效的折叠不叫折叠（P115）：折着的带永远 `thin`，从顶边摞、下面空着；跨轮比帧要编同期对照。
+46. 「重叠」是区间运算（P116）：折叠带取并集（相接算，`<=` 不是 `<`），一段一条线一个头；等价变异不是咬测。
+47. 一个手势动三个东西，顺序就是规则（P117）：`openOverviewBand` = 先在带上读拍与音高 → `setActiveLayerIndex`（会通知会夹滚动，故在摆视口前）→ 退总览 → `centreViewOnBeat`（自己夹到 `timelineBeats - visible`，`setScrollBeats` 会把标尺变长）+ `revealPitch`（只揭示不居中）→ `onLocateRequested`（视图不写 `playheadBeat`）。空白不是带，折叠带不猜音高。
 
 ## 索引
 - 目录结构、构建命令（含 `unset *proxy*`）、CI 门禁、`formatVersion` 逐版字段、快照夹具 —— `STATUS.md` / `REFERENCE.md`。

@@ -22246,6 +22246,267 @@ juce::String MainComponent::runSelfTest()
                                       : juce::String()));
     }();
 
+    //== Phase 117: 双击一条带 = 打开那一层、去那个时间点 ====================
+    // 用户原话：「在总览界面里，双击某个图层的某个时间点，则打开该图层并将播放头
+    // 放在该时间点，视口也相应地移过去（要考虑视口因为时间长短的缘故无法完全移过
+    // 去的情况）」。
+    //
+    // 三件事，一件都不能少：**打开**（活动层换成带号那一层，模式退出——带是提示，
+    // 钢琴窗才是能编辑的那张）、**播放头**（走宿主那一个入口 `onLocateRequested`，
+    // 和标尺拖动是同一条路）、**视口**（目标拍放到窗口正中；夹在标尺两端以内，因为
+    // `setScrollBeats` 会在越过尾巴时**把标尺变长**——一个「去看看」的手势不该改工
+    // 程的时间长度）。
+    //
+    // 钉八件事：三条带各自答对自己的号 / 双击第 1 层 20 拍 → 离开总览 + 活动层换了
+    // / 目标拍落在窗口正中 / 近尾处夹住且标尺不变长 / 带下方的空白双击什么都不做 /
+    // 折叠带双击仍打开但不猜音高 / 这一下不是编辑（不加音符、不选中）/ 行反查：段的
+    // 中心答回它自己的音高。
+    [&]
+    {
+        LayerStack stack;
+        RackModel  rack;
+
+        stack.addLayer (utf8 ("单音"), palette::layer1);
+        stack.addLayer (utf8 ("双音"), palette::layer2);
+        stack.addLayer (utf8 ("四音"), palette::layer3);
+
+        auto* l1 = stack.getLayer (0);
+        auto* l2 = stack.getLayer (1);
+        auto* l4 = stack.getLayer (2);
+
+        l1->addNote ({ 0, 60, 0.0, 2.0, 0.8f });
+
+        // 两行：79 在上、72 在下。
+        l2->addNote ({ 0, 72, 16.0, 4.0, 0.8f });
+        l2->addNote ({ 0, 79, 28.0, 4.0, 0.8f });
+
+        // 四行，音高从高到低 67 / 60 / 55 / 48，全部落在 8..12 这一列上——行反查
+        // 要的是「同一个 y 只指一个音高」，所以四行都得有点东西。
+        const int n67 = l4->addNote ({ 0, 67, 8.0, 4.0, 0.8f });
+        const int n60 = l4->addNote ({ 0, 60, 8.0, 4.0, 0.8f });
+        const int n55 = l4->addNote ({ 0, 55, 8.0, 4.0, 0.8f });
+        const int n48 = l4->addNote ({ 0, 48, 8.0, 4.0, 0.8f });
+
+        stack.setActiveLayerIndex (0);
+
+        PianoRollComponent roll (stack, rack);
+        roll.setSize (1100, 420);
+        roll.setScrollBeats (0.0);
+        roll.setOverviewMode (true);
+
+        double located = -1.0;
+        int    locates = 0;
+
+        roll.onLocateRequested = [&] (double beats)
+        {
+            located = beats;
+            ++locates;
+        };
+
+        const auto grid = roll.getGridBounds();
+        auto bandOf = [&] (int i) { return roll.getOverviewBandBounds (i); };
+
+        //-- (1) 前提：带号 == 图层号，三条带各自答对自己的号 ----------------
+        const bool bandsAnswerThemselves =
+               roll.getOverviewBandAt ({ grid.getX() + 20.0f, bandOf (0).getCentreY() }) == 0
+            && roll.getOverviewBandAt ({ grid.getX() + 20.0f, bandOf (1).getCentreY() }) == 1
+            && roll.getOverviewBandAt ({ grid.getX() + 20.0f, bandOf (2).getCentreY() }) == 2;
+
+        check (utf8 ("（前提）三条带各自答对自己的号，活动层是 0，视口在 0"),
+               bandsAnswerThemselves
+                 && stack.getActiveLayerIndex() == 0
+                 && std::abs (roll.getScrollBeats()) < 1.0e-9
+                 && roll.isOverviewMode(),
+               juce::String (roll.getOverviewBandAt ({ grid.getX() + 20.0f, bandOf (0).getCentreY() }))
+                 + " / " + juce::String (roll.getOverviewBandAt ({ grid.getX() + 20.0f, bandOf (1).getCentreY() }))
+                 + " / " + juce::String (roll.getOverviewBandAt ({ grid.getX() + 20.0f, bandOf (2).getCentreY() })));
+
+        //-- (2) 双击第 1 层 20 拍：打开那一层 -------------------------------
+        const int notesBefore = (int) l1->getNotes().size() + (int) l2->getNotes().size()
+                                  + (int) l4->getNotes().size();
+
+        const auto point20 = juce::Point<float> (roll.screenXForBeatForTest (20.0),
+                                                 bandOf (1).getCentreY());
+
+        roll.simulateDoubleClickForTest (point20);
+
+        check (utf8 ("双击第 1 层的 20 拍：离开总览、活动层换成第 1 层、宿主收到 20 拍"),
+               ! roll.isOverviewMode()
+                 && stack.getActiveLayerIndex() == 1
+                 && locates == 1
+                 && std::abs (located - 20.0) < 1.0e-6,
+               juce::String (stack.getActiveLayerIndex()) + utf8 (" 层 / 模式 ")
+                 + (roll.isOverviewMode() ? "on" : "off") + utf8 (" / 定位 ")
+                 + juce::String (located, 3) + utf8 (" x") + juce::String (locates));
+
+        //-- (3) 视口：目标拍落在窗口正中 ------------------------------------
+        // 带与钢琴窗共用同一条时间轴，所以这一点**本来就在屏幕上**。这一条测的不是
+        // 「让它可见」，而是「别把它留在你恰好点到的那个角落」——顺带把「视口真的动
+        // 了」也写成断言，否则一个根本没滚的实现也会绿。
+        const double visibleBeats = roll.getVisibleBeats();
+        const double centreOfView  = roll.getScrollBeats() + visibleBeats * 0.5;
+
+        check (utf8 ("视口移过去：目标拍落在窗口正中，而且真的动了"),
+               roll.getScrollBeats() > 1.0e-6
+                 && std::abs (centreOfView - 20.0) < 0.01,
+               utf8 ("中心 ") + juce::String (centreOfView, 2)
+                 + utf8 (" / 滚动 ") + juce::String (roll.getScrollBeats(), 2));
+
+        //-- (4) 这一下不是编辑 ----------------------------------------------
+        // 「打开」不是「动工程」。P109 的只读管的是网格上的按压，这一条管双击：它
+        // 换的是看的方式和播放头，不是任何一个模型字段。
+        check (utf8 ("双击不是编辑：不多不少一个音符，也没留下选中"),
+               (int) l1->getNotes().size() + (int) l2->getNotes().size()
+                 + (int) l4->getNotes().size() == notesBefore
+                 && roll.getSelection().empty()
+                 && roll.getEditingGroupId() < 0,
+               juce::String ((int) roll.getSelection().size()) + utf8 (" 个选中"));
+
+        //-- (5) 近尾：视口停在能停的地方，标尺不变长 ------------------------
+        // 55 拍在 64 拍的时间轴上，居中要滚到 55 - 可见/2；尾巴只剩 9 拍，装不下半个
+        // 窗口，于是只能夹到 `64 - 可见`。判据两半：**夹对了**，而且**没有顺手把标尺
+        // 撑成 128**（est 64 → 128 是 ensureTimelineExtendsTo 的一个 chunk）。
+        roll.setOverviewMode (true);
+        roll.setScrollBeats (40.0);
+
+        const double tailVisible = roll.getVisibleBeats();
+        const double tailMax     = juce::jmax (0.0, roll.getTimelineBeats() - tailVisible);
+
+        const auto point55 = juce::Point<float> (roll.screenXForBeatForTest (55.0),
+                                                 bandOf (0).getCentreY());
+
+        roll.simulateDoubleClickForTest (point55);
+
+        check (utf8 ("近尾处视口夹在 64 拍以内：不居中，但播放头仍在窗口里，标尺没被撑长"),
+               std::abs (roll.getScrollBeats() - tailMax) < 1.0e-6
+                 && std::abs (roll.getTimelineBeats() - 64.0) < 1.0e-9
+                 && std::abs (located - 55.0) < 1.0e-6
+                 && located >= roll.getScrollBeats() - 1.0e-9
+                 && located <= roll.getScrollBeats() + tailVisible + 1.0e-9,
+               utf8 ("滚动 ") + juce::String (roll.getScrollBeats(), 2)
+                 + " / " + juce::String (tailMax, 2)
+                 + utf8 (" · 标尺 ") + juce::String (roll.getTimelineBeats(), 1)
+                 + utf8 (" · 拍 ") + juce::String (located, 2));
+
+        //-- (6) 带下方的空白：什么都不做 ------------------------------------
+        // P115 让全折的一摞从顶边摞下来、下面空着。那片空白**不是带**：一个「去那儿」
+        // 的手势得先有一个「那儿」。
+        roll.setOverviewMode (true);
+
+        for (int i = 0; i < roll.getOverviewBandCount(); ++i)
+            roll.setOverviewFolded (i, true);
+
+        const auto  emptyPoint = juce::Point<float> (grid.getCentreX(), grid.getBottom() - 4.0f);
+        const int   layerBefore = stack.getActiveLayerIndex();
+        const int   locatesBefore = locates;
+
+        roll.simulateDoubleClickForTest (emptyPoint);
+
+        check (utf8 ("带下方的空白双击：模式、活动层、定位一格都不动"),
+               roll.isOverviewMode()
+                 && stack.getActiveLayerIndex() == layerBefore
+                 && locates == locatesBefore
+                 && roll.getOverviewBandAt (emptyPoint) < 0,
+               juce::String (roll.getOverviewBandAt (emptyPoint)) + utf8 (" 号带"));
+
+        //-- (7) 折叠带：仍然打开，但不猜音高 --------------------------------
+        // 折叠之后一条带只有**一行**，那一行不是音高（P110）。拿层的平均音高当答案
+        // 是凭空造一个画面从没给过的数，所以纵向一格不动是正确行为，不是偷懒。
+        for (int i = 0; i < roll.getOverviewBandCount(); ++i)
+            roll.setOverviewFolded (i, false);
+
+        roll.setOverviewFolded (2, true);
+
+        // Back to the top: (5) left the window at the far end, and 12 拍 has to be
+        // on screen for a double click to have anywhere to land.
+        roll.setScrollBeats (0.0);
+
+        const auto  foldedBand = bandOf (2);
+        const float scrollYBefore = roll.getScrollYForTest();
+        const int   locatesInFold = locates;
+
+        roll.simulateDoubleClickForTest ({ roll.screenXForBeatForTest (12.0),
+                                           foldedBand.getCentreY() });
+
+        check (utf8 ("折叠带双击：照样打开并定位，但不猜音高（纵向不动）"),
+               ! roll.isOverviewMode()
+                 && stack.getActiveLayerIndex() == 2
+                 && locates == locatesInFold + 1
+                 && std::abs (located - 12.0) < 1.0e-6
+                 && std::abs (roll.getScrollYForTest() - scrollYBefore) < 0.01f,
+               utf8 ("层 ") + juce::String (stack.getActiveLayerIndex())
+                 + utf8 (" / 定位 ") + juce::String (located, 2)
+                 + utf8 (" / 纵向 ") + juce::String (roll.getScrollYForTest(), 1)
+                 + " vs " + juce::String (scrollYBefore, 1));
+
+        //-- (8) 行反查：段的中心答回它自己的音高 ----------------------------
+        // 这是 `overviewPitchAt` 与 `overviewSegmentOf` 互为逆的收据：四条线各自落在
+        // 自己那一行上，所以把它们的**中心**喂回去，必须拿到各自的音高。两个函数各算
+        // 一遍可以，但算出来的必须是同一件事。
+        roll.setScrollBeats (0.0);
+        roll.setOverviewMode (true);
+
+        for (int i = 0; i < roll.getOverviewBandCount(); ++i)
+            roll.setOverviewFolded (i, false);
+
+        struct RowCase { int noteId; int pitch; };
+        const RowCase rowCases[] { { n67, 67 }, { n60, 60 }, { n55, 55 }, { n48, 48 } };
+
+        bool   rowsAgree = true;
+        juce::String rowDetail;
+
+        for (const auto& rc : rowCases)
+        {
+            const auto at = roll.getOverviewSegmentBounds (2, rc.noteId).getCentre();
+            const int  got = roll.getOverviewPitchAt (2, at);
+
+            rowsAgree = rowsAgree && got == rc.pitch;
+            rowDetail << (rowDetail.isEmpty() ? "" : " ") << got << "/" << rc.pitch;
+        }
+
+        check (utf8 ("行反查：每一条线段的中心都答回它自己的音高"),
+               rowsAgree, rowDetail);
+
+        // 一行是一个**格子**，不是一个中心点：线画在格子的正中，可一个像素落在格子
+        // 里的任何位置都该答这一格。取「上格中心往下 1.2 格」那个点——它离带顶 1.7
+        // 格，落在第二格（音高 60）里，而 `round` 会把它算到第三格（55）去。
+        const auto c67 = roll.getOverviewSegmentBounds (2, n67).getCentre();
+        const auto c55 = roll.getOverviewSegmentBounds (2, n55).getCentre();
+        const float rowGap = std::abs (c55.y - c67.y) * 0.5f;     // 67 到 55 是两格
+
+        const int inCell = roll.getOverviewPitchAt (2, { c67.x, c67.y + rowGap * 1.2f });
+
+        check (utf8 ("行的边界按格子算：离带顶 1.7 格是第二格（floor，不是 round）"),
+               std::abs (inCell - 60) < 0.5,
+               juce::String (inCell) + utf8 (" / 期望 60 · 格高 ")
+                 + juce::String (rowGap, 2));
+
+        //-- (9) 纵向：点到的那一行跟着进窗口 --------------------------------
+        // 「打开该图层」如果只对了时间、对了层，而那一行还在窗口外，用户看到的是一
+        // 片空网格——他点的那个音符在哪？所以纵向也要移，但只**揭示**、不居中：已经
+        // 看得见的东西不该因为一次跳转被重新排布。
+        //
+        // 前提写成断言：第 2 层最低那一行（48）此刻**在窗口外**——默认视口停在 C5
+        // 附近，48 远在下面。前提不成立的话这一条会在一个什么都看不出来的夹具上变绿。
+        const auto gridNow = roll.getGridBounds();
+        const auto lowRowPoint = roll.getOverviewSegmentBounds (2, n48).getCentre();
+
+        const float lowRowYBefore = roll.screenYForPitchForTest (48);
+        const bool  wasOffScreen  = lowRowYBefore > gridNow.getBottom() + 0.01f;
+
+        roll.simulateDoubleClickForTest (lowRowPoint);
+
+        const float lowRowYAfter = roll.screenYForPitchForTest (48);
+
+        check (utf8 ("（前提）48 那一行本来在窗口外；双击它之后它在窗口里"),
+               wasOffScreen
+                 && lowRowYAfter >= gridNow.getY() - 0.01f
+                 && lowRowYAfter + PianoRollComponent::keyHeight <= gridNow.getBottom() + 0.01f,
+               juce::String (lowRowYBefore, 1) + utf8 (" -> ") + juce::String (lowRowYAfter, 1)
+                 + utf8 (" / 窗口 ") + juce::String (gridNow.getY(), 1) + ".."
+                 + juce::String (gridNow.getBottom(), 1));
+    }();
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

@@ -2490,6 +2490,70 @@ juce::Image MainComponent::createOverviewMergeSnapshot (int width, int height)
 }
 
 //==============================================================================
+juce::Image MainComponent::createOverviewJumpSnapshot (int width, int height)
+{
+    // Phase 117: 双击一条带 = 打开那一层、去那个时间点。A gesture cannot appear in
+    // a still, so the frame shows its RESULT, and the fixture is built so that the
+    // result could not have come from anywhere else:
+    //
+    //   * three layers with different content, so "which sheet opened" is
+    //     readable rather than inferred;
+    //   * the window starts near the right edge of the target (scroll 20) so the
+    //     centring is a visible move, not a no-op — a frame taken from a jump
+    //     that did not have to scroll would prove nothing about scrolling;
+    //   * the target beat is 26 with a melody either side of it, so an off-by-a-
+    //     window jump would be obvious in the picture (the notes would be cut).
+    LayerStack showStack;
+    RackModel  showRack;
+
+    showStack.addLayer (utf8 ("铺底"), palette::layer2);
+    showStack.addLayer (utf8 ("旋律"), palette::layer1);
+    showStack.addLayer (utf8 ("打击"), palette::layer4);
+
+    // Layer 0: long held notes, one per two bars. Nothing here is subtle — it is
+    // the sheet you would NOT be looking at after the click.
+    for (int i = 0; i < 6; ++i)
+        showStack.getLayer (0)->addNote ({ 0, 48, (double) i * 8.0, 7.0, 0.8f });
+
+    // Layer 1: the one the double click lands on. A rising phrase across beats
+    // 20..32, so the playhead at 26 sits inside the music rather than after it.
+    const int melody[8] { 60, 64, 67, 72, 71, 67, 64, 60 };
+
+    for (int i = 0; i < 8; ++i)
+        showStack.getLayer (1)->addNote ({ 0, melody[i], 20.0 + (double) i * 1.5, 1.2, 0.8f });
+
+    // Layer 2: a row of short hits, so the three bands are told apart at a glance
+    // in the overview even in a frame that no longer shows the overview.
+    for (int i = 0; i < 12; ++i)
+        showStack.getLayer (2)->addNote ({ 0, 36, (double) i * 4.0, 0.25, 0.8f });
+
+    showStack.setActiveLayerIndex (0);
+
+    PianoRollComponent showRoll (showStack, showRack);
+    showRoll.setSize (width, height);
+    showRoll.setBeatWidth (ui::pf (44.0f));
+    showRoll.setScrollBeats (20.0);
+
+    // The host's half of the gesture, wired as MainComponent wires it: the view
+    // reports the beat, the transport moves. Without this the frame would show
+    // the jump with no playhead in it.
+    showRoll.onLocateRequested = [&showRoll] (double beats)
+    {
+        showRoll.setPlayheadBeat (beats);
+        showRoll.setTransportActive (true);
+    };
+
+    showRoll.setOverviewMode (true);
+
+    const auto band = showRoll.getOverviewBandBounds (1);
+
+    showRoll.simulateDoubleClickForTest ({ showRoll.screenXForBeatForTest (26.0),
+                                           band.getCentreY() });
+
+    return showRoll.createComponentSnapshot (showRoll.getLocalBounds(), true);
+}
+
+//==============================================================================
 juce::Image MainComponent::createPerfSnapshot()
 {
     // A headless run has no sound card, so the meter is fed by hand — through

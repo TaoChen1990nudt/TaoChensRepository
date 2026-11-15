@@ -1466,6 +1466,12 @@ public:
         pitch row that belongs to the group's band" needs the row's own y. */
     float screenYForPitchForTest (int pitch) const noexcept { return screenYForPitch (pitch); }
 
+    /** Phase 117: the vertical scroll, as a number. The horizontal one has had a
+        public getter since Phase 11 (`getScrollBeats`); "the viewport moved
+        there" is half a claim without this, and a test that only checked the
+        beat would pass on a jump that left the note off screen. */
+    float getScrollYForTest() const noexcept { return scrollY; }
+
     /** Phase 87: the whole gesture, from press to report, without a MouseEvent.
         The three parts are the three the real handler runs — press decides which
         of the four gestures it is, the drag applies it, the release reports —
@@ -1596,6 +1602,27 @@ public:
         row, so every block covers the whole stripe, which is what Phase 109
         drew unconditionally. */
     juce::Rectangle<float> getOverviewSampleBounds (int layerIndex, int sampleId) const;
+
+    /** Phase 117: which band is under `position` — the whole grid's width, not
+        just the left column. -1 for "no band here": the mode is off, the point
+        is left of the grid, or it is in the empty space a collapsed stack leaves
+        at the bottom (Phase 115 — the strips pack against the top edge and
+        stop, so the window below them is not a band).
+
+        Band 3 IS layer 3 (Phase 109), so this is also the answer to "which layer
+        did I just double click". */
+    int getOverviewBandAt (juce::Point<float> position) const;
+
+    /** Phase 117: the pitch a point in band `layerIndex` sits on, or -1.
+
+        The band's rows ARE pitches (Phase 110/112), so a y inside it names one.
+        This is the inverse of the rank arithmetic `overviewSegmentOf` uses to
+        place a line, which is what makes "double click that note" land on that
+        note rather than merely at that time.
+
+        -1 when the band is folded: one row is not a pitch, and the average of
+        the layer's notes is an answer the picture never showed. */
+    int getOverviewPitchAt (int layerIndex, juce::Point<float> position) const;
 
     /** Phase 110/111: does band `layerIndex` keep the pitch axis?
 
@@ -2208,6 +2235,30 @@ private:
         handler and the cursor both ask this, so a click and the pointing hand
         can never disagree about where the buttons are. */
     int overviewFoldToggleAt (juce::Point<float> point) const;
+
+    /** Phase 117: the double click's whole job — 打开该图层并将播放头放在该
+        时间点，视口也相应地移过去.
+
+        Five steps, in this order for a reason: read the beat and the pitch off
+        the band WHILE it is still a band (the y axis is about to change
+        meaning), switch the sheet, leave the mode, place the window, and hand
+        the playhead to the host. The last step is the same call the ruler makes
+        (`scrubRulerTo`), so a jump and a scrub cannot disagree about what
+        locating means. */
+    void openOverviewBand (int layerIndex, juce::Point<float> position);
+
+    /** Phase 117: put `beat` in the middle of the window, as far as the ruler
+        allows. The clamp is the point of the function — `setScrollBeats` GROWS
+        the ruler when asked to scroll past its end (`ensureTimelineExtendsTo`),
+        and a gesture that only wants to look somewhere must never lengthen the
+        project to get there. */
+    void centreViewOnBeat (double beat);
+
+    /** Phase 117: bring `pitch` into the window if it is outside it, and do
+        nothing if it is not. Not "centre the pitch": the vertical view is the
+        user's own map, and a jump that rearranges what was already on screen is
+        a jump that did not need to happen. */
+    void revealPitch (int pitch);
 
     //-- Phase 17: audio clips ------------------------------------------------
     /** P79: `sample.name`, plus "→ sampler" when the block is mounted somewhere

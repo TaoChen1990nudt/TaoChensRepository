@@ -361,6 +361,10 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
     // box, enter a group. The bands answer none of them, by request ("不能编辑，
     // 只显示作为提示"), and the place to say so is one line here rather than a
     // condition sprinkled through thirty branches.
+    //
+    // Phase 117 did not open this door: a double click on a band now goes
+    // somewhere (see handleDoubleClick), but that is a PRESS question — the
+    // press that precedes it, and every press after it, still answers nothing.
     if (overviewMode)
         return;
 
@@ -939,11 +943,26 @@ void PianoRollComponent::handleDoubleClick (juce::Point<float> pos)
     if (! getGridArea().contains (pos))
         return;
 
-    // Phase 109: opening is an edit. In the overview a band has nothing to open,
-    // and a double click that reached the branches below would open the editor
-    // for a note the view deliberately does not make editable.
+    //-- Phase 117: 双击一条带 = 去那儿 --------------------------------------
+    // P109 made the overview read-only and this branch was `return;` — "a band
+    // has nothing to open". Phase 117 gives it the one thing it does have: a
+    // place and a layer. A double click opens that sheet, puts the playhead on
+    // that beat and brings the window with it; what it still must NOT do is any
+    // of the editing the branches below would do (draw, move, open a note
+    // editor, enter a group), which is why this stays above them and returns.
+    //
+    // A point that is not on a band — the empty window under a collapsed stack
+    // (Phase 115), or the gap after the last stripe — does nothing at all. "Go
+    // there" needs a there.
     if (overviewMode)
+    {
+        const int band = getOverviewBandAt (pos);
+
+        if (band >= 0)
+            openOverviewBand (band, pos);
+
         return;
+    }
 
     //-- Phase 73: 双击 = 打开组。空白处双击 = 关掉它 ------------------------
     // The order is the whole behaviour: members first (open or switch), then the
