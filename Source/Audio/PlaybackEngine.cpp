@@ -2,6 +2,7 @@
 
 #include "PluginHost.h"
 
+#include "Audio/OverloadLatch.h"
 #include "Model/AutomationStack.h"
 #include "Model/Routing.h"
 
@@ -247,6 +248,14 @@ PlaybackEngine::PlaybackEngine()
 
     for (auto& meter : masterMeters)
         meter.store (0.0f);
+
+    // Phase 104: `std::atomic<bool>` has no initialising default constructor, so
+    // an array of them starts as thirty-two indeterminate booleans. "Probably
+    // false" is not a state a clip lamp is allowed to be in on the first frame.
+    for (auto& lamp : channelClip)
+        lamp.store (false, std::memory_order_relaxed);
+
+    masterClip.store (false, std::memory_order_relaxed);
 
     mixScratch.setSize (2, 1024);
 
@@ -2902,6 +2911,13 @@ void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numS
                       std::memory_order_relaxed);
         meterR.store (juce::jmax (meterR.load (std::memory_order_relaxed), entry.right),
                       std::memory_order_relaxed);
+
+        // Phase 104: the peak a strip is about to show is also the answer to
+        // "did it clip", so the latch is set here rather than in a second pass
+        // over the same samples. One scan, two readers — the same bargain
+        // `channelPeaks` already makes with the meters.
+        if (overload::isClipped (entry.left) || overload::isClipped (entry.right))
+            channelClip[(size_t) entry.channel].store (true, std::memory_order_relaxed);
     }
 
     for (int ch = 0; ch < 2; ++ch)
@@ -2909,10 +2925,17 @@ void PlaybackEngine::renderNextBlock (juce::AudioBuffer<float>& output, int numS
         if (ch >= output.getNumChannels())
             break;
 
+        // One magnitude for both the meter and the latch: asking twice would be
+        // two scans of the master buffer and two chances to answer the same
+        // question differently, on the one bus where the answer is the user's.
+        const float magnitude = output.getMagnitude (ch, 0, numSamples);
+
         auto& meter = masterMeters[(size_t) ch];
-        meter.store (juce::jmax (meter.load (std::memory_order_relaxed),
-                                 output.getMagnitude (ch, 0, numSamples)),
+        meter.store (juce::jmax (meter.load (std::memory_order_relaxed), magnitude),
                      std::memory_order_relaxed);
+
+        if (overload::isClipped (magnitude))
+            masterClip.store (true, std::memory_order_relaxed);
     }
 }
 
@@ -4079,6 +4102,60 @@ float PlaybackEngine::getInsertGainReductionDb (int channel, int slot) const
         return 0.0f;
 
     return insertReduction[(size_t) channel][(size_t) slot].load (std::memory_order_relaxed);
+}
+
+bool PlaybackEngine::getChannelClipped (int channel) const noexcept
+{
+    if (channel == MixerModel::masterChannel)
+        return masterClip.load (std::memory_order_relaxed);
+
+    if (! juce::isPositiveAndBelow (channel, MixerModel::numChannels))
+        return false;
+
+    return channelClip[(size_t) channel].load (std::memory_order_relaxed);
+}
+
+bool PlaybackEngine::getMasterClipped() const noexcept
+{
+    return masterClip.load (std::memory_order_relaxed);
+}
+
+void PlaybackEngine::clearClip (int channel) noexcept
+{
+    if (channel == MixerModel::masterChannel)
+    {
+        masterClip.store (false, std::memory_order_relaxed);
+        return;
+    }
+
+    if (juce::isPositiveAndBelow (channel, MixerModel::numChannels))
+        channelClip[(size_t) channel].store (false, std::memory_order_relaxed);
+}
+
+void PlaybackEngine::clearAllClips() noexcept
+{
+    for (auto& lamp : channelClip)
+        lamp.store (false, std::memory_order_relaxed);
+
+    masterClip.store (false, std::memory_order_relaxed);
+}
+
+void PlaybackEngine::setChannelClippedForTest (int channel, bool clipped)
+{
+    // Phase 104: the picture only, exactly like `setInsertGainReductionForTest`.
+    // A still frame cannot arrange for a strip to be genuinely slammed, and one
+    // that waited for it would carry whatever the scheduler handed it. The
+    // checks do not come through here — they render real material that really
+    // goes over, because the entire claim is that the lamp agrees with the
+    // sound.
+    if (channel == MixerModel::masterChannel)
+    {
+        masterClip.store (clipped, std::memory_order_relaxed);
+        return;
+    }
+
+    if (juce::isPositiveAndBelow (channel, MixerModel::numChannels))
+        channelClip[(size_t) channel].store (clipped, std::memory_order_relaxed);
 }
 
 void PlaybackEngine::decayMeters (int numSamples)

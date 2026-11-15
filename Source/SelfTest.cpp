@@ -9,6 +9,7 @@
 //==============================================================================
 
 #include "MainComponent.h"
+#include "Audio/OverloadLatch.h"
 #include "Model/Comp.h"
 #include "Model/MidiCc.h"
 #include "Model/VelocityLane.h"
@@ -20600,6 +20601,200 @@ juce::String MainComponent::runSelfTest()
                        "master " + juce::String (onMaster, 2)
                          + " / channel " + juce::String (e.getInsertGainReductionDb (0, 0), 2));
             }
+        }
+    }();
+
+    //== Phase 104: 削波是一个事件 =============================================
+    // P103 立了一条制度：一个读数要三个动作配套——发布取大、按速率落、读完消费。
+    // 这一轮写的是它的反面，而且那个反面不是妥协，是**同一套理由推出来的另一半**：
+    // 那三条成立的前提是「读数记的是一个会自己消失的状态」。削波记的是一个**事件**
+    // ——「这块缓冲里有样本越过了满刻度」——事件不会因为没人看而变成没发生，所以
+    // 它不回落、不消费，只在用户点它的时候清零。
+    //
+    // 所以这里的断言跟 P103 的形状完全不同：那边问「它落得对不对」，这边问
+    // 「它有没有被别的东西顺手抹掉」。抹掉它的东西有四个：回落、resetMixState、
+    // 旁通、以及「清完之后又被旧读数重新点亮」。四条各一条断言。
+    [&] {
+        //-- (1) 满刻度不是削波 ------------------------------------------------
+        // 0 dBFS 是这条尺子的最后一格，不是越过它。把 1.0 算成削波，等于让每一个
+        // 规规矩矩推到 0 dB 的混音常亮——灯一旦永远亮着就不报告任何东西了。
+        {
+            check (utf8 ("满刻度不是削波：0.999 与 1.0 都不亮，越过 1.0 才亮"),
+                   ! overload::isClipped (0.0f)
+                     && ! overload::isClipped (0.999f)
+                     && ! overload::isClipped (overload::fullScale)
+                     &&   overload::isClipped (1.0001f)
+                     &&   overload::isClipped (2.0f),
+                   "1.0 = " + juce::String ((int) overload::isClipped (1.0f))
+                     + " / 1.0001 = " + juce::String ((int) overload::isClipped (1.0001f)));
+
+            // 引擎喂进来的是 `getMagnitude()`，已经取过绝对值。这条断言守的是
+            // 「下一个调用者传了有符号的样本」：那个错的表现是灯永不亮，比一个
+            // 看得见的错难发现得多，所以规则自己兜住它。
+            check (utf8 ("负半周和正半周是同一件事：-1.5 也亮，-1.0 不亮"),
+                   overload::isClipped (-1.5f) && ! overload::isClipped (-1.0f),
+                   "-1.5 = " + juce::String ((int) overload::isClipped (-1.5f)));
+        }
+
+        //-- (2) 一条真的过载的通道 --------------------------------------------
+        // 不走 `setChannelClippedForTest`：那个接口是给静帧摆数用的。这里的整个
+        // 主张是「灯和声音说的是同一件事」，所以必须让声音真的越过去。
+        //
+        // 怎么让它越过去：默认音源是 -6 dB 的正弦，推子最多 +6 dB——两样加起来
+        // 也不够。所以借一个压缩器当放大器：ratio 1:1 **不压**，makeup 拉满 +18 dB。
+        // 顺带证明 P103 那条「补偿不进表」在这里也是对的：它在放大，而 GR 表说 0。
+        LayerStack st;
+        RackModel  rk;
+        MixerModel mx;
+
+        st.addLayer (utf8 ("过载"), palette::layer1);
+
+        const int slotId = rk.getSlotIdAt (0);
+
+        st.setLayerOutputSlot (0, slotId);
+        st.getLayer (0)->addNote ({ 0, 60, 0.0, 4.0, 1.0f });
+
+        rk.setMixerChannel (slotId, 0);
+        mx.setChannelOutput (0, MixerModel::masterChannel);
+
+        mx.setInsertType (0, 0, fx::Type::comp);
+        mx.setInsertEnabled (0, 0, true);
+        mx.setInsertParam (0, 0, 0, 0.0f);   // -40 dB
+        mx.setInsertParam (0, 0, 1, 0.0f);   // 1:1 —— 只放大，不压
+        mx.setInsertParam (0, 0, 2, 1.0f);   // +18 dB makeup
+        mx.setInsertParam (0, 0, 3, 0.0f);
+        mx.setInsertParam (0, 0, 4, 0.0f);
+        mx.setInsertParam (0, 0, 5, 0.0f);
+
+        PlaybackEngine e;
+        e.setSampleRate (22050.0);
+        e.prepareToPlay (22050.0, 512);
+        e.publishSchedule (st, rk, 120.0, 0.0, &mx);
+
+        juce::AudioBuffer<float> block (2, 512);
+
+        const auto renderBlock = [&]
+        {
+            block.clear();
+            e.renderNextBlock (block, 512);
+        };
+
+        // Four blocks: the synth's attack has to arrive before anything is
+        // measured, and a peak read off the first block would be the envelope
+        // rather than the material.
+        const auto renderSettled = [&]
+        {
+            e.setPositionBeats (0.5);
+
+            for (int i = 0; i < 4; ++i)
+                renderBlock();
+        };
+
+        e.resetMixState();
+        e.clearAllClips();
+        renderSettled();
+
+        const float loudPeak = e.getChannelPeak (0);
+
+        check (utf8 ("夹具真的把它推过了满刻度：通道的峰值越过了 1.0"),
+               loudPeak > 1.0f,
+               "channel peak " + juce::String (loudPeak, 3)
+                 + " / GR " + juce::String (e.getInsertGainReductionDb (0, 0), 2));
+
+        check (utf8 ("越过满刻度的通道点亮自己的灯，主输出也跟着点亮（同一份信号也越了它）"),
+               e.getChannelClipped (0) && e.getMasterClipped(),
+               "channel " + juce::String ((int) e.getChannelClipped (0))
+                 + " / master " + juce::String ((int) e.getMasterClipped()));
+
+        //-- (3) 停止不清灯 -----------------------------------------------------
+        // `resetMixState` 是「从零开始量」的入口：locate、停止、每次 bounce 都走它。
+        // 电平必须归零，灯不能——「你一小时前把主输出推爆了」在那三个时刻都还是真的。
+        {
+            e.resetMixState();
+
+            check (utf8 ("resetMixState 把电平清零，但不碰削波灯"),
+                   e.getChannelPeak (0) == 0.0f && e.getChannelClipped (0),
+                   "peak " + juce::String (e.getChannelPeak (0), 3)
+                     + " / lamp " + juce::String ((int) e.getChannelClipped (0)));
+        }
+
+        //-- (4) 通道爆而主输出不爆：这条链回答的是「谁太响」 -------------------
+        // A strip that is over while the master is not is the one diagnosis a
+        // console can make and a single master meter cannot: the material is too
+        // loud BEFORE the mix bus, so pulling the master down is treating the
+        // symptom.
+        {
+            // The premise, stated as an assertion rather than assumed: the SAME
+            // material at master unity must light the master's lamp. Without this
+            // half, "the master did not clip" is also true of an implementation
+            // that never reports the master at all — a tautology dressed as a
+            // check. (P101's lesson, third time round.)
+            mx.setMasterLevelDb (0.0f);
+            e.publishSchedule (st, rk, 120.0, 0.0, &mx);
+
+            e.resetMixState();
+            e.clearAllClips();
+            renderSettled();
+
+            const bool masterLitWhenLoud = e.getMasterClipped();
+
+            mx.setMasterLevelDb (-30.0f);          // ×0.0316
+            e.publishSchedule (st, rk, 120.0, 0.0, &mx);
+
+            e.resetMixState();
+            e.clearAllClips();
+            renderSettled();
+
+            check (utf8 ("通道过了满刻度、主输出没过去：两盏灯一红一暗，指向的是不同的问题"),
+                   masterLitWhenLoud
+                     && e.getChannelPeak (0) > 1.0f
+                     && e.getMasterPeak (0) < 1.0f
+                     && e.getChannelClipped (0)
+                     && ! e.getMasterClipped(),
+                   "loud master lamp " + juce::String ((int) masterLitWhenLoud)
+                     + " / ch " + juce::String (e.getChannelPeak (0), 2)
+                     + " / mst " + juce::String (e.getMasterPeak (0), 3));
+        }
+
+        //-- (5) 它不回落 -------------------------------------------------------
+        // 四十块静音。电平表在这段时间里落到底——它就是这么工作的——而灯一格
+        // 都不动。这一条同时是「灯真的在 `publishMeters` 之外」的证据：把它顺手
+        // 加进 `decayMeters` 的循环里，这条断言当场变红。
+        {
+            e.setPositionBeats (50.0);          // 音符在 0..4 拍，这里什么都没发生
+
+            for (int i = 0; i < 40; ++i)
+            {
+                e.decayMeters (512);
+                renderBlock();
+            }
+
+            check (utf8 ("四十块静音之后电平表归零、削波灯不动：状态会消失，事件不会"),
+                   e.getChannelPeak (0) < 0.02f && e.getChannelClipped (0),
+                   "peak " + juce::String (e.getChannelPeak (0), 4)
+                     + " / lamp " + juce::String ((int) e.getChannelClipped (0)));
+        }
+
+        //-- (6) 只有点它能清 ---------------------------------------------------
+        {
+            // Same premise rule as above: capture the lamp being ON before
+            // asserting that clearing turns it off, or "it is off" is what an
+            // engine that never published anything would also say.
+            const bool litBefore = e.getChannelClipped (0);
+
+            e.clearClip (0);
+
+            check (utf8 ("点一下灯就灭，而且不会再自己亮回来（没有新的越界）"),
+                   litBefore && ! e.getChannelClipped (0) && ! e.getMasterClipped(),
+                   "before " + juce::String ((int) litBefore)
+                     + " / after " + juce::String ((int) e.getChannelClipped (0)));
+
+            e.setPositionBeats (50.0);
+            renderBlock();
+
+            check (utf8 ("清完之后再走一块静音，灯仍然是灭的"),
+                   ! e.getChannelClipped (0),
+                   juce::String ((int) e.getChannelClipped (0)));
         }
     }();
 

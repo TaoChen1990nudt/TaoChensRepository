@@ -659,6 +659,13 @@ public:
     /** Phase 103: the effect rack with a gain-reduction bar in it. */
     juce::Image createGainReductionSnapshot (int width = ui::px (1180), int height = ui::px (300));
 
+    /** Phase 104: the console with two overload lamps lit and the rest dark.
+
+        Not `-clip`: that name has meant "the sample block, zoomed in" since
+        Phase 29, and two frames whose names differ by nothing are two frames
+        nobody can find later. */
+    juce::Image createOverloadSnapshot (int width = ui::px (1180), int height = ui::px (300));
+
     /** Phase 43: how tall the file tree's pane is, in device pixels, as the
         splitter currently has it. The self-test asks this instead of measuring
         components: the number IS the setting, and a component's height also

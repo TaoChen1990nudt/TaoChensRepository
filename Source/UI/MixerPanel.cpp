@@ -415,6 +415,16 @@ juce::Rectangle<int> MixerPanel::getMeterBarBounds (int channel, int side) const
                      : meter.withX (meter.getRight() - bar).withWidth (bar);
 }
 
+juce::Rectangle<int> MixerPanel::getClipLightBounds (int channel) const
+{
+    return getMeterBounds (channel).withHeight (ui::px (3));
+}
+
+juce::Rectangle<int> MixerPanel::getClipLightHitBounds (int channel) const
+{
+    return getClipLightBounds (channel).withHeight (ui::px (8));
+}
+
 juce::Rectangle<int> MixerPanel::getStripCloseBounds (int channel) const
 {
     // The right end of the name row. Everything else on a strip is a control
@@ -780,7 +790,11 @@ void MixerPanel::mixerChanged()
 //==============================================================================
 void MixerPanel::updateMeters()
 {
-    if (levelSource != nullptr)
+    // Phase 104: the overload lamp lives inside the meter's own rectangle, so one
+    // repaint already covers both. The extra `clipSource` test is for the case
+    // where the engine publishes lamps but no levels — a console whose meters are
+    // unwired must still show a lamp going out.
+    if (levelSource != nullptr || clipSource != nullptr)
         for (int slot = 0; slot < getStripCount(); ++slot)
             repaint (getMeterBounds (channelForDisplaySlot (slot)).expanded (2));
 
@@ -1175,6 +1189,19 @@ void MixerPanel::drawStrip (juce::Graphics& g, int channel)
             g.setColour (fill > 0.92f ? theme::record : colour.withAlpha (0.9f));
             g.fillRect (bar.withHeight (h).withY (bar.getBottom() - h));
         }
+    }
+
+    // Phase 104: the overload lamp, drawn last so a meter that reaches the top
+    // passes behind it. Unlit is a dim rail rather than nothing at all: the user
+    // has to know there is a lamp there to click, and a lamp that only appears
+    // once you have already overloaded teaches nobody.
+    if (clipSource != nullptr)
+    {
+        const auto lamp = getClipLightBounds (channel).toFloat();
+        const bool over = clipSource (channel);
+
+        g.setColour (over ? theme::record : juce::Colours::white.withAlpha (0.12f));
+        g.fillRoundedRectangle (lamp, ui::pf (1.5f));
     }
 }
 
@@ -1573,6 +1600,19 @@ void MixerPanel::mouseDown (const juce::MouseEvent& e)
     if (getMonoBounds (channel).contains (pos))
     {
         toggleMono (channel);
+        return;
+    }
+
+    // Phase 104: a click on the overload lamp puts it out. Tested before the
+    // fader because the lamp occupies the meter's top — pixels the fader's hit
+    // area is already forbidden to take (P70), so the two cannot overlap, and
+    // reading it here keeps "the lamp is the only thing up there" in one place.
+    if (clipSource != nullptr && getClipLightHitBounds (channel).contains (pos))
+    {
+        if (onClipCleared != nullptr)
+            onClipCleared (channel);
+
+        repaint (getClipLightBounds (channel));
         return;
     }
 

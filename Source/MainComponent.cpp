@@ -1056,6 +1056,20 @@ MainComponent::MainComponent()
         return audio.getPlayback().getInsertGainReductionDb (channel, slot);
     };
 
+    // Phase 104: the overload lamp, and the one click that puts it out. Note it
+    // does NOT hang off the repaint of the level meter: clearing a lamp is a fact
+    // about a past event, so it changes what the panel draws without changing
+    // what the engine renders, and nothing gets re-published for it.
+    mixerPanel.clipSource = [this] (int channel)
+    {
+        return audio.getPlayback().getChannelClipped (channel);
+    };
+
+    mixerPanel.onClipCleared = [this] (int channel)
+    {
+        audio.getPlayback().clearClip (channel);
+    };
+
     // Phase 10: the app opens on a blank session — one empty layer, no synths,
     // no notes. The demo arrangement is a test fixture now (loadDemoProject),
     // not the thing every launch starts with.
@@ -1683,6 +1697,50 @@ juce::Image MainComponent::createGainReductionSnapshot (int width, int height)
     mixer.getInserts (0) = savedInserts;
     mixerPanel.setSelectedChannel (previousChannel);
     mixer.notify();
+
+    mixerPanel.setBounds (previousBounds);
+    mixerPanel.resized();
+
+    return image;
+}
+
+juce::Image MainComponent::createOverloadSnapshot (int width, int height)
+{
+    // Phase 104. The console with the master and channel 1 lit and everything
+    // else dark. Three things are being claimed by one picture:
+    //
+    //   * the lamp is ON THE METER, not in a row of its own — the strip had no
+    //     free pixel left and this is a reading of the bar below it anyway;
+    //   * unlit is a dim rail, not empty space, because a lamp that only appears
+    //     once you have already overloaded is a lamp nobody ever clicks;
+    //   * master lights too — "the mix went over" and "channel 1 went over" are
+    //     two different answers to "who is too loud", and a console that can only
+    //     say the second one sends the user hunting on the wrong strip.
+    //
+    // Staged, like every other reading in a still frame: nothing in a headless
+    // run renders audio loud enough to clip, and a frame that waited for it would
+    // carry whatever the scheduler handed it.
+    const auto previousBounds = mixerPanel.getBounds();
+
+    std::array<bool, MixerModel::numChannels + 1> saved;
+    for (int channel = 0; channel <= MixerModel::numChannels; ++channel)
+        saved[(size_t) channel] = audio.getPlayback().getChannelClipped (channel);
+
+    audio.getPlayback().clearAllClips();
+    audio.getPlayback().setChannelClippedForTest (0, true);
+    audio.getPlayback().setChannelClippedForTest (MixerModel::masterChannel, true);
+
+    mixerPanel.setSize (width, height);
+    mixerPanel.resized();
+    mixerPanel.updateMeters();
+
+    auto image = mixerPanel.createComponentSnapshot (mixerPanel.getLocalBounds(), true);
+
+    // Put back the lamps this fixture borrowed, one by one, rather than clearing
+    // them: a screenshot must not switch off a lamp the user was looking at. Same
+    // rule `createGainReductionSnapshot` follows for its three cells.
+    for (int channel = 0; channel <= MixerModel::numChannels; ++channel)
+        audio.getPlayback().setChannelClippedForTest (channel, saved[(size_t) channel]);
 
     mixerPanel.setBounds (previousBounds);
     mixerPanel.resized();
@@ -2831,6 +2889,12 @@ void MainComponent::buildSession (bool withEmptyLayer)
 
     automation.clear();
     mixer.resetToDefault();
+
+    // Phase 104: a new session does not inherit the previous one's overloads.
+    // This is one of the only two places a lamp goes out on its own, and the
+    // reason it is allowed here is that "the master went over" was a statement
+    // about material that no longer exists.
+    audio.getPlayback().clearAllClips();
 
     // Phase 11: a new session comes with ONE built-in synth, already pointed at
     // by the empty layer. One instrument means "click the grid and you hear

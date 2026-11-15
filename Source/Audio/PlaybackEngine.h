@@ -910,8 +910,46 @@ public:
         here, once, and the rack only decides how tall to draw it. */
     float getInsertGainReductionDb (int channel, int slot) const;
 
+    /** Phase 104: has this strip gone over full scale since somebody last
+        looked? `channel` may be `MixerModel::masterChannel`.
+
+        Deliberately NOT a float and deliberately not in the family above: every
+        other reading here is a level that falls on its own, because a level is a
+        state. This one is a LATCH — it stays lit until it is cleared, because
+        what it reports is an event that already happened and will not happen
+        again to remind you. See `Audio/OverloadLatch.h` for why that distinction
+        is worth a whole phase. */
+    bool getChannelClipped (int channel) const noexcept;
+
+    /** The master's own lamp. Spelled out rather than left to
+        `getChannelClipped (masterChannel)` because the callers that ask it are
+        talking about the mix bus, not about a strip that happens to have a high
+        number, and the panel asks it on every frame. */
+    bool getMasterClipped() const noexcept;                                      
+
+    /** Puts the lamp out. Only two things do this: a click on it, and the
+        session being replaced. Nothing on the audio path ever will — a falling
+        reading and a cleared reading are two different facts, and the one thing
+        a clip lamp must never do is clear itself while the user is looking
+        somewhere else. */
+    void clearClip (int channel) noexcept;
+
+    /** Every lamp, for a new session. Loading a project must not inherit the
+        previous one's overloads: they describe material that is no longer here. */
+    void clearAllClips() noexcept;
+
+    /** Phase 104: for the picture, not for the checks — a still frame cannot
+        arrange for a strip to be actually slammed. The checks drive real audio
+        through `renderInto` and read what the engine published. */
+    void setChannelClippedForTest (int channel, bool clipped);
+
     /** Clears every meter, and every filter's memory. Call before a deterministic
-        measurement so a previous pass cannot colour the next one. */
+        measurement so a previous pass cannot colour the next one.
+
+        Phase 104: the clip lamps are NOT part of this, on purpose. This is called
+        on stop, on locate and before every bounce — all three are moments where
+        the levels must start from zero, and none of them is a moment where "you
+        overloaded the master an hour ago" stopped being true. */
     void  resetMixState();
 
     //-- Phase 19: audition ---------------------------------------------------
@@ -1233,6 +1271,20 @@ private:
         not part of the schedule. */
     mutable std::array<std::array<std::atomic<float>, fx::ChainState::maxSlots>,
                        MixerModel::numChannels + 1> insertReduction;
+
+    /** Phase 104: who has gone over, one latch per strip plus one for the master
+        — the same `[numChannels]` = master addressing `insertReduction` uses, so
+        a caller that knows one already knows the other.
+
+        `bool`, not a peak: the question "did it clip" has two answers, and a
+        number that is compared against 1.0 by every reader is a rule that lives
+        in every reader. Written by the audio thread, written by the message
+        thread (a click), read by the panel — and a plain relaxed store is enough
+        for all three: the worst interleaving is "cleared at the same instant it
+        clipped", which shows one missed overload in a year of clicking, while any
+        stronger ordering would buy nothing the user could hear. */
+    mutable std::array<std::atomic<bool>, MixerModel::numChannels> channelClip;
+    mutable std::atomic<bool> masterClip { false };
 
     /** Reused every block: one stereo bus, one slot at a time. Allocated in
         prepareToPlay, never inside the callback. */

@@ -148,6 +148,19 @@ public:
         published numbers — so the bar cannot disagree with the sound. */
     std::function<float (int channel, int slot)> insertGainReductionSource;
 
+    /** Phase 104: has this strip gone over full scale, and put the lamp out when
+        the user clicks it.
+
+        A separate pair from the meter above on purpose: the meter asks "how
+        loud is it right now" every frame and the answer is allowed to fall, while
+        this asks "did it ever go over" and the answer is not allowed to. Two
+        questions, two lifetimes, so they are not one callback with a flag.
+
+        `channel` is `MixerModel::masterChannel` for the master strip, the same
+        sentinel the level source uses. */
+    std::function<bool (int channel)> clipSource;
+    std::function<void (int channel)> onClipCleared;
+
     /** The host owns the plugin library, so it owns the VST3 submenu. */
     std::function<void (int channel, int slot, juce::Point<int> screenPos)> onInsertPluginRequested;
 
@@ -307,6 +320,20 @@ private:
     /** Phase 26: the pair of bars, then one bar. `side` 0 = left, 1 = right. */
     juce::Rectangle<int> getMeterBounds (int channel) const;
     juce::Rectangle<int> getMeterBarBounds (int channel, int side) const;
+
+    /** Phase 104: the overload lamp — a thin cap across the top of the meter
+        pair.
+
+        It sits ON the meter rather than beside it for two reasons: it is a
+        reading of the same thing, and the strip has no free pixel left (P25
+        already packed mono into the readout row). Drawing it last means a meter
+        that reaches the top disappears behind the lamp, which is the right
+        picture — full scale IS the lamp's own height. */
+    juce::Rectangle<int> getClipLightBounds (int channel) const;
+
+    /** The hit area is taller than the lamp. Three design pixels is a reading,
+        not a target, and a lamp you cannot hit is a lamp that stays lit. */
+    juce::Rectangle<int> getClipLightHitBounds (int channel) const;
 
     /** Phase 26: the "－" at the right end of the name row. Drawn on every
         ordinary strip; dead (and dimmed) once the console is at the floor, so

@@ -191,6 +191,11 @@ namespace
         // that cannot has no track".
         writePng ("-gr", component.createGainReductionSnapshot());
 
+        // Phase 104: the console, two overload lamps lit. The master is one of
+        // them on purpose — "who went over" is a question about two different
+        // buses, and a frame that only lit a channel would answer it for one.
+        writePng ("-overload", component.createOverloadSnapshot());
+
         // Phase 28: the browser tree, taller than the shell's split can give it.
         writePng ("-browser", component.createFileBrowserSnapshot());
 
