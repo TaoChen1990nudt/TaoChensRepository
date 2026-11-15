@@ -564,14 +564,71 @@ juce::Rectangle<float> PianoRollComponent::getOverviewBandBounds (int index) con
         return {};
 
     const auto grid = getGridArea();
+
+    //-- Phase 113: a folded band is thin, and the room it gives back is real --
+    // Phase 109..112 gave every band an equal slice whatever its state, so a
+    // folded layer kept its third of the window and drew one line down the
+    // middle of it with air above and below: folding answered "how many rows",
+    // never "how much room". The user asked for the other half of the sentence
+    // — 折叠之后，整个图层在总览中的宽度也变成一条线的宽度 — and that is not
+    // one band's geometry: a band can only be thin if something else is thick,
+    // which is why this function now reads the fold state of every band.
+    //
+    // 16 px is not a new number. It is the threshold this file already states in
+    // drawOverviewColumn ("a name needs about 16 px of band"), and it is what
+    // keeps a fold reversible: the chevron is `min (13, height - 4)`, so 16
+    // leaves a 12 px button inside its own stripe, and the layer keeps its name.
+    // Thinner and the only way back out of a fold would be the menu item — P111
+    // put the switch where the fold happened, and a switch that disappears
+    // exactly when it is needed is not a switch.
+    //
+    // This is O(count) per call where it used to be O(1), and the note loop calls
+    // it once per note. `count` is layers, not notes — a handful of set lookups —
+    // so it stays cheaper than the one sort that P110 hoisted out of that loop,
+    // and a cache here would be a second source of truth for a layout that is
+    // already derived.
+    int folded = 0;
+
+    for (int i = 0; i < count; ++i)
+        if (isOverviewFolded (i))
+            ++folded;
+
+    const int   open  = count - folded;
     const float slice = grid.getHeight() / (float) count;
 
-    // Round the two EDGES, never the height: a 7-layer stack on 449 pixels
+    // Never taller than the equal slice: a twenty-layer stack on 200 px has 10 px
+    // bands, and a "collapsed" band taller than an expanded one would be a lie
+    // about which one is collapsed.
+    const float thin = juce::jmin (ui::pf (16.0f), slice);
+
+    // Nothing folded ⟹ `open == count` ⟹ this is EXACTLY the equal split of
+    // Phase 109, which is why every picture that folds nothing did not move by a
+    // pixel. All folded ⟹ nobody is left to give the room to, so the stack falls
+    // back to the equal split too: that is Phase 109's picture, which is what
+    // Phase 110 meant by "像现在一样", and it is better than a bar code of lines
+    // at the top of an empty window.
+    const float share = open > 0
+                          ? (grid.getHeight() - thin * (float) folded) / (float) open
+                          : slice;
+
+    auto heightOf = [&] (int i)
+    {
+        return (open > 0 && isOverviewFolded (i)) ? thin : share;
+    };
+
+    // Round the two EDGES, never the heights: a 7-layer stack on 449 pixels
     // otherwise ends with a band that is a fraction short of its neighbour's
     // top, and one stray pixel row of background down the middle of the stack
-    // reads as "that layer is empty".
-    const float top    = grid.getY() + (float) juce::roundToInt (slice * (float) index);
-    const float bottom = grid.getY() + (float) juce::roundToInt (slice * (float) (index + 1));
+    // reads as "that layer is empty". With two different heights in play this
+    // matters more, not less — a 16 px stripe with 449/7 px neighbours puts the
+    // fraction on a much shorter ruler.
+    float offset = 0.0f;
+
+    for (int i = 0; i < index; ++i)
+        offset += heightOf (i);
+
+    const float top    = grid.getY() + (float) juce::roundToInt (offset);
+    const float bottom = grid.getY() + (float) juce::roundToInt (offset + heightOf (index));
 
     return { grid.getX(), top, grid.getWidth(), juce::jmax (0.0f, bottom - top) };
 }
@@ -763,10 +820,12 @@ void PianoRollComponent::setOverviewFolded (int layerIndex, bool shouldFold)
     else
         foldedOverviewLayers.erase (id);
 
-    // No gesture to cancel and no selection to touch: this changes where a line
-    // is drawn inside ONE band, and nothing else. The cursor is reset for the
-    // same reason the mode reset it — the pointer is now over a different
-    // picture, and a stale corner-resize arrow belongs to the old one.
+    // No gesture to cancel and no selection to touch: this changes how much room
+    // ONE band takes (and, with it, how much the others get — Phase 113), and
+    // nothing in the project. The cursor is reset for the same reason the mode
+    // reset it — the pointer is now over a different picture, and a stale
+    // corner-resize arrow belongs to the old one. It matters more now than it
+    // did: the band under the pointer may have moved out from under it.
     dragMode      = DragMode::none;
     hoveredNoteId = -1;
 

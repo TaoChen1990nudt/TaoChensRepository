@@ -21428,27 +21428,45 @@ juce::String MainComponent::runSelfTest()
         //-- (3) 同一画面，两种答案 ---------------------------------------
         // 这是本阶段唯一真正要说的话：一摞里可以同时有「压成一条线」和
         // 「按音高分行」。第 1 层三个音高必须并到带中心，而第 0 层两个音高
-        // 仍然上下错开 —— 并且它们的 y 与折叠之前**逐点相同**（只折一层，
-        // 不许顺手重排别的层）。
+        // 仍然上下错开。
+        //
+        // Phase 113 在这里改了口径：下面两条原本钉的是「折一层，别人的像素
+        // 逐点不动」，那句在当时是对的（每条带永远占 1/N）。现在折起来的那层
+        // 把高度还了出来，别人的带就变高、行距跟着变——「不动」不再是好行为，
+        // 它是「折叠只改了条带里面」的旧世界的性质。所以第 3 条断言改成它的
+        // 反面，并在同一条里钉住「别人的带确实变高了」。
         const auto fB1 = roll.getOverviewSegmentBounds (1, b1);
         const auto fB2 = roll.getOverviewSegmentBounds (1, b2);
         const auto fB3 = roll.getOverviewSegmentBounds (1, b3);
         const auto aHighAfter = roll.getOverviewSegmentBounds (0, aHigh);
         const auto aLowAfter  = roll.getOverviewSegmentBounds (0, aLow);
 
+        // 折叠之后的三条带，重新问一遍：`band0` / `band1` 是折叠之前那一版，
+        // 现在它们只代表「等分时的样子」，拿它们量折叠后的像素会量出空气。
+        const auto thin1   = roll.getOverviewBandBounds (1);
+        const auto grew0   = roll.getOverviewBandBounds (0);
+
         check (utf8 ("同一摞里：折叠的那层三个音高并到带中心，没折的那层照旧上下错开"),
                std::abs (fB1.getCentreY() - fB2.getCentreY()) < 0.01f
                  && std::abs (fB2.getCentreY() - fB3.getCentreY()) < 0.01f
-                 && std::abs (fB1.getCentreY() - band1.getCentreY()) < 0.01f
+                 && std::abs (fB1.getCentreY() - thin1.getCentreY()) < 0.01f
                  && aHighAfter.getCentreY() < aLowAfter.getCentreY() - 1.0f,
                juce::String (fB1.getCentreY(), 1) + " / " + juce::String (fB2.getCentreY(), 1)
                  + " / " + juce::String (fB3.getCentreY(), 1) + utf8 ("；带1 中心 ")
-                 + juce::String (band1.getCentreY(), 1));
+                 + juce::String (thin1.getCentreY(), 1));
 
-        check (utf8 ("折叠一层不移动别人的像素：第 0 层的线段 y 与折叠前逐点相同"),
-               std::abs (aHighAfter.getY() - aHighOpen.getY()) < 0.01f
-                 && std::abs (aHighAfter.getHeight() - aHighOpen.getHeight()) < 0.01f,
-               juce::String (aHighOpen.getY(), 2) + " -> " + juce::String (aHighAfter.getY(), 2));
+        check (utf8 ("折叠一层，别人的带反而变高：还回来的高度归了没折的层，"
+                     "第 0 层的线段跟着新的等分往下走（P111 这条说的是反面，P113 翻了它）"),
+               grew0.getHeight() > band0.getHeight() + 1.0f
+                 && std::abs (grew0.getY() - band0.getY()) < 0.01f
+                 && thin1.getHeight() < band1.getHeight() * 0.5f
+                 && aHighAfter.getY() > aHighOpen.getY() + 1.0f
+                 && aHighAfter.getHeight() <= ui::pf (5.0f) + 0.01f,
+               utf8 ("带高 ") + juce::String (band0.getHeight(), 1) + " -> "
+                 + juce::String (grew0.getHeight(), 1) + utf8 ("，折起来那条 ")
+                 + juce::String (band1.getHeight(), 1) + " -> " + juce::String (thin1.getHeight(), 1)
+                 + utf8 ("，线段 y ")
+                 + juce::String (aHighOpen.getY(), 2) + " -> " + juce::String (aHighAfter.getY(), 2));
 
         //-- (4) 箭头长在自己的带里 ---------------------------------------
         // 几何有且只有一处（`getOverviewFoldToggleBounds`），绘制与命中都问它。
@@ -21463,10 +21481,10 @@ juce::String MainComponent::runSelfTest()
                ! t0.isEmpty() && ! t1.isEmpty() && ! t2.isEmpty()
                  && t0.getRight() <= (float) gridNow.getX()
                  && t1.getRight() <= (float) gridNow.getX()
-                 && t0.getY() >= band0.getY() - 0.01f
-                 && t0.getBottom() <= band0.getBottom() + 0.01f
-                 && t1.getY() >= band1.getY() - 0.01f
-                 && t1.getBottom() <= band1.getBottom() + 0.01f
+                 && t0.getY() >= grew0.getY() - 0.01f
+                 && t0.getBottom() <= grew0.getBottom() + 0.01f
+                 && t1.getY() >= thin1.getY() - 0.01f
+                 && t1.getBottom() <= thin1.getBottom() + 0.01f
                  && t0.getBottom() <= t1.getY() + 0.01f,
                t0.toString() + " / " + t1.toString());
 
@@ -21485,7 +21503,13 @@ juce::String MainComponent::runSelfTest()
 
         //-- (5) 点箭头只翻那一层 -----------------------------------------
         // 从「第 1 层折着」开始：点第 1 层的箭头 = 展开它，别的层不动。
-        roll.simulatePressForTest (t1.getCentre());
+        //
+        // Phase 113: 箭头的位置不能跨折叠缓存。折一层会让整摞重排——那条带被
+        // 压薄 16 px，它下面的带全部上移——所以「第 3 层的箭头」在别人翻面之后
+        // 是另一个坐标。上一版这里拿 (4) 里算出的 t2 直接按下去，现在它会落在
+        // band2 的空白处、什么都不发生，而下面那条「只有它自己翻了过来」**照样
+        // 变绿**（它本来就没翻）。每次按之前重新问一次，这就是代价本身。
+        roll.simulatePressForTest (roll.getOverviewFoldToggleBounds (1).getCentre());
 
         check (utf8 ("点第 2 层的箭头，只有它自己翻了过来"),
                ! roll.isOverviewFolded (1)
@@ -21495,7 +21519,7 @@ juce::String MainComponent::runSelfTest()
                juce::String (roll.getOverviewRowCount (1)) + utf8 (" 行 / 折 ")
                  + (roll.isOverviewFolded (1) ? "yes" : "no"));
 
-        roll.simulatePressForTest (t2.getCentre());
+        roll.simulatePressForTest (roll.getOverviewFoldToggleBounds (2).getCentre());
 
         check (utf8 ("点第 3 层的箭头，也只有它自己翻了过来"),
                roll.isOverviewFolded (2)
@@ -21503,20 +21527,25 @@ juce::String MainComponent::runSelfTest()
                  && ! roll.isOverviewFolded (1),
                juce::String (roll.getOverviewRowCount (2)) + utf8 (" 行"));
 
-        roll.simulatePressForTest (t2.getCentre());     // 还原
+        roll.simulatePressForTest (roll.getOverviewFoldToggleBounds (2).getCentre());   // 还原
 
         //-- (6) 点箭头不是编辑 -------------------------------------------
         // 左列那个三角是视图控件。它可以点，不代表这里开始能改工程：选区、
         // 音符数、起点都不许动。（P109 的只读管的是网格，这条管的是新按钮。）
+        //
+        // 前提要写进断言：按下去必须真的翻了一层，否则「什么都没改」是白说的
+        // ——一个按在空白处的点也能让这条变绿。
         roll.setSelection ({ aLow });
         const int    notesBefore = (int) la->getNotes().size()
                                  + (int) lb->getNotes().size()
                                  + (int) lc->getNotes().size();
+        const bool   foldBefore  = roll.isOverviewFolded (1);
 
-        roll.simulatePressForTest (t1.getCentre());
+        roll.simulatePressForTest (roll.getOverviewFoldToggleBounds (1).getCentre());
 
-        check (utf8 ("点箭头只换画法：选区还在、音符数没变、音符的起点没变"),
-               roll.getSelection().size() == 1
+        check (utf8 ("点箭头只换画法：它真的翻了面，而选区还在、音符数没变、起点没变"),
+               roll.isOverviewFolded (1) != foldBefore
+                 && roll.getSelection().size() == 1
                  && roll.isNoteSelectedForTest (aLow)
                  && (int) la->getNotes().size() + (int) lb->getNotes().size()
                       + (int) lc->getNotes().size() == notesBefore
@@ -21568,14 +21597,23 @@ juce::String MainComponent::runSelfTest()
                roll.isOverviewFolded (1) && roll.getOverviewRowCount (1) == 1,
                juce::String (roll.getOverviewRowCount (1)) + utf8 (" 行"));
 
-        //-- (9) 箭头不随行数移动 -----------------------------------------
-        // 三角长在带里，跟着带的中心走；折叠改的是带内的行，不是带本身。
+        //-- (9) 箭头跟着带 -----------------------------------------------
+        // 三角长在带里，跟着带的中心走。Phase 113 之后「带的中心」自己会动
+        // （折起来的那条只剩 16 px，它下面的带全部上移），所以这条钉的不再是
+        // 「折叠前后同一个像素」——那件事已经随那轮改动失效了——而是真正不变的
+        // 那一条：箭头永远落在自己那条带的正中间，而且塞得进去。
         const auto toggleWhileFolded = roll.getOverviewFoldToggleBounds (1);
+        const auto thinBandNow       = roll.getOverviewBandBounds (1);
 
-        check (utf8 ("折叠前后，箭头在同一个位置（它跟着带，不跟着行）"),
+        check (utf8 ("折叠前后，箭头仍然在自己那条带的正中间，而且装得进那条带"),
                ! toggleWhileFolded.isEmpty()
-                 && std::abs (toggleWhileFolded.getCentreY() - t1.getCentreY()) < 0.01f,
-               juce::String (t1.getCentreY(), 1) + " -> "
+                 && thinBandNow.getHeight() <= ui::pf (16.0f) + 1.01f
+                 && std::abs (toggleWhileFolded.getCentreY() - thinBandNow.getCentreY()) < 0.01f
+                 && toggleWhileFolded.getY() >= thinBandNow.getY() - 0.01f
+                 && toggleWhileFolded.getBottom() <= thinBandNow.getBottom() + 0.01f,
+               juce::String (band1.getCentreY(), 1) + utf8 ("（等分时）-> ")
+                 + juce::String (thinBandNow.getCentreY(), 1) + utf8 ("，带 ")
+                 + juce::String (thinBandNow.getHeight(), 1) + utf8 (" px / 箭头 ")
                  + juce::String (toggleWhileFolded.getCentreY(), 1));
 
         //-- (10) 记的是图层 id，不是下标 ---------------------------------
@@ -21758,6 +21796,211 @@ juce::String MainComponent::runSelfTest()
         check (utf8 ("越界、不存在的采样、以及钢琴窗里，块答空矩形"),
                outOfRange && sheetEmpty,
                "off-grid " + roll.getOverviewSampleBounds (7, idA).toString());
+    }();
+
+    //== Phase 113: 折起来的那条带，自己也变成一条线 =========================
+    // 用户原话：「折叠之后，整个图层在总览中的宽度也变成一条线的宽度」。
+    //
+    // P109–P112 把每条带固定成 1/N：折叠只回答「几行」，从不回答「占多少地方」，
+    // 于是折起来的层仍然占着整个 1/N，只在正中间画一条线，上下全是空气。P113 让
+    // 那条带自己压到 16 px，还回来的高度归给还没折的层。
+    //
+    // 这里钉八件事：折前等分 / 折的那条变薄 / 别人的变高且整摞仍铺满 / 折起来那
+    // 条里的线仍然细而且在带里 / 折两条各自都薄 / 全折回到等分（P109 那张图）/ 展开
+    // 回来逐点还原 / 矮面板上「薄」不许比等分还厚。
+    [&]
+    {
+        LayerStack stack;
+        RackModel  rack;
+
+        stack.addLayer (utf8 ("三行"), palette::layer1);
+        stack.addLayer (utf8 ("两行"), palette::layer2);
+        stack.addLayer (utf8 ("四行"), palette::layer3);
+        stack.addLayer (utf8 ("一行"), palette::layer4);
+        stack.setActiveLayerIndex (0);
+
+        auto* l0 = stack.getLayer (0);
+        auto* l1 = stack.getLayer (1);
+        auto* l2 = stack.getLayer (2);
+        auto* l3 = stack.getLayer (3);
+
+        // 行数故意不一样：带宽是「折没折」的函数，跟这一层有几行**没有**关系
+        // ——这正是这一轮与 P110 的分工（P110 管行，P113 管地方）。
+        l0->addNote ({ 0, 84, 0.0, 4.0, 0.8f });
+        l0->addNote ({ 0, 76, 0.0, 4.0, 0.8f });
+        l0->addNote ({ 0, 72, 0.0, 4.0, 0.8f });
+
+        l1->addNote ({ 0, 60, 0.0, 4.0, 0.8f });
+        l1->addNote ({ 0, 55, 0.0, 4.0, 0.8f });
+
+        const int cHigh = l2->addNote ({ 0, 96, 0.0, 4.0, 0.8f });
+        l2->addNote ({ 0, 90, 0.0, 4.0, 0.8f });
+        l2->addNote ({ 0, 85, 0.0, 4.0, 0.8f });
+        l2->addNote ({ 0, 80, 0.0, 4.0, 0.8f });
+
+        l3->addNote ({ 0, 48, 0.0, 4.0, 0.8f });
+
+        PianoRollComponent roll (stack, rack);
+        roll.setSize (1100, 500);
+        roll.setScrollBeats (0.0);
+        roll.setOverviewMode (true);
+
+        const auto  grid  = roll.getGridBounds();
+        const float slice = grid.getHeight() / 4.0f;
+
+        const auto open0 = roll.getOverviewBandBounds (0);
+        const auto open1 = roll.getOverviewBandBounds (1);
+        const auto open2 = roll.getOverviewBandBounds (2);
+        const auto open3 = roll.getOverviewBandBounds (3);
+
+        //-- (1) 折之前：仍然是四条等分，铺满 -------------------------------
+        // 这条同时是「没动过的那张图不许变」的保证：P109..P112 的每一张帧都建立
+        // 在这条上，所以 open == count 时算出来的必须还是那个等分。
+        check (utf8 ("一层都没折：四条带还是等分，首尾相接铺满网格"),
+               std::abs (open0.getHeight() - slice) < 1.01f
+                 && std::abs (open1.getHeight() - slice) < 1.01f
+                 && std::abs (open2.getHeight() - slice) < 1.01f
+                 && std::abs (open3.getHeight() - slice) < 1.01f
+                 && std::abs (open0.getY() - grid.getY()) < 0.01f
+                 && std::abs (open3.getBottom() - grid.getBottom()) < 0.01f,
+               juce::String (open0.getHeight(), 1) + utf8 (" / 等分 ")
+                 + juce::String (slice, 1));
+
+        //-- (2) 折一条：那条带自己也变成一条线 -----------------------------
+        roll.setOverviewFolded (2, true);
+
+        const auto thin2 = roll.getOverviewBandBounds (2);
+
+        check (utf8 ("折叠之后，那一层自己那条带也变薄：不超过 16 px，也不到等分的四分之一"),
+               thin2.getHeight() > 1.0f
+                 && thin2.getHeight() <= ui::pf (16.0f) + 1.01f
+                 && thin2.getHeight() < open2.getHeight() * 0.25f,
+               juce::String (open2.getHeight(), 1) + " -> " + juce::String (thin2.getHeight(), 1));
+
+        //-- (3) 还回来的高度归了没折的层，整摞仍然铺满 ---------------------
+        // 「铺满」必须连着头尾一起钉：只检查每条都变高的话，一个把折叠带丢掉、
+        // 把空档留给背景的实现也会全绿。
+        const auto grew0 = roll.getOverviewBandBounds (0);
+        const auto grew1 = roll.getOverviewBandBounds (1);
+        const auto grew3 = roll.getOverviewBandBounds (3);
+
+        check (utf8 ("空出来的高度归了没折的三层：都变高，整摞仍首尾相接铺满网格"),
+               grew0.getHeight() > open0.getHeight() + 1.0f
+                 && grew1.getHeight() > open1.getHeight() + 1.0f
+                 && grew3.getHeight() > open3.getHeight() + 1.0f
+                 && std::abs (grew0.getY() - grid.getY()) < 0.01f
+                 && std::abs (grew1.getY() - grew0.getBottom()) < 0.01f
+                 && std::abs (thin2.getY() - grew1.getBottom()) < 0.01f
+                 && std::abs (grew3.getY() - thin2.getBottom()) < 0.01f
+                 && std::abs (grew3.getBottom() - grid.getBottom()) < 0.01f,
+               juce::String (open0.getHeight(), 1) + " -> " + juce::String (grew0.getHeight(), 1)
+                 + utf8 ("，折 ") + juce::String (thin2.getHeight(), 1)
+                 + utf8 ("，底 ") + juce::String (grew3.getBottom(), 1)
+                 + utf8 (" vs 网格 ") + juce::String (grid.getBottom(), 1));
+
+        //-- (4) 折起来那条里的线，仍然在带里、仍然细 -----------------------
+        // 带薄了，线不能跟着变粗：线高的公式里那一夹（55% 行高）在 count == 1 时
+        // 等于 55% 的带高，于是 16 px 的带会画出 8.8 px 的「线」。真正压住它的是
+        // 那条 `jmin (…, 5 px)`，这条断言就是它的收据。
+        const auto lineC = roll.getOverviewSegmentBounds (2, cHigh);
+
+        check (utf8 ("折起来的那层：线压在带的中间，比带薄得多，也没跑出带"),
+               ! lineC.isEmpty()
+                 && lineC.getHeight() <= ui::pf (5.0f) + 0.01f
+                 && lineC.getHeight() < thin2.getHeight() * 0.5f
+                 && std::abs (lineC.getCentreY() - thin2.getCentreY()) < 0.01f
+                 && lineC.getY() >= thin2.getY() - 0.01f
+                 && lineC.getBottom() <= thin2.getBottom() + 0.01f,
+               lineC.toString() + utf8 (" / 带 ") + thin2.toString());
+
+        //-- (5) 折两条：两条都薄，剩下两条一起分 ---------------------------
+        roll.setOverviewFolded (0, true);
+
+        const auto thin0 = roll.getOverviewBandBounds (0);
+        const auto two1  = roll.getOverviewBandBounds (1);
+        const auto two3  = roll.getOverviewBandBounds (3);
+
+        check (utf8 ("折两条：两条各自 16 px，剩下两条一起分掉空出来的高度"),
+               thin0.getHeight() <= ui::pf (16.0f) + 1.01f
+                 && roll.getOverviewBandBounds (2).getHeight() <= ui::pf (16.0f) + 1.01f
+                 && two1.getHeight() > grew1.getHeight() + 1.0f
+                 && two3.getHeight() > grew3.getHeight() + 1.0f
+                 && std::abs (two3.getBottom() - grid.getBottom()) < 0.01f,
+               juce::String (thin0.getHeight(), 1) + " / "
+                 + juce::String (two1.getHeight(), 1) + " / "
+                 + juce::String (two3.getHeight(), 1));
+
+        //-- (6) 全折：回到等分 ---------------------------------------------
+        // 没有人需要那块高度的时候，均摊是唯一不把窗口画成空白的答案——而且它
+        // 正好就是 P109 / P110 说的「像现在一样」。顺序必须与「一层都没折」逐点
+        // 相同，否则同一张图上「折了」和「没折」会画出两个不同的等分。
+        roll.setAllOverviewFolded (true);
+
+        const auto folded0 = roll.getOverviewBandBounds (0);
+        const auto folded3 = roll.getOverviewBandBounds (3);
+
+        check (utf8 ("全折时没有人需要那块高度，于是回到等分——与「没折」那一版逐点相同"),
+               roll.isAllOverviewFolded()
+                 && std::abs (folded0.getHeight() - open0.getHeight()) < 0.01f
+                 && std::abs (folded0.getY() - open0.getY()) < 0.01f
+                 && std::abs (folded3.getHeight() - open3.getHeight()) < 0.01f
+                 && std::abs (folded3.getBottom() - open3.getBottom()) < 0.01f,
+               juce::String (folded0.getHeight(), 1) + utf8 (" vs ")
+                 + juce::String (open0.getHeight(), 1));
+
+        //-- (7) 展开回来：逐点还原 -----------------------------------------
+        // 带宽是**派生**的（fold 状态 → 布局），不是存下来的数：所以一个来回之后
+        // 必须逐点回到出发的那一版。这条同时把「折叠把某个高度写进了状态」这种
+        // 实现挡在门外。
+        roll.setAllOverviewFolded (false);
+
+        const auto back2 = roll.getOverviewBandBounds (2);
+        const auto back3 = roll.getOverviewBandBounds (3);
+
+        check (utf8 ("全部展开：四条带逐点回到折叠之前（带宽是算出来的，不是记住的）"),
+               std::abs (back2.getY() - open2.getY()) < 0.01f
+                 && std::abs (back2.getHeight() - open2.getHeight()) < 0.01f
+                 && std::abs (back3.getY() - open3.getY()) < 0.01f
+                 && std::abs (back3.getBottom() - grid.getBottom()) < 0.01f,
+               back2.toString() + " vs " + open2.toString());
+
+        //-- (8) 矮面板：「薄」不许比等分还厚 -------------------------------
+        // 八层挤在两百来像素里，等分只剩十几个像素（实测 14）。这时候 16 px 的
+        // 「薄」比等分还厚——一个「折叠」把条带撑大的实现就这么漏过去（它只在
+        // 层数少的面板上看着对）。上限必须是 min (16, 等分)。
+        LayerStack many;
+        RackModel  manyRack;
+
+        for (int i = 0; i < 8; ++i)
+        {
+            many.addLayer (utf8 ("层 ") + juce::String (i + 1), palette::layer1);
+            many.getLayer (i)->addNote ({ 0, 60 + i, 0.0, 4.0, 0.8f });
+        }
+
+        PianoRollComponent tall (many, manyRack);
+        tall.setSize (1100, 208);
+        tall.setScrollBeats (0.0);
+        tall.setOverviewMode (true);
+
+        const auto  tallGrid  = tall.getGridBounds();
+        const float tallSlice = tallGrid.getHeight() / 8.0f;
+
+        for (int i = 0; i < 4; ++i)
+            tall.setOverviewFolded (i, true);
+
+        const auto thinTall = tall.getOverviewBandBounds (3);
+        const auto openTall = tall.getOverviewBandBounds (7);
+
+        check (utf8 ("面板矮到等分只有十几个像素时，折叠带的上限就是等分，不是 16"),
+               tallSlice > 1.0f
+                 && tallSlice < ui::pf (16.0f)                 // 前提：夹子真的咬得住
+                 && thinTall.getHeight() < ui::pf (16.0f)      // 它没有被写死的 16 顶大
+                 && thinTall.getHeight() <= tallSlice + 1.01f
+                 && openTall.getHeight() >= thinTall.getHeight() - 0.01f
+                 && std::abs (openTall.getBottom() - tallGrid.getBottom()) < 0.01f,
+               juce::String (tallSlice, 1) + utf8 (" 等分 / 折 ")
+                 + juce::String (thinTall.getHeight(), 1) + utf8 (" / 展 ")
+                 + juce::String (openTall.getHeight(), 1));
     }();
 
     // The summary MUST come after the last check. It used to sit mid-function

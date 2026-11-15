@@ -1537,7 +1537,19 @@ public:
         The bands TILE the grid: band 0 starts at its top edge, the last one
         ends at its bottom edge, and each band's bottom is the next one's top.
         Rounded once per edge (not once per height) so a 7-layer stack cannot
-        leave a one-pixel gap that reads as "a layer with nothing on it". */
+        leave a one-pixel gap that reads as "a layer with nothing on it".
+
+        Phase 113: the tiling is no longer an equal split. A FOLDED band is
+        16 design px thick — "the whole layer is now a line" — and the height it
+        gives up is shared between the bands that still show rows. Read the
+        consequence carefully, because it is the point of the phase: a band's
+        height is a fact about the WHOLE STACK, so folding one layer moves every
+        band below it. Nothing folded ⟹ equal split ⟹ Phase 109's picture, bit
+        for bit; everything folded ⟹ equal split again, since there is nobody
+        left to hand the room to.
+
+        16 is the smallest height that keeps a fold reversible: the chevron is
+        `min (13, height - 4)` and a name needs 16 (see drawOverviewColumn). */
     juce::Rectangle<float> getOverviewBandBounds (int index) const;
 
     /** The line a note becomes in the overview: from its start to its end, one
