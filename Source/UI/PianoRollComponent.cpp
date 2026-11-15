@@ -615,17 +615,31 @@ juce::Rectangle<float> PianoRollComponent::getOverviewBandBounds (int index) con
 
     // Nothing folded ⟹ `open == count` ⟹ this is EXACTLY the equal split of
     // Phase 109, which is why every picture that folds nothing did not move by a
-    // pixel. All folded ⟹ nobody is left to give the room to, so the stack falls
-    // back to the equal split too: that is Phase 109's picture, which is what
-    // Phase 110 meant by "像现在一样", and it is better than a bar code of lines
-    // at the top of an empty window.
+    // pixel.
+    //
+    //-- Phase 115: all folded is a stack of thin strips, not a fallback -------
+    // Phase 113 answered `open == 0` with the equal split ("nobody is left to
+    // give the room to, so nothing moves"), and that answer is wrong in the one
+    // situation where folding is the only thing the user is doing: fold all of
+    // them — or work on a one-layer project, where count == 1 and folding is
+    // always "all" — and the picture does not change at all. 折叠之后那层还是
+    // 占满整扇窗，只在中间多了一条线。The user's sentence was 折叠之后就变成窄窄
+    // 的一条, and a fold that leaves the band exactly as tall as before is not a
+    // fold.
+    //
+    // So `open == 0` now falls through to `thin` like every other folded band:
+    // n strips of 7 design px packed from the grid's top edge, and the rest of
+    // the window left empty. That empty space IS the answer — it is what "这一层
+    // 收起来了" looks like — and it is what a collapsed track stack does in every
+    // DAW. The alternative (stretch the strips to fill the window) is the old
+    // picture with extra steps.
     const float share = open > 0
                           ? (grid.getHeight() - thin * (float) folded) / (float) open
-                          : slice;
+                          : thin;   // unreachable in effect: open == 0 ⟹ every band is folded
 
     auto heightOf = [&] (int i)
     {
-        return (open > 0 && isOverviewFolded (i)) ? thin : share;
+        return isOverviewFolded (i) ? thin : share;
     };
 
     // Round the two EDGES, never the heights: a 7-layer stack on 449 pixels

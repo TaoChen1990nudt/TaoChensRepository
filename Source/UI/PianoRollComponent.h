@@ -1534,22 +1534,23 @@ public:
     /** Band `index` — one layer's stripe — in local coordinates. Empty when the
         mode is off or the index is out of range.
 
-        The bands TILE the grid: band 0 starts at its top edge, the last one
-        ends at its bottom edge, and each band's bottom is the next one's top.
-        Rounded once per edge (not once per height) so a 7-layer stack cannot
-        leave a one-pixel gap that reads as "a layer with nothing on it".
+        The bands are packed from the grid's top edge, each band's bottom is the
+        next one's top, and they are rounded once per edge (not once per height)
+        so a 7-layer stack cannot leave a one-pixel gap that reads as "a layer
+        with nothing on it".
 
-        Phase 113: the tiling is no longer an equal split. A FOLDED band is
-        16 design px thick — "the whole layer is now a line" — and the height it
-        gives up is shared between the bands that still show rows. Read the
-        consequence carefully, because it is the point of the phase: a band's
-        height is a fact about the WHOLE STACK, so folding one layer moves every
-        band below it. Nothing folded ⟹ equal split ⟹ Phase 109's picture, bit
-        for bit; everything folded ⟹ equal split again, since there is nobody
-        left to hand the room to.
+        Phase 113/114: the packing is no longer an equal split. A FOLDED band is
+        7 design px thick — one line plus a pixel of air above and below — and
+        the height it gives up is shared between the bands that still show rows.
+        A band's height is therefore a fact about the WHOLE STACK: folding one
+        layer moves every band below it. Nothing folded ⟹ equal split ⟹ Phase
+        109's picture, bit for bit.
 
-        16 is the smallest height that keeps a fold reversible: the chevron is
-        `min (13, height - 4)` and a name needs 16 (see drawOverviewColumn). */
+        Phase 115: they no longer FILL the grid. When every band is folded (or
+        the project has one layer, where folding is always "all"), the strips
+        pack against the top edge and the rest of the window stays empty — that
+        empty space is what a collapsed stack looks like. So do not read this as
+        "the last band ends at the grid's bottom"; only the equal split does. */
     juce::Rectangle<float> getOverviewBandBounds (int index) const;
 
     /** The line a note becomes in the overview: from its start to its end, one

@@ -21260,20 +21260,28 @@ juce::String MainComponent::runSelfTest()
                juce::String (gapWide, 2) + " vs " + juce::String (gapNarrow, 2)
                  + utf8 ("，行高 ") + juce::String (band0.getHeight() / 4.0f, 2));
 
-        //-- (4) 只有一个音高的层：一行，压在带中心（与折叠后同一个 y）-----
+        //-- (4) 只有一个音高的层：一行，压在带中心 ------------------------
+        // Phase 115 之前这里还能顺手比一句「和折叠之后是同一个 y」，因为全折会
+        // 回等分、带不动。现在全折把带压成一条窄条，**y 也跟着变了**，那句话
+        // 不再成立——它本来也不是这条要说的意思。要说的是：一行，就在自己那条
+        // 带的正中间；带换了形状，它跟着换。
         const auto sOnlyOpen = roll.getOverviewSegmentBounds (1, only);
 
         roll.setAllOverviewFolded (true);
 
+        const auto foldedBand1 = roll.getOverviewBandBounds (1);
         const auto sOnlyFolded = roll.getOverviewSegmentBounds (1, only);
 
-        check (utf8 ("单音高的那一层只有一行，就压在条带中心——和折叠之后是同一个 y"),
+        check (utf8 ("单音高的那一层展开时只有一行，压在自己那条带的正中间；折叠后跟着新带的中线走"),
                std::abs (sOnlyOpen.getCentreY() - band1.getCentreY()) < 0.01f
-                 && std::abs (sOnlyFolded.getCentreY() - sOnlyOpen.getCentreY()) < 0.01f,
+                 && ! sOnlyFolded.isEmpty()
+                 && std::abs (sOnlyFolded.getCentreY() - foldedBand1.getCentreY()) < 0.01f,
                juce::String (sOnlyOpen.getCentreY(), 1) + " / " + juce::String (band1.getCentreY(), 1)
-                 + " / " + juce::String (sOnlyFolded.getCentreY(), 1));
+                 + " / " + juce::String (sOnlyFolded.getCentreY(), 1) + utf8 ("，折后带 ")
+                 + foldedBand1.toString());
 
         //-- (5) 折叠 = 全部回到一条线 ------------------------------------
+        const auto foldedBandTop = roll.getOverviewBandBounds (0);
         const auto fHigh = roll.getOverviewSegmentBounds (0, high);
         const auto fLow  = roll.getOverviewSegmentBounds (0, low);
 
@@ -21281,9 +21289,10 @@ juce::String MainComponent::runSelfTest()
                roll.isAllOverviewFolded()
                  && roll.getOverviewRowCount (0) == 1
                  && std::abs (fHigh.getCentreY() - fLow.getCentreY()) < 0.01f
-                 && std::abs (fHigh.getCentreY() - band0.getCentreY()) < 0.01f,
+                 && std::abs (fHigh.getCentreY() - foldedBandTop.getCentreY()) < 0.01f,
                juce::String (roll.getOverviewRowCount (0)) + utf8 (" 行 / ")
-                 + juce::String (fHigh.getCentreY(), 1) + " vs " + juce::String (fLow.getCentreY(), 1));
+                 + juce::String (fHigh.getCentreY(), 1) + " vs " + juce::String (fLow.getCentreY(), 1)
+                 + utf8 ("，带中心 ") + juce::String (foldedBandTop.getCentreY(), 1));
 
         //-- (6) 折叠只换画法：起点、数量、选区、网格一个都不动 ------------
         // 这条是「视图状态不是工程状态」的另一半。展开/折叠来回切一次，能变
@@ -21774,16 +21783,24 @@ juce::String MainComponent::runSelfTest()
         //-- (8) 折叠时仍然压满条带 -----------------------------------------
         // 折叠 = 一行 = 整条带，所以那一行里的所有块 y 区间相同。这条是 P109 的
         // 画面在 P112 之后仍然成立：折叠没有把块变细。
+        //
+        // Phase 115：条带必须**折叠之后**重新量。全折从这一轮起会把条带压到 7 设计
+        // 像素（在那之前它回等分），拿折叠前那条 135 px 的带去比「块压满带」，比的
+        // 是两条不同的带——这正是「断言的前提本身要写成断言」的又一次。压满这件事
+        // 没有变，变的是「带」是哪一个。
         roll.setAllOverviewFolded (true);
 
+        const auto foldedBand0 = roll.getOverviewBandBounds (0);
         const auto fA = roll.getOverviewSampleBounds (0, idA);
         const auto fB = roll.getOverviewSampleBounds (0, idB);
 
         check (utf8 ("折叠时块仍然压满条带：一行就是整条带，两块 y 区间相同"),
-               std::abs (fA.getY() - (band0.getY() + 0.5f)) < 0.6f
-                 && std::abs (fA.getBottom() - (band0.getBottom() - 0.5f)) < 0.6f
+               foldedBand0.getHeight() > 1.0f
+                 && std::abs (fA.getY() - (foldedBand0.getY() + 0.5f)) < 0.6f
+                 && std::abs (fA.getBottom() - (foldedBand0.getBottom() - 0.5f)) < 0.6f
                  && std::abs (fA.getY() - fB.getY()) < 0.01f,
-               fA.toString() + " / " + fB.toString());
+               fA.toString() + " / " + fB.toString() + utf8 (" / 带 ")
+                 + foldedBand0.toString());
 
         roll.setAllOverviewFolded (false);
 
@@ -21951,23 +21968,32 @@ juce::String MainComponent::runSelfTest()
                  + juce::String (two1.getHeight(), 1) + " / "
                  + juce::String (two3.getHeight(), 1));
 
-        //-- (6) 全折：回到等分 ---------------------------------------------
-        // 没有人需要那块高度的时候，均摊是唯一不把窗口画成空白的答案——而且它
-        // 正好就是 P109 / P110 说的「像现在一样」。顺序必须与「一层都没折」逐点
-        // 相同，否则同一张图上「折了」和「没折」会画出两个不同的等分。
+        //-- (6) 全折：一摞窄条，剩下的窗口空着 -----------------------------
+        // Phase 113 这里答的是「回到等分」，理由是「没有人接收那块高度」。那句话
+        // 在一种情况下直接不成立：**全都折起来的时候，折叠就是用户唯一在做的事**
+        // （单层工程更彻底——count == 1，一折就是全折）。那时画面一点都不变，
+        // 「折叠」只剩一个亮着的按钮。Phase 115 把它改成与单层折叠同一句话：
+        // 每条带 7 设计像素，从网格顶上依次摞下来，下面空着——那片空白就是
+        // 「这一层收起来了」，也是折叠在别的 DAW 里长的样子。
         roll.setAllOverviewFolded (true);
 
-        const auto folded0 = roll.getOverviewBandBounds (0);
-        const auto folded3 = roll.getOverviewBandBounds (3);
+        const auto  folded0     = roll.getOverviewBandBounds (0);
+        const auto  folded3     = roll.getOverviewBandBounds (3);
+        const float stackBottom = grid.getY() + (folded0.getHeight() + folded3.getHeight()) * 2.0f;
 
-        check (utf8 ("全折时没有人需要那块高度，于是回到等分——与「没折」那一版逐点相同"),
+        check (utf8 ("全折：四条带各自一条线的厚度，从顶上依次摞下来，剩下的窗口空着"),
                roll.isAllOverviewFolded()
-                 && std::abs (folded0.getHeight() - open0.getHeight()) < 0.01f
-                 && std::abs (folded0.getY() - open0.getY()) < 0.01f
-                 && std::abs (folded3.getHeight() - open3.getHeight()) < 0.01f
-                 && std::abs (folded3.getBottom() - open3.getBottom()) < 0.01f,
-               juce::String (folded0.getHeight(), 1) + utf8 (" vs ")
-                 + juce::String (open0.getHeight(), 1));
+                 && folded0.getHeight() > 1.0f
+                 && folded0.getHeight() <= ui::pf (7.0f) + 1.01f
+                 && folded0.getHeight() < open0.getHeight() * 0.25f     // 上一轮这里是等分
+                 && std::abs (folded0.getY() - grid.getY()) < 0.01f     // 贴着网格顶
+                 && std::abs (folded3.getHeight() - folded0.getHeight()) < 1.01f
+                 && std::abs (folded3.getBottom() - stackBottom) < 2.5f  // 摞在一起，没散开
+                 && folded3.getBottom() < grid.getBottom() - ui::pf (60.0f),
+               juce::String (folded0.getHeight(), 1) + utf8 (" px 每条，摞到 ")
+                 + juce::String (folded3.getBottom(), 1) + utf8 ("，网格底 ")
+                 + juce::String (grid.getBottom(), 1) + utf8 ("（没折时 ") 
+                 + juce::String (open0.getHeight(), 1) + utf8 (" px）"));
 
         //-- (7) 展开回来：逐点还原 -----------------------------------------
         // 带宽是**派生**的（fold 状态 → 布局），不是存下来的数：所以一个来回之后
