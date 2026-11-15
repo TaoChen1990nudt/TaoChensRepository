@@ -2274,13 +2274,14 @@ juce::Image MainComponent::createGroupScrollSnapshot (int width, int height)
 }
 
 //==============================================================================
-juce::Image MainComponent::createOverviewSnapshot (int width, int height)
+juce::Image MainComponent::createOverviewSnapshot (int width, int height, bool folded)
 {
     const auto   previousBounds    = pianoRoll.getBounds();
     const float  previousBeatWidth = pianoRoll.getBeatWidth();
     const double previousScroll    = pianoRoll.getScrollBeats();
     const int    previousFocus     = focusedSlotId;
     const bool   previousMode      = pianoRoll.isOverviewMode();
+    const bool   previousFold      = pianoRoll.isOverviewFolded();
 
     focusSynth (-1);
 
@@ -2321,8 +2322,14 @@ juce::Image MainComponent::createOverviewSnapshot (int width, int height)
 
     pianoRoll.setOverviewMode (true);
 
+    // Phase 110: the two frames differ in exactly one setting, so the pair reads
+    // as "these are the same project, this is the switch". Staged after the mode
+    // because that is the order the user meets them in.
+    pianoRoll.setOverviewFolded (folded);
+
     auto image = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
 
+    pianoRoll.setOverviewFolded (previousFold);
     pianoRoll.setOverviewMode (previousMode);
 
     for (int i = 0; i < 2; ++i)
@@ -4706,6 +4713,13 @@ void MainComponent::showSettingsMenu (juce::Point<int> screenPosition)
     // currently set.
     menu.addItem (7, utf8 ("总览模式（全部图层压成条带，只读）"), true, pianoRoll.isOverviewMode());
 
+    // Phase 110: the second state of that mode, and again the only place that
+    // can tick it without a toolbar round trip. Disabled rather than hidden
+    // while the mode is off: a menu that grows and shrinks is a menu you have to
+    // read twice.
+    menu.addItem (8, utf8 ("总览里折叠重叠音符（每层压回一条线）"),
+                  pianoRoll.isOverviewMode(), pianoRoll.isOverviewFolded());
+
     juce::Component::SafePointer<MainComponent> safe (this);
 
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (
@@ -4724,6 +4738,7 @@ void MainComponent::showSettingsMenu (juce::Point<int> screenPosition)
             case 5: safe->pianoRoll.setGhostAlpha (0.60f); break;
             case 6: safe->toggleMixerWindow(); break;
             case 7: safe->pianoRoll.setOverviewMode (! safe->pianoRoll.isOverviewMode()); break;
+            case 8: safe->pianoRoll.setOverviewFolded (! safe->pianoRoll.isOverviewFolded()); break;
             default: break;
         }
 

@@ -3259,7 +3259,7 @@ juce::String MainComponent::runSelfTest()
                      : juce::String ("no note"));
         }
 
-        //-- Phase 20: the toolbar has to fit its buttons (11 since Phase 109) ---
+        //-- Phase 20: the toolbar has to fit its buttons (12 since Phase 110) ---
         {
             LayerStack t;
             RackModel  r;
@@ -3276,7 +3276,7 @@ juce::String MainComponent::runSelfTest()
 
             check ("Every toolbar button owns its own pixels (the velocity toggle included)",
                    ! overlap
-                     && PianoRollComponent::numToolButtons == 11
+                     && PianoRollComponent::numToolButtons == 12
                      && roll.getToolbarArea().contains (
                               roll.getToolButtonBounds (PianoRollComponent::numToolButtons - 1)),
                    juce::String (PianoRollComponent::numToolButtons) + utf8 (" 个按钮，右端 ")
@@ -9934,7 +9934,7 @@ juce::String MainComponent::runSelfTest()
         pianoRoll.setTool (PianoRollComponent::Tool::knife);
 
         check ("The knife is the toolbar's fifth tool button",
-               PianoRollComponent::numToolButtons == 11
+               PianoRollComponent::numToolButtons == 12
                  && pianoRoll.getToolButtonBounds (4).getX()
                       > pianoRoll.getToolButtonBounds (3).getRight()
                  && pianoRoll.getToolButtonBounds (5).getX()
@@ -21185,6 +21185,170 @@ juce::String MainComponent::runSelfTest()
         check (utf8 ("越界索引、以及钢琴窗里的「压缩后的线段」，都答空矩形"),
                outOfRange && roll.getOverviewSegmentBounds (0, n0).isEmpty(),
                "band3 " + roll.getOverviewBandBounds (3).toString());
+    }();
+
+    //== Phase 110: 总览保留音高方向，折叠才压回一条线 ======================
+    // 用户原话：「如果在钢琴窗里面有两个音符是上下重叠的，那么在总览窗里面也要
+    // 显示为上下重叠，但是可以略去间隔的琴键，然后总览窗可以有一个折叠的按钮，
+    // 点了之后就把多个重叠的音符折叠在一起，像现在一样」。
+    //
+    // 三件事，依次钉：
+    //   1. **重叠要看得见** —— 同一拍两个音高，在带里也是两条不重叠的线，高的在上；
+    //   2. **跳过的琴键不占位置** —— 差 12 个半音和差 1 个半音，行距一模一样；
+    //   3. **折叠是「回到 P109」** —— 一条中心线，行数 1，工程一个字节没动。
+    [&]
+    {
+        LayerStack stack;
+        RackModel  rack;
+
+        stack.addLayer (utf8 ("宽音域"), palette::layer1);
+        stack.addLayer (utf8 ("单音"),   palette::layer2);
+        stack.setActiveLayerIndex (0);
+
+        auto* l0 = stack.getLayer (0);
+        auto* l1 = stack.getLayer (1);
+
+        // 四个音高，两两之间的「钢琴键距」故意差得很远：84→72 是 12 个半音，
+        // 61→60 是 1 个。展开之后它们必须**等距**，这正是「略去间隔的琴键」。
+        const int high = l0->addNote ({ 0, 84, 4.0, 1.0, 0.8f });
+        const int oct  = l0->addNote ({ 0, 72, 4.0, 1.0, 0.8f });
+        const int semi = l0->addNote ({ 0, 61, 4.0, 1.0, 0.8f });
+        const int low  = l0->addNote ({ 0, 60, 4.0, 1.0, 0.8f });
+        const int only = l1->addNote ({ 0, 60, 4.0, 1.0, 0.8f });
+
+        PianoRollComponent roll (stack, rack);
+        roll.setSize (1100, 460);
+        roll.setScrollBeats (0.0);
+        roll.setOverviewMode (true);
+
+        const auto band0 = roll.getOverviewBandBounds (0);
+        const auto band1 = roll.getOverviewBandBounds (1);
+
+        check (utf8 ("展开时，一条带的行数就是这一层用到的不同音高数（不是 128）"),
+               roll.getOverviewRowCount (0) == 4
+                 && roll.getOverviewRowCount (1) == 1
+                 && ! roll.isOverviewFolded(),
+               juce::String (roll.getOverviewRowCount (0)) + " / "
+                 + juce::String (roll.getOverviewRowCount (1)));
+
+        //-- (2) 上下重叠的音符，在带里也上下错开 -------------------------
+        const auto sHigh = roll.getOverviewSegmentBounds (0, high);
+        const auto sLow  = roll.getOverviewSegmentBounds (0, low);
+
+        check (utf8 ("同一拍上的两个音高，在总览里是上下两条线，高的在上，而且不叠在一起"),
+               ! sHigh.isEmpty() && ! sLow.isEmpty()
+                 && sHigh.getCentreY() < sLow.getCentreY()
+                 && sHigh.getBottom() <= sLow.getY() + 0.01f
+                 && sHigh.getY() >= band0.getY() - 0.01f
+                 && sLow.getBottom() <= band0.getBottom() + 0.01f,
+               juce::String (sHigh.getCentreY(), 1) + " / " + juce::String (sLow.getCentreY(), 1)
+                 + utf8 ("，带 ") + band0.toString());
+
+        //-- (3) 跳过的琴键不占位置 ---------------------------------------
+        // 若按真实半音数排布，84→72 的行距会是 61→60 的**十二倍**，而一个
+        // 150 px 的带子里那就是「一个看得见」和「一个看不见」。展开的行距是
+        // 等分的，所以两对之间的距离必须逐点相等。
+        const auto sOct  = roll.getOverviewSegmentBounds (0, oct);
+        const auto sSemi = roll.getOverviewSegmentBounds (0, semi);
+
+        const float gapWide = sOct.getCentreY()  - sHigh.getCentreY();
+        const float gapNarrow = sLow.getCentreY() - sSemi.getCentreY();
+
+        check (utf8 ("跳过的空琴键不占位置：差 12 个半音和差 1 个半音，行距一样"),
+               std::abs (gapWide - gapNarrow) < 0.01f
+                 && std::abs (gapWide - band0.getHeight() / 4.0f) < 0.01f,
+               juce::String (gapWide, 2) + " vs " + juce::String (gapNarrow, 2)
+                 + utf8 ("，行高 ") + juce::String (band0.getHeight() / 4.0f, 2));
+
+        //-- (4) 只有一个音高的层：一行，压在带中心（与折叠后同一个 y）-----
+        const auto sOnlyOpen = roll.getOverviewSegmentBounds (1, only);
+
+        roll.setOverviewFolded (true);
+
+        const auto sOnlyFolded = roll.getOverviewSegmentBounds (1, only);
+
+        check (utf8 ("单音高的那一层只有一行，就压在条带中心——和折叠之后是同一个 y"),
+               std::abs (sOnlyOpen.getCentreY() - band1.getCentreY()) < 0.01f
+                 && std::abs (sOnlyFolded.getCentreY() - sOnlyOpen.getCentreY()) < 0.01f,
+               juce::String (sOnlyOpen.getCentreY(), 1) + " / " + juce::String (band1.getCentreY(), 1)
+                 + " / " + juce::String (sOnlyFolded.getCentreY(), 1));
+
+        //-- (5) 折叠 = 全部回到一条线 ------------------------------------
+        const auto fHigh = roll.getOverviewSegmentBounds (0, high);
+        const auto fLow  = roll.getOverviewSegmentBounds (0, low);
+
+        check (utf8 ("折叠之后，几个音高全部回到同一条中心线上（行数 1，就是 P109 那张图）"),
+               roll.isOverviewFolded()
+                 && roll.getOverviewRowCount (0) == 1
+                 && std::abs (fHigh.getCentreY() - fLow.getCentreY()) < 0.01f
+                 && std::abs (fHigh.getCentreY() - band0.getCentreY()) < 0.01f,
+               juce::String (roll.getOverviewRowCount (0)) + utf8 (" 行 / ")
+                 + juce::String (fHigh.getCentreY(), 1) + " vs " + juce::String (fLow.getCentreY(), 1));
+
+        //-- (6) 折叠只换画法：起点、数量、选区、网格一个都不动 ------------
+        // 这条是「视图状态不是工程状态」的另一半。展开/折叠来回切一次，能变
+        // 的只有 y：x 还是那个 x，音符还是那么多个。
+        roll.setSelection ({ high });
+        const int    notesBefore = (int) l0->getNotes().size();
+        const double startBefore = l0->findNote (high) != nullptr ? l0->findNote (high)->startBeat : -1.0;
+
+        roll.setOverviewFolded (false);
+
+        const auto reopened = roll.getOverviewSegmentBounds (0, high);
+
+        check (utf8 ("折叠开关只换画法：起点、音符数、选区、以及网格的 x 都不动"),
+               std::abs (reopened.getX() - fHigh.getX()) < 0.01f
+                 && std::abs ((double) reopened.getY() - (double) fHigh.getY()) > 1.0
+                 && (int) l0->getNotes().size() == notesBefore
+                 && roll.getSelection().size() == 1
+                 && roll.isNoteSelectedForTest (high)
+                 && l0->findNote (high) != nullptr
+                 && std::abs (l0->findNote (high)->startBeat - startBefore) < 1e-9,
+               "x " + juce::String (reopened.getX(), 1) + " / y "
+                 + juce::String (reopened.getY(), 1) + " vs " + juce::String (fHigh.getY(), 1));
+
+        //-- (7) 行集合与视口无关 -----------------------------------------
+        // 这一条是设计的一半：行表要是按「视口里有什么」算的，横向滚一下线就
+        // 会上下跳。滚动之后同一批音符必须还在原来的行上（只是往左挪了）。
+        //
+        // 「没跳」这个结论必须配上「真的滚了」这条前提，否则一个把 scrollBeats
+        // 夹回 0 的夹具也会让它变绿（P101-C 的老坑）。
+        const auto before = roll.getOverviewSegmentBounds (0, low);
+
+        roll.setScrollBeats (24.0);
+
+        const auto after = roll.getOverviewSegmentBounds (0, low);
+
+        check (utf8 ("横向滚走之后，同一个音符仍然在原来那一行（行表按图层算，不按视口算）"),
+               roll.getScrollBeats() > 0.5
+                 && std::abs (after.getX() - before.getX()) > 100.0f
+                 && std::abs (after.getCentreY() - before.getCentreY()) < 0.01f,
+               juce::String (before.getCentreY(), 1) + " -> " + juce::String (after.getCentreY(), 1)
+                 + utf8 ("，x ") + juce::String (before.getX(), 1) + " -> "
+                 + juce::String (after.getX(), 1));
+
+        roll.setScrollBeats (0.0);
+
+        //-- (8) 线还是线，不是块 -----------------------------------------
+        const auto rowHeight = band0.getHeight() / 4.0f;
+        const auto anyLine   = roll.getOverviewSegmentBounds (0, high);
+
+        check (utf8 ("展开之后线还是线：不超过 5 个设计像素，也不超过它那一行的六成"),
+               anyLine.getHeight() <= ui::pf (5.0f) + 0.01f
+                 && anyLine.getHeight() <= rowHeight * 0.6f + 0.01f
+                 && anyLine.getHeight() > 1.0f,
+               juce::String (anyLine.getHeight(), 2) + " / " + juce::String (rowHeight, 2));
+
+        //-- (9) 按钮 ------------------------------------------------
+        check (utf8 ("工具栏第 12 颗就是「折叠」，长在「总览」右边、还在工具栏里"),
+               PianoRollComponent::numToolButtons == 12
+                 && roll.getToolButtonBounds (11).getX()
+                      > roll.getToolButtonBounds (10).getRight()
+                 && roll.getToolbarArea().contains (roll.getToolButtonBounds (11)),
+               "btn11 x " + juce::String (roll.getToolButtonBounds (11).getX()));
+
+        roll.setOverviewFolded (false);
+        roll.setSelection ({});
     }();
 
     // The summary MUST come after the last check. It used to sit mid-function

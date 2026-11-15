@@ -467,8 +467,14 @@ public:
         Eight bars at 36 px per beat, so the stack fits the frame instead of
         being cropped to its first six; the two ghost layers' eyes are opened for
         the shot and put back afterwards, because the claim is "every layer, in
-        order" and a nearly invisible band would document the opposite. */
-    juce::Image createOverviewSnapshot (int width = ui::px (980), int height = ui::px (420));
+        order" and a nearly invisible band would document the opposite.
+
+        Phase 110: `folded` takes the same picture with the pitch axis removed —
+        one line per band, which is what every note in it collapses onto. Same
+        project, same framing, one setting apart, so the two frames are a
+        before/after rather than two illustrations. */
+    juce::Image createOverviewSnapshot (int width = ui::px (980), int height = ui::px (420),
+                                        bool folded = false);
 
     /** Phase 36: the note inspector with all three automation layers live.
 

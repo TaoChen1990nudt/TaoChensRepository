@@ -285,6 +285,34 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
                     bounds.withTrimmedLeft (ui::pf (26)), juce::Justification::centredLeft, false);
     }
 
+    //-- Phase 110: 折叠 ------------------------------------------------------
+    // A second state of the overview, drawn like the toggles to its left: lit
+    // while folded. Dimmed outside the mode — it is not a thing you can want
+    // from the sheet view, and a button that does nothing for no stated reason
+    // is worse than one that says "not here".
+    {
+        const auto bounds  = getToolButtonBounds (11).toFloat();
+        const bool hovered = hoveredTool == 11;
+        const bool on      = overviewMode && overviewFolded;
+        const float inkAlpha = overviewMode ? 0.75f : 0.35f;
+
+        g.setColour (on ? tint.withAlpha (0.22f)
+                        : juce::Colours::white.withAlpha (hovered && overviewMode ? 0.12f : 0.05f));
+        g.fillRoundedRectangle (bounds, ui::pf (4));
+
+        g.setColour (on ? tint.withAlpha (0.85f)
+                        : juce::Colours::white.withAlpha (overviewMode ? 0.20f : 0.10f));
+        g.drawRoundedRectangle (bounds.reduced (0.5f), ui::pf (4), 1.0f);
+
+        drawToolIcon (g, 11, bounds.withTrimmedLeft (ui::pf (7)).withWidth (ui::pf (18)),
+                      on ? juce::Colours::white : kText.withAlpha (inkAlpha));
+
+        g.setColour (on ? juce::Colours::white : kText.withAlpha (inkAlpha));
+        g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (9.0f))));
+        g.drawText (utf8 ("折叠"),
+                    bounds.withTrimmedLeft (ui::pf (26)), juce::Justification::centredLeft, false);
+    }
+
     // A short reminder of what the current tool does, so the mode is never a
     // mystery after a click. With a paint state loaded, saying so matters more
     // than describing the tool: every click from now on stamps that note.
@@ -317,17 +345,20 @@ void PianoRollComponent::drawToolbar (juce::Graphics& g)
     }
     else if (overviewMode)
     {
-        // The one sentence this mode has to say: the stripes are read-only, and
-        // a note is a line rather than a block. Nine characters against a budget
-        // of about sixteen: the first draft was "总览 · 只读：每层一条带，音符是
-        // 线段　·　Esc 回来", which ran over the readout and left both halves
-        // unreadable (Phase 109 follow-up). What got dropped is what the picture
-        // already says — the left column is captioned Layer 1/2/3, so "one band
-        // per layer" is visible; that the line cannot be dragged is not; and the
-        // lit 总览 button in this very row is the way back out.
+        // The one sentence this mode has to say is that nothing here can be
+        // touched. What a note looks like is now the picture's job: since Phase
+        // 110 the bands keep the pitch axis, so "两条线上下错开" reads off the
+        // screen, and 折叠 next door says what to do when a band gets crowded.
+        //
+        // "总览" left the sentence too — the lit button at the head of this very
+        // row already says which mode you are in, and twelve buttons plus the
+        // readout leave room for about EIGHT characters now (it was sixteen
+        // before 折叠 took its 62 px). P109-E: what does not fit does not get
+        // clamped, it gets shorter — the first draft of this line ran straight
+        // over "8.0 / 128 beat".
         g.setColour (tint.withAlpha (0.85f));
         g.setFont (juce::Font (juce::FontOptions (atomic::ui::sp (10.0f))));
-        g.drawText (utf8 ("总览 · 只读　音符是一段线"),
+        g.drawText (utf8 ("只读 · 按不动"),
                     hintArea, juce::Justification::centredLeft, true);
     }
     else if (hasPaintState)
@@ -665,9 +696,18 @@ void PianoRollComponent::drawOverview (juce::Graphics& g)
         }
 
         //-- Notes: one line each, at its own start --------------------------
+        // Phase 110: the pitch table is built ONCE per band and handed to the
+        // per-note geometry. Asking for it inside the loop would re-sort the
+        // layer once per note, which is the O(n²) this file already avoids for
+        // `findNote`. Folded, the table is empty and every note lands on the
+        // centre line.
+        const std::vector<int> rows = overviewFolded ? std::vector<int>()
+                                                     : overviewRowPitches (i);
+        const std::vector<int>* rowTable = overviewFolded ? nullptr : &rows;
+
         for (const auto& note : layer->getNotes())
         {
-            const auto segment = overviewSegmentOf (i, note);
+            const auto segment = overviewSegmentOf (i, note, rowTable);
 
             if (segment.isEmpty() || ! segment.intersects (area))
                 continue;
@@ -1875,6 +1915,28 @@ void PianoRollComponent::drawToolIcon (juce::Graphics& g, int toolIndex,
                 g.fillRoundedRectangle (juce::Rectangle<float> (box.getX() + 2.0f + (float) i * 3.2f,
                                                                 y, 4.6f, 2.8f), 0.6f);
             }
+            break;
+        }
+
+        case 11:    // Phase 110: fold — two rows, and two arrows meeting between
+        {
+            // "Put them back on one line" at 16 px: a row, its mirror, and a
+            // bowtie between them doing the work. Drawn as two triangles rather
+            // than one arrow because the motion is TOWARDS a line that is
+            // already there, not towards a destination off the button.
+            const float left = box.getX() + 2.0f;
+            const float wide = 12.0f;
+
+            g.fillRect (juce::Rectangle<float> (left, box.getY() + 2.4f, wide, 2.2f));
+            g.fillRect (juce::Rectangle<float> (left, box.getY() + 11.4f, wide, 2.2f));
+
+            juce::Path down;
+            down.addTriangle (c.x, c.y + 2.0f, c.x - 2.6f, c.y - 1.9f, c.x + 2.6f, c.y - 1.9f);
+            g.fillPath (down);
+
+            juce::Path up;
+            up.addTriangle (c.x, c.y - 2.0f, c.x - 2.6f, c.y + 1.9f, c.x + 2.6f, c.y + 1.9f);
+            g.fillPath (up);
             break;
         }
 

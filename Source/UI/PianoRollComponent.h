@@ -151,7 +151,7 @@ public:
         hours at 120 BPM — "unlimited" in any practical sense. */
     static constexpr double maxTimelineBeats = 10000.0;
 
-    static constexpr int    numToolButtons = 11;     // 5 tools + copy-state + group + ungroup + snap + velocity lane + overview
+    static constexpr int    numToolButtons = 12;     // 5 tools + copy-state + group + ungroup + snap + velocity lane + overview + fold
 
     //-- Phase 7: tools -------------------------------------------------------
     enum class Tool
@@ -1544,6 +1544,26 @@ public:
         that does not exist. */
     juce::Rectangle<float> getOverviewSegmentBounds (int layerIndex, int noteId) const;
 
+    /** Phase 110: does a band keep the pitch axis?
+
+        Folded (the Phase 109 look) puts every note of a layer on ONE centre
+        line, so two notes that overlap in time are one line. Unfolded — the
+        default — gives the band as many rows as the layer has DISTINCT pitches
+        and puts each note on its own, high notes at the top. The keys in
+        between are skipped, which is the point: 128 rows in a 150 px band is a
+        pixel each, and "these two overlap" would be invisible all over again.
+
+        The row set is the whole LAYER's pitches, not the pitches on screen:
+        a row table built from what the viewport happens to contain would make
+        the lines jump up and down whenever the timeline scrolled sideways. */
+    bool isOverviewFolded() const noexcept { return overviewFolded; }
+    void setOverviewFolded (bool shouldFold);
+
+    /** How many pitch rows band `index` is cut into: the number of distinct
+        pitches the layer's notes use, 1 when folded, 1 for an empty layer.
+        The band is split evenly between them — that IS "skip the empty keys". */
+    int getOverviewRowCount (int index) const;
+
     /** Phase 98: what the lane is showing. Four tabs share one strip.
 
         The numbers are the TAB order, not `MidiCcLane`'s order — 0 is velocity
@@ -2062,8 +2082,19 @@ private:
     /** The segment a note becomes, given the note object the caller is already
         holding. `drawOverview` walks every note, so the public query (which has
         to look one up by id) is a wrapper around this, not the other way
-        round — otherwise painting would be O(notes²). */
-    juce::Rectangle<float> overviewSegmentOf (int layerIndex, const NoteEvent&) const;
+        round — otherwise painting would be O(notes²).
+
+        `rows` is the layer's pitch table (see `overviewRowPitches`), or nullptr
+        when folded. It is passed in rather than looked up per note for the same
+        reason: building it is a sort of the whole layer, and painting calls
+        this once per note. */
+    juce::Rectangle<float> overviewSegmentOf (int layerIndex, const NoteEvent&,
+                                              const std::vector<int>* rows) const;
+
+    /** Phase 110: the distinct pitches a layer's notes use, highest first. The
+        rows of its band, once sorted. Built from the LAYER, never from the
+        viewport — see `getOverviewRowCount`. */
+    std::vector<int> overviewRowPitches (int layerIndex) const;
 
     //-- Phase 17: audio clips ------------------------------------------------
     /** P79: `sample.name`, plus "→ sampler" when the block is mounted somewhere
@@ -2517,6 +2548,16 @@ private:
         as it is while this is on and simply has no strip to show — leaving
         the mode restores it without a round trip through a saved value. */
     bool overviewMode = false;
+
+    /** Phase 110: does the overview keep the pitch axis? Session state like the
+        mode it belongs to, and it survives leaving the mode — you fold once,
+        the way you like looking at it, and it stays folded.
+
+        The default is UNFOLDED: "两个音符上下重叠，总览里也该上下重叠" is a
+        property of the picture, so it has to be the picture you get without
+        asking. Folding is the escape hatch for a layer that uses sixty pitches,
+        which is exactly when sixty rows in a 150 px band stop meaning anything. */
+    bool overviewFolded = false;
 
     /** The velocities this gesture is moving, captured at the press.
 

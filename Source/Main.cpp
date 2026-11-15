@@ -263,6 +263,13 @@ namespace
         // shows the same session laid out differently.
         writePng ("-overview", component.createOverviewSnapshot());
 
+        // Phase 110: the same frame with the bands folded — one line per layer
+        // instead of one per pitch. Two frames rather than one because the
+        // setting is a question ("do you want the pitch axis back?"), and a
+        // question is answered by both of its answers being on record.
+        writePng ("-overviewfold", component.createOverviewSnapshot (atomic::ui::px (980),
+                                                                   atomic::ui::px (420), true));
+
         // Phase 21: the group's inline curve box. Its own frame, because only
         // one floating editor can be open at a time and the main image above
         // already documents the note box.

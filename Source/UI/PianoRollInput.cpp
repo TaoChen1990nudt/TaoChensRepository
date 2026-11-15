@@ -162,6 +162,21 @@ void PianoRollComponent::handlePress (juce::Point<float> pos, juce::ModifierKeys
             return;
         }
 
+        if (getToolButtonBounds (11).contains (ipos))
+        {
+            // Phase 110: the overview's second state. Outside the mode there is
+            // no band to fold, and saying so is the whole handling — the same
+            // shape as the velocity button two to the left, because it is the
+            // same situation with the roles reversed.
+            if (! overviewMode)
+                flashStatus (utf8 ("折叠是总览里的开关 —— 先点「总览」"));
+            else
+                setOverviewFolded (! overviewFolded);
+
+            repaint();
+            return;
+        }
+
         return;
     }
 

@@ -8,6 +8,7 @@
 #include "Util/Text.h"
 #include "Util/Theme.h"
 
+#include <algorithm>
 #include <limits>
 #include <map>
 #include <set>
@@ -577,12 +578,41 @@ juce::Rectangle<float> PianoRollComponent::getOverviewBandBounds (int index) con
 
 
 juce::Rectangle<float> PianoRollComponent::overviewSegmentOf (int layerIndex,
-                                                              const NoteEvent& note) const
+                                                              const NoteEvent& note,
+                                                              const std::vector<int>* rows) const
 {
     const auto band = getOverviewBandBounds (layerIndex);
 
     if (band.isEmpty())
         return {};
+
+    // Unfolded, the band is cut into one row per distinct pitch; folded, there
+    // is exactly one row and it is the whole band — which is why the folded
+    // picture is not a special case below but the count == 1 case of it.
+    const int count = (rows != nullptr) ? juce::jmax (1, (int) rows->size()) : 1;
+    const float rowHeight = band.getHeight() / (float) count;
+
+    int rank = 0;
+
+    if (count > 1)
+    {
+        const auto found = std::lower_bound (rows->begin(), rows->end(), note.pitch,
+                                             std::greater<int>());
+
+        // Every note's pitch IS a row (the table is built from these notes), so
+        // the miss branch is unreachable — it lands on the bottom row rather
+        // than on a negative index, because a wrong line is a smaller bug than
+        // a line drawn outside its own band.
+        rank = (found != rows->end() && *found == note.pitch)
+                 ? (int) std::distance (rows->begin(), found)
+                 : count - 1;
+    }
+
+    // Rows are counted from the TOP (rank 0 = highest pitch) and laid out from
+    // the top for the same reason: a higher note has to be a higher pixel, or
+    // the whole axis is upside down. count == 1 gives the centre line of
+    // Phase 109 exactly, since (0 + 0.5) * height is half the band.
+    const float centreY = band.getY() + ((float) rank + 0.5f) * rowHeight;
 
     const float x0 = screenXForBeat (note.startBeat);
     const float x1 = screenXForBeat (note.startBeat + note.lengthBeats);
@@ -591,14 +621,69 @@ juce::Rectangle<float> PianoRollComponent::overviewSegmentOf (int layerIndex,
     // stripe, not as a bar with air around it. The clamp keeps a twelfth-layer
     // stack from turning the lines into nothing at the top end, and a three-layer
     // one from turning them into bricks at the bottom.
-    const float height = juce::jlimit (1.5f, ui::pf (5.0f), band.getHeight() * 0.30f);
+    //
+    // Phase 110: also at most 55% of the ROW it sits in, or two adjacent pitches
+    // (C and C# are one row apart, which is now ~4 px) would touch and the whole
+    // stack would read as one block. When the row IS the band, the two rules
+    // agree and nothing changes.
+    const float height = juce::jlimit (1.5f, ui::pf (5.0f),
+                                       juce::jmin (band.getHeight() * 0.30f, rowHeight * 0.55f));
 
     // A note shorter than the minimum is still a mark at its start — that is
     // the whole of "有音符的起始位置就显示一条线段". The minimum widens to the
     // right, never to the left, so the left edge stays exactly the onset.
     const float width = juce::jmax (ui::pf (3.0f), x1 - x0);
 
-    return { x0, band.getCentreY() - height * 0.5f, width, height };
+    return { x0, centreY - height * 0.5f, width, height };
+}
+
+
+std::vector<int> PianoRollComponent::overviewRowPitches (int layerIndex) const
+{
+    std::vector<int> rows;
+
+    auto* layer = stack.getLayer (layerIndex);
+
+    if (layer == nullptr)
+        return rows;
+
+    rows.reserve (layer->getNotes().size());
+
+    for (const auto& note : layer->getNotes())
+        rows.push_back (note.pitch);
+
+    std::sort (rows.begin(), rows.end(), std::greater<int>());
+    rows.erase (std::unique (rows.begin(), rows.end()), rows.end());
+
+    return rows;
+}
+
+
+int PianoRollComponent::getOverviewRowCount (int index) const
+{
+    if (overviewFolded)
+        return 1;
+
+    return juce::jmax (1, (int) overviewRowPitches (index).size());
+}
+
+
+void PianoRollComponent::setOverviewFolded (bool shouldFold)
+{
+    if (overviewFolded == shouldFold)
+        return;
+
+    overviewFolded = shouldFold;
+
+    // No gesture to cancel and no selection to touch: this changes where a line
+    // is drawn inside a band, and nothing else. The cursor is reset for the
+    // same reason the mode reset it — the pointer is now over a different
+    // picture, and a stale corner-resize arrow belongs to the old one.
+    dragMode      = DragMode::none;
+    hoveredNoteId = -1;
+
+    updateCursor();
+    repaint();
 }
 
 
@@ -612,7 +697,15 @@ juce::Rectangle<float> PianoRollComponent::getOverviewSegmentBounds (int layerIn
 
     const auto* note = layer->findNote (noteId);
 
-    return note != nullptr ? overviewSegmentOf (layerIndex, *note) : juce::Rectangle<float>();
+    if (note == nullptr)
+        return {};
+
+    if (overviewFolded)
+        return overviewSegmentOf (layerIndex, *note, nullptr);
+
+    const auto rows = overviewRowPitches (layerIndex);
+
+    return overviewSegmentOf (layerIndex, *note, &rows);
 }
 
 
