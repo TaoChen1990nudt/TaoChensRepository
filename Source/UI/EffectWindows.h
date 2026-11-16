@@ -28,7 +28,7 @@ namespace atomic
 class PluginEditorWindow final : public juce::DocumentWindow
 {
 public:
-    PluginEditorWindow (juce::AudioPluginInstance& processor,
+    PluginEditorWindow (juce::AudioProcessor& processor,
                         const juce::String& pluginName,
                         int instanceIdToShow);
 
@@ -55,9 +55,40 @@ public:
 
     void closeButtonPressed() override;
 
+    /** Phase 122: this window opts out of per-monitor DPI rescaling. The
+        plugin's native view manages its own content scale (VST3's
+        IPlugViewContentScaleSupport); a second, host-side scale on the frame
+        is what leaves the plugin's black backing component exposed when the
+        window is dragged to a display with a different DPI. JUCE's own
+        AudioPluginHost pins the same value for exactly this reason. */
+    static constexpr float frameDesktopScale = 1.0f;
+    float getDesktopScaleFactor() const override { return frameDesktopScale; }
+
+    /** Test seam: the editor being framed, or nullptr for a plugin with no UI. */
+    juce::AudioProcessorEditor* getEditorForTest() const noexcept { return editor; }
+
 private:
+    /** Phase 122: the frame's constrainer counts window pixels; the plugin's
+        counts editor pixels. Neither may be used raw for the other — the host
+        has to translate, including the native title bar's border, or dragging
+        the frame asks the plugin for a size it cannot honour. */
+    class EditorConstrainer final : public juce::BorderedComponentBoundsConstrainer
+    {
+    public:
+        EditorConstrainer (PluginEditorWindow& w, juce::AudioProcessorEditor* e) noexcept;
+
+        juce::ComponentBoundsConstrainer* getWrappedConstrainer() const override;
+        juce::BorderSize<int> getAdditionalBorder() const override;
+
+    private:
+        PluginEditorWindow&  window;
+        juce::AudioProcessorEditor* editor;
+    };
+
     juce::KeyListener* keyForwarder = nullptr;
     int instanceId = 0;
+    juce::AudioProcessorEditor* editor = nullptr;
+    std::unique_ptr<EditorConstrainer> editorConstrainer;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginEditorWindow)
 };

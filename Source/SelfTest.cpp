@@ -23009,6 +23009,93 @@ juce::String MainComponent::runSelfTest()
                juce::String ((int) afterUntick.devices.size()) + utf8 (" 个记忆"));
     } ();
 
+    //-- P122: 外框和实际界面只能有一套尺寸 ----------------------------------
+    // 真机上是 VST3 的原生 HWND 藏在 JUCE 编辑器里，headless 拿不到那个界面，
+    // 所以这里用一个会自己改大小的 AudioProcessorEditor 顶上：外框的活儿是
+    // 宿主干的，跟界面是 JUCE 画的还是原生 HWND 无关。
+    [&]
+    {
+        struct ProbeEditor final : juce::AudioProcessorEditor
+        {
+            explicit ProbeEditor (juce::AudioProcessor& p) : juce::AudioProcessorEditor (p)
+            {
+                setSize (400, 300);
+                setResizable (true, true);
+                setResizeLimits (240, 180, 800, 600);
+            }
+            void paint (juce::Graphics& g) override { g.fillAll (juce::Colours::red); }
+        };
+
+        struct ProbeProcessor : juce::AudioProcessor
+        {
+            const juce::String getName() const override { return "P122"; }
+            void prepareToPlay (double, int) override {}
+            void releaseResources() override {}
+            void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override {}
+            double getTailLengthSeconds() const override { return 0.0; }
+            bool acceptsMidi() const override { return false; }
+            bool producesMidi() const override { return false; }
+            juce::AudioProcessorEditor* createEditor() override { return new ProbeEditor (*this); }
+            bool hasEditor() const override { return true; }
+            int getNumPrograms() override { return 1; }
+            int getCurrentProgram() override { return 0; }
+            void setCurrentProgram (int) override {}
+            const juce::String getProgramName (int) override { return {}; }
+            void changeProgramName (int, const juce::String&) override {}
+            void getStateInformation (juce::MemoryBlock&) override {}
+            void setStateInformation (const void*, int) override {}
+        };
+
+        ProbeProcessor proc;
+        auto win = std::make_unique<PluginEditorWindow> (proc, "P122", 42);
+        auto* ed = win->getEditorForTest();
+
+        check (utf8 ("插件窗口不跟着显示器的 DPI 再缩放一遍"),
+               ed != nullptr && PluginEditorWindow::frameDesktopScale == 1.0f
+                 && win->getDesktopScaleFactor() == PluginEditorWindow::frameDesktopScale,
+               juce::String (win->getDesktopScaleFactor(), 3));
+
+        const int ew = ed != nullptr ? ed->getWidth() : 0;
+        const int eh = ed != nullptr ? ed->getHeight() : 0;
+        ed->setSize (ew + 60, eh + 40);
+        check (utf8 ("音源自己改界面大小，外框跟着走"),
+               win->getWidth() >= ew + 60 && win->getHeight() >= eh + 40,
+               juce::String (win->getWidth()) + "x" + juce::String (win->getHeight()));
+
+        win->setSize (win->getWidth() - 40, win->getHeight() - 30);
+        check (utf8 ("拖外框改大小，音源实际界面跟着铺满，不留黑边"),
+               ed->getWidth() < ew + 60 && ed->getHeight() < eh + 40,
+               juce::String (ed->getWidth()) + "x" + juce::String (ed->getHeight()));
+
+        auto* wrapped = dynamic_cast<juce::BorderedComponentBoundsConstrainer*> (win->getConstrainer());
+        check (utf8 ("外框用的就是音源自己的约束器，不另立一套尺寸"),
+               wrapped != nullptr && wrapped->getWrappedConstrainer() == ed->getConstrainer(),
+               wrapped != nullptr && wrapped->getWrappedConstrainer() != nullptr
+                 ? utf8 ("确实转到了编辑器") : utf8 ("没有转到编辑器"));
+
+        juce::Rectangle<int> requested (0, 0, 1200, 900);
+        win->getConstrainer()->checkBounds (requested, { 0, 0, 400, 300 },
+                                            { 0, 0, 100000, 100000 }, false, false, true, true);
+        const auto border = win->getContentComponentBorder();
+        check (utf8 ("外框拖过音源上限就停住，不会把界面拉出黑边"),
+               requested.getWidth() <= 800 + border.getLeftAndRight() + 100
+                 && requested.getHeight() <= 600 + border.getTopAndBottom() + 100,
+               juce::String (requested.getWidth()) + "x" + juce::String (requested.getHeight()));
+
+        struct NoUiProcessor final : ProbeProcessor
+        {
+            juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+            bool hasEditor() const override { return false; }
+        };
+
+        NoUiProcessor quiet;
+        auto quietWin = std::make_unique<PluginEditorWindow> (quiet, "quiet", 43);
+        check (utf8 ("没有界面的插件仍有一扇窗，也不挂一个空约束器"),
+               quietWin->getEditorForTest() == nullptr
+                 && dynamic_cast<juce::BorderedComponentBoundsConstrainer*> (quietWin->getConstrainer()) == nullptr,
+               juce::String ((int) (quietWin->getEditorForTest() != nullptr)));
+    } ();
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

@@ -4561,3 +4561,47 @@ CI 机器上一个 MIDI 端口都没有，所以 hub 留了 `getLastRestoreAttem
 同二进制自差 17 张，多出的 `recovery` 是墙上时钟、`selectmark-focus` 是机架电平条明暗，
 本轮没有 UI 代码改动。
 
+
+## P122 — 插件窗口：两套尺寸之间那块黑色底板
+
+用户报的是双屏：音源界面在一屏上很大，拖到另一屏变小之后，外框和实际界面之间有一段黑边；
+拖外框时界面不跟着变，拖音源自己的右下角三角却可以。**后者是钥匙**——
+`setContentOwned(editor, true)` 的 `childBoundsChanged` 一路一直是通的，断的是宿主→编辑器那一路。
+
+### A. 第二个 constrainer 是坏的那一半
+
+`VST3PluginWindow`（JUCE 给 VST3 编辑器做的壳）把插件的 `checkSizeConstraint` 接在自己的
+constrainer 上；换显示器时它按 `nativeScaleFactor * getDesktopScaleFactor()` 重算合法尺寸。
+我们原来在窗口上硬写 `setResizeLimits (…, 2600, 1600)` —— `setResizeLimits` **会替换窗口的
+constrainer**，于是外框允许 1200×900、插件只认 800×600，插件一拒绝，露出来的就是
+VST3 `ViewComponent` 里那块 `Colours::black` 的 `Inner`。黑边不是绘制问题，是两套尺寸打架。
+
+改法照 JUCE 自己的 AudioPluginHost：窗口装 `EditorConstrainer`
+（`BorderedComponentBoundsConstrainer`），`getWrappedConstrainer()` 返回编辑器的 constrainer，
+`getAdditionalBorder()` 返回 peer 的原生边框加 `getContentComponentBorder()`。**没有编辑器时才**
+走普通 `setResizeLimits`。咬测：去掉委派 / 委派返回空，各红 2 条（`1200x900` 没被夹住）。
+
+### B. 缩放只准有一层
+
+原生视图通过 `IPlugViewContentScaleSupport` 自己管 content scale；宿主再乘一次就重复。
+窗口 `getDesktopScaleFactor()` 钉在 1.0f（JUCE 官方宿主同样这么写）。咬测把常量改成 2：红 1。
+
+### C. headless 的 Test Synth 没有编辑器
+
+自检里 `createEditorIfNeeded()` 返回空，窗口走的是「这个插件没有提供界面」那条 Label 分支——
+拿它测 constrainer 委派只会测到一个空指针。把构造参数从 `AudioPluginInstance&` 放宽成
+`AudioProcessor&`（窗口只用 `createEditorIfNeeded()`），自检塞一个合成 `AudioProcessor` /
+`AudioProcessorEditor`，才咬得住 A 和 B。咬测 `setContentOwned(editor, false)` 红 1
+（编辑器自己改大小时外框不再跟）。
+
+### D. 视觉回归的边界
+
+本轮没有改任何绘制代码。48 张帧，与 P121 比 29 张逐字节相同、19 张不同；
+同二进制两遍自差 17 张；多出的 `clipauto` 只差 1 像素，`selectmark` 的 180 像素全在
+x≈31..84 / y≈107..292 的机架电平条抖动带内（p119→p120→p121 一路都在抖）。不是回归。
+
+### E. 还没证明的那一段
+
+headless 跑不出真实 VST3 的 HWND，也没有 `WM_DPICHANGED`。这里证明的是**宿主这一侧的两套尺寸
+并成了一套**，不是「双屏黑边一定消失」。真机上如果还有黑边，下一步加的是「显示设备变化后按
+编辑器尺寸重同步外框」，不要去动绘制；绘制那一侧没有任何东西可以改出这个症状。

@@ -2160,6 +2160,24 @@ P106 曾在它底部加过一条宿主自己的琴键带（`AuditionStrip`），
 - **按键转发仍然装在窗口与 content 上**（P42）。它在插件窗口里能用，但**看不见**；焦点落进
   插件自己的 `TextEditor` 时会静音——这两条性质本轮原样留着，改它是另一件事。
 
+### 外框与编辑器只认一套尺寸（P122）
+
+`PluginEditorWindow` 照 JUCE 自己 AudioPluginHost 的那套办，三条不能拆开：
+
+- **只有一个 constrainer**：窗口的 constrainer 是 `EditorConstrainer`
+  （`BorderedComponentBoundsConstrainer`），先扣掉原生边框再交给**编辑器自己的** constrainer。
+  VST3 的编辑器（`VST3PluginWindow`）把插件的 `checkSizeConstraint` 接在自己身上，换显示器时
+  `nativeScaleFactor` 一变，合法尺寸也跟着变。**不要**在窗口上另写 `setResizeLimits`——那会
+  换掉这个 constrainer，变成外框允许、插件不认的第二套尺寸，拒绝之后露出来的是
+  `ViewComponent` 的黑色底板。没有编辑器的插件仍走普通 `setResizeLimits`。
+- **原生视图自己管 content scale**：`getDesktopScaleFactor()` 钉在 `frameDesktopScale = 1.0f`。
+  宿主再乘一层，跨屏 DPI 时就是两层缩放叠加。
+- `setContentOwned (editor, true)` 保持原样：编辑器自己改大小时窗口跟着走（`childBoundsChanged`），
+  这一路本来就是通的；断掉它，拖动插件自己的右下角就只剩界面动、外框不动。
+
+构造参数收的是 `juce::AudioProcessor&` 而不是 `AudioPluginInstance&`：窗口只用
+`createEditorIfNeeded()`，放宽之后自检才能塞一个合成编辑器进去——headless 的 Test Synth 没有 UI。
+
 ## 踩坑档案
 平台陷阱、自检夹具摆位、出图尺寸见同目录 **`PITFALLS.md`**。动以下任一处前先读它：
 VST3 扫描 / 采样解码 / 试听声部 / 标尺 / ghost / `--snapshot` / 折叠行高 / 插件参数自动化 /

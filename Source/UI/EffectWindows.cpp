@@ -40,7 +40,7 @@ int InsertEditorContent::preferredHeightFor (int numParams)
 }
 
 //==============================================================================
-PluginEditorWindow::PluginEditorWindow (juce::AudioPluginInstance& processor,
+PluginEditorWindow::PluginEditorWindow (juce::AudioProcessor& processor,
                                         const juce::String& pluginName,
                                         int instanceIdToShow)
     : juce::DocumentWindow (utf8 ("AtomicDAW · ") + pluginName, kBackground,
@@ -54,17 +54,22 @@ PluginEditorWindow::PluginEditorWindow (juce::AudioPluginInstance& processor,
     // reserved below it. A wrapper is where a host starts believing it can put
     // its own chrome inside somebody else's window, and every pixel of that
     // band is a pixel the plugin no longer gets.
-    if (auto* editor = processor.createEditorIfNeeded())
+    if (auto* e = processor.createEditorIfNeeded())
     {
+        editor = e;
         setContentOwned (editor, true);
         setResizable (editor->isResizable(), false);
 
         const int w = juce::jmax (atomic::ui::px (320), editor->getWidth());
         const int h = juce::jmax (atomic::ui::px (180), editor->getHeight());
 
-        setResizeLimits (juce::jmax (atomic::ui::px (240), w / 2),
-                         juce::jmax (atomic::ui::px (140), h / 2),
-                         2600, 1600);
+        // Phase 122: do NOT call setResizeLimits here. That would install a
+        // host-side constrainer on the frame and throw away the editor's own —
+        // the two then disagree about which sizes are legal, the plugin's view
+        // refuses the frame's size, and the black backing plate shows through.
+        // One constrainer, translated across the border, answers both.
+        editorConstrainer = std::make_unique<EditorConstrainer> (*this, editor);
+        setConstrainer (editorConstrainer.get());
         centreWithSize (w, h);
     }
     else
@@ -77,6 +82,8 @@ PluginEditorWindow::PluginEditorWindow (juce::AudioPluginInstance& processor,
         label->setColour (juce::Label::backgroundColourId, kBackground);
 
         setContentOwned (label, true);
+        setResizable (false, false);
+        setResizeLimits (atomic::ui::px (420), atomic::ui::px (120), 2600, 1600);
         centreWithSize (atomic::ui::px (420), atomic::ui::px (120));
     }
 
@@ -87,7 +94,33 @@ PluginEditorWindow::~PluginEditorWindow()
 {
     // The editor is owned by the content slot. Clear it explicitly so the
     // processor is told the editor is gone before this window stops existing.
+    editor = nullptr;                 // the constrainer must not outlive it
     clearContentComponent();
+}
+
+PluginEditorWindow::EditorConstrainer::EditorConstrainer (PluginEditorWindow& w,
+                                                          juce::AudioProcessorEditor* e) noexcept
+    : window (w), editor (e)
+{
+}
+
+juce::ComponentBoundsConstrainer* PluginEditorWindow::EditorConstrainer::getWrappedConstrainer() const
+{
+    return editor != nullptr ? editor->getConstrainer() : nullptr;
+}
+
+juce::BorderSize<int> PluginEditorWindow::EditorConstrainer::getAdditionalBorder() const
+{
+    const auto nativeFrame = [&]() -> juce::BorderSize<int>
+    {
+        if (auto* peer = window.getPeer())
+            if (const auto frame = peer->getFrameSizeIfPresent())
+                return *frame;
+
+        return {};
+    }();
+
+    return nativeFrame.addedTo (window.getContentComponentBorder());
 }
 
 void PluginEditorWindow::setKeyForwarder (juce::KeyListener* listener)
