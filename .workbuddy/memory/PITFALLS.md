@@ -4698,3 +4698,57 @@ editor / frameContent`；默认不写。真机若仍不对，先看 `scale` 与 
 
 headless 依然没有第二块屏与真实 VST3 HWND，本轮证明的是「宿主把新 DPI 交出去」这一条，
 不是「Serum 一定跟着缩放」。
+
+## Phase 125 — 三轮修缩放都错：有些问题该回避，不该驯服
+
+用户报了三轮「黑边还在」「还是不缩放」，P122/P123/P124 依次修 constrainer、size 通知、
+`setScaleFactor`，真机全部否掉。第四轮用户在追问「同屏拖框会不会缩放」时改口：
+**「禁止手动调整插件窗口的大小」**。这才是对的方向——不再猜宿主怎么跟上插件，
+而是拿走冲突来源。
+
+### A. P124 的 setScaleFactor 是有害的，不是缺失的
+
+读 JUCE 8 `juce_VST3PluginFormat.cpp` 定论：
+- `VST3PluginWindow` 内部成员 `NativeScaleFactorNotifier scaleNotifier`，挂在编辑器 component 上。
+  `ComponentMovementWatcher::componentPeerChanged()` 会向父链取 peer 并
+  `addScaleFactorListener`；peer 的 platform scale 变化时回调 `ScaleNotifierCallback`，
+  它设 `nativeScaleFactor = platformScale`，再 `setContentScaleFactor()` + `resizeToFit()`
+  + `updateHWNDBounds()`。**JUCE 自己就把跨屏缩放做完了。**
+- `float getEffectiveScale() const { return nativeScaleFactor * userScaleFactor; }`。
+  `AudioProcessorEditor::setScaleFactor(s)` 写的是 `userScaleFactor`。
+  宿主在跨屏时再调一次 `setScaleFactor(displayScale)`，最终给插件的值就是
+  `native × user`——同一个 DPI 乘了两遍。P124 那一手不是补缺口，是制造错数。
+
+结论：**宿主不要碰插件的 content scale**。P124 的 `applyEditorScale` 留成空函数，
+自检断言改成「跨屏后 `scaleCalls == 0`」，恢复调用立刻红。
+
+### B. 锁外框 ≠ 锁插件
+
+`DocumentWindow::setResizable(false, false)` 只去掉**宿主给用户的那对把手**。
+插件自己的 resize grip 走的是完全独立的另一条路：
+`IPlugView::resizeView` → JUCE `VST3PluginWindow::resizeView()` → `editor.setSize()`
+→ `childBoundsChanged()` → `ResizableWindow` 因 `setContentOwned(editor, true)` 而
+`resizeToFitContent` → 外框跟随。所以 `setResizable(false)` 之后插件仍能改自己的尺寸，
+外框仍跟着；这在自检里用合成编辑器 `setSize(520,380)` 咬住（关掉
+`setContentOwned` 的 follow 参数红 3 条）。
+
+### C. 为什么这是正解
+
+黑边的两种来源都是「宿主外框的尺寸由用户直接控制」：
+- 框拖得比插件内容大 → 露出 `ViewComponent` 的黑色底板；
+- 框拖得比插件内容小 → 内容被裁掉。
+
+外框一旦不许手动拖、只由编辑器尺寸决定，这两种状态都进不去了。
+跨屏之后就算插件的原生 HWND 换了尺寸，只要它自己 `resizeToFit`（JUCE 会做），
+外框就跟过去。**产品层面的回避比继续猜 DPI 时序可靠**——前四轮全错在 headless
+推理 + 让用户去真机试，这个循环本身就该终止。
+
+### D. 验证
+
+自检 1186 → **1187**（+1），三刀：恢复 `setResizable(editor->isResizable(),false)` 红 1、
+把 `applyEditorScale(scale)` 接回 `checkDisplayScale` 红 1、`setContentOwned(editor,false)` 红 3。
+帧 49 张与 P124 比 13 张不同，全在同二进制 A/B 抖动集（19 张）内，额外差异 0，零绘制改动。
+
+**仍需真机确认**：锁外框是产品行为，跟 DPI 无关，不依赖任何对 Windows 或 Serum 的推断；
+但「插件自己三角缩放时外框仍跟随」这一条，headless 用的是合成编辑器，真机上还是拖一次
+Serum 的右下角三角确认一遍。

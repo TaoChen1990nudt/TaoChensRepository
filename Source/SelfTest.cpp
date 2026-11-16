@@ -23234,10 +23234,11 @@ juce::String MainComponent::runSelfTest()
                juce::String (quietWin->getWidth()) + "x" + juce::String (quietWin->getHeight()));
     } ();
 
-    //-- P124: 跨屏时把新 DPI 交给插件自己 -----------------------------------
-    // P122/P123 只让外框和编辑器对齐； Serum 的内容密度仍冻在旧屏上，因为
-    // 宿主从没调用过 JUCE 给宿主的那一个入口。这里用 SpyEditor 记录调用，
-    // 咬掉它就必须红——「画在哪」合格不等于「用什么密度画」合格。
+    //-- P125: 外框禁止手动缩放；插件尺寸是唯一权威 ---------------------------
+    // 真机上 Serum 的原生 view 冻结旧 DPI，无论外框怎么拖都不改自己的密度；
+    // 只有它自己的右下角三角（IPlugView::resizeView）才能改尺寸。既然跨屏的
+    // 缩放对宿主不可控，就从根上拿走「手动拖外框」这条路：外框只做插件的跟随者。
+    // 同时验证 P124 的教训——宿主的 setScaleFactor 会造成 native×user 双重缩放。
     [&]
     {
         struct ScaleSpyEditor final : juce::AudioProcessorEditor
@@ -23261,7 +23262,7 @@ juce::String MainComponent::runSelfTest()
 
         struct ScaleSpyProcessor final : juce::AudioProcessor
         {
-            const juce::String getName() const override { return "P124"; }
+            const juce::String getName() const override { return "P125"; }
             void prepareToPlay (double, int) override {}
             void releaseResources() override {}
             void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override {}
@@ -23280,38 +23281,51 @@ juce::String MainComponent::runSelfTest()
         };
 
         ScaleSpyProcessor proc;
-        auto win = std::make_unique<PluginEditorWindow> (proc, "P124", 46);
+        auto win = std::make_unique<PluginEditorWindow> (proc, "P125", 46);
         auto* ed = dynamic_cast<ScaleSpyEditor*> (win->getEditorForTest());
 
-        check (utf8 ("前提：窗口建好时还没有把 DPI 交给插件"),
-               ed != nullptr && ed->scaleCalls == 0,
-               ed != nullptr ? juce::String (ed->scaleCalls) : utf8 ("没有编辑器"));
+        check (utf8 ("前提：编辑器装好了，有实际尺寸可量"),
+               ed != nullptr && ed->getWidth() == 420 && ed->getHeight() == 320,
+               ed != nullptr ? juce::String (ed->getWidth()) + "x" + juce::String (ed->getHeight())
+                             : utf8 ("没有编辑器"));
 
+        // The user-facing decision: the frame can no longer be dragged. The
+        // editor's own grip still resizes it, which is the only reliable path.
+        check (utf8 ("插件外框禁止手动调整大小，尺寸只由插件自己决定"),
+               ! win->isResizable(),
+               win->isResizable() ? utf8 ("仍可手动缩放") : utf8 ("已锁死"));
+
+        check (utf8 ("前提：窗口建好时还没有把 DPI 交给插件"),
+               ed->scaleCalls == 0,
+               juce::String (ed->scaleCalls));
+
+        // JUCE's VST3 view forwards the peer's platform scale exactly once.
+        // The host must NOT add a second setScaleFactor: getEffectiveScale()
+        // multiplies nativeScaleFactor by userScaleFactor and double-scales.
         win->simulateDisplayChangeForTest (1.5);
         win->timerCallback();
 
-        check (utf8 ("跨屏后把新 DPI 交给插件，Serum 才会按新密度重画"),
-               ed->scaleCalls == 1 && juce::approximatelyEqual (ed->lastScale, 1.5f),
+        check (utf8 ("跨屏不再二次缩放：宿主不碰插件的 setScaleFactor"),
+               ed->scaleCalls == 0,
                juce::String (ed->scaleCalls) + utf8 (" 次 / ")
                  + juce::String (ed->lastScale));
 
-        check (utf8 ("交完 DPI 外框仍和编辑器严丝合缝，黑边不回来"),
+        check (utf8 ("跨屏后外框仍和编辑器严丝合缝，黑边不回来"),
                win->getFrameContentAreaForTest().getWidth() == ed->getWidth()
                  && win->getFrameContentAreaForTest().getHeight() == ed->getHeight(),
                juce::String (win->getFrameContentAreaForTest().getWidth()) + "x"
                  + juce::String (win->getFrameContentAreaForTest().getHeight()));
 
-        win->timerCallback();
-        check (utf8 ("没换屏就不重复通知插件，避免重入导致尺寸震荡"),
-               ed->scaleCalls == 1,
-               juce::String (ed->scaleCalls) + utf8 (" 次"));
+        // A plugin whose view is resizable must still be able to grow/shrink
+        // itself; the frame follows through childBoundsChanged. This is the
+        // Serum bottom-right grip path, and locking the frame must not cut it.
+        ed->setSize (520, 380);
 
-        win->simulateDisplayChangeForTest (1.0);
-        win->moved();
-        check (utf8 ("回到原屏也把原 DPI 交还插件，不是只涨不落"),
-               ed->scaleCalls == 2 && juce::approximatelyEqual (ed->lastScale, 1.0f),
-               juce::String (ed->scaleCalls) + utf8 (" 次 / ")
-                 + juce::String (ed->lastScale));
+        check (utf8 ("插件自己改尺寸时外框仍自动跟随，不因锁死而卡住"),
+               win->getFrameContentAreaForTest().getWidth() == ed->getWidth()
+                 && win->getFrameContentAreaForTest().getHeight() == ed->getHeight(),
+               juce::String (win->getFrameContentAreaForTest().getWidth()) + "x"
+                 + juce::String (win->getFrameContentAreaForTest().getHeight()));
     } ();
 
     // The summary MUST come after the last check. It used to sit mid-function

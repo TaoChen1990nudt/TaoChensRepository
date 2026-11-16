@@ -60,7 +60,15 @@ PluginEditorWindow::PluginEditorWindow (juce::AudioProcessor& processor,
     {
         editor = e;
         setContentOwned (editor, followingEditorSize);
-        setResizable (editor->isResizable(), false);
+
+        // Phase 125: the host frame is NEVER manually resizable. A VST3 view
+        // owns its own size (its bottom-right grip calls IPlugView::resizeView,
+        // which reaches the editor, whose childBoundsChanged resizes this frame
+        // through setContentOwned above). Letting the user drag the frame asks
+        // for a size the native HWND does not agree to, and the mismatch is
+        // exactly the black band / clipped content reported on dual monitors.
+        // The editor is the one and only authority for size.
+        setResizable (false, false);
 
         const int w = juce::jmax (atomic::ui::px (320), editor->getWidth());
         const int h = juce::jmax (atomic::ui::px (180), editor->getHeight());
@@ -207,14 +215,15 @@ void PluginEditorWindow::checkDisplayScale()
 
     lastDisplayScale = scale;
 
-    // Geometry alone is not enough. A VST3 view is drawn by its own HWND at a
-    // content scale decided when the editor was attached; moving the window to
-    // a display with a different DPI leaves that scale frozen, so the plugin
-    // keeps painting at the old density no matter how the frame is sized.
-    // This is the host-side call JUCE exposes for exactly that case — on VST3
-    // it forwards to IPlugViewContentScaleSupport::setContentScaleFactor and
-    // lets the plugin recompute its own view size before we align the frame.
-    applyEditorScale (scale);
+    // Phase 125: geometry alignment only. JUCE's VST3PluginWindow already
+    // listens to the peer's platform scale via its own NativeScaleFactorNotifier
+    // and forwards that single scale to IPlugViewContentScaleSupport. Pushing a
+    // second scale through AudioProcessorEditor::setScaleFactor here would
+    // multiply nativeScaleFactor by userScaleFactor and draw the plugin at the
+    // wrong density (getEffectiveScale() = native * user), which was the P124
+    // mistake. The editor owns its own content scale; the host only aligns the
+    // frame to whatever bounds the editor ends up with.
+    // frame to whatever bounds the editor ends up with.
     logDpiState ("dpi-before", scale);
     resyncFrameToEditor();
     logDpiState ("dpi-after", scale);
@@ -222,8 +231,9 @@ void PluginEditorWindow::checkDisplayScale()
 
 void PluginEditorWindow::applyEditorScale (double scale)
 {
-    if (editor != nullptr && scale > 0.0)
-        editor->setScaleFactor ((float) scale);
+    // Intentionally inert — kept only so the self-test proves the double-scale
+    // path is no longer wired into checkDisplayScale().
+    juce::ignoreUnused (scale);
 }
 
 void PluginEditorWindow::logDpiState (const char* event, double scale)

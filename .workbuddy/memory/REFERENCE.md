@@ -2198,23 +2198,25 @@ JUCE 编辑器的逻辑 bounds 不变，`childBoundsChanged` 不触发，黑边�
 headless 证明不了真机 HWND；`WM_DPICHANGED` 是否真的被这一条链路处理完，只能在双屏上拖一次确认。
 若黑边还在，下一步查具体插件的 `checkSizeConstraint`，不要再改宿主外框或绘制。
 
-### 把新 DPI 交给插件自己（P124）
+### 外框尺寸只由插件决定（P125，撤销 P124 的 setScaleFactor）
 
-P123 只让框跟着编辑器走，插件按什么密度画这件事宿主一直没说。跨屏时
-`checkDisplayScale()` 在 DPI **真变化**时按这个顺序做两件事：
+P122/P123/P124 三轮都在试图让宿主跟上插件的跨屏缩放，真机全部否掉。P125 换成回避：
+**外框禁止手动调整尺寸，只做插件的跟随者。**
 
-1. `applyEditorScale (scale)` → `editor->setScaleFactor ((float) scale)`。这是 JUCE 给宿主的
-   唯一入口；VST3 的 override 转成 `IPlugViewContentScaleSupport::setContentScaleFactor()`
-   并 `resizeToFit()`，插件才会按新密度重画。没变就不发——重入地连发会让尺寸震荡。
-2. `resyncFrameToEditor()`，即 P123 那一套几何对齐。
+- `setResizable (false, false)`——宿主不再给用户拖外框的把手。
+- `setContentOwned (editor, followingEditorSize)`（生产默认 true）——编辑器自己
+  `setSize` 时 `childBoundsChanged` 会让外框跟随。这是插件右下角 resize grip 走的唯一路：
+  `IPlugView::resizeView → VST3PluginWindow::resizeView → editor.setSize → childBoundsChanged → resizeToFitContent`。
+  锁外框不切这条。
+- `checkDisplayScale()` 只做 P123 的几何对齐，**不再调用 `setScaleFactor`**。
+  VST3 编辑器内部的 `NativeScaleFactorNotifier` 已把 peer platform scale 送进
+  `nativeScaleFactor` 并自己 `setContentScaleFactor`；宿主那一次写的是 `userScaleFactor`，
+  而 `getEffectiveScale() = native × user`——再送一次就是双重缩放（P124 的错）。
+  `applyEditorScale()` 保留为空函数仅为咬测（接回调用，自检立刻红）。
 
-`displayScaleReady` 守卫必须在 `centreWithSize` / `setVisible` 之后、基线采完才置 true：
-构造期的 `moved()` 会在这之前触发，不挡住就会在插件刚 attach 时多送一次 scale。
-
-**诊断**：设环境变量 `ATOMICDAW_DPI_LOG` 为文件路径，每次跨屏追加一行
-`event / scale / peer / editor / frameContent`（分别是我们报的 DPI、窗口 peer 的
-platform scale、编辑器与框的像素尺寸）。默认不写文件，自检也不写。真机仍不缩放时先看
-`scale` 与 `peer` 有没有跟着变，再决定下一刀方向。
+黑边的两种来源（框比内容大露黑底 / 框比内容小裁切）都要求用户能直接改外框尺寸；
+拿掉这条路之后它们都进不来。诊断口 `ATOMICDAW_DPI_LOG` 保留（默认关闭），
+但真正的验收是真机上拖一次 Serum 自己的三角，看外框是否跟随。
 
 ## 踩坑档案
 平台陷阱、自检夹具摆位、出图尺寸见同目录 **`PITFALLS.md`**。动以下任一处前先读它：

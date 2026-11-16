@@ -103,9 +103,13 @@ public:
 
 private:
     void checkDisplayScale();
-    /** Phase 124: the one host call that reaches the plugin's own scaling
-        (VST3: IPlugViewContentScaleSupport::setContentScaleFactor). Kept as a
-        separate function so the self-test can bite it by removing the body. */
+    /** Phase 124 (removed in 125): this used to call
+        AudioProcessorEditor::setScaleFactor on a display change. JUCE's VST3
+        view already applies the peer's platform scale once through its own
+        NativeScaleFactorNotifier; a second call multiplies nativeScaleFactor
+        by userScaleFactor and draws at the wrong density. The body is now
+        inert. The self-test still checks that a display change does NOT reach
+        the editor's setScaleFactor, so rewiring it turns that assertion red. */
     void applyEditorScale (double scale);
     void logDpiState (const char* event, double scale);
 
