@@ -1911,6 +1911,50 @@ public:
     /** Same thing for a note looked up by id, against the current playhead. */
     double getPlayheadProgress (int layerIndex, int noteId) const;
 
+    //-- Phase 120: the take being recorded -----------------------------------
+    /** A note that exists only because it is being recorded.
+
+        It is not a NoteEvent and it is not in the layer, for the same reason a
+        take is not a group until it lands: `commitTake` is where a performance
+        becomes an object — it gets an id, a group, a place in the undo history.
+        Showing it early must not create any of that, or "recording" would mean
+        "editing as fast as you play" and every half-finished take would be
+        something to undo.
+
+        So the sheet draws a **snapshot**: the closed notes as they will land,
+        and the held ones up to the playhead. `held` is the only difference
+        between the two lists — a key that is still down has no length yet. */
+    struct LiveNote
+    {
+        int    pitch     = 60;
+        float  velocity  = 0.8f;
+        double startBeat = 0.0;
+        double endBeat   = 0.0;
+        bool   held      = false;
+
+        bool operator== (const LiveNote& other) const noexcept
+        {
+            return pitch == other.pitch && velocity == other.velocity
+                     && startBeat == other.startBeat && endBeat == other.endBeat
+                     && held == other.held;
+        }
+    };
+
+    /** Replaces the snapshot. An empty list means "nothing is being recorded",
+        which is also how the take hands over to the real notes at the end. */
+    void setLiveNotes (std::vector<LiveNote> notes);
+
+    const std::vector<LiveNote>& getLiveNotes() const noexcept { return liveNotes; }
+
+    /** Where a live note is drawn. `atBeat` is the tail of a held note — the
+        playhead — passed in rather than read from the member so a repaint can
+        ask for the previous frame's rectangle and this one in the same pass.
+
+        One geometry for both states: the same function `getNoteBounds` that a
+        committed note uses, so what you see while recording is exactly where
+        the note lands. */
+    juce::Rectangle<float> getLiveNoteScreenBounds (const LiveNote& note, double atBeat) const;
+
     //-- Component ------------------------------------------------------------
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -2073,6 +2117,11 @@ private:
     void scrubRulerTo (float screenX);
 
     juce::Rectangle<float> getNoteBounds (const NoteEvent&) const;
+
+    /** Phase 120: the rectangle itself, from the three numbers it is made of.
+        `getNoteBounds(note)` forwards here, and so does a live note — one bar,
+        one rectangle (P97), whether the note has landed yet or not. */
+    juce::Rectangle<float> getNoteBounds (double startBeat, int pitch, double lengthBeats) const;
 
     /** Only ever looks at the active, visible layer. Ghost notes are invisible
         to the mouse by construction, not by an if-check at the call site. */
@@ -2445,6 +2494,14 @@ private:
     void drawNote (juce::Graphics&, const NoteEvent&, juce::Colour,
                    float alpha, bool selected, bool hovered, double progress);
 
+    /** Phase 120: the notes of the take in progress, in the record colour.
+
+        Drawn last of the note-ish content — a group frame or a highlight may
+        not cut through a note that is being written. It is a different painter
+        from `drawNote` because it is a different object: no id, no curves, no
+        group, and its tail is a moving number rather than a stored one. */
+    void drawLiveNotes (juce::Graphics&);
+
     //-- Phase 16: group marks and the focused-synth spotlight ----------------
     /** Behind the notes: the tinted band filling the group's box. */
     void drawGroupBands (juce::Graphics&);
@@ -2781,6 +2838,11 @@ private:
     double playheadBeat    = -1.0;
     double bpm             = 120.0;
     bool   transportActive = false;
+
+    /** Phase 120: the take in progress, as the snapshot `setLiveNotes` left.
+        Empty when nothing is being recorded — it is not cleared by "stop
+        painting", it is cleared by the hand-over. */
+    std::vector<LiveNote> liveNotes;
 
     //-- Phase 7 --------------------------------------------------------------
     Tool   tool = Tool::select;

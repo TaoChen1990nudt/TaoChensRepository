@@ -50,6 +50,7 @@ void PianoRollComponent::paint (juce::Graphics& g)
             drawGroupFrames (g);      // Phase 57: the frame's outline, ON the members
             drawGroupLabels (g);      // ... and their name pills in front
             drawFocusHighlights (g);  // the focused synth's notes, on top of all
+            drawLiveNotes (g);        // Phase 120: and the take being recorded
             drawSpotlightExitChip (g); // Phase 29: and the way back out of the veil
             drawMarquee (g);
             drawDropPreview (g);      // Phase 17: where a dragged sample would land
@@ -1266,6 +1267,46 @@ void PianoRollComponent::drawSpotlightExitChip (juce::Graphics& g)
     g.drawText (utf8 ("高亮 ") + name + utf8 ("   ·   点空白或 Esc 退出"),
                 chip.withTrimmedLeft (ui::px (9)).withTrimmedRight (ui::px (6)),
                 juce::Justification::centredLeft, true);
+}
+
+
+//==============================================================================
+//  Phase 120: the take being recorded
+//==============================================================================
+void PianoRollComponent::drawLiveNotes (juce::Graphics& g)
+{
+    if (liveNotes.empty())
+        return;
+
+    const auto area = getGridArea();
+
+    for (const auto& live : liveNotes)
+    {
+        const auto bounds = getLiveNoteScreenBounds (live, playheadBeat);
+
+        if (! bounds.intersects (area))
+            continue;
+
+        // Red is the one colour on this sheet that means "not yours yet": it is
+        // the record button's colour, and it says the same thing here — this
+        // note is being written, not edited. A held note needs no second code:
+        // its tail is under the playhead, which is drawn on top of it a moment
+        // later.
+        //
+        // The shape is `drawNote`'s shape, from the same `getNoteBounds`, and
+        // that is not optional: a preview drawn a pixel off would make the note
+        // jump the moment the take lands and the layer takes over.
+        const auto tinted = theme::record.withMultipliedBrightness (0.78f + 0.35f * live.velocity);
+
+        g.setColour (tinted.withAlpha (0.85f));
+        g.fillRoundedRectangle (bounds, 3.0f);
+
+        g.setColour (tinted.brighter (0.55f).withAlpha (0.95f));
+        g.fillRoundedRectangle (bounds.withHeight (2.5f), 1.4f);
+
+        g.setColour (tinted.darker (0.7f));
+        g.drawRoundedRectangle (bounds.reduced (0.5f), 3.0f, 1.0f);
+    }
 }
 
 

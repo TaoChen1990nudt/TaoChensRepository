@@ -5183,6 +5183,10 @@ bool MainComponent::startRecording (TakeMode mode)
     takeCollector.begin (recordStartBeat);
     recording.store (true);
 
+    // Phase 120: an empty snapshot — the previous take's preview (if the last
+    // one was cut short) must not be mistaken for the first bar of this one.
+    publishLiveTakeNotes();
+
     // The tape is armed now, so its first callback is the count-in's first
     // sample — and skipped past exactly the length of the count-in so the
     // take's first sample is the downbeat. Starting the recorder when the
@@ -5431,6 +5435,11 @@ void MainComponent::finishRecording()
 
     commitTake (std::move (take), captured, capturedRate);
 
+    // Phase 120: the preview hands over. The notes exist in the layer now, so
+    // the snapshot goes empty in the same breath — leaving them up would draw
+    // every note twice, and the two copies would part company on the first edit.
+    publishLiveTakeNotes();
+
     repaint (topBarBounds);
 }
 
@@ -5663,6 +5672,30 @@ int MainComponent::commitTake (Take take, const juce::AudioBuffer<float>& audioT
 }
 
 //-- Test seams ---------------------------------------------------------------
+void MainComponent::publishLiveTakeNotes()
+{
+    std::vector<PianoRollComponent::LiveNote> notes;
+
+    // Two lists, one rule: `getRecordedNotes` are the notes that already have a
+    // length, `getHeldNotes` are the ones still under a finger. Both are read
+    // straight off the collector, so what is drawn while recording cannot be a
+    // different take from the one `commitTake` is about to build.
+    if (recording.load() && takeArmingFor (recordMode).events)
+    {
+        for (const auto& note : takeCollector.getRecordedNotes())
+            notes.push_back ({ note.pitch, note.velocity, note.startBeat, note.endBeat, false });
+
+        // The end of a held note is not known yet — it is wherever the
+        // transport has got to by the time this is painted. Handing over the
+        // start twice is how "no end yet" is said here, and the roll resolves
+        // it against the playhead.
+        for (const auto& held : takeCollector.getHeldNotes())
+            notes.push_back ({ held.pitch, held.velocity, held.startBeat, held.startBeat, true });
+    }
+
+    pianoRoll.setLiveNotes (std::move (notes));
+}
+
 void MainComponent::beginTakeForTest (double startBeat, TakeMode mode)
 {
     // Phase 118: the mode is part of what a take is, so the test seam takes it
@@ -5677,6 +5710,7 @@ void MainComponent::beginTakeForTest (double startBeat, TakeMode mode)
     recording.store (true);
     lastRecordGroupId = -1;
     lastRecordClipId  = -1;
+    publishLiveTakeNotes();       // an empty take draws nothing, and clears the last one
 }
 
 void MainComponent::recordNoteAt (int pitch, float velocity, bool on, double beat)
@@ -5700,6 +5734,12 @@ void MainComponent::recordNoteAt (int pitch, float velocity, bool on, double bea
         takeCollector.noteOn (pitch, velocity, beat);
     else
         takeCollector.noteOff (pitch, beat);
+
+    // Phase 120: the note appears as it is played. A key going down adds a note
+    // with no length and a key coming up gives it one; the snapshot is rebuilt
+    // from the collector both times, so there is no second copy of the take to
+    // keep in step.
+    publishLiveTakeNotes();
 }
 
 void MainComponent::recordControlAt (int controller, int value7, double beat)
@@ -5733,6 +5773,10 @@ int MainComponent::endTakeForTest (double endBeat)
     const int result = commitTake (std::move (take), testTakeAudio, testTakeSampleRate);
 
     testTakeAudio.setSize (0, 0);
+
+    // Same hand-over as the button: the preview is over the moment the notes
+    // are real.
+    publishLiveTakeNotes();
     return result;
 }
 
@@ -8755,8 +8799,56 @@ juce::Image MainComponent::createRecordModeSnapshot (TakeMode mode)
     recording.store (false);
     audioTakeArmed = false;
     takeCollector.finish (4.0);
+    publishLiveTakeNotes();      // Phase 120: and no phantom notes on the sheet
 
     return still;
+}
+
+juce::Image MainComponent::createLiveRecordingSnapshot()
+{
+    // Three notes played and the fourth still down, through the same seam the
+    // self-test uses: a still must not open an audio device, and what this
+    // picture is about is the sheet, not the button being lit.
+    beginTakeForTest (0.0, TakeMode::midi);
+
+    recordNoteAt (60, 0.85f, true,  2.0);
+    recordNoteAt (60, 0.85f, false, 2.5);
+    recordNoteAt (64, 0.70f, true,  2.6);
+    recordNoteAt (64, 0.70f, false, 3.1);
+    recordNoteAt (67, 0.95f, true,  3.2);      // 还按着：它的尾巴就是播放头
+
+    // The playhead is where the held note ends, so it has to be somewhere the
+    // note is: this is also the number the painter resolves `held` against.
+    pianoRoll.setPlayheadBeat (3.7);
+    pianoRoll.setTransportActive (true);
+
+    const auto full = pianoRoll.createComponentSnapshot (pianoRoll.getLocalBounds(), true);
+
+    // A band around the take, not the whole sheet: three notes are the subject,
+    // and the rows above and below are there to place them on the keyboard.
+    auto band = juce::Rectangle<float>();
+
+    for (const auto& live : pianoRoll.getLiveNotes())
+        band = band.isEmpty() ? pianoRoll.getLiveNoteScreenBounds (live, 3.7)
+                              : band.getUnion (pianoRoll.getLiveNoteScreenBounds (live, 3.7));
+
+    const int bandTop = band.isEmpty() ? 0 : juce::roundToInt (band.getY());
+    const int top     = juce::jmax (0, bandTop - ui::px (46));
+    const int height  = juce::jmin (full.getHeight() - top,
+                                    (band.isEmpty() ? 0 : juce::roundToInt (band.getHeight()))
+                                      + ui::px (92));
+
+    // A frame is a moment, not a recording — same rule as the button pair.
+    recording.store (false);
+    audioTakeArmed = false;
+    takeCollector.finish (4.0);
+    publishLiveTakeNotes();
+    pianoRoll.setTransportActive (false);
+
+    if (height <= 0)
+        return {};
+
+    return full.getClippedImage ({ 0, top, full.getWidth(), height });
 }
 
 void MainComponent::setLoopRegion (const LoopRegion& region)

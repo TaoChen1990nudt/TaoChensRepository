@@ -379,6 +379,18 @@ namespace
         writePng ("-recordaudio", component.createRecordModeSnapshot (atomic::TakeMode::audio));
         writePng ("-recordmidi", component.createRecordModeSnapshot (atomic::TakeMode::midi));
 
+        // Phase 120: and what the sheet looks like while that take is being
+        // played. Photographed from a SECOND component, like `-blank`: on the
+        // demo fixture the take would land on top of existing notes, and the
+        // three red ones — the whole subject — would be competing with twenty
+        // others for the reader's eye.
+        {
+            atomic::MainComponent live;
+            live.setSize (atomic::ui::px (1440), atomic::ui::px (820));
+
+            writePng ("-recordlive", live.createLiveRecordingSnapshot());
+        }
+
         // Same rule as the loop: switching the click on and starting a count-in
         // changes what the bar says, so this still is taken last as well.
         writePng ("-metronome", component.createMetronomeSnapshot (4));

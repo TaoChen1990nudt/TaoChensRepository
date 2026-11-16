@@ -755,6 +755,27 @@ build Release → `--snapshot selftest.png`。
 - `recording` 是 **`std::atomic<bool>`**：MIDI 线程读它。普通 bool 在这里就是数据竞争。
 - 停止键先 `finishRecording()` 再 `parkTransportAt()`：反过来的话，take 的结束位置
   是"跑回起点之后"的位置，最后一个音会变成长得离谱的一条。
+
+**录中的预览（P120：显示不是提交）**
+- 数据只有一份：`TakeCollector` 的两个只读口——`getRecordedNotes()`（已收尾）与
+  `getHeldNotes()`（还按着，`HeldNote` 是 public struct）。`MainComponent::publishLiveTakeNotes()`
+  把它们折成 `PianoRollComponent::LiveNote{pitch, velocity, startBeat, endBeat, held}` 交给卷帘，
+  在**三个时刻**重发：键按下、键抬起、take 落地（`startRecording` / `beginTakeForTest` 的
+  发布是清空）。**不从 timer 发**——列表只在人按键时变。
+- 卷帘端：`setLiveNotes` 与上次的列表相等就直接返回（事件率下省一次全量重绘）；
+  `drawLiveNotes` 画在 `drawFocusHighlights` 之后——**任何东西都不许压住一笔正在写的音符**；
+  颜色 `theme::record`（红在这张纸上只有一个意思），亮度照旧跟力度走。
+- **按住的音符没有长度**：终点就是播放头，`getLiveNoteScreenBounds (note, atBeat)` 一个函数
+  回答（`atBeat` 传参不读成员，重绘要问上一帧和这一帧两个矩形；`jmax(startBeat, atBeat)` 挡住
+  往头的左边长）。`setPlayheadBeat` 里每个 `held` 音符补一次 `旧矩形 ∪ 新矩形`——播放头的窄带
+  只盖新尾边，盖不住两像素外的旧轮廓。
+- **几何只有一份**：`getNoteBounds (startBeat, pitch, lengthBeats)` 三参版，音符与预览都问它。
+  断言「预览的位置 == 落地的位置」逐像素成立。
+- 预览不进图层、不进撤销、不进工程文件（`formatVersion` 不动）；落地那口气清空快照——
+  留着就会把每个音符画两遍，并在第一次编辑时分家。
+- **样式断言要读像素**：`drawLiveNotes` 那一行从 `paint` 里删掉，列表断言一条不红；
+  第 8 条读回卷帘快照，断言预览格子的中心像素由底色变成录音红
+  （`r > g + 80 && r > b + 80`，图层色没有一个满足）。
 - 录音文件落在 `Music/AtomicDAW Recordings/录音 N.wav`（`setRecordingsFolder` 可改；
   自检和 demo 都改到临时目录——测试不该往用户的音乐库或仓库里扔 WAV）。
 - **工程文件不升版本（仍是 25）**：录音产出用的全是已有字段——`<Sample>` 的

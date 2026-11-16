@@ -277,6 +277,20 @@ public:
     void recordNoteAt (int pitch, float velocity, bool on, double beat);
     void recordControlAt (int controller, int value7, double beat);
 
+    /** Phase 120: hands the roll a snapshot of the take in progress.
+
+        One reader, one writer: the collector is the only source, and this is
+        the only place that turns it into something the sheet can draw. Called
+        from the three moments the snapshot actually changes — a key goes down,
+        a key comes up, and the take lands — rather than from a timer, because
+        a timer would repaint at 60 fps to show a list that changes when a
+        human presses a key.
+
+        It is a snapshot and not a handle on purpose: showing a note must not
+        create one. Nothing here touches the layer, the undo history or the
+        project file. */
+    void publishLiveTakeNotes();
+
     void beginTakeForTest (double startBeat, TakeMode mode = TakeMode::midi);
     void takeAudioForTest (const juce::AudioBuffer<float>& audio, double sampleRate);
     int  endTakeForTest (double endBeat);
@@ -616,6 +630,17 @@ public:
         picture is the other half of the answer: the lit button and the symbol
         inside it — three bars for the microphone, a note for the keyboard. */
     juce::Image createRecordModeSnapshot (TakeMode mode);
+
+    /** P120: a MIDI take in flight — three notes played, the last one still
+        under a finger so its tail is the playhead.
+
+        Photographed on the roll and cropped to the band the notes are in: the
+        point of the picture is the red of a note that has not been committed
+        yet, and a whole window would put it in competition with everything
+        else. Nothing is committed here — all three states in the frame ("red",
+        "where it will land", "this one is still growing") disappear the moment
+        `commitTake` runs. */
+    juce::Image createLiveRecordingSnapshot();
 
     //-- Phase 6: project files and offline bounce ----------------------------
     /** Writes the whole session to a .atomic file. Also the path the self-test

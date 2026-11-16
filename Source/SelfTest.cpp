@@ -22708,6 +22708,198 @@ juce::String MainComponent::runSelfTest()
                  + utf8 (" / 音量轨道平：") + utf8 (curveIsFlat ? "是" : "否"));
     }
 
+    //== Phase 120: 录的时候看得见 ============================================
+    {
+        MainComponent host;
+        auto* layer = host.getLayerStack().getActiveLayer();
+        auto& roll  = host.pianoRollForTest();
+
+        const int  notesBefore   = (int) layer->getNotes().size();
+        const bool emptyAtStart  = roll.getLiveNotes().empty();
+
+        host.beginTakeForTest (0.0, TakeMode::midi);
+
+        // (1) A key going down puts a note on the sheet immediately — with no
+        //     length, because the finger is still on it — and adds nothing to
+        //     the layer. "Showing it" and "committing it" are two events, and
+        //     only the second one is an edit.
+        host.recordNoteAt (60, 0.8f, true, 2.0);
+
+        const auto pressed = roll.getLiveNotes();
+
+        check (utf8 ("按下一个键：卷帘上立刻出现这一个音符（还没松手，所以它没有长度），图层里一个都没多"),
+               emptyAtStart && pressed.size() == 1 && pressed[0].pitch == 60 && pressed[0].held
+                 && juce::approximatelyEqual (pressed[0].endBeat, pressed[0].startBeat)
+                 && (int) layer->getNotes().size() == notesBefore,
+               juce::String ((int) pressed.size()) + utf8 (" 条预览 / held ")
+                 + juce::String (pressed.empty() ? -1 : (pressed[0].held ? 1 : 0))
+                 + utf8 (" / 图层 ") + juce::String ((int) layer->getNotes().size())
+                 + utf8 (" 条（原 ") + juce::String (notesBefore) + utf8 ("）"));
+
+        // (2) The tail of a held note is the playhead, not a stored number. The
+        //     two widths come from the same function the painter calls.
+        //     Guarded against an empty list: a build that never publishes has to
+        //     report a red line, not fall over inside the fixture.
+        const auto widthAt = [&roll] (double beat)
+        {
+            if (roll.getLiveNotes().empty())
+                return 0.0f;
+
+            return roll.getLiveNoteScreenBounds (roll.getLiveNotes().front(), beat).getWidth();
+        };
+
+        check (utf8 ("按住的那个音符尾巴就是播放头：同一份几何，3.5 拍比 2.0 拍宽"),
+               widthAt (3.5) > widthAt (2.0) + 1.0f,
+               juce::String (widthAt (2.0), 1) + utf8 (" px → ") + juce::String (widthAt (3.5), 1)
+                 + utf8 (" px"));
+
+        // (3) Releasing gives it a length and still commits nothing.
+        host.recordNoteAt (60, 0.8f, false, 3.0);
+
+        const auto released = roll.getLiveNotes();
+
+        check (utf8 ("松键之后预览有了尾巴，图层里仍然一个都没有 —— 显示不是提交"),
+               released.size() == 1 && ! released[0].held
+                 && juce::approximatelyEqual (released[0].endBeat, 3.0)
+                 && (int) layer->getNotes().size() == notesBefore,
+               juce::String ((int) released.size()) + utf8 (" 条预览 / held ")
+                 + juce::String (released.empty() ? -1 : (released[0].held ? 1 : 0))
+                 + utf8 (" / 图层 ") + juce::String ((int) layer->getNotes().size()) + utf8 (" 条"));
+
+        // (4) The hand-over. Three things at once: the preview empties, the
+        //     layer gains exactly one note, and that note lands on the very
+        //     rectangle the preview was drawn in. The last one is the reason
+        //     the preview borrows `getNoteBounds` instead of computing its own
+        //     — a preview a pixel off would make every take jump when it lands.
+        const auto previewed = roll.getLiveNotes().empty()
+                                 ? juce::Rectangle<float>()
+                                 : roll.getLiveNoteScreenBounds (roll.getLiveNotes().front(), 3.0);
+        const int  groupId   = host.endTakeForTest (4.0);
+
+        const auto& landed = layer->getNotes();
+        const int   landedLayer = host.getLayerStack().getActiveLayerIndex();
+        const auto  landedRect  = landed.empty() ? juce::Rectangle<float>()
+                                                 : roll.getNoteScreenBounds (landedLayer, landed.back().id);
+
+        const bool samePlace = juce::approximatelyEqual (previewed.getX(), landedRect.getX())
+                                 && juce::approximatelyEqual (previewed.getY(), landedRect.getY())
+                                 && juce::approximatelyEqual (previewed.getWidth(), landedRect.getWidth())
+                                 && juce::approximatelyEqual (previewed.getHeight(), landedRect.getHeight());
+
+        check (utf8 ("落地那一下：预览清空、图层正好多一个、而且就落在预览画的那个格子里"),
+               groupId >= 0 && roll.getLiveNotes().empty()
+                 && (int) landed.size() == notesBefore + 1 && samePlace,
+               juce::String (groupId) + utf8 (" / 预览 ") + juce::String ((int) roll.getLiveNotes().size())
+                 + utf8 (" 条 / 图层 ") + juce::String ((int) landed.size())
+                 + utf8 (" 条 / x ") + juce::String (previewed.getX(), 1) + utf8 (" vs ")
+                 + juce::String (landedRect.getX(), 1) + utf8 (" / 宽 ")
+                 + juce::String (previewed.getWidth(), 1) + utf8 (" vs ")
+                 + juce::String (landedRect.getWidth(), 1));
+    }
+
+    {
+        // (5) The gate P118 put at the capture entry is the gate this shows
+        //     through: a sampler take does not grow notes, so it does not grow
+        //     a preview either.
+        MainComponent host;
+        auto& roll = host.pianoRollForTest();
+
+        host.beginTakeForTest (0.0, TakeMode::audio);
+        host.recordNoteAt (64, 0.8f, true, 1.0);
+
+        check (utf8 ("录采样时弹键盘：既不长音符，也不长预览（门还在采集入口）"),
+               roll.getLiveNotes().empty(),
+               juce::String ((int) roll.getLiveNotes().size()) + utf8 (" 条预览"));
+    }
+
+    {
+        // (6) Same for the count-in (P119): what the tape does not hear, the
+        //     sheet does not show.
+        MainComponent host;
+        auto& roll     = host.pianoRollForTest();
+        auto& playback = host.getAudioEngineForTest().getPlayback();
+
+        host.beginTakeForTest (0.0, TakeMode::midi);
+        playback.startPreRoll (4);
+
+        host.recordNoteAt (67, 0.8f, true, 0.0);
+
+        const bool silentDuringCountIn = roll.getLiveNotes().empty();
+
+        playback.cancelPreRoll();
+        host.recordNoteAt (67, 0.8f, true, 1.0);
+
+        const bool showingAfter = roll.getLiveNotes().size() == 1;
+
+        check (utf8 ("数拍期间既不进 take 也不上屏；数完那一下才出现"),
+               silentDuringCountIn && showingAfter,
+               juce::String (silentDuringCountIn ? 1 : 0) + juce::String (showingAfter ? 1 : 0));
+    }
+
+    {
+        // (7) A preview is the take's own, not the sheet's. Starting the next
+        //     take clears it — otherwise a key pressed before the last stop
+        //     would still be hanging on the sheet, red, in a take it never
+        //     belonged to.
+        MainComponent host;
+        auto& roll = host.pianoRollForTest();
+
+        host.beginTakeForTest (0.0, TakeMode::midi);
+        host.recordNoteAt (60, 0.8f, true, 1.0);      // 按着不放，也没有收尾
+
+        const bool hadOne = roll.getLiveNotes().size() == 1;
+
+        host.beginTakeForTest (8.0, TakeMode::midi);
+
+        check (utf8 ("新的一遍从空开始：上一遍按着没松手的预览不会跟过来"),
+               hadOne && roll.getLiveNotes().empty(),
+               juce::String (hadOne ? 1 : 0)
+                 + juce::String ((int) roll.getLiveNotes().size()));
+    }
+
+    {
+        // (8) A style is a picture, so this reads the picture back. "The roll
+        //     was told about the note" is not the question — the question is
+        //     whether anything came out of the painter, and only a pixel knows.
+        //     This is the check that catches a painter nobody calls.
+        MainComponent host;
+        auto& roll = host.pianoRollForTest();
+
+        host.beginTakeForTest (0.0, TakeMode::midi);
+
+        const auto blank = roll.createComponentSnapshot (roll.getLocalBounds(), true);
+
+        host.recordNoteAt (60, 0.8f, true, 2.0);
+
+        const auto lit  = roll.createComponentSnapshot (roll.getLocalBounds(), true);
+        const auto rect = roll.getLiveNotes().empty()
+                            ? juce::Rectangle<float>()
+                            : roll.getLiveNoteScreenBounds (roll.getLiveNotes().front(), 2.0);
+
+        const int x = juce::jlimit (0, juce::jmax (0, lit.getWidth()  - 1),
+                                    juce::roundToInt (rect.getCentreX()));
+        const int y = juce::jlimit (0, juce::jmax (0, lit.getHeight() - 1),
+                                    juce::roundToInt (rect.getCentreY()));
+
+        const auto wasThere = blank.getPixelAt (x, y);
+        const auto isThere  = lit.getPixelAt (x, y);
+
+        // Red-dominant, 80 apart: no layer colour on this sheet is, so this
+        // cannot be satisfied by a note that came out in the layer's own tint.
+        const auto recordRed = [] (juce::Colour c)
+        {
+            return (int) c.getRed() > (int) c.getGreen() + 80
+                     && (int) c.getRed() > (int) c.getBlue() + 80;
+        };
+
+        check (utf8 ("画出来的就是那个样子：预览占的那个格子，快照里的中心像素从底色变成录音红"),
+               lit.isValid() && blank.isValid() && ! rect.isEmpty()
+                 && recordRed (isThere) && ! recordRed (wasThere),
+               juce::String (x) + utf8 (",") + juce::String (y) + utf8 (" · 之前 ")
+                 + wasThere.toDisplayString (false) + utf8 (" · 现在 ")
+                 + isThere.toDisplayString (false));
+    }
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

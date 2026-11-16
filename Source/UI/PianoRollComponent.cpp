@@ -393,6 +393,18 @@ void PianoRollComponent::setPlayheadBeat (double beats)
     for (auto packed : after)
         if (! contains (before, packed))
             repaintBlock (packed);
+
+    // 3. Phase 120: a held note's tail IS the playhead, so its block changes
+    //    shape every frame. The bands above cover the sliver the playhead just
+    //    swept, but the note also has to lose its outline where it used to end,
+    //    and that edge sits a couple of pixels BEHIND the new one — a band on
+    //    the new position alone would leave a stale corner behind. One union
+    //    per held note, and a take holds a handful at most.
+    for (const auto& live : liveNotes)
+        if (live.held)
+            repaint (getLiveNoteScreenBounds (live, previous)
+                       .getUnion (getLiveNoteScreenBounds (live, playheadBeat))
+                       .expanded (3.0f).getSmallestIntegerContainer());
 }
 
 
@@ -1891,11 +1903,45 @@ void PianoRollComponent::scrubRulerTo (float screenX)
 
 juce::Rectangle<float> PianoRollComponent::getNoteBounds (const NoteEvent& note) const
 {
-    const float x = screenXForBeat (note.startBeat);
-    const float y = screenYForPitch (note.pitch);
-    const float w = juce::jmax (5.0f, (float) (note.lengthBeats * beatWidth) - 1.5f);
+    return getNoteBounds (note.startBeat, note.pitch, note.lengthBeats);
+}
+
+juce::Rectangle<float> PianoRollComponent::getNoteBounds (double startBeat, int pitch,
+                                                         double lengthBeats) const
+{
+    const float x = screenXForBeat (startBeat);
+    const float y = screenYForPitch (pitch);
+    const float w = juce::jmax (5.0f, (float) (lengthBeats * beatWidth) - 1.5f);
 
     return { x, y + 1.0f, w, keyHeight - 2.0f };
+}
+
+//==============================================================================
+//  Phase 120: the take being recorded
+//==============================================================================
+void PianoRollComponent::setLiveNotes (std::vector<LiveNote> notes)
+{
+    // Nothing to redraw when the snapshot did not change: `recordNoteAt` runs
+    // once per key press, but the caller may also hand over an identical list
+    // (a republish after a control change), and a full repaint of the grid is
+    // not free.
+    if (notes == liveNotes)
+        return;
+
+    liveNotes = std::move (notes);
+    repaint();
+}
+
+juce::Rectangle<float> PianoRollComponent::getLiveNoteScreenBounds (const LiveNote& note,
+                                                                   double atBeat) const
+{
+    // A note you have not let go of yet ends where the playhead is — that is
+    // the whole reason this is drawn separately from the notes in the layer.
+    // `jmax` against the start keeps a key pressed before the transport moved
+    // from drawing a note to the left of its own head.
+    const double end = note.held ? juce::jmax (note.startBeat, atBeat) : note.endBeat;
+
+    return getNoteBounds (note.startBeat, note.pitch, end - note.startBeat);
 }
 
 

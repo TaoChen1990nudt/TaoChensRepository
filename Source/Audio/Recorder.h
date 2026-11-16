@@ -142,6 +142,16 @@ struct Take
 class TakeCollector
 {
 public:
+    /** Phase 120: a key that is still down. It has a start and no length —
+        the length is whatever the transport has done since, which is why the
+        sheet draws it up to the playhead. */
+    struct HeldNote
+    {
+        int    pitch     = 60;
+        float  velocity  = 0.8f;
+        double startBeat = 0.0;
+    };
+
     void begin (double startBeat);
 
     void noteOn  (int pitch, float velocity, double beat);
@@ -156,20 +166,23 @@ public:
     int    getNumHeld() const noexcept { return (int) held.size(); }
     int    getNumNotes() const noexcept { return (int) take.notes.size(); }
 
-private:
-    struct Held
-    {
-        int    pitch     = 60;
-        float  velocity  = 0.8f;
-        double startBeat = 0.0;
-    };
+    /** Phase 120: the take in progress, as two lists — what is already closed,
+        and what is still under a finger.
 
+        A preview needs both: `notes` is drawn as it will land, `held` is drawn
+        to the playhead, and neither is a copy of anything else. Message thread
+        only, which is the thread `recordNoteAt` runs on — the MIDI thread hops
+        over here with a timestamp, it does not touch the collector. */
+    const std::vector<RecordedNote>& getRecordedNotes() const noexcept { return take.notes; }
+    const std::vector<HeldNote>&     getHeldNotes()     const noexcept { return held; }
+
+private:
     int findHeld (int pitch) const noexcept;
 
     void appendNote (int pitch, float velocity, double startBeat, double endBeat);
 
-    std::vector<Held> held;
-    Take take;
+    std::vector<HeldNote> held;
+    Take   take;
     bool   active     = false;
     double startBeat  = 0.0;
 };
