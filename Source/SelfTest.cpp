@@ -16395,6 +16395,51 @@ juce::String MainComponent::runSelfTest()
                    juce::String (e88.getPreRollTotalBeats()));
         }
 
+        //-- B2. 预备拍必须在任何块大小下都数得完（P119） ----------------------
+        // 4 拍在 48 kHz / 120 BPM 下正好是 96000 个采样。块大小除得尽与否不是
+        // 关键，关键是**最后剩下的那点余量不足一个采样**时怎么办：`floor` 答 0，
+        // 于是「拍数到了没有」必须由「这一块跑过了头」来回答，而不是拿累加出来
+        // 的 double 去比 endBeat - 1e-9。480 与 960 就是会卡死的那两个（实测
+        // 停在 3.999958 拍），而 480 正是这台机器声卡的块大小。
+        {
+            for (const int blockSize : { 480, 960, 128, 1000 })
+            {
+                LayerStack    t119;
+                RackModel     r119;
+                MixerModel    m119;
+                PlaybackEngine e119;
+
+                t119.addLayer (utf8 ("预备"), palette::layer1);
+                e119.prepareToPlay (sr88, blockSize);
+                e119.publishSchedule (t119, r119, 120.0, 0.0, &m119);
+                e119.setPositionBeats (0.0);
+                e119.startPreRoll (4);
+
+                juce::AudioBuffer<float> b119 (2, blockSize);
+                int blocks = 0;
+
+                while (e119.isPreRolling() && blocks < 4000)
+                {
+                    b119.clear();
+                    e119.renderPreRoll (b119, blockSize);
+                    ++blocks;
+                }
+
+                const bool ended = ! e119.isPreRolling();
+
+                // 四拍 = 96000 采样，一块一块数完应该是 ceil(96000 / 块) 块，
+                // 正好整除时再多一块（那一块块头就交给走带了）。这里量的是
+                // 「数得完、而且用的块数对得上」——卡死的实现会跑到 4000 块。
+                const int expected = (96000 + blockSize - 1) / blockSize + 1;
+
+                check (utf8 ("预备拍照样数得完：") + juce::String (blockSize) + utf8 (" 采样一块"),
+                       ended && blocks <= expected,
+                       juce::String (blocks) + utf8 (" 块 / 应该有 ") + juce::String (expected)
+                         + utf8 (" 块 / 走带到 ") + juce::String (e119.getPositionBeats(), 3)
+                         + utf8 (" 拍"));
+            }
+        }
+
         //-- C. 走带混进去，导出拿不到 ---------------------------------------
         {
             LayerStack   t88b;
@@ -22596,6 +22641,71 @@ juce::String MainComponent::runSelfTest()
                  && ! armed,           // 测试入口不碰设备，采集链从来不该被 arm
                juce::String (during == TakeMode::audio ? 1 : 0)
                  + juce::String (host.isAudioTakeArmed() ? 1 : 0));
+    }
+
+    //== Phase 119: 预备拍不该吃掉走带，也不该吃掉音符 ==========================
+    {
+        // 预备拍只在「从静止起步」时用。正在走带时按下红点就是 punch-in：那里
+        // 没有「前面」可数，硬数四拍会把一段正在进行的演奏按停四拍。
+        check (utf8 ("预备拍只在从静止起步时用：正在走带时按下就是 punch-in"),
+               MainComponent::countInApplies (false, 4)
+                 && ! MainComponent::countInApplies (true, 4)
+                 && ! MainComponent::countInApplies (false, 0),
+               juce::String (MainComponent::countInApplies (false, 4) ? 1 : 0)
+                 + juce::String (MainComponent::countInApplies (true, 4) ? 1 : 0)
+                 + juce::String (MainComponent::countInApplies (false, 0) ? 1 : 0));
+    }
+
+    {
+        // 数拍期间磁带不收音。WAV 那一半已经把这几拍的采样丢掉了
+        // （`samplesToSkip`），音符那一半必须一样——不然数拍时弹的音会全部落
+        // 在底拍上，一个音符块叠着一个。
+        MainComponent host;
+        auto* layer = host.getLayerStack().getActiveLayer();
+        auto& playback = host.getAudioEngineForTest().getPlayback();
+
+        const int notesBefore = (int) layer->getNotes().size();
+
+        host.beginTakeForTest (0.0, TakeMode::midi);
+
+        playback.startPreRoll (4);          // 正在数拍
+
+        host.recordNoteAt (60, 0.8f, true, 0.0);
+        host.recordNoteAt (60, 0.8f, false, 0.0);
+
+        // 旋钮也一样：数拍时拧的两下不许变成 group 的音量曲线。
+        host.recordControlAt (7, 20, 0.0);
+        host.recordControlAt (7, 120, 0.5);
+
+        playback.cancelPreRoll();           // 数完了，磁带开始收音
+
+        host.recordNoteAt (64, 0.8f, true, 1.0);
+        host.recordNoteAt (64, 0.8f, false, 2.0);
+
+        const int result = host.endTakeForTest (2.0);
+        const auto& notes = layer->getNotes();
+        const int added = (int) notes.size() - notesBefore;
+
+        const auto* recordedGroup = layer->findGroup (result);
+
+        // 一条没被录过的音量轨道是一条**平的**线（0 拍与曲尾两个点，同一个值）。
+        // 断言「平」而不是「空」：默认就是两个点，数点数是数不出来「有没有被写过」的。
+        bool curveIsFlat = recordedGroup != nullptr;
+
+        if (recordedGroup != nullptr)
+        {
+            const auto& pts = recordedGroup->getLevelAutomation().getPoints();
+
+            for (const auto& pt : pts)
+                if (std::abs (pt.value - pts.front().value) > 1.0e-6f)
+                    curveIsFlat = false;
+        }
+
+        check (utf8 ("数拍期间弹的键与拧的旋钮都不进 take；数完之后照收（只剩音高 64 那一个）"),
+               result >= 0 && added == 1 && notes.back().pitch == 64 && curveIsFlat,
+               juce::String (result) + utf8 (" / 音符 +") + juce::String (added)
+                 + utf8 (" / 最后一个音高 ") + juce::String (notes.empty() ? -1 : notes.back().pitch)
+                 + utf8 (" / 音量轨道平：") + utf8 (curveIsFlat ? "是" : "否"));
     }
 
     // The summary MUST come after the last check. It used to sit mid-function

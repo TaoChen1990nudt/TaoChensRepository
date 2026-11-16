@@ -341,8 +341,13 @@ build Release → `--snapshot selftest.png`。
 - `startPreRoll` 里**先写 payload 再写 gate**：`preRollBeatsLeft` 是 `isPreRolling()` 读的那个，
   所以它最后写。中间溜进来的回调渲染一个"total 老了一块"的数拍，无害；加锁更贵。
 - `renderPreRoll` **不改 `positionBeats`**；数拍期间 `blockBeats.store(0.0)`。
-- 数完**同一个块里**交接：`cancelPreRoll()` 后把 `numSamples - segment` 交给 `renderNextBlock`。
-  在块边界交接会塞一个 buffer 的静音（最多 46 ms，且随 buffer 大小变）。
+- **数完的判据是 `segment < numSamples`**（P119），不是 `beat >= endBeat - 1e-9`：
+  `segment = floor(samplesLeft)` 一旦把不足一个采样的余量丢掉，`beat` 就再也不会前进；
+  而那个丢掉的余量恰恰让 `beat` 停在 `endBeat` 前面 4.2×10⁻⁵ 拍上，任何 ε 都比它大。
+  480 / 960 采样的块（Focusrite 在本机的 buffer 就是 480）会永久卡在 3.999958 / 4 拍，
+  走带永不开始。`segment < numSamples` 说的是同一件事、而且是算术保证得住的那一句。
+- 数完**同一个块里**交接：`cancelPreRoll()` 后把 `numSamples - segment` 交给 `renderNextBlock`
+  （`rest = 0` 时不建 buffer）。在块边界交接会塞一个 buffer 的静音（最多 46 ms，且随 buffer 大小变）。
 - `getPreRollBeatsLeft()` = `total - floor (preRollBeat)`，所以读数从 N 掉到 1。
 - 速度取**播放头所在位置**的速度，且数拍内部不跟速度曲线变化（数拍不是音乐）。
 - `setPositionBeats` / `AudioEngine::pause` / `finishRecording` 一律 `cancelPreRoll()`。
@@ -350,10 +355,18 @@ build Release → `--snapshot selftest.png`。
 **录音与预备拍**
 - `MainComponent::startRecording()` 顺序：`playTransport()`（会 rewind 停在线尾的播放头）
   → `startPreRoll (countIn)` → 读 `recordStartBeat` → `takeCollector.begin` → `beginRecording`。
+- **预备拍只跟"按之前停着"这一件事走**（P119）：`countInApplies (wasRolling, countIn)`
+  （`MainComponent.h`，`constexpr`）是唯一判据——`wasRolling` 必须在 `playTransport()` **之前**
+  读。已经在走带时按下录音是 punch-in，那里数四拍会把演奏当场冻住四拍（P88 整段数拍都不动播放头）。
+  `skipSamples` 与 `startPreRoll` 都读同一个 `countingIn`，不许各算一遍。
 - `skipSamples = countIn × getSecondsPerBeat() × sampleRate`。
 - `Recorder::begin (samplesToSkip)` → `std::atomic<int> skipRemaining`，`append()` 里先按它
   左移 `sourceOffset`。**不是"数完再 arm"**：那要等一个 timer tick，take 会从自己的
   downbeat 之后开始。
+- **数拍期间磁带是聋的**（P119）：`recordNoteAt` / `recordControlAt` 在模式门之后再问一句
+  `audio.getPlayback().isPreRolling()`，是就 return。这是 WAV 那半 `samplesToSkip` 的对称：
+  否则"预备拍上弹的那几个音"会落在还没动的播放头上，正是 downbeat。门开在**采集入口**，
+  `commitTake` 仍然不看预备拍。
 
 **顶栏**
 - `getMetronomeButtonBounds()` = `getBpmFieldBounds().getRight() + ui::px(6)`，`ui::px(34) × ui::px(28)`；

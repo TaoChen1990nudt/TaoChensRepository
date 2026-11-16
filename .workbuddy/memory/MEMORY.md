@@ -58,6 +58,8 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
 
 48. 「录什么」是一个值（P118）：`takeArmingFor (TakeMode)` 一次答 capture/events/monitor 三问；门在**采集**入口（`recordNoteAt`），不在落地入口（`commitTake` 只答「手上有什么」）；停从不提问；取消不回落；那个 30×28 的按钮自己画答案——状态条那一行已经没地方了。
 
+49. 累加出来的 double 不能和终点比（P119）：数拍结束的判据是 `segment < numSamples`，不是 `beat >= endBeat - 1e-9`（差值 4×10⁻⁵ 拍，永远假）；夹具的块大小是坐标不是背景；`countInApplies (wasRolling, …)` 的 `wasRolling` 必须在 `playTransport()` 之前读；数拍期间 `recordNoteAt`/`recordControlAt` 一律 return。
+
 ## 索引
 - 目录结构、构建命令（含 `unset *proxy*`）、CI 门禁、`formatVersion` 逐版字段、快照夹具 —— `STATUS.md` / `REFERENCE.md`。
 - 两条不能忘：**加断言的那一轮必须同步调大 `MIN_CHECKS`**；**「选中哪条 lane」这类状态必须显式写属性**。

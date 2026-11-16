@@ -3000,10 +3000,24 @@ void PlaybackEngine::renderPreRoll (juce::AudioBuffer<float>& output, int numSam
     const double endBeat = (double) total;
 
     double beat = preRollBeat.load (std::memory_order_relaxed);
-    int segment = numSamples;
 
-    if (beat + (double) numSamples * beatsPerSample > endBeat)
-        segment = juce::jlimit (0, numSamples, (int) std::floor ((endBeat - beat) / beatsPerSample));
+    // Phase 119: how many samples of THIS block still belong to the count-in.
+    // `floor`, because a sample that is only half inside the count-in belongs to
+    // the take: the click stops on a sample boundary and the music starts there.
+    //
+    // The count-in is over exactly when this block ran past its end — which is
+    // the same statement as `segment < numSamples`, and that is the only test
+    // that survives the arithmetic: when less than one sample of the count-in is
+    // left, `floor` answers 0 and no later block can ever move the beat again.
+    // Comparing the accumulated double against `endBeat - 1e-9` instead (what
+    // this did until P119) is a promise the sum cannot keep: 480-sample blocks
+    // at 48 kHz stop at 3.999958 of 4 beats, the count-in never ends, the
+    // transport never starts, and every note of the take is stamped on the
+    // downbeat it never left.
+    const double samplesLeft = (endBeat - beat) / beatsPerSample;
+    const int segment = samplesLeft < (double) numSamples
+                          ? juce::jlimit (0, numSamples, (int) std::floor (samplesLeft))
+                          : numSamples;
 
     if (segment > 0)
     {
@@ -3018,19 +3032,21 @@ void PlaybackEngine::renderPreRoll (juce::AudioBuffer<float>& output, int numSam
         preRollBeat.store (beat, std::memory_order_relaxed);
     }
 
-    if (beat >= endBeat - 1.0e-9)
+    if (segment < numSamples)
     {
         // Handing over mid-block is the point of this function: ending the
         // count-in at a block boundary would put up to one buffer of silence
         // between the last click and the first note of the take.
         cancelPreRoll();
 
-        if (segment < numSamples)
-        {
-            juce::AudioBuffer<float> rest (output.getArrayOfWritePointers(),
-                                           output.getNumChannels(), segment, numSamples - segment);
+        const int rest = numSamples - segment;
 
-            renderNextBlock (rest, numSamples - segment);
+        if (rest > 0)
+        {
+            juce::AudioBuffer<float> remainder (output.getArrayOfWritePointers(),
+                                                output.getNumChannels(), segment, rest);
+
+            renderNextBlock (remainder, rest);
         }
 
         return;

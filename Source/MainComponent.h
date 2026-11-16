@@ -169,6 +169,18 @@ public:
         return recordingNow ? RecordPress::stop : RecordPress::ask;
     }
 
+    /** Phase 119: does a take that starts now get counted in?
+
+        A count-in is the time in front of a take. Pressing record on a transport
+        that is already rolling has no "in front" — you are punching in, and
+        counting four beats there stops a running performance dead (Phase 88
+        holds the playhead still for the whole count-in). The rule is a value so
+        the self-test can hold both answers without a sound card. */
+    static constexpr bool countInApplies (bool transportWasRolling, int countInBeats) noexcept
+    {
+        return countInBeats > 0 && ! transportWasRolling;
+    }
+
     void toggleRecording();
 
     /** Phase 118: "录什么?" — the two-item menu the press opens. Cancelling it

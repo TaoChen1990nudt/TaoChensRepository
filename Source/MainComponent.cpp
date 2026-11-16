@@ -5159,15 +5159,24 @@ bool MainComponent::startRecording (TakeMode mode)
     // the very end of the timeline. The take begins wherever the playhead ends
     // up, not where it was before the transport was engaged — reading the beat
     // first would put the take's first bar somewhere the song never went.
-    if (! audio.isPlaying())
+    //
+    // Phase 119: whether the count-in applies is decided by the state the
+    // transport was in BEFORE that call — a count-in is the time in front of a
+    // take, and a transport that is already rolling has no "in front" to count.
+    // Punching in used to fire one anyway, which stopped the playhead dead for
+    // four beats in the middle of a performance.
+    const bool wasRolling = audio.isPlaying();
+
+    if (! wasRolling)
         playTransport();
 
     const int countIn = juce::jlimit (0, 64, countInBeats);
+    const bool countingIn = countInApplies (wasRolling, countIn);
 
     // The count-in runs where the playhead already is. Nothing here moves it:
     // the four clicks are the four beats BEFORE the downbeat, and the downbeat
     // is the beat the playhead is sitting on.
-    if (countIn > 0)
+    if (countingIn)
         audio.getPlayback().startPreRoll (countIn);
 
     recordStartBeat = audio.getPositionBeats();
@@ -5180,7 +5189,7 @@ bool MainComponent::startRecording (TakeMode mode)
     // count-in ends instead would be a timer tick late, and the take would
     // begin just after its own first note.
     const double sampleRate = juce::jmax (1.0, audio.getPlayback().getSampleRate());
-    const int skipSamples = countIn > 0
+    const int skipSamples = countingIn
         ? (int) std::llround ((double) countIn * audio.getPlayback().getSecondsPerBeat() * sampleRate)
         : 0;
 
@@ -5678,6 +5687,15 @@ void MainComponent::recordNoteAt (int pitch, float velocity, bool on, double bea
     if (! recording.load() || ! takeArmingFor (recordMode).events)
         return;
 
+    // Phase 119: the tape is not listening during the count-in. The WAV half of
+    // the same take already drops exactly those samples (`samplesToSkip` in
+    // `startRecording`), so a note played over the count-in would be the one
+    // thing in the take that pretends the count-in was not there — and it would
+    // land ON the downbeat, because that is where the playhead is standing while
+    // the click counts. Warm-up belongs to the room, not to the take.
+    if (audio.getPlayback().isPreRolling())
+        return;
+
     if (on)
         takeCollector.noteOn (pitch, velocity, beat);
     else
@@ -5687,6 +5705,11 @@ void MainComponent::recordNoteAt (int pitch, float velocity, bool on, double bea
 void MainComponent::recordControlAt (int controller, int value7, double beat)
 {
     if (! recording.load() || ! takeArmingFor (recordMode).events)
+        return;
+
+    // Same rule as the notes above: a knob turned during the count-in is not
+    // part of the performance the take is about.
+    if (audio.getPlayback().isPreRolling())
         return;
 
     takeCollector.control (controller, value7, beat);
