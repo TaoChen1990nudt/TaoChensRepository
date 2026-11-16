@@ -63,6 +63,7 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
 50. 显示不是提交（P120）：录中的音符是一份**快照**（`publishLiveTakeNotes` → `setLiveNotes`），不进图层/撤销/工程文件，只在键按下、键抬起、take 落地三个时刻重发，不从 timer 发；按住的音符没有长度，尾巴就是播放头；预览与落地共用 `getNoteBounds` 三参版——「画在哪」和「落在哪」必须是同一份几何；「画出来没」要用像素读回快照来咬（自检 P120 第 8 条），列表在手不等于上了屏。
 51. 记住的是意图不是成功（P121）：`MidiPreferences` 存两个开关/八度/勾选过的端口（`identifier` 是身份，`name` 只是 id 变了之后的退路），失败与关控制器都不删，只有主动取消勾选才删；只有窗口那一个 `MainComponent` 拿真实路径，headless 拿空路径；恢复排在回调接好之后且自己不写回；`openRememberedDevices` 按值收参数——它会重建成员，按引用就是在自己的 `clear()` 上读空。
 52. 外框和插件界面只认一套尺寸（P122）：窗口的 constrainer 必须转交给编辑器自己的那一个（`EditorConstrainer` 扣掉原生边框），不能在窗口上另写 `setResizeLimits`——那是第二套尺寸，插件的 `checkSizeConstraint` 一拒绝就露出黑色底板；`getDesktopScaleFactor()` 钉 1.0，原生视图自己管 content scale；`setContentOwned(editor, true)` 保住「编辑器自己改、外框跟着走」那一路。
+53. 尺寸对了不等于 view 重画过（P123）：跨屏后原生 HWND 按新 DPI 重排、JUCE 编辑器 bounds 没动，`childBoundsChanged` 不触发，黑边照旧；`resyncFrameToEditor()` 以外框跟编辑器（不是反过来），**尺寸已对时仍要 `+1px` 再设回发一次 resized**，否则 VST3 的 `onSize`/`updateHWNDBounds` 不跑——这一步才是真机上擦掉黑边的那一下；触发口是 `moved()` + 2 Hz 轮询，两者都先比 `Display::scale`（字段名不是 scaleFactor），没变就什么都不做。
 
 ## 索引
 - 目录结构、构建命令（含 `unset *proxy*`）、CI 门禁、`formatVersion` 逐版字段、快照夹具 —— `STATUS.md` / `REFERENCE.md`。

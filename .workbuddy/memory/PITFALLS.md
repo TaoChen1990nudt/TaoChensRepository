@@ -4605,3 +4605,47 @@ x≈31..84 / y≈107..292 的机架电平条抖动带内（p119→p120→p121 �
 headless 跑不出真实 VST3 的 HWND，也没有 `WM_DPICHANGED`。这里证明的是**宿主这一侧的两套尺寸
 并成了一套**，不是「双屏黑边一定消失」。真机上如果还有黑边，下一步加的是「显示设备变化后按
 编辑器尺寸重同步外框」，不要去动绘制；绘制那一侧没有任何东西可以改出这个症状。
+
+## P123 — 跨屏之后那块黑边还在：尺寸对了，通知没发
+
+用户只回了三个字：「黑边还在」。P122 预言的那一段真的发生了。
+
+### A. 尺寸一致不等于 view 重画过
+
+P122 把 constrainer 并成一套，也保住了 `setContentOwned(editor, true)` 那条「编辑器改、外框跟」
+的路。但跨屏 DPI 变化的时序是：原生 HWND 按新 `nativeScaleFactor` 重算了尺寸，**JUCE 编辑器的
+逻辑 bounds 一个像素没动**——于是 `childBoundsChanged` 根本不触发，外框和编辑器「尺寸一致」
+（都是旧值），而原生 view 已经按新 DPI 画在了另一块物理区域上；露出来的仍是
+`VST3PluginWindow::ViewComponent::paint()` 里那块 `Colours::black`。
+
+### B. 修法是补一次通知，不是补一层绘制
+
+`resyncFrameToEditor()` 三件事：① 外框 `setSize` 到 `editor 尺寸 + 边框`（**编辑器是权威，
+外框是跟随者**，反过来的话拖外框会把插件挤到它不愿接受的大小）；② 编辑器 bounds 与 content
+区域不一致就 `setBounds`；③ **bounds 已经一致时反而关键**——同尺寸的 `setBounds` 不发 resized
+消息，VST3 的 `componentMovedOrResized` 收不到，`onSize` + `updateHWNDBounds` 全不跑。所以故意
+`+1 px` 再设回，让那一条通知链走两次。这一步咬测 M2 精确红 1 条（`0 次 resized`）——**这是
+真机上真正把黑边擦掉的那一下**，其余几条只是让它别再长出来。
+
+### C. 两个触发口，同一条路
+
+`moved()`（跨屏那一刻）+ 2 Hz 轮询（DPI 变化发生在窗口静止时、或 move 早于 WM_DPICHANGED 到达）。
+两者都只做 `checkDisplayScale()`：拿 `getDisplayForRect(getScreenBounds())->scale` 与上次的值比，
+**没变就什么都不做**——轮询不能每秒改两次编辑器尺寸，否则插件一直在重排。自检的
+`simulateDisplayChangeForTest()` 把基线设成不可能值，headless 才有得咬。
+
+### D. 咬测与帧
+
+自检 1173 → **1181**（+8）。四刀：掐轮询红 3、掐 nudge 红 1、掐外框跟随红 2、掐 move 触发红 1。
+`DISPLAYS::Display` 的字段名是 `scale`（double），不是 `scaleFactor`；`Component::setBounds` 系列
+**不是虚函数**，自检的 spy 要挂在 `resized()` 上，那恰好也是 VST3 收到通知的同一时刻。
+帧 49 张：与 P122 比 29 张逐字节相同、20 张不同，其中 19 张在同二进制两遍的抖动集内；
+多出的 `clipauto` 差 **1 像素** `(210,224)`、两遍之间为 0，与 P122 日记记的是同一个抖动。
+本轮零绘制改动。
+
+### E. 仍然证明不了的
+
+headless 里没有第二块显示器、没有真实 VST3 的 HWND，也就没有 `WM_DPICHANGED`。这里证明的是
+「显示变化 → 外框以编辑器为准 → 尺寸没变也发一次通知」这条宿主侧链路成立；**真机黑边是否真的
+消失，还得用户在双屏上拖一次**。如果还在，下一步该看的是具体哪个插件的 `checkSizeConstraint`
+在 DPI 变化后把尺寸夹到了别处，而不是继续改宿主外框或绘制。

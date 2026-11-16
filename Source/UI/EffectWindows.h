@@ -25,12 +25,14 @@ namespace atomic
     `this`: the host owns the window, and a window that deletes itself inside
     closeButtonPressed() is a use-after-free waiting for the next repaint.
 */
-class PluginEditorWindow final : public juce::DocumentWindow
+class PluginEditorWindow final : public juce::DocumentWindow,
+                                 private juce::Timer
 {
 public:
     PluginEditorWindow (juce::AudioProcessor& processor,
                         const juce::String& pluginName,
-                        int instanceIdToShow);
+                        int instanceIdToShow,
+                        bool followEditorSize = true);
 
     ~PluginEditorWindow() override;
 
@@ -67,7 +69,46 @@ public:
     /** Test seam: the editor being framed, or nullptr for a plugin with no UI. */
     juce::AudioProcessorEditor* getEditorForTest() const noexcept { return editor; }
 
+    /** Phase 123: put the outer frame back in exact agreement with the editor.
+
+        A VST3 view recomputes its own size when the window crosses onto a
+        display with a different DPI. JUCE's resizeToFitContent only reacts
+        when the editor calls setSize; a plugin that resizes its native HWND
+        without touching the JUCE component leaves the frame larger than the
+        view, and the plugin's black backing component shows through. Calling
+        this after the fact realigns the two — the frame is sized from the
+        editor, never the other way round. Idempotent, and safe to call from
+        any thread that owns the message loop. */
+    void resyncFrameToEditor();
+
+    /** The rectangle the editor is supposed to fill. Equal to the editor's
+        own bounds once resyncFrameToEditor has run; the self-test compares
+        the two to prove there is no gap for the black backing to show. */
+    juce::Rectangle<int> getFrameContentAreaForTest() const noexcept;
+
+    /** Public so the self-test can drive one poll directly instead of waiting
+        for a real timer tick (and so removing the call inside is a biteable
+        mutation). */
+    void timerCallback() override;
+
+    /** A top-level window crossing onto another display is the only moment a
+        real DPI change is observable. The baseline poll catches the cases a
+        move callback misses; both funnel into checkDisplayScale(). */
+    void moved() override;
+
+    /** Test seam: make the next poll believe the display changed, without
+        needing a second physical monitor in the self-test. */
+    void simulateDisplayChangeForTest();
+
 private:
+    void checkDisplayScale();
+
+    /** Phase 123: the frame follows the editor, never editor follows frame.
+        false is only for the self-test fixture that deliberately desynchronises
+        the two; production windows must leave it true. */
+    bool followingEditorSize = true;
+    bool syncingFrame = false;
+    double lastDisplayScale = 1.0;
     /** Phase 122: the frame's constrainer counts window pixels; the plugin's
         counts editor pixels. Neither may be used raw for the other — the host
         has to translate, including the native title bar's border, or dragging

@@ -42,11 +42,13 @@ int InsertEditorContent::preferredHeightFor (int numParams)
 //==============================================================================
 PluginEditorWindow::PluginEditorWindow (juce::AudioProcessor& processor,
                                         const juce::String& pluginName,
-                                        int instanceIdToShow)
+                                        int instanceIdToShow,
+                                        bool followEditorSize)
     : juce::DocumentWindow (utf8 ("AtomicDAW · ") + pluginName, kBackground,
                             juce::DocumentWindow::closeButton
                               | juce::DocumentWindow::minimiseButton),
-      instanceId (instanceIdToShow)
+      instanceId (instanceIdToShow),
+      followingEditorSize (followEditorSize)
 {
     setUsingNativeTitleBar (true);
 
@@ -57,7 +59,7 @@ PluginEditorWindow::PluginEditorWindow (juce::AudioProcessor& processor,
     if (auto* e = processor.createEditorIfNeeded())
     {
         editor = e;
-        setContentOwned (editor, true);
+        setContentOwned (editor, followingEditorSize);
         setResizable (editor->isResizable(), false);
 
         const int w = juce::jmax (atomic::ui::px (320), editor->getWidth());
@@ -88,10 +90,23 @@ PluginEditorWindow::PluginEditorWindow (juce::AudioProcessor& processor,
     }
 
     setVisible (true);
+
+    if (editor != nullptr)
+    {
+        if (auto* display = juce::Desktop::getInstance().getDisplays()
+                                .getDisplayForRect (getScreenBounds()))
+            lastDisplayScale = display->scale;
+
+        // A slow baseline: crossing a display boundary normally arrives through
+        // moved(), but a DPI change can also land while the window is still.
+        startTimerHz (2);
+    }
 }
 
 PluginEditorWindow::~PluginEditorWindow()
 {
+    stopTimer();
+
     // The editor is owned by the content slot. Clear it explicitly so the
     // processor is told the editor is gone before this window stops existing.
     editor = nullptr;                 // the constrainer must not outlive it
@@ -140,6 +155,88 @@ void PluginEditorWindow::closeButtonPressed()
 {
     if (onCloseRequest != nullptr)
         onCloseRequest();
+}
+
+//==============================================================================
+// Phase 123 — display change realignment.
+//
+// P122 merged the two constrainers, but that only fixes who is allowed to
+// *ask* for a size. It does not fix what happens after the OS moves the window
+// to a monitor with a different DPI: the VST3 view recomputes its native HWND
+// against the new scale factor, while JUCE's outer editor keeps the logical
+// bounds it had on the old monitor. The gap between the two is painted by
+// VST3PluginWindow::ViewComponent::paint(), i.e. solid black.
+//
+// The editor is the authority — the frame is sized from it, never vice versa.
+void PluginEditorWindow::moved()
+{
+    juce::DocumentWindow::moved();
+    checkDisplayScale();
+}
+
+void PluginEditorWindow::timerCallback()
+{
+    checkDisplayScale();
+}
+
+void PluginEditorWindow::simulateDisplayChangeForTest()
+{
+    lastDisplayScale = -1.0f;   // impossible value: the next poll must fire
+}
+
+void PluginEditorWindow::checkDisplayScale()
+{
+    if (editor == nullptr || syncingFrame)
+        return;
+
+    double scale = 1.0;
+
+    if (auto* display = juce::Desktop::getInstance().getDisplays()
+                            .getDisplayForRect (getScreenBounds()))
+        scale = display->scale;
+
+    if (juce::approximatelyEqual (scale, lastDisplayScale))
+        return;
+
+    lastDisplayScale = scale;
+    resyncFrameToEditor();
+}
+
+juce::Rectangle<int> PluginEditorWindow::getFrameContentAreaForTest() const noexcept
+{
+    return getContentComponentBorder().subtractedFrom (getLocalBounds());
+}
+
+void PluginEditorWindow::resyncFrameToEditor()
+{
+    if (editor == nullptr || syncingFrame)
+        return;
+
+    const auto border = getContentComponentBorder();
+    const int wantedW = editor->getWidth() + border.getLeftAndRight();
+    const int wantedH = editor->getHeight() + border.getTopAndBottom();
+
+    juce::ScopedValueSetter<bool> guard (syncingFrame, true);
+
+    if (getWidth() != wantedW || getHeight() != wantedH)
+        setSize (wantedW, wantedH);
+
+    const auto area = border.subtractedFrom (getLocalBounds());
+
+    if (editor->getBounds() != area)
+    {
+        editor->setBounds (area);
+    }
+    else
+    {
+        // Same bounds emits no resized message, so a hosted VST3 view never
+        // hears about the new DPI and never re-runs its onSize/HWND update.
+        // A one-pixel nudge and back goes through componentMovedOrResized and
+        // redraws the native view at the new scale. This is the step that
+        // actually removes the black band on a real dual-monitor setup.
+        editor->setSize (area.getWidth() + 1, area.getHeight());
+        editor->setSize (area.getWidth(), area.getHeight());
+    }
 }
 
 //==============================================================================

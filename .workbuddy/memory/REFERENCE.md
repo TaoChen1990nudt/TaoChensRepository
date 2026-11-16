@@ -2178,6 +2178,26 @@ P106 曾在它底部加过一条宿主自己的琴键带（`AuditionStrip`），
 构造参数收的是 `juce::AudioProcessor&` 而不是 `AudioPluginInstance&`：窗口只用
 `createEditorIfNeeded()`，放宽之后自检才能塞一个合成编辑器进去——headless 的 Test Synth 没有 UI。
 
+### 跨屏之后重同步（P123）
+
+P122 只统一了「谁有权请求尺寸」，没有覆盖跨屏 DPI 变化的时序：原生 HWND 按新 DPI 重排，
+JUCE 编辑器的逻辑 bounds 不变，`childBoundsChanged` 不触发，黑边照旧。**尺寸一致不等于 view
+重画过**，这几件事必须一起做：
+
+- `resyncFrameToEditor()`：**编辑器是权威、外框跟随**（`setSize (editor 尺寸 + 边框)`）。反过来
+  以编辑器跟着外框会使插件收到它拒绝的尺寸。
+- **bounds 已经相等时也要发通知**：同尺寸的 `setBounds` 不产生 resized，VST3 的
+  `componentMovedOrResized` 收不到，`onSize` / `updateHWNDBounds` 都不跑。用 `+1px` 再设回，
+  让通知链走两次；这一步是真正擦掉黑边的那一下。
+- 触发口两个，同一条 `checkDisplayScale()`：`moved()`（跨屏瞬间）+ 2 Hz 轮询（静止时变 DPI、
+  或 move 早于 `WM_DPICHANGED`）。`Displays::Display::scale` 是 `double`（**不是 `scaleFactor`**）；
+  没变就 return，轮询不许反复改编辑器尺寸。
+- 自检的 spy 挂在 `resized()` 上——`Component::setBounds` 系列**不是虚函数**，而 `resized()`
+  恰好是 VST3 收到 size 通知的同一时刻。
+
+headless 证明不了真机 HWND；`WM_DPICHANGED` 是否真的被这一条链路处理完，只能在双屏上拖一次确认。
+若黑边还在，下一步查具体插件的 `checkSizeConstraint`，不要再改宿主外框或绘制。
+
 ## 踩坑档案
 平台陷阱、自检夹具摆位、出图尺寸见同目录 **`PITFALLS.md`**。动以下任一处前先读它：
 VST3 扫描 / 采样解码 / 试听声部 / 标尺 / ghost / `--snapshot` / 折叠行高 / 插件参数自动化 /

@@ -23096,6 +23096,144 @@ juce::String MainComponent::runSelfTest()
                juce::String ((int) (quietWin->getEditorForTest() != nullptr)));
     } ();
 
+    //-- P123: 跨屏之后按编辑器尺寸重同步外框 -------------------------------
+    // 真机上是 VST3 的原生 HWND，headless 没有第二块屏也没有 WM_DPICHANGED。
+    // 这里用一个会自己改大小的合成编辑器顶上：宿主这一侧要证明的是
+    // 「显示变化 → 外框重新以编辑器为准 → 即使尺寸没变也让编辑器走一次
+    // size 通知」，因为最后那一步才是让原生 view 重新 onSize 的那一声。
+    [&]
+    {
+        struct SpyEditor final : juce::AudioProcessorEditor
+        {
+            explicit SpyEditor (juce::AudioProcessor& p) : juce::AudioProcessorEditor (p)
+            {
+                setSize (400, 300);
+                setResizable (true, true);
+                setResizeLimits (240, 180, 800, 600);
+            }
+            void paint (juce::Graphics& g) override { g.fillAll (juce::Colours::red); }
+            void resized() override
+            {
+                ++resizeCalls;
+                juce::AudioProcessorEditor::resized();
+            }
+            int resizeCalls = 0;
+        };
+
+        struct SpyProcessor : juce::AudioProcessor
+        {
+            const juce::String getName() const override { return "P123"; }
+            void prepareToPlay (double, int) override {}
+            void releaseResources() override {}
+            void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override {}
+            double getTailLengthSeconds() const override { return 0.0; }
+            bool acceptsMidi() const override { return false; }
+            bool producesMidi() const override { return false; }
+            juce::AudioProcessorEditor* createEditor() override { return new SpyEditor (*this); }
+            bool hasEditor() const override { return true; }
+            int getNumPrograms() override { return 1; }
+            int getCurrentProgram() override { return 0; }
+            void setCurrentProgram (int) override {}
+            const juce::String getProgramName (int) override { return {}; }
+            void changeProgramName (int, const juce::String&) override {}
+            void getStateInformation (juce::MemoryBlock&) override {}
+            void setStateInformation (const void*, int) override {}
+        };
+
+        SpyProcessor proc;
+        // followEditorSize=false deliberately breaks JUCE's automatic path,
+        // so a green assertion can only come from the new explicit resync.
+        auto win = std::make_unique<PluginEditorWindow> (proc, "P123", 44, false);
+        auto* ed = dynamic_cast<SpyEditor*> (win->getEditorForTest());
+
+        check (utf8 ("合成编辑器装好了，前提不是空跑"),
+               ed != nullptr && ed->getWidth() >= 320 && ed->getHeight() >= 180,
+               ed != nullptr ? juce::String (ed->getWidth()) + "x" + juce::String (ed->getHeight())
+                             : utf8 ("没有编辑器"));
+
+        // Pretend the DPI change shrank the native view but not JUCE's frame.
+        // Stay above the spy's own 240x180 resize limits so the shrink sticks.
+        const int baseW = ed->getWidth();
+        const int baseH = ed->getHeight();
+        ed->setSize (baseW - 60, baseH - 30);
+
+        check (utf8 ("前提：编辑器缩小之后外框 content 比它大，黑边成立"),
+               win->getFrameContentAreaForTest().getWidth() == baseW
+                 && win->getFrameContentAreaForTest().getHeight() == baseH
+                 && ed->getWidth() == baseW - 60,
+               juce::String (win->getFrameContentAreaForTest().getWidth()) + "x"
+                 + juce::String (win->getFrameContentAreaForTest().getHeight())
+                 + utf8 (" 外框 / ") + juce::String (ed->getWidth()) + "x" + juce::String (ed->getHeight()));
+
+        win->simulateDisplayChangeForTest();
+        win->timerCallback();
+
+        check (utf8 ("显示变化之后外框按编辑器尺寸重同步，黑边消失"),
+               win->getFrameContentAreaForTest().getWidth() == ed->getWidth()
+                 && win->getFrameContentAreaForTest().getHeight() == ed->getHeight(),
+               juce::String (win->getFrameContentAreaForTest().getWidth()) + "x"
+                 + juce::String (win->getFrameContentAreaForTest().getHeight()));
+
+        const auto border = win->getContentComponentBorder();
+        check (utf8 ("外框尺寸正好是编辑器加原生边框，不松不紧"),
+               win->getWidth() == ed->getWidth() + border.getLeftAndRight()
+                 && win->getHeight() == ed->getHeight() + border.getTopAndBottom(),
+               juce::String (win->getWidth()) + "x" + juce::String (win->getHeight()));
+
+        // The other direction: a view that grew must drag the frame with it.
+        ed->setSize (ed->getWidth() + 100, ed->getHeight() + 80);
+        const int grownW = ed->getWidth();
+        const int grownH = ed->getHeight();
+        win->simulateDisplayChangeForTest();
+        win->timerCallback();
+
+        check (utf8 ("编辑器变大之后外框跟着变大，不是只会缩小"),
+               win->getFrameContentAreaForTest().getWidth() == grownW
+                 && win->getFrameContentAreaForTest().getHeight() == grownH,
+               juce::String (win->getFrameContentAreaForTest().getWidth()) + "x"
+                 + juce::String (win->getFrameContentAreaForTest().getHeight()));
+
+        // The vertex that actually cures the real black band: bounds already
+        // match, so a plain setBounds would emit nothing and the hosted VST3
+        // view would never redraw. A nudge and back must emit two messages.
+        const int callsBefore = ed->resizeCalls;
+        win->resyncFrameToEditor();
+        const int nudgeCalls = ed->resizeCalls - callsBefore;
+
+        check (utf8 ("尺寸已对仍走一次通知，让原生 view 按新 DPI 重排"),
+               nudgeCalls >= 2
+                 && win->getFrameContentAreaForTest().getWidth() == grownW
+                 && win->getFrameContentAreaForTest().getHeight() == grownH,
+               juce::String (nudgeCalls) + utf8 (" 次 resized"));
+
+        // A window move is the other trigger; the poll is not the only way in.
+        ed->setSize (grownW - 40, grownH - 30);
+        win->simulateDisplayChangeForTest();
+        win->moved();
+
+        check (utf8 ("窗口移到另一块屏的那一刻也触发重同步"),
+               win->getFrameContentAreaForTest().getWidth() == ed->getWidth()
+                 && win->getFrameContentAreaForTest().getHeight() == ed->getHeight(),
+               juce::String (win->getFrameContentAreaForTest().getWidth()) + "x"
+                 + juce::String (win->getFrameContentAreaForTest().getHeight()));
+
+        struct P123NoUiProcessor final : SpyProcessor
+        {
+            juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+            bool hasEditor() const override { return false; }
+        };
+
+        P123NoUiProcessor quiet;
+        auto quietWin = std::make_unique<PluginEditorWindow> (quiet, "quiet-p123", 45);
+        quietWin->simulateDisplayChangeForTest();
+        quietWin->timerCallback();
+        quietWin->resyncFrameToEditor();
+
+        check (utf8 ("没有界面的插件走同一条轮询也不会出事"),
+               quietWin->getEditorForTest() == nullptr && quietWin->getWidth() > 0,
+               juce::String (quietWin->getWidth()) + "x" + juce::String (quietWin->getHeight()));
+    } ();
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the
