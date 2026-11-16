@@ -59,6 +59,22 @@ inline juce::String midiSourcesName (const MidiSources& sources)
 }
 
 //==============================================================================
+/** One remembered external port. `identifier` is the identity, `name` is the
+    fallback when a driver change hands the same keyboard a new id. */
+struct MidiDeviceBinding
+{
+    juce::String identifier;
+    juce::String name;
+
+    bool operator== (const MidiDeviceBinding& other) const noexcept
+    {
+        return identifier == other.identifier && name == other.name;
+    }
+
+    bool operator!= (const MidiDeviceBinding& other) const noexcept { return ! operator== (other); }
+};
+
+//==============================================================================
 /**
     Owns the open MIDI inputs and reports what arrives.
 
@@ -102,11 +118,34 @@ public:
     void refreshDevices();
 
     /** Message thread. Returns the state the device ended up in — opening can
-        fail, and a checkbox that lies about that is useless. */
+        fail, and a checkbox that lies about that is useless. The *wish* is
+        remembered even when the open fails: a loose cable must not make the
+        app forget the keyboard forever. */
     bool setDeviceOpen (const juce::String& identifier, bool shouldOpen);
+
+    /** Phase 121: re-asks for the remembered ports, by identifier first and
+        by name when that identifier has gone away. Returns how many actually
+        opened. The memory is kept for every port that failed. */
+    int openRememberedDevices (std::vector<MidiDeviceBinding> remembered);
+
+    /** The bindings to save — intent, not a census of what is open now. */
+    std::vector<MidiDeviceBinding> getRememberedDevices() const { return rememberedDevices; }
+
+    /** Which bindings the last start tried to reach. A test seam: with no
+        hardware on the machine, "we went looking" is the observable fact. */
+    std::vector<MidiDeviceBinding> getLastRestoreAttempts() const { return lastRestoreAttempts; }
+
+    /** Exact identifier wins; a different port with the same name is the
+        fallback only when the identifier is gone. -1 = not present. */
+    static int findDeviceIndex (const std::vector<DeviceInfo>& list,
+                                const MidiDeviceBinding& binding, int skipIndex = -1);
 
     std::vector<DeviceInfo> getDevices() const { return devices; }
     int getNumOpenDevices() const;
+
+    /** Harness only: use this list instead of enumerating hardware, so the
+        identity rules can be tested on a machine with no MIDI ports. */
+    void useDeviceListForTest (const std::vector<DeviceInfo>& list);
 
     //-- Monitor --------------------------------------------------------------
     struct Monitor
@@ -146,14 +185,22 @@ private:
 
     void closeAllPorts();
 
+    /** One memory per port. A failed open still leaves the binding in place;
+        an explicit untick is the only thing that removes it. */
+    void remember (const MidiDeviceBinding& binding);
+
     /** Re-derives `devices[].open` from the open ports, without re-reading the
         hardware list. Called from inside click handlers that iterate the rows. */
     void syncOpenFlags();
 
     MidiSources sources;
 
-    std::vector<DeviceInfo> devices;      // message thread only
-    std::vector<OpenPort>   ports;        // message thread only
+    std::vector<DeviceInfo>          devices;            // message thread only
+    std::vector<DeviceInfo>          injectedDevices;    // harness only
+    bool                             useInjected = false;
+    std::vector<OpenPort>            ports;              // message thread only
+    std::vector<MidiDeviceBinding>   rememberedDevices;  // what the user asked for
+    std::vector<MidiDeviceBinding>   lastRestoreAttempts;
 
     std::atomic<int>  messageCount { 0 };
     std::atomic<int>  lastType     { 0 };

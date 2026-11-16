@@ -33,6 +33,7 @@ target_sources(AtomicDAW PRIVATE
     Source/SelfTest.cpp
     Source/Audio/AudioEngine.cpp
     Source/Audio/MidiInputHub.cpp
+    Source/Audio/MidiPreferences.cpp
     Source/Audio/Metronome.cpp
     Source/Audio/Mp3Encoder.cpp
     Source/Audio/PlaybackEngine.cpp

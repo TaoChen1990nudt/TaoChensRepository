@@ -111,7 +111,10 @@ class MainComponent final : public juce::Component,
                             private AutomationModel::Listener
 {
 public:
-    MainComponent();
+    /** An empty file means "no preferences" — every headless component uses
+        that, so a self-test can never rewrite the person's real MIDI setup.
+        Only the windowed app passes getDefaultMidiPreferencesFile(). */
+    explicit MainComponent (juce::File midiPreferencesFile = {});
     ~MainComponent() override;
 
     void paint (juce::Graphics&) override;
@@ -1189,7 +1192,9 @@ private:
         keyboard is on out of the box. Turning a source OFF releases the notes it
         was holding; turning one ON disturbs nothing, which is the whole point of
         two switches instead of a choice. */
-    void setMidiSources (MidiSources sources);
+    /** `persist == false` is for startup restore: apply the remembered state
+        without writing it back before the devices have even been tried. */
+    void setMidiSources (MidiSources sources, bool persist = true);
     MidiSources getMidiSources() const noexcept;
 
     /** True when the computer keyboard is routed to the synth. The key handler
@@ -1213,7 +1218,7 @@ private:
     /** The typing keyboard's octave, in octaves, relative to FL Studio's
         layout (Z = C4). Numpad + / - move it while playing. */
     int  getTypingOctave() const noexcept { return typingOctave; }
-    void setTypingOctave (int octaves);
+    void setTypingOctave (int octaves, bool persist = true);
 
     /** The settings page edits the device list through this; the host owns it
         because the host is what makes the sound. */
@@ -1579,6 +1584,15 @@ private:
         members die in reverse order, and a MidiInput that outlives the engine
         it feeds would call into a destroyed object. */
     std::unique_ptr<MidiInputHub> midiHub;
+
+    /** Phase 121: where the last session's MIDI choices live. Empty in every
+        headless component, so neither a self-test nor a screenshot can change
+        what the person using the app will get at their next start. */
+    juce::File midiPreferencesFile;
+
+    /** Snapshot the two switches, the octave and the *wanted* ports. Called
+        after every user change, never from the restore path. */
+    void persistMidiPreferences();
 
     /** Re-derives `liveTargetSlot` from the model. Message thread only. */
     void refreshLiveTarget();

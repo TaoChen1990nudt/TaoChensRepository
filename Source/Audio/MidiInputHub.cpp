@@ -21,12 +21,17 @@ void MidiInputHub::setSources (MidiSources nextSources)
     if (sources == nextSources)
         return;
 
+    const bool wasExternal = usesExternalController();
     sources = nextSources;
 
     // The typing keyboard never touches a MIDI device, so it changing is not a
     // reason to close anything. Only the controller switch owns ports.
     if (! usesExternalController())
         closeAllPorts();
+    else if (! wasExternal)
+        // Turning the switch back on is another chance for a keyboard that
+        // was absent the last time. The memory survived the time off.
+        openRememberedDevices (rememberedDevices);
 }
 
 void MidiInputHub::closeAllPorts()
@@ -46,7 +51,15 @@ void MidiInputHub::refreshDevices()
 {
     devices.clear();
 
-    for (const auto& device : juce::MidiInput::getAvailableDevices())
+    std::vector<DeviceInfo> available;
+
+    if (useInjected)
+        available = injectedDevices;
+    else
+        for (const auto& device : juce::MidiInput::getAvailableDevices())
+            available.push_back ({ device.name, device.identifier, false });
+
+    for (const auto& device : available)
     {
         DeviceInfo info;
         info.name       = device.name;
@@ -74,17 +87,47 @@ bool MidiInputHub::setDeviceOpen (const juce::String& identifier, bool shouldOpe
             continue;
 
         if (shouldOpen)
+        {
+            // An already-open port may have been remembered under an older
+            // name; keep the intent in step with what is on screen.
+            for (const auto& info : devices)
+                if (info.identifier == identifier)
+                    remember ({ identifier, info.name });
+
             return it->input != nullptr;
+        }
 
         it->input->stop();
         it->input.reset();
         ports.erase (it);
+
+        for (auto remembered = rememberedDevices.begin(); remembered != rememberedDevices.end(); ++remembered)
+            if (remembered->identifier == identifier)
+            {
+                rememberedDevices.erase (remembered);
+                break;
+            }
+
         syncOpenFlags();
         return false;
     }
 
     if (! shouldOpen)
+    {
+        // An untick is the one and only way to forget a keyboard.
+        for (auto remembered = rememberedDevices.begin(); remembered != rememberedDevices.end(); ++remembered)
+            if (remembered->identifier == identifier)
+            {
+                rememberedDevices.erase (remembered);
+                break;
+            }
+
         return false;
+    }
+
+    for (const auto& info : devices)
+        if (info.identifier == identifier)
+            remember ({ identifier, info.name });
 
     OpenPort port;
     port.identifier = identifier;
@@ -103,6 +146,83 @@ bool MidiInputHub::setDeviceOpen (const juce::String& identifier, bool shouldOpe
 
     syncOpenFlags();
     return true;
+}
+
+void MidiInputHub::remember (const MidiDeviceBinding& binding)
+{
+    if (binding.identifier.isEmpty())
+        return;
+
+    for (auto& existing : rememberedDevices)
+        if (existing.identifier == binding.identifier)
+        {
+            if (binding.name.isNotEmpty())
+                existing.name = binding.name;
+            return;
+        }
+
+    rememberedDevices.push_back (binding);
+}
+
+int MidiInputHub::findDeviceIndex (const std::vector<DeviceInfo>& list,
+                                   const MidiDeviceBinding& binding, int skipIndex)
+{
+    for (int i = 0; i < (int) list.size(); ++i)
+        if (i != skipIndex && list[(size_t) i].identifier == binding.identifier)
+            return i;
+
+    // Names are the fallback, not the identity: two Keystations can be plugged
+    // in at once, so a name match is only used after the id has gone missing.
+    if (binding.name.isNotEmpty())
+        for (int i = 0; i < (int) list.size(); ++i)
+            if (i != skipIndex && list[(size_t) i].name == binding.name)
+                return i;
+
+    return -1;
+}
+
+int MidiInputHub::openRememberedDevices (std::vector<MidiDeviceBinding> remembered)
+{
+    // Passed BY VALUE on purpose: the re-enable path calls this with
+    // `rememberedDevices` itself, and the first thing this function does is
+    // rebuild that member. A const reference here aliases its own clear().
+    lastRestoreAttempts.clear();
+    rememberedDevices.clear();
+    closeAllPorts();
+    refreshDevices();
+
+    auto available = devices;
+    int opened = 0;
+
+    for (const auto& wanted : remembered)
+    {
+        const int index = findDeviceIndex (available, wanted);
+        const auto binding = index >= 0
+                               ? MidiDeviceBinding { available[(size_t) index].identifier,
+                                                     available[(size_t) index].name }
+                               : wanted;
+
+        lastRestoreAttempts.push_back (binding);
+
+        if (setDeviceOpen (binding.identifier, true))
+            ++opened;
+
+        // The port stays remembered whether or not it answered this time.
+        remember (binding);
+
+        if (index >= 0)
+            available.erase (available.begin() + index);
+    }
+
+    syncOpenFlags();
+    return opened;
+}
+
+void MidiInputHub::useDeviceListForTest (const std::vector<DeviceInfo>& list)
+{
+    injectedDevices = list;
+    useInjected     = true;
+    refreshDevices();
 }
 
 void MidiInputHub::syncOpenFlags()

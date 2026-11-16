@@ -9,6 +9,7 @@
 //==============================================================================
 
 #include "MainComponent.h"
+#include "Audio/MidiPreferences.h"
 #include "Audio/OverloadLatch.h"
 #include "Model/Comp.h"
 #include "Model/MidiCc.h"
@@ -22899,6 +22900,114 @@ juce::String MainComponent::runSelfTest()
                  + wasThere.toDisplayString (false) + utf8 (" · 现在 ")
                  + isThere.toDisplayString (false));
     }
+
+    //== Phase 121: 上次挂载的键盘，下次启动还得去找 ==========================
+    // 用户一句话：「软件应该记忆上一次的midi设置，比如上一次挂载了键盘，这次
+    // 启动也要去尝试挂载那个键盘，除非失败」。记住的是**意图**，不是「当时
+    // 恰好开着」的硬件清单：失败一次就忘掉的话，一根松了的 USB 线会变成永久
+    // 失忆。
+    [&]
+    {
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                              .getChildFile ("AtomicDAW-P121");
+
+        folder.createDirectory();
+        const auto file = folder.getChildFile ("midi-settings.xml");
+        file.deleteFile();
+
+        const MidiPreferences factory;
+
+        check (utf8 ("没有设置文件时，MIDI 回到出厂状态"),
+               loadMidiPreferences (file) == factory,
+               juce::String ((int) loadMidiPreferences (file).sources.typingKeyboard)
+                 + "/" + juce::String ((int) loadMidiPreferences (file).sources.externalController));
+
+        MidiPreferences saved;
+        saved.sources      = { false, true };
+        saved.typingOctave = 2;
+        saved.devices      = { { "keyboard-A", "Keystation 49" },
+                               { "keyboard-B", "Keystation 61" } };
+
+        check (utf8 ("上次的 MIDI 设置写得下、读得回"),
+               saveMidiPreferences (file, saved) && loadMidiPreferences (file) == saved,
+               file.getFullPathName());
+
+        file.replaceWithText ("<MidiPreferences version=\"1\"><Sources");
+
+        check (utf8 ("坏文件不会读成半个记忆"),
+               loadMidiPreferences (file) == factory,
+               file.loadFileAsString().substring (0, 24));
+
+        saveMidiPreferences (file, saved);
+        MainComponent host (file);
+
+        check (utf8 ("新启动把上次的开关和八度带回来"),
+               host.getMidiSources() == saved.sources && host.getTypingOctave() == 2,
+               midiSourcesName (host.getMidiSources())
+                 + utf8 (" · 八度 ") + juce::String (host.getTypingOctave()));
+
+        const auto attempts = host.getMidiInputHub().getLastRestoreAttempts();
+
+        check (utf8 ("启动真的去找过上次那两把键盘"),
+               attempts.size() == 2 && attempts[0].identifier == "keyboard-A"
+                 && attempts[1].identifier == "keyboard-B",
+               juce::String ((int) attempts.size())
+                 + (attempts.empty() ? juce::String() : attempts[0].identifier));
+
+        check (utf8 ("设备这次没应门，记忆也不抹掉"),
+               host.getMidiInputHub().getRememberedDevices() == saved.devices,
+               juce::String ((int) host.getMidiInputHub().getRememberedDevices().size()));
+
+        std::vector<MidiInputHub::DeviceInfo> present;
+        present.push_back ({ "Keystation 49", "other-id", false });
+        present.push_back ({ "Keystation 49", "keyboard-A", false });
+
+        check (utf8 ("身份认 identifier：同名不同 id 不混进来"),
+               MidiInputHub::findDeviceIndex (present, saved.devices[0]) == 1,
+               "index " + juce::String (MidiInputHub::findDeviceIndex (present, saved.devices[0])));
+
+        check (utf8 ("id 不在了才按名字找回同一把键盘"),
+               MidiInputHub::findDeviceIndex (present, { "gone-id", "Keystation 49" }) == 0,
+               "index "
+                 + juce::String (MidiInputHub::findDeviceIndex (present, { "gone-id", "Keystation 49" })));
+
+        check (utf8 ("id 和名字都不在就是没找到"),
+               MidiInputHub::findDeviceIndex (present, { "gone-id", "no such keyboard" }) < 0,
+               "index "
+                 + juce::String (MidiInputHub::findDeviceIndex (present, { "gone-id", "no such keyboard" })));
+
+        auto& hub = host.getMidiInputHub();
+        hub.useDeviceListForTest (present);
+        hub.setDeviceOpen ("other-id", true);   // the fake port cannot really open
+
+        // Two flips: out of and back into the remembered controller state.
+        host.setMidiSources ({ true, false });
+        host.setMidiSources (saved.sources);
+        const auto afterFailure = loadMidiPreferences (file);
+        bool failedPortRemembered = false;
+
+        for (const auto& binding : afterFailure.devices)
+            if (binding.identifier == "other-id")
+                failedPortRemembered = true;
+
+        check (utf8 ("勾选了却打不开的键盘仍记着，下次接着试"),
+               failedPortRemembered && afterFailure.sources == saved.sources,
+               juce::String ((int) afterFailure.devices.size()) + utf8 (" 个记忆"));
+
+        hub.setDeviceOpen ("other-id", false);
+        host.setMidiSources ({ true, false });
+        host.setMidiSources (saved.sources);
+        const auto afterUntick = loadMidiPreferences (file);
+        bool forgotten = true;
+
+        for (const auto& binding : afterUntick.devices)
+            if (binding.identifier == "other-id")
+                forgotten = false;
+
+        check (utf8 ("只有主动取消勾选才真的忘掉那把键盘"),
+               forgotten && afterUntick.devices == saved.devices,
+               juce::String ((int) afterUntick.devices.size()) + utf8 (" 个记忆"));
+    } ();
 
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after

@@ -7,6 +7,7 @@
 #include "Model/AutomationStack.h"
 #include "Model/Routing.h"
 #include "Model/SamplePath.h"
+#include "Audio/MidiPreferences.h"
 #include "Audio/Mp3Encoder.h"
 #include "UI/MixerLook.h"
 #include "Util/Text.h"
@@ -339,7 +340,8 @@ void VerticalSplitter::mouseExit (const juce::MouseEvent&)
 }
 
 //==============================================================================
-MainComponent::MainComponent()
+MainComponent::MainComponent (juce::File prefsFile)
+    : midiPreferencesFile (std::move (prefsFile))
 {
     setOpaque (true);
     setSize (ui::px (1440), ui::px (820));
@@ -1170,6 +1172,19 @@ MainComponent::MainComponent()
     sampleEnvelopePanel.addKeyListener (&typingForwarder);
 
     refreshLiveTarget();
+
+    // Phase 121: the last session's MIDI choices, after the callbacks above
+    // are in place — a port that answers its first note must already have
+    // somewhere to send it. Restore never writes back: a keyboard that is
+    // asleep this morning still gets tried again tomorrow.
+    if (midiPreferencesFile != juce::File())
+    {
+        const auto preferences = loadMidiPreferences (midiPreferencesFile);
+
+        setTypingOctave (preferences.typingOctave, false);
+        setMidiSources (preferences.sources, false);
+        midiHub->openRememberedDevices (preferences.devices);
+    }
 
     cancelPendingUpdate();                   // building the blank session is not an edit
     history.clear();
@@ -3408,6 +3423,11 @@ SettingsWindow* MainComponent::ensureSettingsWindow()
             setMidiSources (sources);
         };
 
+        settingsWindow->onMidiDevicesChanged = [this]
+        {
+            persistMidiPreferences();
+        };
+
         settingsWindow->getLiveTargetName = [this] { return getLiveTargetName(); };
 
         settingsWindow->onAddInstrument = [this] (const juce::PluginDescription& description)
@@ -4243,7 +4263,7 @@ void MainComponent::applyFocus()
 //==============================================================================
 //  Phase 39: playing the rack's synth from a keyboard
 //==============================================================================
-void MainComponent::setMidiSources (MidiSources next)
+void MainComponent::setMidiSources (MidiSources next, bool persist)
 {
     if (midiHub == nullptr)
         return;
@@ -4273,6 +4293,9 @@ void MainComponent::setMidiSources (MidiSources next)
         midiHub->refreshDevices();
 
     refreshLiveTarget();
+
+    if (persist)
+        persistMidiPreferences();
 }
 
 MidiSources MainComponent::getMidiSources() const noexcept
@@ -4321,7 +4344,7 @@ void MainComponent::liveNoteOff (int pitch)
     audio.getPlayback().noteOffLive (pitch);
 }
 
-void MainComponent::setTypingOctave (int octaves)
+void MainComponent::setTypingOctave (int octaves, bool persist)
 {
     const int clamped = juce::jlimit (-4, 4, octaves);
 
@@ -4331,6 +4354,22 @@ void MainComponent::setTypingOctave (int octaves)
     // Keys held across the shift keep the note they started: their release is
     // matched by the stored note, not re-derived from the new mapping.
     typingOctave = clamped;
+
+    if (persist)
+        persistMidiPreferences();
+}
+
+void MainComponent::persistMidiPreferences()
+{
+    if (midiHub == nullptr || midiPreferencesFile == juce::File())
+        return;
+
+    MidiPreferences preferences;
+    preferences.sources     = getMidiSources();
+    preferences.typingOctave = typingOctave;
+    preferences.devices     = midiHub->getRememberedDevices();
+
+    saveMidiPreferences (midiPreferencesFile, preferences);
 }
 
 //==============================================================================

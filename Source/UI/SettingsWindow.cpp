@@ -139,6 +139,7 @@ namespace
         /** The host applies the switches: it is the one that has to release the
             notes a source was holding when that source is turned off. */
         std::function<void (MidiSources)> onSourcesChanged;
+        std::function<void()>             onDevicesChanged;
 
         /** Asked on every paint, so the caption cannot go stale. */
         std::function<juce::String()> getTargetName;
@@ -293,6 +294,10 @@ namespace
                     // not claim it did.
                     hub.setDeviceOpen (rows[(size_t) i].identifier,
                                        ! rows[(size_t) i].open);
+
+                    if (onDevicesChanged != nullptr)
+                        onDevicesChanged();
+
                     refreshRows();
                     return;
                 }
@@ -820,6 +825,11 @@ public:
             if (onMidiSourcesChanged != nullptr)
                 onMidiSourcesChanged (sources);
         };
+        midi->onDevicesChanged = [this]
+        {
+            if (onMidiDevicesChanged != nullptr)
+                onMidiDevicesChanged();
+        };
         midi->getTargetName = [this]
         {
             return getLiveTargetName != nullptr ? getLiveTargetName() : juce::String();
@@ -873,6 +883,7 @@ public:
     std::function<void (const juce::PluginDescription&)> onAddInstrument;
     std::function<void (const juce::PluginDescription&)> onAddEffect;
     std::function<void (MidiSources)> onMidiSourcesChanged;
+    std::function<void()>             onMidiDevicesChanged;
     std::function<juce::String()>     getLiveTargetName;
 
     friend class SettingsWindow;
@@ -919,6 +930,12 @@ SettingsWindow::SettingsWindow (PluginHost& pluginHost,
     {
         if (onMidiSourcesChanged != nullptr)
             onMidiSourcesChanged (sources);
+    };
+
+    content->onMidiDevicesChanged = [this]
+    {
+        if (onMidiDevicesChanged != nullptr)
+            onMidiDevicesChanged();
     };
 
     content->getLiveTargetName = [this]

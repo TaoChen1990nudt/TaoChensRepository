@@ -4509,3 +4509,55 @@ M2 的 7 条是本轮的连带证明：一个发布点管着"出现 / 长尾巴 
 与 P118 比 29 张逐字节相同、17 张不同、3 张新增（`-recordlive` 与不入库的 `-blank`）；
 同二进制两遍自差 17 张、区域完全重合——`-sends` 的发送条高度在本轮前后都抖
 （p118→p119 也差同一区域），不是回归。
+
+## P121 — 跨启动记住 MIDI 设置：记意图，不记当时开没开
+
+用户一句话：「软件应该记忆上一次的midi设置，比如上一次挂载了键盘，这次启动也要去尝试挂载那个键盘，除非失败」。
+
+### A. 「失败」不是「忘掉」
+`openDevice` 返回 nullptr 只说明这次没连上。`rememberedDevices` 因此记的是**勾选意图**，
+不是成功打开的端口清单；关控制器也留着，下一次开控制器、下一次启动都要再试。
+只有 `setDeviceOpen(id, false)`（人主动取消勾选）才删。把 `getOpenDevices()` 拿来当记忆写盘，
+等于让一根松了的 USB 线永久删掉那把键盘。
+
+### B. 测试不能写人的真实设置
+`MainComponent(File prefsFile = {})`：默认空路径 = 不读不写。窗口启动那一处是唯一
+`getDefaultMidiPreferencesFile()` 的调用点。P121 之前所有 headless 组件都用默认构造——
+要是默认路径是真的，自检翻一次 `setMidiSources` 就把人昨晚的设置覆盖了。
+
+### C. 恢复自己不写回，且排在回调之后
+`onNote` / `onControl` 接好之后再 `openRememberedDevices`：第一声可能马上到。
+恢复调用 `setMidiSources(..., false)` / `setTypingOctave(..., false)` 抑制持久化；
+否则一个没找到设备的早晨会把记忆写成空文件。
+
+### D. identifier 是身份，name 只是退路
+`findDeviceIndex` 先按 id 精确找，找不到才按 name；同名不同 id 必须分开，
+名字兜底命中一次就从候选里移走（两把 Keystation 不能让同一个端口开两遍）。
+
+### E. 会重建成员的函数不能按引用收那个成员（本轮真踩）
+`setSources` 重新打开控制器时写的是 `openRememberedDevices (rememberedDevices)`，
+而这个函数第一件事是 `rememberedDevices.clear()`。第一版签名是 `const vector&`：
+参数与成员是同一个对象，`clear()` 之后 range-for 遍历的是空表——启动恢复自己没事，
+但「关掉再开控制器」会把记忆清空，随后写盘。现在按值收。
+咬测 M6：改回 const& 红 2。
+
+### F. 没有硬件也要能咬「去找过」
+CI 机器上一个 MIDI 端口都没有，所以 hub 留了 `getLastRestoreAttempts()` 与
+`useDeviceListForTest()` 两个只读／注入口。断言的是「按记忆里的 id 去问过」，
+不是「端口真的开了」——后者在无声卡机器上不可测，硬测就成了同义反复。
+
+### 咬测流水
+
+| 变异 | 红 | 细节 |
+|---|---:|---|
+| M1 删掉构造里的 `openRememberedDevices` | **3** | 找不到键盘、启动去找过、取消勾选三条一起红 |
+| M2 `persistMidiPreferences` 不写 devices | **2** | 失败仍记着 / 取消忘掉 |
+| M3 读文件时丢掉八度 | **2** | 写读往返 / 新启动八度 0 |
+| M4 `findDeviceIndex` 去掉名字兜底 | **1** | index -1 |
+| M5 开失败就从记忆里删 | **2** | 找不到键盘、取消忘掉 |
+| M6 按值改回 const&（自别名） | **2** | 关开控制器后记忆变 0 |
+
+自检 1156 → **1167**（+11）。48 张帧与 P120 比 30 张逐字节相同、18 张不同；
+同二进制自差 17 张，多出的 `recovery` 是墙上时钟、`selectmark-focus` 是机架电平条明暗，
+本轮没有 UI 代码改动。
+

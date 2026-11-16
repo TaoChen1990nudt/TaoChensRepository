@@ -63,6 +63,10 @@ public:
         went away was holding, and the one that decides where notes go. */
     std::function<void (MidiSources)> onMidiSourcesChanged;
 
+    /** Phase 121: a device row was ticked or unticked. The host saves the new
+        intent; the page only draws what the hub reports. */
+    std::function<void()> onMidiDevicesChanged;
+
     /** Phase 39: what the played keys will sound, for the page's own caption.
         A function rather than a string so it cannot go stale while the window
         is open. */

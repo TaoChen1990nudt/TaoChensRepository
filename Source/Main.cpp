@@ -4,6 +4,7 @@
 #include <iostream>
 
 #include "MainComponent.h"
+#include "Audio/MidiPreferences.h"
 #include "Util/Metrics.h"
 #include "Util/Theme.h"
 #include "Util/UiLookAndFeel.h"
@@ -776,7 +777,10 @@ public:
                               DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar (true);
-            setContentOwned (new atomic::MainComponent(), true);
+            // The only MainComponent that gets a preferences file. Every other
+            // one in this TU is a headless run and must not touch the person's
+            // real MIDI setup just because a self-test flipped a switch.
+            setContentOwned (new atomic::MainComponent (atomic::getDefaultMidiPreferencesFile()), true);
 
             // Only the windowed app touches the sound card; --snapshot must stay
             // headless and deterministic.

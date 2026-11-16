@@ -1800,13 +1800,32 @@ friend、不需要改一行头文件、也不存在"两个对象互相问状态"
 ## 按键发声（P39 通道 / P40 双开关）
 
 - **两个独立开关**（`MidiSources{ typingKeyboard, externalController }`，P40 默认
-  `{true,false}`）：不是三选一。"什么都不开" = 两个都关。**不跨启动记忆**（默认值是代码里的）。
+  `{true,false}`）：不是三选一。"什么都不开" = 两个都关。**P121 起跨启动记忆**（见下面那一节）；
+  没有设置文件时的出厂值仍是 `{true,false}`。
 - **关掉一个来源才释放它自己的音符**：键盘 → `releaseAllTypingNotes()`；控制器 → 一条
   `allLiveNotesOff()`（端口说不出自己按着什么）。**打开一个来源不打扰另一个**——这是双开关
   存在的全部理由，自检里断的就是这条（按着 Z/X 再开控制器，`typingHeld` 不能变）。
 - **设备归 `MidiInputHub` 所有**（`Source/Audio/MidiInputHub.*`）：一个 MIDI 端口只能开一次，
   所以"打开设备的东西"和"发声的东西"必须是同一个对象；设置页只是它的视图。
   `setSources` 在控制器关掉时关所有端口，`setDeviceOpen` 在控制器关着时**拒绝**打开。
+
+### 跨启动记忆（P121）
+
+- **一个文件，三件事**：`Audio/MidiPreferences.{h,cpp}` 把 `MidiSources`、打字八度、
+  勾选过的外部端口写进 `userApplicationDataDirectory/AtomicDAW/midi-settings.xml`。
+  `juce::File::replaceWithText` 原子替换；坏文件 / 缺字段 = 出厂值。工程文件里一个字节都不加。
+- **只有窗口里的那一个 `MainComponent` 拿到真实路径**：`MainComponent(File prefsFile = {})`，
+  默认空路径。所有 headless 与自检走空路径——否则测试翻一次开关就会改写人的真实设置。
+- **恢复的顺序**：`onNote` / `onControl` 接好之后 → `setTypingOctave(..., false)` →
+  `setMidiSources(..., false)` → `midiHub->openRememberedDevices(...)`。恢复路径**不写回**，
+  所以一次没找到设备不会把记忆擦成空。
+- **记的是意图，不是成功清单**：`MidiDeviceBinding{identifier, name}` 进 `rememberedDevices`；
+  `openDevice` 失败仍保留，`setSources` 关掉控制器也保留，**只有 `setDeviceOpen(id, false)`
+  才删除**。重新打开控制器时再试一次。
+- **身份口径**：`findDeviceIndex` 先认 identifier，找不到才按 name 兜底（驱动换了 id）；
+  同名不同 id 的两把琴按 id 分开，兜底用过一次就移出候选，不会被打开两遍。
+- **`openRememberedDevices` 按值收参数**：重新打开控制器的调用传的正是成员 `rememberedDevices`
+  自己，而这个函数第一件事是重建该成员；按引用 = 在自己的 `clear()` 上读空（咬测 M6 红 2）。
 - **设置页布局要算，不能假设**（P40）：两块会同时出现，`MidiSettingsPage::plan()` 返回
   `{keyboard, devices, monitor, deviceRowsTop, maxDeviceRows}`，**绘制和命中测试读同一份**；
   装不下的设备行会被裁掉并在标题行写「显示 N / M 个」。
