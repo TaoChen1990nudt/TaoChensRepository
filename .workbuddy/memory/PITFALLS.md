@@ -4649,3 +4649,52 @@ headless 里没有第二块显示器、没有真实 VST3 的 HWND，也就没有
 「显示变化 → 外框以编辑器为准 → 尺寸没变也发一次通知」这条宿主侧链路成立；**真机黑边是否真的
 消失，还得用户在双屏上拖一次**。如果还在，下一步该看的是具体哪个插件的 `checkSizeConstraint`
 在 DPI 变化后把尺寸夹到了别处，而不是继续改宿主外框或绘制。
+
+## P124 — 几何全对了，插件却始终不缩放
+
+用户在 P123 之后回的是一段精确的症状，不是「黑边还在」四个字：Serum 在这块屏一个大小，
+拖到另一块屏之后**区域变小了，但 Serum 的尺寸不跟着缩放**；区域拖得比 Serum 大有黑边，
+拖得比 Serum 小有裁切，只有手动拖 Serum 显示区右下角那个三角才变。
+
+### A. 前两轮错在哪
+
+P122 查的是「谁有权决定尺寸」（constrainer），P123 查的是「尺寸没变时有没有发通知」
+（nudge）。用户这段话同时否掉两者：外框确实在变，Serum 完全没变——**变的是框，冻住的是
+插件的内容密度**。这两轮都不是白做（两套尺寸合并、size 通知都成立），但都不是这一刀。
+
+### B. 真正的断点
+
+读 JUCE 8 源码得到的一条链：
+
+- `Component::getPeer()` 对子组件会沿父链取 peer，所以嵌在 `DocumentWindow` 里的 VST3
+  编辑器**能**拿到窗口 peer，`VST3PluginWindow::NativeScaleFactorNotifier` 是活的；
+- `HWNDComponent::componentMovedOrResized` 用 `peer->getAreaCoveredBy(owner) *
+  peer->getPlatformScaleFactor()` 重排原生 HWND，`handleDPIChanging` 也自己 `SetWindowPos`；
+- **宿主侧从来没调用过 `AudioProcessorEditor::setScaleFactor()`**。这是 JUCE 给宿主的唯一
+  一个「插件该用多大 GUI scale」入口；`VST3PluginWindow` 的 override 转成
+  `IPlugViewContentScaleSupport::setContentScaleFactor()`，然后 `resizeToFit()`。
+
+所以：JUCE 自己管住了窗口与 HWND 的几何，但**插件按什么密度画这件事，宿主没说**。
+Serum 右下角那个三角是插件内部的缩放入口，因此只有它有效。
+
+### C. 改法与坑
+
+`checkDisplayScale()` 里，DPI 真变化时先 `applyEditorScale (scale)` 再 `resyncFrameToEditor()`。
+`applyEditorScale` 独立成函数是为了咬测：把函数体掏空，三条 P124 断言立刻红。
+
+**构造期泄漏**：第一次跑自检时「窗口刚建好还没有把 DPI 交给插件」红（1 次）。原因是
+`centreWithSize`/`setVisible` 在 `lastDisplayScale` 赋值之前就触发了 `moved()`，启动即多缩放
+一次。加 `displayScaleReady` 守卫，基线采完才放行；咬掉它红 4 条。
+
+### D. 验证与未证明
+
+自检 1181 → **1186**（+5），两刀：掐通知红 3、掐守卫红 4。帧 49 张与 P123 比 18 张不同，
+全部落在同二进制 A/B 抖动集；`recovery.png` 的 109 像素在 y=93–102 的时间标签上，
+p121→p122→p123 每轮都变（202/83/109），不是回归。
+
+**诊断口**：设 `ATOMICDAW_DPI_LOG` 为文件路径，跨屏时逐行写 `event / scale / peer /
+editor / frameContent`；默认不写。真机若仍不对，先看 `scale` 与 `peer` 是否跟着变——
+这决定了下一刀是继续推内容密度，还是回到 Windows 的 DPI awareness 上下文。
+
+headless 依然没有第二块屏与真实 VST3 HWND，本轮证明的是「宿主把新 DPI 交出去」这一条，
+不是「Serum 一定跟着缩放」。

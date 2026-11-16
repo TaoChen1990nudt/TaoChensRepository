@@ -97,6 +97,11 @@ PluginEditorWindow::PluginEditorWindow (juce::AudioProcessor& processor,
                                 .getDisplayForRect (getScreenBounds()))
             lastDisplayScale = display->scale;
 
+        // centreWithSize/setVisible above already fired moved(); the baseline
+        // is only trustworthy now. Without this flag the first construction
+        // could push a scale on a plugin that has just been attached.
+        displayScaleReady = true;
+
         // A slow baseline: crossing a display boundary normally arrives through
         // moved(), but a DPI change can also land while the window is still.
         startTimerHz (2);
@@ -179,27 +184,70 @@ void PluginEditorWindow::timerCallback()
     checkDisplayScale();
 }
 
-void PluginEditorWindow::simulateDisplayChangeForTest()
+void PluginEditorWindow::simulateDisplayChangeForTest (double scale)
 {
-    lastDisplayScale = -1.0f;   // impossible value: the next poll must fire
+    forcedDisplayScale = scale;
+    lastDisplayScale = -1.0;   // impossible value: the next poll must fire
 }
 
 void PluginEditorWindow::checkDisplayScale()
 {
-    if (editor == nullptr || syncingFrame)
+    if (! displayScaleReady || editor == nullptr || syncingFrame)
         return;
 
-    double scale = 1.0;
+    double scale = forcedDisplayScale > 0.0 ? forcedDisplayScale : 1.0;
 
-    if (auto* display = juce::Desktop::getInstance().getDisplays()
-                            .getDisplayForRect (getScreenBounds()))
-        scale = display->scale;
+    if (forcedDisplayScale <= 0.0)
+        if (auto* display = juce::Desktop::getInstance().getDisplays()
+                                .getDisplayForRect (getScreenBounds()))
+            scale = display->scale;
 
     if (juce::approximatelyEqual (scale, lastDisplayScale))
         return;
 
     lastDisplayScale = scale;
+
+    // Geometry alone is not enough. A VST3 view is drawn by its own HWND at a
+    // content scale decided when the editor was attached; moving the window to
+    // a display with a different DPI leaves that scale frozen, so the plugin
+    // keeps painting at the old density no matter how the frame is sized.
+    // This is the host-side call JUCE exposes for exactly that case — on VST3
+    // it forwards to IPlugViewContentScaleSupport::setContentScaleFactor and
+    // lets the plugin recompute its own view size before we align the frame.
+    applyEditorScale (scale);
+    logDpiState ("dpi-before", scale);
     resyncFrameToEditor();
+    logDpiState ("dpi-after", scale);
+}
+
+void PluginEditorWindow::applyEditorScale (double scale)
+{
+    if (editor != nullptr && scale > 0.0)
+        editor->setScaleFactor ((float) scale);
+}
+
+void PluginEditorWindow::logDpiState (const char* event, double scale)
+{
+    // Opt-in: set ATOMICDAW_DPI_LOG to a file path before starting the app.
+    // Default off — nothing is written during normal use or the self-test.
+    const auto path = juce::SystemStats::getEnvironmentVariable ("ATOMICDAW_DPI_LOG", {});
+
+    if (path.isEmpty())
+        return;
+
+    double peerScale = -1.0;
+
+    if (auto* peer = getPeer())
+        peerScale = peer->getPlatformScaleFactor();
+
+    const auto edBounds = editor != nullptr ? editor->getBounds() : juce::Rectangle<int>{};
+    const juce::String line = juce::String (event) + " scale=" + juce::String (scale, 3)
+        + " peer=" + juce::String (peerScale, 3)
+        + " editor=" + juce::String (edBounds.getWidth()) + "x" + juce::String (edBounds.getHeight())
+        + " frameContent=" + juce::String (getFrameContentAreaForTest().getWidth())
+        + "x" + juce::String (getFrameContentAreaForTest().getHeight()) + "\n";
+
+    juce::File (path).appendText (line);
 }
 
 juce::Rectangle<int> PluginEditorWindow::getFrameContentAreaForTest() const noexcept

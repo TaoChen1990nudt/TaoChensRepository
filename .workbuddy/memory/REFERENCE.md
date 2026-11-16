@@ -2198,6 +2198,24 @@ JUCE 编辑器的逻辑 bounds 不变，`childBoundsChanged` 不触发，黑边�
 headless 证明不了真机 HWND；`WM_DPICHANGED` 是否真的被这一条链路处理完，只能在双屏上拖一次确认。
 若黑边还在，下一步查具体插件的 `checkSizeConstraint`，不要再改宿主外框或绘制。
 
+### 把新 DPI 交给插件自己（P124）
+
+P123 只让框跟着编辑器走，插件按什么密度画这件事宿主一直没说。跨屏时
+`checkDisplayScale()` 在 DPI **真变化**时按这个顺序做两件事：
+
+1. `applyEditorScale (scale)` → `editor->setScaleFactor ((float) scale)`。这是 JUCE 给宿主的
+   唯一入口；VST3 的 override 转成 `IPlugViewContentScaleSupport::setContentScaleFactor()`
+   并 `resizeToFit()`，插件才会按新密度重画。没变就不发——重入地连发会让尺寸震荡。
+2. `resyncFrameToEditor()`，即 P123 那一套几何对齐。
+
+`displayScaleReady` 守卫必须在 `centreWithSize` / `setVisible` 之后、基线采完才置 true：
+构造期的 `moved()` 会在这之前触发，不挡住就会在插件刚 attach 时多送一次 scale。
+
+**诊断**：设环境变量 `ATOMICDAW_DPI_LOG` 为文件路径，每次跨屏追加一行
+`event / scale / peer / editor / frameContent`（分别是我们报的 DPI、窗口 peer 的
+platform scale、编辑器与框的像素尺寸）。默认不写文件，自检也不写。真机仍不缩放时先看
+`scale` 与 `peer` 有没有跟着变，再决定下一刀方向。
+
 ## 踩坑档案
 平台陷阱、自检夹具摆位、出图尺寸见同目录 **`PITFALLS.md`**。动以下任一处前先读它：
 VST3 扫描 / 采样解码 / 试听声部 / 标尺 / ghost / `--snapshot` / 折叠行高 / 插件参数自动化 /

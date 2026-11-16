@@ -23234,6 +23234,86 @@ juce::String MainComponent::runSelfTest()
                juce::String (quietWin->getWidth()) + "x" + juce::String (quietWin->getHeight()));
     } ();
 
+    //-- P124: 跨屏时把新 DPI 交给插件自己 -----------------------------------
+    // P122/P123 只让外框和编辑器对齐； Serum 的内容密度仍冻在旧屏上，因为
+    // 宿主从没调用过 JUCE 给宿主的那一个入口。这里用 SpyEditor 记录调用，
+    // 咬掉它就必须红——「画在哪」合格不等于「用什么密度画」合格。
+    [&]
+    {
+        struct ScaleSpyEditor final : juce::AudioProcessorEditor
+        {
+            explicit ScaleSpyEditor (juce::AudioProcessor& p) : juce::AudioProcessorEditor (p)
+            {
+                setSize (420, 320);
+                setResizable (true, true);
+            }
+            void paint (juce::Graphics& g) override { g.fillAll (juce::Colours::red); }
+            void setScaleFactor (float newScale) override
+            {
+                ++scaleCalls;
+                lastScale = newScale;
+                // Deliberately do NOT call the base: a real VST3 editor forwards
+                // this to IPlugViewContentScaleSupport instead of transforming.
+            }
+            int scaleCalls = 0;
+            float lastScale = -1.0f;
+        };
+
+        struct ScaleSpyProcessor final : juce::AudioProcessor
+        {
+            const juce::String getName() const override { return "P124"; }
+            void prepareToPlay (double, int) override {}
+            void releaseResources() override {}
+            void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override {}
+            double getTailLengthSeconds() const override { return 0.0; }
+            bool acceptsMidi() const override { return false; }
+            bool producesMidi() const override { return false; }
+            juce::AudioProcessorEditor* createEditor() override { return new ScaleSpyEditor (*this); }
+            bool hasEditor() const override { return true; }
+            int getNumPrograms() override { return 1; }
+            int getCurrentProgram() override { return 0; }
+            void setCurrentProgram (int) override {}
+            const juce::String getProgramName (int) override { return {}; }
+            void changeProgramName (int, const juce::String&) override {}
+            void getStateInformation (juce::MemoryBlock&) override {}
+            void setStateInformation (const void*, int) override {}
+        };
+
+        ScaleSpyProcessor proc;
+        auto win = std::make_unique<PluginEditorWindow> (proc, "P124", 46);
+        auto* ed = dynamic_cast<ScaleSpyEditor*> (win->getEditorForTest());
+
+        check (utf8 ("前提：窗口建好时还没有把 DPI 交给插件"),
+               ed != nullptr && ed->scaleCalls == 0,
+               ed != nullptr ? juce::String (ed->scaleCalls) : utf8 ("没有编辑器"));
+
+        win->simulateDisplayChangeForTest (1.5);
+        win->timerCallback();
+
+        check (utf8 ("跨屏后把新 DPI 交给插件，Serum 才会按新密度重画"),
+               ed->scaleCalls == 1 && juce::approximatelyEqual (ed->lastScale, 1.5f),
+               juce::String (ed->scaleCalls) + utf8 (" 次 / ")
+                 + juce::String (ed->lastScale));
+
+        check (utf8 ("交完 DPI 外框仍和编辑器严丝合缝，黑边不回来"),
+               win->getFrameContentAreaForTest().getWidth() == ed->getWidth()
+                 && win->getFrameContentAreaForTest().getHeight() == ed->getHeight(),
+               juce::String (win->getFrameContentAreaForTest().getWidth()) + "x"
+                 + juce::String (win->getFrameContentAreaForTest().getHeight()));
+
+        win->timerCallback();
+        check (utf8 ("没换屏就不重复通知插件，避免重入导致尺寸震荡"),
+               ed->scaleCalls == 1,
+               juce::String (ed->scaleCalls) + utf8 (" 次"));
+
+        win->simulateDisplayChangeForTest (1.0);
+        win->moved();
+        check (utf8 ("回到原屏也把原 DPI 交还插件，不是只涨不落"),
+               ed->scaleCalls == 2 && juce::approximatelyEqual (ed->lastScale, 1.0f),
+               juce::String (ed->scaleCalls) + utf8 (" 次 / ")
+                 + juce::String (ed->lastScale));
+    } ();
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

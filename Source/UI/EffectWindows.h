@@ -97,11 +97,17 @@ public:
     void moved() override;
 
     /** Test seam: make the next poll believe the display changed, without
-        needing a second physical monitor in the self-test. */
-    void simulateDisplayChangeForTest();
+        needing a second physical monitor in the self-test. `scale` is the
+        scale to report; 0 means "use the real display's scale". */
+    void simulateDisplayChangeForTest (double scale = 0.0);
 
 private:
     void checkDisplayScale();
+    /** Phase 124: the one host call that reaches the plugin's own scaling
+        (VST3: IPlugViewContentScaleSupport::setContentScaleFactor). Kept as a
+        separate function so the self-test can bite it by removing the body. */
+    void applyEditorScale (double scale);
+    void logDpiState (const char* event, double scale);
 
     /** Phase 123: the frame follows the editor, never editor follows frame.
         false is only for the self-test fixture that deliberately desynchronises
@@ -109,8 +115,10 @@ private:
     bool followingEditorSize = true;
     bool syncingFrame = false;
     double lastDisplayScale = 1.0;
-    /** Phase 122: the frame's constrainer counts window pixels; the plugin's
-        counts editor pixels. Neither may be used raw for the other — the host
+    double forcedDisplayScale = 0.0;   // self-test only; 0 = ask the desktop
+    bool displayScaleReady = false;    // construction must not push a scale
+
+    /** Phase 122: the frame's constrainer counts window pixels; the plugin's        counts editor pixels. Neither may be used raw for the other — the host
         has to translate, including the native title bar's border, or dragging
         the frame asks the plugin for a size it cannot honour. */
     class EditorConstrainer final : public juce::BorderedComponentBoundsConstrainer
