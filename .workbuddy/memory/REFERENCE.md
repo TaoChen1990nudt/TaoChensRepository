@@ -702,7 +702,7 @@ build Release → `--snapshot selftest.png`。
 - 老工程的迁移是「补默认」不是「沿用」：文件里没有 `<TempoAutomation>` 就 `resetToDefault`，
   否则打开一个 v25 老工程会继承上一个工程的速度图。
 
-## 录制（P81：一次按键，两样产物）
+## 录制（P81：一次按键；P118：先问录哪一半）
 
 - 录制不是一个功能，是两件：**音频**（声卡听到了什么）和 **MIDI**（手弹了什么）。
   它们落到不同地方是因为它们是不同的事物——音频变成采样（WAV + 采样器槽 + 块），
@@ -750,6 +750,34 @@ build Release → `--snapshot selftest.png`。
   名字，下一次启动从 1 数起也不会错），`lastRecordGroupId / lastRecordClipId` 是给自检与
   定位用的缓存。凡是"新一轮产出刚好全是旧字段"的功能，都别顺手升版本。
 
+### 录哪一半（P118：模式是一个值，不是三句 `if`）
+
+- `TakeMode { audio, midi }` 与 `TakeArming takeArmingFor (mode)` 在 `Audio/Recorder.h`：
+
+  | 模式 | `capture`（采集链 / WAV） | `events`（音符 / CC） | `monitor`（监听） |
+  |---|---|---|---|
+  | `audio` | 是 | — | 是 |
+  | `midi` | — | 是 | — |
+
+  **它是值，不是分支**：自检跑在没有麦克风的机器上，唯一能断言「录 MIDI 不打开输入」的
+  办法是把这条规则做成可以问的函数。
+- **按下红点 = 两态**：`recordPressAction (recordingNow)` 答 `ask` 或 `stop`。
+  **停从不提问**——一个把手放在乐器上的人不该在收尾时做选择题。`ask` 弹两项菜单
+  （`showRecordMenu`），勾在 `recordMode` 上；**取消 = 什么都不录**，回落到上次的选择
+  会让这个问题变成装饰，还会启动一次用户刚刚拒绝的 take。
+- **门在采集入口，不在落地入口**：`recordNoteAt` / `recordControlAt` 在非 MIDI 模式下
+  直接 return；`commitTake` **不读模式**（它只回答「手上有什么」——让它按模式过滤，P81/P95
+  那些注入音频的测试就会变成第二套语义）。
+- `finishRecording` 只在 `arming.capture && audioTakeArmed` 时向引擎要样本。一段 MIDI take
+  因此不会把上一遍残留的磁带给成块落地。`audioTakeArmed` 在 `startRecording` 写、收尾清零。
+- **引擎拒绝 arm 不是取消 take 的理由**（没有输入通道）：采样 take 变成「没有 WAV 的那一遍」，
+  什么都不落的 take 仍然返回 -1、不建空组。
+- **看得见**：录中按钮不再画红点，画的是答案——三条竖线（麦克风）/ 一个音符（键盘）。
+  未录仍是 P81 的红点。
+- 状态条**不能**承担这句话：`drawToolbar` 的 hint 区在 12 颗工具按钮之后已经只剩十几像素，
+  任何一句提示都压在滚动读数上并被省略号截断（P118 实测过，`录制 MIDI` 显示成「录制 MI..」）。
+- 存盘**不升版本**（34）：模式是会话状态。
+
 ## 输入监听与录音补偿（P94：两条链，两个数）
 
 - **监听是直通，不是插件链**：`AudioEngine::setMonitoringEnabled`，采集通道按
@@ -758,8 +786,9 @@ build Release → `--snapshot selftest.png`。
 - **混在走带淡变之后**，位置与 audition / live / preview 并列。理由一样：话筒不是走带音频，
   那段 8 ms 淡出不能把它一起掐掉——而**走带停着查电平正是最常见的用法**。
   这也是它必须参与早退判据的原因（`! monitoring` 是第五个"停下也要渲染"的理由）。
-- **默认关，由录音键开、录音键关**：`startRecording()` 里 `setMonitoringEnabled(audioArmed)`
-  （没开成录音就不开监听），`finishRecording()` 里关。不询问就活的输入是啸叫，
+- **默认关，由录音键开、录音键关**：`startRecording()` 里
+  `setMonitoringEnabled(arming.monitor && audioTakeArmed)`（P118：采样模式且真 arm 了才开；
+  MIDI 模式显式关掉、顺手清掉上一遍可能留下的活话筒），`finishRecording()` 里关。不询问就活的输入是啸叫，
   而录音键是唯一"我马上要对着它弹"的那一下。
 - **两条链两个数**，都在 `AudioEngine`：
   - `getRecordOffsetSamples()` = 设备输出 + 设备输入 + 监听链 → 给**话筒**那一半。

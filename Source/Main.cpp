@@ -371,6 +371,14 @@ namespace
         // roll is photographed on its own with a region already set.
         writePng ("-loop", component.createLoopSnapshot (8.0, 16.0));
 
+        // Phase 118: the two halves of the record button, as a pair — same
+        // gesture, two symbols inside the same lit button. The popup that asks
+        // is a popup and cannot be photographed; what these two frames document
+        // is the answer, and the pair is the only way a still can say "it is not
+        // the same thing in both".
+        writePng ("-recordaudio", component.createRecordModeSnapshot (atomic::TakeMode::audio));
+        writePng ("-recordmidi", component.createRecordModeSnapshot (atomic::TakeMode::midi));
+
         // Same rule as the loop: switching the click on and starting a count-in
         // changes what the bar says, so this still is taken last as well.
         writePng ("-metronome", component.createMetronomeSnapshot (4));

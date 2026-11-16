@@ -56,6 +56,8 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
 46. 「重叠」是区间运算（P116）：折叠带取并集（相接算，`<=` 不是 `<`），一段一条线一个头；等价变异不是咬测。
 47. 一个手势动三个东西，顺序就是规则（P117）：`openOverviewBand` = 先在带上读拍与音高 → `setActiveLayerIndex`（会通知会夹滚动，故在摆视口前）→ 退总览 → `centreViewOnBeat`（自己夹到 `timelineBeats - visible`，`setScrollBeats` 会把标尺变长）+ `revealPitch`（只揭示不居中）→ `onLocateRequested`（视图不写 `playheadBeat`）。空白不是带，折叠带不猜音高。
 
+48. 「录什么」是一个值（P118）：`takeArmingFor (TakeMode)` 一次答 capture/events/monitor 三问；门在**采集**入口（`recordNoteAt`），不在落地入口（`commitTake` 只答「手上有什么」）；停从不提问；取消不回落；那个 30×28 的按钮自己画答案——状态条那一行已经没地方了。
+
 ## 索引
 - 目录结构、构建命令（含 `unset *proxy*`）、CI 门禁、`formatVersion` 逐版字段、快照夹具 —— `STATUS.md` / `REFERENCE.md`。
 - 两条不能忘：**加断言的那一轮必须同步调大 `MIN_CHECKS`**；**「选中哪条 lane」这类状态必须显式写属性**。

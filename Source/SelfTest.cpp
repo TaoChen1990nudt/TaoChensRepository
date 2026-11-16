@@ -22507,6 +22507,97 @@ juce::String MainComponent::runSelfTest()
                  + juce::String (gridNow.getBottom(), 1));
     }();
 
+    //== Phase 118: 按下红点先问一句：录采样还是录 MIDI ======================
+    // 用户原话：「录音按钮按下时，先询问是录制采样还是 midi，然后决定录入采样还
+    // 是 midi」。P81 的按钮一个含义（开始 / 停止），而且一开始两边同时 arm：采样
+    // 链与事件链一起打开，于是一个弹吉他的人碰到键盘会长出一个「录音 N」的音符组，
+    // 一个弹键盘的人会得到一段没人听过、却必须先听一遍才敢删的空 WAV。
+    //
+    // 这一节钉的是「问过之后模式真的管住了谁」：规则是纯值（无声卡也能咬）、
+    // 回车那一下的两态、以及两条链各自**不**收对方的东西。
+    {
+        const auto audioArm = takeArmingFor (TakeMode::audio);
+        const auto midiArm  = takeArmingFor (TakeMode::midi);
+
+        check (utf8 ("采样的 take：arm 采集链与监听，不 arm 事件链"),
+               audioArm.capture && ! audioArm.events && audioArm.monitor,
+               juce::String (audioArm.capture ? 1 : 0) + juce::String (audioArm.events ? 1 : 0)
+                 + juce::String (audioArm.monitor ? 1 : 0));
+
+        check (utf8 ("MIDI 的 take：arm 事件链，不碰采集链也不开监听"),
+               ! midiArm.capture && midiArm.events && ! midiArm.monitor,
+               juce::String (midiArm.capture ? 1 : 0) + juce::String (midiArm.events ? 1 : 0)
+                 + juce::String (midiArm.monitor ? 1 : 0));
+
+        check (utf8 ("红点的两态：没在录就问，正在录就停（停从不提问）"),
+               MainComponent::recordPressAction (false) == MainComponent::RecordPress::ask
+                 && MainComponent::recordPressAction (true) == MainComponent::RecordPress::stop,
+               juce::String (MainComponent::recordPressAction (false) == MainComponent::RecordPress::ask ? 1 : 0)
+                 + juce::String (MainComponent::recordPressAction (true) == MainComponent::RecordPress::stop ? 1 : 0));
+    }
+
+    {
+        // 录采样时弹一下键盘：键盘那一半不该被采进来。这是模式真正生效的地方，
+        // 也是「吉他手碰了一下控制器」那一类事故的入口。
+        MainComponent host;
+        auto* layer = host.getLayerStack().getActiveLayer();
+
+        const int notesBefore  = (int) layer->getNotes().size();
+        const int groupsBefore = (int) layer->getGroups().size();
+
+        host.beginTakeForTest (0.0, TakeMode::audio);
+        host.recordNoteAt (60, 0.8f, true, 0.0);
+        host.recordNoteAt (60, 0.8f, false, 1.0);
+
+        const int result = host.endTakeForTest (1.0);
+
+        check (utf8 ("录采样时弹键盘：一个音符都不写，也不留空组"),
+               result == -1
+                 && (int) layer->getNotes().size() == notesBefore
+                 && (int) layer->getGroups().size() == groupsBefore,
+               juce::String (result) + utf8 (" / 音符 ")
+                 + juce::String ((int) layer->getNotes().size() - notesBefore));
+    }
+
+    {
+        // 录 MIDI 时同一下：音符照旧落下来。两条断言成对才有意义——只写「采样
+        // 模式不收」的话，一个什么都不收的实现也会绿。
+        MainComponent host;
+        auto* layer = host.getLayerStack().getActiveLayer();
+
+        const int notesBefore = (int) layer->getNotes().size();
+
+        host.beginTakeForTest (0.0, TakeMode::midi);
+        host.recordNoteAt (64, 0.8f, true, 0.0);
+        host.recordNoteAt (64, 0.8f, false, 1.0);
+
+        const int result = host.endTakeForTest (1.0);
+
+        check (utf8 ("录 MIDI 时弹键盘：音符照旧落进那一条 take"),
+               result >= 0 && (int) layer->getNotes().size() == notesBefore + 1,
+               juce::String (result) + utf8 (" / 音符 +")
+                 + juce::String ((int) layer->getNotes().size() - notesBefore));
+    }
+
+    {
+        // 按钮记着自己刚才问过什么（菜单下一次勾的就是它），take 结束之后这个
+        // 答案还在——它不是「正在录什么」，是「上次录的是什么」。
+        MainComponent host;
+
+        host.beginTakeForTest (0.0, TakeMode::audio);
+        const auto during = host.getRecordMode();
+        const bool armed = host.isAudioTakeArmed();
+
+        host.endTakeForTest (0.0);
+
+        check (utf8 ("take 进行中按钮知道自己录的是哪一半；收尾后不残留 arm 状态"),
+               during == TakeMode::audio
+                 && ! host.isAudioTakeArmed()
+                 && ! armed,           // 测试入口不碰设备，采集链从来不该被 arm
+               juce::String (during == TakeMode::audio ? 1 : 0)
+                 + juce::String (host.isAudioTakeArmed() ? 1 : 0));
+    }
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

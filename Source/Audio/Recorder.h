@@ -39,6 +39,44 @@ enum class RecordTarget
 RecordTarget recordTargetFor (int controller) noexcept;
 
 //==============================================================================
+/** Phase 118: what a take captures.
+
+    The two halves of a take arrive on different wires. A microphone arrives
+    through `RecordBuffer`, on the audio callback, as samples. A keyboard
+    arrives through the host's MIDI callback, as events. Until this phase one
+    press armed both, which is two mistakes at once: a guitarist got a "录音 N"
+    group for every key they brushed against a controller, and a keyboard take
+    grew an empty WAV that had to be listened to before it could be trusted.
+    The kind is now chosen before the tape rolls, and the two chains are armed
+    separately.
+
+    `audio` is the microphone, not "audio in general": the sampler the take ends
+    up in is downstream of both modes and is not part of the choice.
+*/
+enum class TakeMode
+{
+    audio,     // the capture chain: samples, a WAV, and the monitor path
+    midi       // the event chain: notes and CCs, no capture, no monitor
+};
+
+/** What a mode arms. A value rather than three `if`s inside `startRecording`,
+    because the only honest way to assert "recording MIDI does not open the
+    microphone" is to be able to ask the rule on a machine with no microphone —
+    which is exactly the machine the self-test runs on. */
+struct TakeArming
+{
+    bool capture = false;      // RecordBuffer / the WAV
+    bool events  = false;      // notes and CCs
+    bool monitor = false;      // the input path to the speakers
+};
+
+constexpr TakeArming takeArmingFor (TakeMode mode) noexcept
+{
+    return mode == TakeMode::audio ? TakeArming { true, false, true }
+                                   : TakeArming { false, true, false };
+}
+
+//==============================================================================
 /** One note as it came in, in absolute project beats.
 
     Velocity is kept as played — it belongs to the note (NoteEvent::velocity) and

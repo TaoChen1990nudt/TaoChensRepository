@@ -43,8 +43,6 @@ namespace
         return juce::Font (juce::FontOptions{}.withHeight (atomic::ui::sp (height)).withStyle ("Bold"));
     }
 
-
-
     /** Phase 33: what a STOP press means, as a value.
 
         `stop` says whether the press does anything at all, `beat` where the
@@ -5145,10 +5143,17 @@ juce::Rectangle<int> MainComponent::getRecordButtonBounds() const
              ui::px (30), ui::px (28) };
 }
 
-bool MainComponent::startRecording()
+bool MainComponent::startRecording (TakeMode mode)
 {
     if (recording.load())
         return true;
+
+    // Phase 118: the two chains are not the same wire, and this is the one
+    // place that decides which of them the take is about. `takeArmingFor` is a
+    // value so the self-test can assert "MIDI does not open the microphone" on
+    // a machine that has none.
+    const auto arming = takeArmingFor (mode);
+    recordMode = mode;
 
     // Phase 88: rolling comes first, because play() rewinds a playhead parked at
     // the very end of the timeline. The take begins wherever the playhead ends
@@ -5180,15 +5185,15 @@ bool MainComponent::startRecording()
         : 0;
 
     // The audio side may refuse (no capture channel, or none free). That is not
-    // a reason to refuse the MIDI side: a keyboard take is still a take, and the
-    // button has to mean something on a machine with no microphone.
-    const bool audioArmed = audio.beginRecording (300.0, skipSamples);
+    // a reason to refuse the take — a refusal on a MIDI take is not even
+    // interesting, because a sampler take is the only thing that asked.
+    audioTakeArmed = arming.capture && audio.beginRecording (300.0, skipSamples);
 
-    // Phase 94: a singer who cannot hear themselves is recording blind. The
-    // monitor path follows the record button because that is the only moment
-    // the two are the same decision — "I am about to play into this" — and an
-    // input left live afterwards is a feedback loop nobody asked for.
-    audio.setMonitoringEnabled (audioArmed);
+    // Phase 94/118: the monitor path follows the capture chain, not the button.
+    // On a MIDI take it is closed explicitly — a microphone left live by the
+    // previous take would otherwise sit open through a performance that never
+    // asked for it, one gesture away from the speakers.
+    audio.setMonitoringEnabled (arming.monitor && audioTakeArmed);
 
     repaint (topBarBounds);
     return true;
@@ -5400,17 +5405,57 @@ void MainComponent::finishRecording()
     const double endBeat = juce::jmax (recordStartBeat, audio.getPositionBeats());
     Take take = takeCollector.finish (endBeat);
 
-    commitTake (std::move (take), audio.endRecording(), audio.getRecordSampleRate());
+    // Phase 118: only a sampler take asks the tape for samples. Closing a tape
+    // that was never armed is harmless, but reading it would be worse than
+    // harmless — whatever an earlier take left behind would land in a MIDI
+    // take's group as an audio block nobody played.
+    juce::AudioBuffer<float> captured;
+    double capturedRate = 0.0;
+
+    if (takeArmingFor (recordMode).capture && audioTakeArmed)
+    {
+        captured = audio.endRecording();
+        capturedRate = audio.getRecordSampleRate();
+    }
+
+    audioTakeArmed = false;
+
+    commitTake (std::move (take), captured, capturedRate);
 
     repaint (topBarBounds);
 }
 
 void MainComponent::toggleRecording()
 {
-    if (recording.load())
+    // Phase 118: stopping never asks. A question between the player and the end
+    // of a take is a take that runs long, and the player is holding an
+    // instrument while it happens.
+    if (recordPressAction (recording.load()) == RecordPress::stop)
         finishRecording();
     else
-        startRecording();
+        showRecordMenu();
+}
+
+void MainComponent::showRecordMenu()
+{
+    juce::PopupMenu menu;
+
+    menu.addSectionHeader (utf8 ("录什么"));
+    menu.addItem (1, utf8 ("录制采样"), true, recordMode == TakeMode::audio);
+    menu.addItem (2, utf8 ("录制 MIDI"), true, recordMode == TakeMode::midi);
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this)
+                                                  .withTargetScreenArea (getRecordButtonBounds()),
+                        [this] (int result)
+                        {
+                            // Cancelling records nothing. Falling back to the
+                            // last choice would make the question decorative
+                            // and would start a take the user just declined.
+                            if (result == 1)
+                                startRecording (TakeMode::audio);
+                            else if (result == 2)
+                                startRecording (TakeMode::midi);
+                        });
 }
 
 void MainComponent::applyRecordedControls (NoteGroup& group, const Take& take) const
@@ -5609,8 +5654,15 @@ int MainComponent::commitTake (Take take, const juce::AudioBuffer<float>& audioT
 }
 
 //-- Test seams ---------------------------------------------------------------
-void MainComponent::beginTakeForTest (double startBeat)
+void MainComponent::beginTakeForTest (double startBeat, TakeMode mode)
 {
+    // Phase 118: the mode is part of what a take is, so the test seam takes it
+    // too. The default is the keyboard half — every caller before this phase was
+    // feeding notes, and the audio those tests commit comes from
+    // `takeAudioForTest`, which bypasses the arming entirely.
+    recordMode = mode;
+    audioTakeArmed = false;
+
     recordStartBeat = startBeat;
     takeCollector.begin (startBeat);
     recording.store (true);
@@ -5620,6 +5672,12 @@ void MainComponent::beginTakeForTest (double startBeat)
 
 void MainComponent::recordNoteAt (int pitch, float velocity, bool on, double beat)
 {
+    // Phase 118: a sampler take does not grow notes. This is the gate that makes
+    // the choice real — the mode decides what the tape listens to, and a
+    // guitarist's hand brushing a controller must not appear as a performance.
+    if (! recording.load() || ! takeArmingFor (recordMode).events)
+        return;
+
     if (on)
         takeCollector.noteOn (pitch, velocity, beat);
     else
@@ -5628,6 +5686,9 @@ void MainComponent::recordNoteAt (int pitch, float velocity, bool on, double bea
 
 void MainComponent::recordControlAt (int controller, int value7, double beat)
 {
+    if (! recording.load() || ! takeArmingFor (recordMode).events)
+        return;
+
     takeCollector.control (controller, value7, beat);
 }
 
@@ -5643,6 +5704,7 @@ int MainComponent::endTakeForTest (double endBeat)
         return -1;
 
     recording.store (false);
+    audioTakeArmed = false;
     Take take = takeCollector.finish (endBeat);
 
     const int result = commitTake (std::move (take), testTakeAudio, testTakeSampleRate);
@@ -7048,21 +7110,58 @@ void MainComponent::paint (juce::Graphics& g)
             g.fillRect (stopGlyph (button));
         }
 
-        //-- Record (Phase 81) -------------------------------------------------
+        //-- Record (Phase 81 / 118) -------------------------------------------
         // Theme.h keeps a red that means "recording", separate from the accent
         // the play button and the playhead use. Until Phase 81 nothing was ever
         // red for that reason; the dot is the first thing that is.
+        //
+        // Phase 118: the dot becomes the ANSWER. A press now asks which half is
+        // being captured, and after the menu closes there is nothing left on
+        // screen that says which — the status strip cannot say it either (its
+        // one line is already shared by the scroll readout, and by Phase 116
+        // twelve tool buttons had eaten the space; a sentence drawn there lands
+        // on top of "6.3 / 1..." and gets ellipsised). So the lit button carries
+        // the symbol: three bars for the microphone, a note for the keyboard.
+        // Idle keeps the plain dot — "what am I about to do" is a question, and
+        // the dot is the right shape for it.
         {
             auto button = getRecordButtonBounds().toFloat();
 
-            drawButtonPlate (button, hoveringRecord, true, theme::record, recording.load());
+            const bool live = recording.load();
 
-            auto dot = juce::Rectangle<float> (button.getCentreX() - ui::pf (5.0f),
-                                               button.getCentreY() - ui::pf (5.0f),
-                                               ui::pf (10.0f), ui::pf (10.0f));
+            drawButtonPlate (button, hoveringRecord, true, theme::record, live);
 
-            g.setColour (theme::record.withAlpha (recording.load() ? 1.0f : (hoveringRecord ? 0.85f : 0.62f)));
-            g.fillEllipse (dot);
+            const auto c = button.getCentre();
+
+            if (! live)
+            {
+                g.setColour (theme::record.withAlpha (hoveringRecord ? 0.85f : 0.62f));
+                g.fillEllipse (c.x - ui::pf (5.0f), c.y - ui::pf (5.0f),
+                               ui::pf (10.0f), ui::pf (10.0f));
+            }
+            else if (getRecordMode() == TakeMode::audio)
+            {
+                // A level meter, not a waveform: at eight pixels a curve is
+                // mush and three bars are unmistakable.
+                const float heights[3] { 6.0f, 11.0f, 4.5f };
+
+                g.setColour (juce::Colours::white.withAlpha (0.92f));
+
+                for (int i = 0; i < 3; ++i)
+                    g.fillRoundedRectangle (c.x + ui::pf (-5.5f + (float) i * 3.6f),
+                                            c.y - ui::pf (heights[i]) * 0.5f,
+                                            ui::pf (2.2f), ui::pf (heights[i]), ui::pf (1.1f));
+            }
+            else
+            {
+                // A note head and a stem: the one glyph everybody reads as
+                // "notes are being written down".
+                g.setColour (juce::Colours::white.withAlpha (0.92f));
+                g.fillEllipse (c.x - ui::pf (4.6f), c.y + ui::pf (1.0f),
+                               ui::pf (6.0f), ui::pf (4.4f));
+                g.fillRect (c.x + ui::pf (0.6f), c.y - ui::pf (5.4f),
+                            ui::pf (1.8f), ui::pf (8.0f));
+            }
         }
 
         //-- Position ----------------------------------------------------------
@@ -8610,6 +8709,30 @@ juce::Image MainComponent::createMetronomeSnapshot (int countInBeatsToShow)
     const auto still = createComponentSnapshot (topBarBounds, true);
 
     audio.getPlayback().cancelPreRoll();
+    return still;
+}
+
+juce::Image MainComponent::createRecordModeSnapshot (TakeMode mode)
+{
+    // The take is started through the same seam the self-test uses, not through
+    // `startRecording`: a still must not open an audio device, and what this
+    // picture is about — the lit button and the symbol inside it — is exactly
+    // what that seam sets.
+    //
+    // The button is photographed on the transport bar rather than as a whole
+    // window: the difference between the two frames is eleven pixels wide, and
+    // a 980-wide shot would leave the reader hunting for it.
+    beginTakeForTest (4.0, mode);
+    repaint (topBarBounds);
+
+    const auto still = createComponentSnapshot (topBarBounds, true);
+
+    // A frame is a moment, not a recording: leave the session the way it was
+    // found, or every later picture carries a red light and a phantom take.
+    recording.store (false);
+    audioTakeArmed = false;
+    takeCollector.finish (4.0);
+
     return still;
 }
 

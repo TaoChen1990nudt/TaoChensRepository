@@ -154,15 +154,44 @@ public:
         place a transport state change is written out. */
     void parkTransportAt (double target);
 
-    //-- Phase 81: recording ---------------------------------------------------
-    /** The red dot. One button for both takes: pressing it starts recording
-        (and rolling, if the transport is parked), pressing it again ends the
-        take and lays down what was captured. */
+    //-- Phase 81: recording, Phase 118: which half ----------------------------
+    /** The red dot. Phase 81 gave it one meaning ("start / stop"); Phase 118
+        makes the START a question. Stopping never asks — a menu between the
+        player and the end of a take is a take that runs long. */
     juce::Rectangle<int> getRecordButtonBounds() const;
+
+    /** Phase 118: what a press on an unlit button means. A value, so both
+        answers can be held by the self-test; the popup lives behind `ask`. */
+    enum class RecordPress { ask, stop };
+
+    static constexpr RecordPress recordPressAction (bool recordingNow) noexcept
+    {
+        return recordingNow ? RecordPress::stop : RecordPress::ask;
+    }
+
     void toggleRecording();
-    bool startRecording();
+
+    /** Phase 118: "录什么?" — the two-item menu the press opens. Cancelling it
+        records nothing: a press that asked and got no answer must not fall back
+        to last time's choice, or the question is decoration. */
+    void showRecordMenu();
+
+    /** Phase 118: starts a take of `mode` and rolls the transport if it is
+        parked. The capture chain is armed only for a sampler take, the event
+        chain only for a MIDI one — see `takeArmingFor`. */
+    bool startRecording (TakeMode mode);
     void finishRecording();
     bool isRecording() const noexcept { return recording.load(); }
+
+    /** Phase 118: which half the take in flight is capturing. Meaningless when
+        `isRecording()` is false — it answers the last choice, which is also
+        what the menu ticks. */
+    TakeMode getRecordMode() const noexcept { return recordMode; }
+
+    /** Phase 118: did the capture chain actually arm? The engine refuses on a
+        machine with no input channel, and a refusal is not a reason to cancel
+        the take: the answer is a take that lands its notes and no WAV. */
+    bool isAudioTakeArmed() const noexcept { return audioTakeArmed; }
 
     //-- Phase 88: the click track ---------------------------------------------
     /** Sits right of the tempo field: a metronome is a tempo thing before it is
@@ -236,7 +265,7 @@ public:
     void recordNoteAt (int pitch, float velocity, bool on, double beat);
     void recordControlAt (int controller, int value7, double beat);
 
-    void beginTakeForTest (double startBeat);
+    void beginTakeForTest (double startBeat, TakeMode mode = TakeMode::midi);
     void takeAudioForTest (const juce::AudioBuffer<float>& audio, double sampleRate);
     int  endTakeForTest (double endBeat);
 
@@ -569,6 +598,12 @@ public:
     /** P88: the transport bar with the click switched on and a count-in in
         progress — the two states a metronome has to be legible in. */
     juce::Image createMetronomeSnapshot (int countInBeatsToShow);
+
+    /** P118: the take in flight, one frame per half. The menu that asked the
+        question is a popup and cannot be photographed without a window, so the
+        picture is the other half of the answer: the lit button and the symbol
+        inside it — three bars for the microphone, a note for the keyboard. */
+    juce::Image createRecordModeSnapshot (TakeMode mode);
 
     //-- Phase 6: project files and offline bounce ----------------------------
     /** Writes the whole session to a .atomic file. Also the path the self-test
@@ -1343,6 +1378,14 @@ private:
     int           recordingCounter   = 0;   // "录音 N"
     int           lastRecordGroupId  = -1;
     int           lastRecordClipId   = -1;
+
+    /** Phase 118: which half the take in flight is capturing, and whether the
+        tape actually armed. `recordMode` survives the take (it is what the menu
+        ticks next time); `audioTakeArmed` is cleared the moment the take ends,
+        because a stale `true` here would make a MIDI take try to read a tape
+        that is not rolling. */
+    TakeMode      recordMode         = TakeMode::midi;
+    bool          audioTakeArmed     = false;
 
     /** What the self-test feeds instead of a microphone. Kept out of the real
         path: `finishRecording()` reads the engine, `endTakeForTest()` reads this. */
