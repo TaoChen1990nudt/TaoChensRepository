@@ -66,6 +66,8 @@ JUCE 8 音频工作站：图层叠加工作区 / 音源机架 / 音符级微观�
 53. 尺寸对了不等于 view 重画过（P123）：跨屏后原生 HWND 按新 DPI 重排、JUCE 编辑器 bounds 没动，`childBoundsChanged` 不触发，黑边照旧；`resyncFrameToEditor()` 以外框跟编辑器（不是反过来），**尺寸已对时仍要 `+1px` 再设回发一次 resized**，否则 VST3 的 `onSize`/`updateHWNDBounds` 不跑——这一步才是真机上擦掉黑边的那一下；触发口是 `moved()` + 2 Hz 轮询，两者都先比 `Display::scale`（字段名不是 scaleFactor），没变就什么都不做。
 54. 插件窗口的尺寸只有插件一个权威（P125）：Serum 的原生 view 冻结旧 DPI，宿主既改不动它的尺寸也改不动它的密度——只有它自己右下角的三角（`IPlugView::resizeView`）能改，而且只有那一路外框才跟得住。所以**外框禁止手动缩放**（`setResizable(false,false)`），尺寸只由编辑器说了算（`setContentOwned(editor, true)` 的 `childBoundsChanged` 跟随）；跨屏时**宿主绝不能再调 `editor->setScaleFactor()`**——JUCE 的 VST3 view 已用自己的 `NativeScaleFactorNotifier` 把 peer 的 platform scale 送了一次（`getEffectiveScale() = nativeScaleFactor × userScaleFactor`），宿主再送一次就是双重缩放（P124 的错）。「手动拖外框」这条路拿走，黑边的两种来源（框比内容大/小）从根上都不存在。
 
+55. 换乐器就是换界面（P126）：`applyRackCardChoice` 的 VST3 分支在 `replaceWithPlugin` 之后必须走**同一个开窗入口** `openSlotEditor(slotId)`，否则用户换完还得回菜单点一次「打开插件界面」；开的是新实例、标题取 P79 清过的当前名字，内置合成器没有界面就静默。「旧窗收掉」不靠这一支的 `reconcilePlugins()`——`rack.notify() → rackChanged()` 已经做了一次。
+
 ## 索引
 - 目录结构、构建命令（含 `unset *proxy*`）、CI 门禁、`formatVersion` 逐版字段、快照夹具 —— `STATUS.md` / `REFERENCE.md`。
 - 两条不能忘：**加断言的那一轮必须同步调大 `MIN_CHECKS`**；**「选中哪条 lane」这类状态必须显式写属性**。

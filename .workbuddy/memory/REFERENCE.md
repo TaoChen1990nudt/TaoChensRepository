@@ -2218,6 +2218,18 @@ P122/P123/P124 三轮都在试图让宿主跟上插件的跨屏缩放，真机�
 拿掉这条路之后它们都进不来。诊断口 `ATOMICDAW_DPI_LOG` 保留（默认关闭），
 但真正的验收是真机上拖一次 Serum 自己的三角，看外框是否跟随。
 
+### 替换音源之后开窗（P126）
+
+`applyRackCardChoice` 的 `result >= 200` 分支是生产代码里唯一的 VST3 替换入口。
+`plugins.load` → `rack.replaceWithPlugin` → `reconcilePlugins()` 之后**必须**调
+`openSlotEditor (slotId)`，否则用户换完乐器还要回菜单点一次「打开插件界面」。
+
+- 复用 `openSlotEditor` / `openPluginEditor`，不要再写第二条开窗路：前者查实例是否 loaded，
+  后者查 `pluginWindows` 保证「一实例一窗」，标题取 `slot->getDisplayName()`（P79 已清掉旧名）。
+- 内置合成器分支（`10..13`）不调：`openSlotEditor` 对非插件槽会早退，没有界面可开。
+- 自检必须用真实 `applyRackCardChoice` 驱动；菜单 id `200 + index` 的 index 是**过滤后**
+  `isInstrument` 列表的下标，不是插件库全表下标。
+
 ## 踩坑档案
 平台陷阱、自检夹具摆位、出图尺寸见同目录 **`PITFALLS.md`**。动以下任一处前先读它：
 VST3 扫描 / 采样解码 / 试听声部 / 标尺 / ghost / `--snapshot` / 折叠行高 / 插件参数自动化 /

@@ -23328,6 +23328,84 @@ juce::String MainComponent::runSelfTest()
                  + juce::String (win->getFrameContentAreaForTest().getHeight()));
     } ();
 
+    //-- P126: 换了乐器，新界面就该自己弹出来 -------------------------------
+    // 用户选的是「换一个乐器」，不是「换一个引擎里的 id」。换完还让用户回菜单
+    // 点一次「打开插件界面」，等于没换。这里驱动真实菜单回调，咬的是替换分支
+    // 里那一次 openSlotEditor——不是去验 openSlotEditor 本身（P85 已验过）。
+    [&]
+    {
+        int chosen = -1;
+        int instrumentIndex = -1;
+
+        for (const auto& entry : plugins.getLibrary())
+        {
+            if (! entry.isInstrument)
+                continue;
+
+            ++instrumentIndex;
+
+            if (entry.description.name.containsIgnoreCase ("Test Synth"))
+            {
+                chosen = instrumentIndex;   // the menu's result is 200 + this index
+                break;
+            }
+        }
+
+        check (utf8 ("前提：插件库里有可载入的 Test Synth，替换测试不是空跑"),
+               chosen >= 0,
+               juce::String (chosen));
+
+        if (chosen < 0)
+            return;
+
+        const int slot         = rack.addSynth();
+        const int windowsBefore = (int) pluginWindows.size();
+
+        check (utf8 ("前提：替换之前这个槽没有打开的界面"),
+               pluginWindows.count (rack.findSlot (slot)->pluginId) == 0,
+               juce::String (windowsBefore) + utf8 (" 扇窗"));
+
+        applyRackCardChoice (200 + chosen, slot);
+
+        const int firstId = rack.findSlot (slot)->pluginId;
+        auto      firstIt = pluginWindows.find (firstId);
+
+        check (utf8 ("替换 VST3 音源之后，新实例的界面自动弹出"),
+               firstId > 0 && firstIt != pluginWindows.end() && firstIt->second != nullptr
+                 && (int) pluginWindows.size() == windowsBefore + 1,
+               juce::String (firstId) + utf8 (" / ")
+                 + juce::String ((int) pluginWindows.size()) + utf8 (" 扇窗"));
+
+        check (utf8 ("弹出的是新实例自己的窗口，不是旧实例的残留"),
+               firstIt != pluginWindows.end()
+                 && firstIt->second->getInstanceId() == firstId,
+               firstIt != pluginWindows.end()
+                 ? juce::String (firstIt->second->getInstanceId())
+                 : utf8 ("没有窗口"));
+
+        applyRackCardChoice (200 + chosen, slot);   // 再换一次，仍是同一个乐器
+
+        const int secondId = rack.findSlot (slot)->pluginId;
+
+        check (utf8 ("再替换一次：旧窗关掉新窗顶上，窗口不累积"),
+               secondId != firstId && pluginWindows.count (firstId) == 0
+                 && pluginWindows.count (secondId) == 1
+                 && (int) pluginWindows.size() == windowsBefore + 1,
+               juce::String (firstId) + utf8 (" -> ") + juce::String (secondId)
+                 + utf8 (" / ") + juce::String ((int) pluginWindows.size()) + utf8 (" 扇窗"));
+
+        applyRackCardChoice (10, slot);              // 换成内置正弦波
+
+        check (utf8 ("换成内置合成器不弹界面：它没有界面可弹，旧窗也要收掉"),
+               ! rack.findSlot (slot)->isPlugin()
+                 && pluginWindows.count (secondId) == 0
+                 && (int) pluginWindows.size() == windowsBefore,
+               juce::String ((int) pluginWindows.size()) + utf8 (" 扇窗"));
+
+        rack.removeSlot (slot);
+        reconcilePlugins();
+    } ();
+
     // The summary MUST come after the last check. It used to sit mid-function
     // (before the fixture restore), and Phase 46's reverb block landed after
     // it — three FAILs printed, summary still said ALL CHECKS PASSED, and the

@@ -3903,7 +3903,16 @@ void MainComponent::applyRackCardChoice (int result, int slotId)
     }
 
     rack.replaceWithPlugin (slotId, instruments[(size_t) index], instanceId);
-    reconcilePlugins();
+    reconcilePlugins();          // the old instance owns no slot any more
+
+    // P126: choosing a new instrument means choosing a new UI. Open it here,
+    // through the same single entry point the card menu's "打开插件界面" and
+    // the card's double click use, so "one instance, one window" stays true
+    // and the window is titled with the slot's CURRENT name (P79 has just
+    // cleared a typed-over name). A built-in synth has no editor to open, so
+    // the 10..13 branch above stays silent.
+    openSlotEditor (slotId);
+
     rackPanel.repaint();
     repaint();
 }

@@ -4752,3 +4752,39 @@ headless 依然没有第二块屏与真实 VST3 HWND，本轮证明的是「宿�
 **仍需真机确认**：锁外框是产品行为，跟 DPI 无关，不依赖任何对 Windows 或 Serum 的推断；
 但「插件自己三角缩放时外框仍跟随」这一条，headless 用的是合成编辑器，真机上还是拖一次
 Serum 的右下角三角确认一遍。
+
+## Phase 126 — 咬测没红，先问「这条断言到底归谁管」
+
+用户一句「希望音源在替换之后自动弹出新音源的界面」。替换入口生产代码只有一处：
+`MainComponent::applyRackCardChoice` 的 `result >= 200` 分支。它在 `plugins.load` →
+`rack.replaceWithPlugin` → `reconcilePlugins` 之后就结束了，没有开窗——菜单里另有
+「打开插件界面」，但用户选「换一个乐器」并不是要再去点一次第二个菜单项。
+
+### A. 修法：复用唯一入口，不要新写一条开窗路
+
+分支末尾加 `openSlotEditor (slotId)`。它内部查 `plugins.getProcessorForEditor (slot->pluginId)`，
+所以开的一定是刚 load 的那个新实例；标题走 `slot->getDisplayName()`，而 P79 的
+`replaceWithPlugin` 刚把 `userName` 清掉，所以标题是新插件名而不是残留的旧名。
+`openPluginEditor` 首行查 `pluginWindows`，「一实例一窗」不用在这里再实现一遍。
+`result 10..13`（内置合成器）不加：它没有界面，`openSlotEditor` 本来就会早退 false。
+
+### B. 三刀咬测里只有一刀咬住了本分支
+
+- **M1**：注释掉 `openSlotEditor (slotId)` → 红 3（自动弹出 / 新实例窗口 / 再替换不累积）。这刀证明核心改动真的被验到。
+- **M2**：注释掉本分支的 `reconcilePlugins()` → **红 0**。原因是 `rack.replaceWithPlugin` 里
+  `notify()` 会调到 `MainComponent::rackChanged()`，那里已经 `reconcilePlugins()` 一次；
+  本分支那行是冗余的保险，不是唯一路径。想用咬测验「旧窗收掉」，要动的是
+  `rackChanged()`，但那是所有 rack 变更的公共回调，不该为这个阶段去改。
+- **M3**：在内置分支也加 `openSlotEditor (slotId)` → **红 0**。因为 `openSlotEditor` 对非插件槽
+  第一行就 return false，不开窗是它自己的不变式（P85 已验），不是「10..13 没写调用」的功劳。
+
+结论：**咬测没红不一定是断言假，也可能是这行有别的拥有者**。写断言前先问「我验的是
+这一分支的责任，还是上游函数的契约」；把契约断言当本阶段成果会误导后来的修改者。
+本阶段真正由新代码承担的责任只有一条：替换之后**主动发起**开窗（M1 红 3）。
+
+### C. 验证
+
+自检 1187 → **1193**（+6，含两条前提和两条契约断言）。帧 49 张与 P125 比 14 张不同，
+全在同二进制 A/B 抖动集（19 张）内，额外差异 0，零绘制改动。
+headless 用真实 `applyRackCardChoice`（不是直接调 `openSlotEditor`）驱动，插件库里
+Test Synth 的索引按**过滤后**的 instruments 下标算——菜单 id 200+index 用的是过滤后的表。
